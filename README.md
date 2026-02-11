@@ -2,6 +2,24 @@
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
+## Development Setup
+
+If you have `npm config get ignore-scripts` enabled for security purposes, then the `prepare` script will not be run when you `npm install`. If you wish to install husky precommit hooks, then you need to manually set up git hooks:
+
+```bash
+npx husky
+```
+
+This installs pre-commit hooks that run type checking and linting before each commit.
+
+To bypass hooks when needed (e.g., WIP commits):
+
+```bash
+git commit --no-verify -m "WIP: debugging"
+```
+
+## Plugins
+
 Currently, two official plugins are available:
 
 - [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh

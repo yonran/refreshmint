@@ -1,0 +1,20 @@
+#!/usr/bin/env sh
+
+# Exit on error
+set -e
+
+echo "Running pre-commit checks..."
+
+# Run TypeScript type checking
+echo "  → Type checking..."
+npm run typecheck
+
+# Run ESLint + Prettier
+echo "  → Linting & formatting..."
+npm run lint
+
+echo "  → Cargo check..."
+cd src-tauri
+cargo check
+
+echo "✓ All pre-commit checks passed"
