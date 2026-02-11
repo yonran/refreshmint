@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# cargo new and tauri run init put these in src-tauri/.gitignore
+# but we combine them into the root .gitignore so that prettier will read them
+src-tauri/target/
+src-tauri/gen/schemas
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
