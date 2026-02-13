@@ -15,6 +15,12 @@ npm run lint
 
 echo "  → Cargo check..."
 cd src-tauri
-cargo check
+RUSTFLAGS="-D warnings" cargo check
+
+echo "  → Cargo fmt (check)..."
+cargo fmt --check
+
+echo "  → Cargo clippy..."
+cargo clippy --all-targets --all-features -- -D warnings
 
 echo "✓ All pre-commit checks passed"

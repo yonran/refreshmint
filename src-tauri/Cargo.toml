@@ -23,3 +23,18 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.10.0", features = [] }
 tauri-plugin-log = "2"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+# panic is ok for code paths that should not happen in reality
+# panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+# in tests, it is ok to #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
