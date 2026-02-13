@@ -22,5 +22,11 @@
         "erasableSyntaxOnly": true,
         "noUncheckedSideEffectImports": true
     },
-    "include": ["vite.config.ts"]
+    "include": [
+        "vite.config.ts",
+        "eslint.config.mts",
+        "scripts/**/*.mts",
+        "eslint-plugin-import-x.d.ts",
+        "eslint-plugin-react-hooks.d.ts"
+    ]
 }

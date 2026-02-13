@@ -1,17 +1,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { includeIgnoreFile } from '@eslint/compat';
 import js from '@eslint/js';
 import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
 import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
-import { defineConfig, globalIgnores } from 'eslint/config';
-import importPlugin from 'eslint-plugin-import-x';
+import { defineConfig } from 'eslint/config';
+import { flatConfigs as importFlatConfigs } from 'eslint-plugin-import-x';
+import { getGitUserIgnoreFile } from './scripts/get-git-user-ignore-file.mts';
 
 const vitePublicResolver = {
     name: 'vite-public',
     resolver: {
-        resolveImport(modulePath) {
+        resolveImport(modulePath: string) {
             if (!modulePath.startsWith('/')) {
                 return undefined;
             }
@@ -28,14 +31,24 @@ const vitePublicResolver = {
 };
 
 export default defineConfig(
-    globalIgnores(['dist', 'src-tauri/target']),
+    includeIgnoreFile(
+        fileURLToPath(new URL('.gitignore', import.meta.url)),
+        'project .gitignore',
+    ),
+    includeIgnoreFile(getGitUserIgnoreFile(), 'user git excludeFile'),
     js.configs.recommended,
 
-    // eslint-disable-next-line import-x/no-named-as-default-member
-    importPlugin.flatConfigs.recommended,
-    // eslint-disable-next-line import-x/no-named-as-default-member
-    importPlugin.flatConfigs.typescript,
-    reactHooks.configs.flat.recommended,
+    importFlatConfigs.recommended,
+    importFlatConfigs.typescript,
+    // Manually configure react-hooks instead of using reactHooks.configs.flat.recommended
+    // to avoid type incompatibility with exactOptionalPropertyTypes: true.
+    // See: https://github.com/eslint/eslint/issues/20286
+    {
+        plugins: {
+            'react-hooks': reactHooks,
+        },
+        rules: reactHooks.configs.recommended.rules,
+    },
     reactRefresh.configs.vite,
     // eslint-disable-next-line import-x/no-named-as-default-member
     ...tseslint.configs.strictTypeChecked,
