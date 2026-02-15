@@ -23,6 +23,7 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.10.0", features = [] }
 tauri-plugin-log = "2"
+clap = { version = "4.5.58", features = ["derive"] }
 
 [lints.rust]
 unsafe_code = "deny"
@@ -37,4 +38,8 @@ unimplemented = "deny"
 dbg_macro = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.182"
+xattr = "1.6.1"
 # in tests, it is ok to #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
