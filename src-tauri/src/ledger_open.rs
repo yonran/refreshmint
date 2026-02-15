@@ -23,6 +23,9 @@ pub struct TransactionRow {
     pub id: String,
     pub date: String,
     pub description: String,
+    #[serde(rename = "descriptionRaw")]
+    pub description_raw: String,
+    pub comment: String,
     pub accounts: String,
     pub totals: Option<Vec<AmountTotal>>,
     pub postings: Vec<PostingRow>,
@@ -45,6 +48,8 @@ pub struct AmountStyleHint {
 #[derive(Debug, Serialize)]
 pub struct PostingRow {
     pub account: String,
+    pub amount: Option<String>,
+    pub comment: String,
     pub totals: Option<Vec<AmountTotal>>,
 }
 
@@ -149,6 +154,8 @@ fn build_transaction_rows(transactions: &[Transaction]) -> Vec<TransactionRow> {
             id: txn.tindex.to_string(),
             date: txn.tdate.clone(),
             description: transaction_description(txn),
+            description_raw: txn.tdescription.clone(),
+            comment: txn.tcomment.clone(),
             accounts: transaction_accounts(txn),
             totals: transaction_amounts(txn),
             postings: transaction_postings(txn),
@@ -214,9 +221,65 @@ fn transaction_postings(txn: &Transaction) -> Vec<PostingRow> {
         .iter()
         .map(|posting| PostingRow {
             account: posting.paccount.clone(),
+            amount: posting_amount_text(posting),
+            comment: posting.pcomment.clone(),
             totals: posting_totals(posting),
         })
         .collect()
+}
+
+fn posting_amount_text(posting: &Posting) -> Option<String> {
+    if posting.pamount.len() != 1 {
+        return None;
+    }
+    format_amount(&posting.pamount[0])
+}
+
+fn format_amount(amount: &Amount) -> Option<String> {
+    if amount.acost.is_some() || amount.acostbasis.is_some() {
+        return None;
+    }
+    let mantissa = parse_mantissa(&amount.aquantity.decimal_mantissa)?;
+    let number = format_decimal(mantissa, amount.aquantity.decimal_places);
+    let commodity = amount.acommodity.as_str();
+    if commodity.is_empty() {
+        return Some(number);
+    }
+    let style = amount.astyle.as_ref().map(|style| CommodityStyle {
+        side: style.ascommodityside.clone(),
+        spaced: style.ascommodityspaced,
+    });
+    let (side, spaced) = style
+        .as_ref()
+        .map(|s| (s.side.clone(), s.spaced))
+        .unwrap_or((Side::R, true));
+    let space = if spaced { " " } else { "" };
+    let formatted = match side {
+        Side::L => format!("{commodity}{space}{number}"),
+        Side::R => format!("{number}{space}{commodity}"),
+    };
+    Some(formatted)
+}
+
+fn format_decimal(mantissa: i128, scale: u32) -> String {
+    let negative = mantissa < 0;
+    let mut digits = mantissa.abs().to_string();
+    if scale > 0 {
+        let scale_usize = scale as usize;
+        if digits.len() <= scale_usize {
+            let needed = scale_usize + 1 - digits.len();
+            let zeros = "0".repeat(needed);
+            digits = format!("{zeros}{digits}");
+        }
+        let split = digits.len() - scale_usize;
+        let (int_part, frac_part) = digits.split_at(split);
+        digits = format!("{int_part}.{frac_part}");
+    }
+    if negative {
+        format!("-{digits}")
+    } else {
+        digits
+    }
 }
 
 fn posting_totals(posting: &Posting) -> Option<Vec<AmountTotal>> {

@@ -23,7 +23,9 @@ pub fn run_with_context(
             new_ledger,
             open_ledger,
             add_transaction,
-            validate_transaction
+            validate_transaction,
+            add_transaction_text,
+            validate_transaction_text
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -75,4 +77,19 @@ fn validate_transaction(
 ) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
     ledger_add::validate_transaction_only(&target_dir, transaction).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn add_transaction_text(
+    ledger: String,
+    transaction: String,
+) -> Result<ledger_open::LedgerView, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    ledger_add::add_transaction_text(&target_dir, &transaction).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn validate_transaction_text(ledger: String, transaction: String) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    ledger_add::validate_transaction_text(&target_dir, &transaction).map_err(|err| err.to_string())
 }

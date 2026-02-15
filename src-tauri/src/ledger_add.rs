@@ -100,6 +100,16 @@ pub fn add_transaction_text(
     crate::ledger_open::open_ledger_dir(ledger_dir)
 }
 
+pub fn validate_transaction_text(
+    ledger_dir: &Path,
+    transaction: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    prepare_ledger(ledger_dir)?;
+    let serialized = ensure_trailing_newline(transaction);
+    run_hledger_check(&serialized, &[], "transaction-only")?;
+    Ok(())
+}
+
 pub fn validate_transaction_only(
     ledger_dir: &Path,
     transaction: NewTransaction,

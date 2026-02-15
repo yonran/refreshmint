@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { documentDir, join } from '@tauri-apps/api/path';
 import {
@@ -9,12 +9,50 @@ import './App.css';
 import {
     type AmountStyleHint,
     type AmountTotal,
+    addTransaction,
+    addTransactionText,
     openLedger,
     type AccountRow,
     type LedgerView,
+    type NewTransactionInput,
     type PostingRow,
     type TransactionRow,
+    validateTransaction,
+    validateTransactionText,
 } from './tauri-commands.ts';
+
+type TransactionDraft = {
+    date: string;
+    description: string;
+    comment: string;
+    postings: DraftPosting[];
+};
+
+type DraftPosting = {
+    account: string;
+    amount: string;
+    comment: string;
+};
+
+type TransactionEntryMode = 'form' | 'raw';
+
+function localIsoDate(): string {
+    const now = new Date();
+    const offset = now.getTimezoneOffset() * 60_000;
+    return new Date(now.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function createTransactionDraft(): TransactionDraft {
+    return {
+        date: localIsoDate(),
+        description: '',
+        comment: '',
+        postings: [
+            { account: '', amount: '', comment: '' },
+            { account: '', amount: '', comment: '' },
+        ],
+    };
+}
 
 function App() {
     const [createStatus, setCreateStatus] = useState<string | null>(null);
@@ -25,6 +63,170 @@ function App() {
     const [activeTab, setActiveTab] = useState<'accounts' | 'transactions'>(
         'accounts',
     );
+    const [transactionDraft, setTransactionDraft] = useState<TransactionDraft>(
+        createTransactionDraft,
+    );
+    const [rawDraft, setRawDraft] = useState('');
+    const [entryMode, setEntryMode] = useState<TransactionEntryMode>('form');
+    const [addStatus, setAddStatus] = useState<string | null>(null);
+    const [isAdding, setIsAdding] = useState(false);
+    const [draftStatus, setDraftStatus] = useState<string | null>(null);
+    const [isValidatingDraft, setIsValidatingDraft] = useState(false);
+
+    useEffect(() => {
+        if (ledger) {
+            setTransactionDraft(createTransactionDraft());
+            setRawDraft('');
+            setAddStatus(null);
+            setDraftStatus(null);
+        }
+    }, [ledger]);
+
+    const buildTransactionInput = (
+        draft: TransactionDraft,
+    ): { transaction: NewTransactionInput | null; error: string | null } => {
+        const date = draft.date.trim();
+        if (!date) {
+            return { transaction: null, error: 'Date is required.' };
+        }
+
+        const trimmedPostings = draft.postings.map((posting) => ({
+            account: posting.account.trim(),
+            amount: posting.amount.trim(),
+            comment: posting.comment.trim(),
+        }));
+        const nonEmptyPostings = trimmedPostings.filter(
+            (posting) =>
+                posting.account.length > 0 ||
+                posting.amount.length > 0 ||
+                posting.comment.length > 0,
+        );
+
+        if (nonEmptyPostings.some((posting) => posting.account.length === 0)) {
+            return {
+                transaction: null,
+                error: 'Every amount or note needs an account.',
+            };
+        }
+
+        if (nonEmptyPostings.length < 2) {
+            return { transaction: null, error: 'Add at least two postings.' };
+        }
+
+        const missingAmounts = nonEmptyPostings.filter(
+            (posting) => posting.amount.length === 0,
+        ).length;
+        if (missingAmounts > 1) {
+            return {
+                transaction: null,
+                error: 'Only one posting may omit an amount.',
+            };
+        }
+
+        return {
+            transaction: {
+                date,
+                description: draft.description.trim(),
+                comment: draft.comment.trim() || null,
+                postings: nonEmptyPostings.map((posting) => ({
+                    account: posting.account,
+                    amount: posting.amount.length === 0 ? null : posting.amount,
+                    comment:
+                        posting.comment.length === 0 ? null : posting.comment,
+                })),
+            },
+            error: null,
+        };
+    };
+
+    useEffect(() => {
+        if (!ledger || entryMode !== 'form') {
+            return;
+        }
+        const hasDraftContent =
+            transactionDraft.description.trim().length > 0 ||
+            transactionDraft.comment.trim().length > 0 ||
+            transactionDraft.postings.some(
+                (posting) =>
+                    posting.account.trim().length > 0 ||
+                    posting.amount.trim().length > 0 ||
+                    posting.comment.trim().length > 0,
+            );
+        if (!hasDraftContent) {
+            setDraftStatus(null);
+            setIsValidatingDraft(false);
+            return;
+        }
+        const { transaction, error } = buildTransactionInput(transactionDraft);
+        if (transaction === null) {
+            setDraftStatus(error ?? 'Draft is incomplete.');
+            setIsValidatingDraft(false);
+            return;
+        }
+
+        let cancelled = false;
+        setIsValidatingDraft(true);
+        const timer = window.setTimeout(() => {
+            void validateTransaction(ledger.path, transaction)
+                .then(() => {
+                    if (!cancelled) {
+                        setDraftStatus('Draft passes hledger check.');
+                    }
+                })
+                .catch((err: unknown) => {
+                    if (!cancelled) {
+                        setDraftStatus(`Draft check failed: ${String(err)}`);
+                    }
+                })
+                .finally(() => {
+                    if (!cancelled) {
+                        setIsValidatingDraft(false);
+                    }
+                });
+        }, 350);
+
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timer);
+        };
+    }, [ledger, transactionDraft, entryMode]);
+
+    useEffect(() => {
+        if (!ledger || entryMode !== 'raw') {
+            return;
+        }
+        if (rawDraft.trim().length === 0) {
+            setDraftStatus(null);
+            setIsValidatingDraft(false);
+            return;
+        }
+
+        let cancelled = false;
+        setIsValidatingDraft(true);
+        const timer = window.setTimeout(() => {
+            void validateTransactionText(ledger.path, rawDraft)
+                .then(() => {
+                    if (!cancelled) {
+                        setDraftStatus('Draft passes hledger check.');
+                    }
+                })
+                .catch((err: unknown) => {
+                    if (!cancelled) {
+                        setDraftStatus(`Draft check failed: ${String(err)}`);
+                    }
+                })
+                .finally(() => {
+                    if (!cancelled) {
+                        setIsValidatingDraft(false);
+                    }
+                });
+        }, 350);
+
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timer);
+        };
+    }, [ledger, rawDraft, entryMode]);
 
     async function handleNewLedger() {
         setIsCreating(true);
@@ -78,6 +280,74 @@ function App() {
         } finally {
             setIsOpening(false);
         }
+    }
+
+    async function handleAddTransaction() {
+        if (!ledger) {
+            return;
+        }
+        setAddStatus(null);
+
+        if (entryMode === 'raw') {
+            if (rawDraft.trim().length === 0) {
+                setAddStatus('Raw transaction is required.');
+                return;
+            }
+            setIsAdding(true);
+            try {
+                const updated = await addTransactionText(ledger.path, rawDraft);
+                setLedger(updated);
+                setAddStatus('Transaction added.');
+                setRawDraft('');
+            } catch (error) {
+                setAddStatus(`Failed to add transaction: ${String(error)}`);
+            } finally {
+                setIsAdding(false);
+            }
+            return;
+        }
+
+        const { transaction, error } = buildTransactionInput(transactionDraft);
+        if (transaction === null) {
+            setAddStatus(error ?? 'Transaction is incomplete.');
+            return;
+        }
+
+        setIsAdding(true);
+        try {
+            const updated = await addTransaction(ledger.path, transaction);
+            setLedger(updated);
+            setAddStatus('Transaction added.');
+            setTransactionDraft(createTransactionDraft());
+        } catch (error) {
+            setAddStatus(`Failed to add transaction: ${String(error)}`);
+        } finally {
+            setIsAdding(false);
+        }
+    }
+
+    function selectMostRecentTransaction(
+        transactions: TransactionRow[],
+    ): TransactionRow | null {
+        const [first, ...rest] = transactions;
+        if (!first) {
+            return null;
+        }
+        let best = first;
+        let bestIndex = Number.parseInt(best.id, 10);
+        if (Number.isNaN(bestIndex)) {
+            bestIndex = -1;
+        }
+        for (const txn of rest) {
+            const candidateIndex = Number.parseInt(txn.id, 10);
+            if (!Number.isNaN(candidateIndex) && candidateIndex >= bestIndex) {
+                best = txn;
+                bestIndex = candidateIndex;
+            } else if (bestIndex < 0) {
+                best = txn;
+            }
+        }
+        return best;
     }
 
     async function promptNewLedgerLocation(): Promise<boolean> {
@@ -182,15 +452,470 @@ function App() {
                         </button>
                     </div>
 
-                    <div className="table-wrap">
-                        {activeTab === 'accounts' ? (
+                    {activeTab === 'accounts' ? (
+                        <div className="table-wrap">
                             <AccountsTable accounts={ledger.accounts} />
-                        ) : (
-                            <TransactionsTable
-                                transactions={ledger.transactions}
-                            />
-                        )}
-                    </div>
+                        </div>
+                    ) : (
+                        <div className="transactions-panel">
+                            <section className="txn-form">
+                                <div className="txn-form-header">
+                                    <div>
+                                        <h2>New transaction</h2>
+                                        <p>
+                                            Amounts accept hledger syntax (for
+                                            costs or balance assertions);
+                                            comments can hold tags.
+                                        </p>
+                                    </div>
+                                    <div className="header-actions">
+                                        <div className="mode-toggle">
+                                            <button
+                                                className={
+                                                    entryMode === 'form'
+                                                        ? 'mode-button active'
+                                                        : 'mode-button'
+                                                }
+                                                type="button"
+                                                onClick={() => {
+                                                    setEntryMode('form');
+                                                    setAddStatus(null);
+                                                    setDraftStatus(null);
+                                                    setIsValidatingDraft(false);
+                                                }}
+                                            >
+                                                Form
+                                            </button>
+                                            <button
+                                                className={
+                                                    entryMode === 'raw'
+                                                        ? 'mode-button active'
+                                                        : 'mode-button'
+                                                }
+                                                type="button"
+                                                onClick={() => {
+                                                    setEntryMode('raw');
+                                                    setAddStatus(null);
+                                                    setDraftStatus(null);
+                                                    setIsValidatingDraft(false);
+                                                }}
+                                            >
+                                                Raw
+                                            </button>
+                                        </div>
+                                        {entryMode === 'form' ? (
+                                            <button
+                                                className="ghost-button"
+                                                type="button"
+                                                onClick={() => {
+                                                    const last =
+                                                        selectMostRecentTransaction(
+                                                            ledger.transactions,
+                                                        );
+                                                    if (!last) {
+                                                        setAddStatus(
+                                                            'No transactions to copy.',
+                                                        );
+                                                        return;
+                                                    }
+                                                    setTransactionDraft(
+                                                        (current) => ({
+                                                            date: current.date,
+                                                            description:
+                                                                last.descriptionRaw.trim()
+                                                                    .length > 0
+                                                                    ? last.descriptionRaw
+                                                                    : '',
+                                                            comment:
+                                                                last.comment,
+                                                            postings:
+                                                                last.postings.map(
+                                                                    (
+                                                                        posting,
+                                                                    ) => ({
+                                                                        account:
+                                                                            posting.account,
+                                                                        amount:
+                                                                            posting.amount ??
+                                                                            '',
+                                                                        comment:
+                                                                            posting.comment,
+                                                                    }),
+                                                                ),
+                                                        }),
+                                                    );
+                                                    setAddStatus(
+                                                        'Copied last transaction.',
+                                                    );
+                                                    setDraftStatus(null);
+                                                }}
+                                            >
+                                                Copy last
+                                            </button>
+                                        ) : null}
+                                        <button
+                                            className="ghost-button"
+                                            type="button"
+                                            onClick={() => {
+                                                if (entryMode === 'raw') {
+                                                    setRawDraft('');
+                                                } else {
+                                                    setTransactionDraft(
+                                                        createTransactionDraft(),
+                                                    );
+                                                }
+                                                setAddStatus(null);
+                                                setDraftStatus(null);
+                                            }}
+                                        >
+                                            Reset
+                                        </button>
+                                    </div>
+                                </div>
+                                {entryMode === 'form' ? (
+                                    <>
+                                        <div className="txn-grid">
+                                            <label className="field">
+                                                <span>Date</span>
+                                                <input
+                                                    type="date"
+                                                    value={
+                                                        transactionDraft.date
+                                                    }
+                                                    placeholder="YYYY-MM-DD"
+                                                    onChange={(event) => {
+                                                        const value =
+                                                            event.target.value;
+                                                        setTransactionDraft(
+                                                            (current) => ({
+                                                                ...current,
+                                                                date: value,
+                                                            }),
+                                                        );
+                                                        setAddStatus(null);
+                                                    }}
+                                                />
+                                            </label>
+                                            <label className="field">
+                                                <span>Description</span>
+                                                <input
+                                                    type="text"
+                                                    value={
+                                                        transactionDraft.description
+                                                    }
+                                                    placeholder="Description"
+                                                    onChange={(event) => {
+                                                        const value =
+                                                            event.target.value;
+                                                        setTransactionDraft(
+                                                            (current) => ({
+                                                                ...current,
+                                                                description:
+                                                                    value,
+                                                            }),
+                                                        );
+                                                        setAddStatus(null);
+                                                        setDraftStatus(null);
+                                                    }}
+                                                />
+                                            </label>
+                                            <label className="field">
+                                                <span>Notes / tags</span>
+                                                <input
+                                                    type="text"
+                                                    value={
+                                                        transactionDraft.comment
+                                                    }
+                                                    placeholder="tag:food, note:..."
+                                                    onChange={(event) => {
+                                                        const value =
+                                                            event.target.value;
+                                                        setTransactionDraft(
+                                                            (current) => ({
+                                                                ...current,
+                                                                comment: value,
+                                                            }),
+                                                        );
+                                                        setAddStatus(null);
+                                                        setDraftStatus(null);
+                                                    }}
+                                                />
+                                            </label>
+                                        </div>
+                                        <div className="txn-postings">
+                                            <datalist id="account-options">
+                                                {ledger.accounts
+                                                    .map(
+                                                        (account) =>
+                                                            account.name,
+                                                    )
+                                                    .filter(
+                                                        (name, index, names) =>
+                                                            names.indexOf(
+                                                                name,
+                                                            ) === index,
+                                                    )
+                                                    .map((name) => (
+                                                        <option
+                                                            key={name}
+                                                            value={name}
+                                                        />
+                                                    ))}
+                                            </datalist>
+                                            {transactionDraft.postings.map(
+                                                (posting, index) => (
+                                                    <div
+                                                        key={`posting-${index}`}
+                                                        className="txn-posting-row"
+                                                    >
+                                                        <input
+                                                            type="text"
+                                                            value={
+                                                                posting.account
+                                                            }
+                                                            placeholder="Account"
+                                                            list="account-options"
+                                                            onChange={(
+                                                                event,
+                                                            ) => {
+                                                                const value =
+                                                                    event.target
+                                                                        .value;
+                                                                setTransactionDraft(
+                                                                    (
+                                                                        current,
+                                                                    ) => ({
+                                                                        ...current,
+                                                                        postings:
+                                                                            current.postings.map(
+                                                                                (
+                                                                                    entry,
+                                                                                    postingIndex,
+                                                                                ) =>
+                                                                                    postingIndex ===
+                                                                                    index
+                                                                                        ? {
+                                                                                              ...entry,
+                                                                                              account:
+                                                                                                  value,
+                                                                                          }
+                                                                                        : entry,
+                                                                            ),
+                                                                    }),
+                                                                );
+                                                                setAddStatus(
+                                                                    null,
+                                                                );
+                                                                setDraftStatus(
+                                                                    null,
+                                                                );
+                                                            }}
+                                                        />
+                                                        <input
+                                                            type="text"
+                                                            value={
+                                                                posting.amount
+                                                            }
+                                                            placeholder="Amount (optional, supports assertions)"
+                                                            onChange={(
+                                                                event,
+                                                            ) => {
+                                                                const value =
+                                                                    event.target
+                                                                        .value;
+                                                                setTransactionDraft(
+                                                                    (
+                                                                        current,
+                                                                    ) => ({
+                                                                        ...current,
+                                                                        postings:
+                                                                            current.postings.map(
+                                                                                (
+                                                                                    entry,
+                                                                                    postingIndex,
+                                                                                ) =>
+                                                                                    postingIndex ===
+                                                                                    index
+                                                                                        ? {
+                                                                                              ...entry,
+                                                                                              amount: value,
+                                                                                          }
+                                                                                        : entry,
+                                                                            ),
+                                                                    }),
+                                                                );
+                                                                setAddStatus(
+                                                                    null,
+                                                                );
+                                                                setDraftStatus(
+                                                                    null,
+                                                                );
+                                                            }}
+                                                        />
+                                                        <input
+                                                            type="text"
+                                                            value={
+                                                                posting.comment
+                                                            }
+                                                            placeholder="Notes / tags"
+                                                            onChange={(
+                                                                event,
+                                                            ) => {
+                                                                const value =
+                                                                    event.target
+                                                                        .value;
+                                                                setTransactionDraft(
+                                                                    (
+                                                                        current,
+                                                                    ) => ({
+                                                                        ...current,
+                                                                        postings:
+                                                                            current.postings.map(
+                                                                                (
+                                                                                    entry,
+                                                                                    postingIndex,
+                                                                                ) =>
+                                                                                    postingIndex ===
+                                                                                    index
+                                                                                        ? {
+                                                                                              ...entry,
+                                                                                              comment:
+                                                                                                  value,
+                                                                                          }
+                                                                                        : entry,
+                                                                            ),
+                                                                    }),
+                                                                );
+                                                                setAddStatus(
+                                                                    null,
+                                                                );
+                                                                setDraftStatus(
+                                                                    null,
+                                                                );
+                                                            }}
+                                                        />
+                                                        <button
+                                                            className="icon-button"
+                                                            type="button"
+                                                            disabled={
+                                                                transactionDraft
+                                                                    .postings
+                                                                    .length <= 2
+                                                            }
+                                                            onClick={() => {
+                                                                if (
+                                                                    transactionDraft
+                                                                        .postings
+                                                                        .length <=
+                                                                    2
+                                                                ) {
+                                                                    return;
+                                                                }
+                                                                setTransactionDraft(
+                                                                    (
+                                                                        current,
+                                                                    ) => ({
+                                                                        ...current,
+                                                                        postings:
+                                                                            current.postings.filter(
+                                                                                (
+                                                                                    _,
+                                                                                    postingIndex,
+                                                                                ) =>
+                                                                                    postingIndex !==
+                                                                                    index,
+                                                                            ),
+                                                                    }),
+                                                                );
+                                                                setAddStatus(
+                                                                    null,
+                                                                );
+                                                            }}
+                                                        >
+                                                            Remove
+                                                        </button>
+                                                    </div>
+                                                ),
+                                            )}
+                                            <button
+                                                className="ghost-button"
+                                                type="button"
+                                                onClick={() => {
+                                                    setTransactionDraft(
+                                                        (current) => ({
+                                                            ...current,
+                                                            postings: [
+                                                                ...current.postings,
+                                                                {
+                                                                    account: '',
+                                                                    amount: '',
+                                                                    comment: '',
+                                                                },
+                                                            ],
+                                                        }),
+                                                    );
+                                                    setAddStatus(null);
+                                                }}
+                                            >
+                                                Add posting
+                                            </button>
+                                        </div>
+                                    </>
+                                ) : (
+                                    <div className="raw-entry">
+                                        <label className="field">
+                                            <span>Raw transaction</span>
+                                            <textarea
+                                                className="raw-textarea"
+                                                value={rawDraft}
+                                                placeholder="Paste full hledger transaction text here."
+                                                onChange={(event) => {
+                                                    const value =
+                                                        event.target.value;
+                                                    setRawDraft(value);
+                                                    setAddStatus(null);
+                                                    setDraftStatus(null);
+                                                }}
+                                            />
+                                        </label>
+                                        <p className="hint">
+                                            Accepts full hledger syntax (status,
+                                            code, tags, balance assertions,
+                                            virtual postings).
+                                        </p>
+                                    </div>
+                                )}
+                                <div className="txn-actions">
+                                    <button
+                                        type="button"
+                                        className="primary-button"
+                                        onClick={() => {
+                                            void handleAddTransaction();
+                                        }}
+                                        disabled={isAdding}
+                                    >
+                                        {isAdding
+                                            ? 'Adding...'
+                                            : 'Add transaction'}
+                                    </button>
+                                </div>
+                                {isValidatingDraft ? (
+                                    <p className="status">Checking draft...</p>
+                                ) : null}
+                                {draftStatus === null ? null : (
+                                    <p className="status">{draftStatus}</p>
+                                )}
+                                {addStatus === null ? null : (
+                                    <p className="status">{addStatus}</p>
+                                )}
+                            </section>
+                            <div className="table-wrap">
+                                <TransactionsTable
+                                    transactions={ledger.transactions}
+                                />
+                            </div>
+                        </div>
+                    )}
                 </section>
             )}
         </div>
