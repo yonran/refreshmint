@@ -2,6 +2,7 @@ pub mod cli;
 pub mod hledger;
 
 mod ledger;
+mod ledger_add;
 mod ledger_open;
 mod version;
 
@@ -18,7 +19,12 @@ pub fn run_with_context(
 ) -> Result<(), Box<dyn std::error::Error>> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![new_ledger, open_ledger])
+        .invoke_handler(tauri::generate_handler![
+            new_ledger,
+            open_ledger,
+            add_transaction,
+            validate_transaction
+        ])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -51,4 +57,22 @@ fn new_ledger(app: tauri::AppHandle, ledger: Option<String>) -> Result<(), Strin
 fn open_ledger(ledger: String) -> Result<ledger_open::LedgerView, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     ledger_open::open_ledger_dir(&target_dir).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn add_transaction(
+    ledger: String,
+    transaction: ledger_add::NewTransaction,
+) -> Result<ledger_open::LedgerView, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    ledger_add::add_transaction_to_ledger(&target_dir, transaction).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn validate_transaction(
+    ledger: String,
+    transaction: ledger_add::NewTransaction,
+) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    ledger_add::validate_transaction_only(&target_dir, transaction).map_err(|err| err.to_string())
 }

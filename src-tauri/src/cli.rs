@@ -1,5 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 use std::error::Error;
+use std::io::Read;
 use std::path::PathBuf;
 use tauri::Manager;
 
@@ -13,6 +14,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     New(NewArgs),
+    Gl(GlArgs),
 }
 
 #[derive(Args)]
@@ -21,10 +23,48 @@ struct NewArgs {
     ledger: Option<PathBuf>,
 }
 
+#[derive(Args)]
+struct GlArgs {
+    #[command(subcommand)]
+    command: GlCommand,
+}
+
+#[derive(Subcommand)]
+enum GlCommand {
+    Add(AddArgs),
+}
+
+#[derive(Args)]
+struct AddArgs {
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["date", "description", "comment", "posting"],
+        help = "Read raw transaction text from PATH ('-' for stdin)."
+    )]
+    raw: Option<PathBuf>,
+    #[arg(long, required_unless_present = "raw")]
+    date: Option<String>,
+    #[arg(long)]
+    description: Option<String>,
+    #[arg(long)]
+    comment: Option<String>,
+    #[arg(
+        long,
+        value_name = "POSTING",
+        required_unless_present = "raw",
+        help = "Posting as account|amount|comment. Amount and comment are optional."
+    )]
+    posting: Vec<String>,
+}
+
 pub fn run(context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::New(args)) => run_new(args, context),
+        Some(Commands::Gl(args)) => run_gl(args, context),
         None => crate::run_with_context(context),
     }
 }
@@ -46,6 +86,113 @@ fn run_new_with_ledger_path(path: PathBuf) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn run_gl(args: GlArgs, context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
+    match args.command {
+        GlCommand::Add(add_args) => run_gl_add(add_args, context),
+    }
+}
+
+fn run_gl_add(args: AddArgs, context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = match args.ledger.as_ref() {
+        Some(path) => crate::ledger::ensure_refreshmint_extension(path.clone())?,
+        None => default_ledger_dir(context)?,
+    };
+
+    run_gl_add_with_dir(args, ledger_dir)
+}
+
+fn run_gl_add_with_dir(args: AddArgs, ledger_dir: PathBuf) -> Result<(), Box<dyn Error>> {
+    let AddArgs {
+        ledger: _,
+        date,
+        description,
+        comment,
+        posting,
+        raw,
+    } = args;
+
+    if let Some(raw_path) = raw {
+        let transaction = read_raw_transaction(&raw_path)?;
+        if transaction.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "raw transaction is empty",
+            )
+            .into());
+        }
+        crate::ledger_add::add_transaction_text(&ledger_dir, &transaction)?;
+        return Ok(());
+    }
+
+    let date = date.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "date is required unless --raw is provided",
+        )
+    })?;
+    let description = description.unwrap_or_default();
+    if posting.len() < 2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "at least two --posting entries are required",
+        )
+        .into());
+    }
+
+    let postings = posting
+        .iter()
+        .map(|entry| parse_posting(entry))
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+
+    let transaction = crate::ledger_add::NewTransaction {
+        date,
+        description,
+        comment,
+        postings,
+    };
+
+    crate::ledger_add::add_transaction_to_ledger(&ledger_dir, transaction)?;
+    Ok(())
+}
+
+fn read_raw_transaction(path: &PathBuf) -> Result<String, Box<dyn Error>> {
+    if path.as_os_str() == "-" {
+        let mut buffer = String::new();
+        std::io::stdin().read_to_string(&mut buffer)?;
+        return Ok(buffer);
+    }
+    Ok(std::fs::read_to_string(path)?)
+}
+
+fn parse_posting(input: &str) -> Result<crate::ledger_add::NewPosting, Box<dyn Error>> {
+    let mut parts = input.splitn(3, '|');
+    let account = parts.next().unwrap_or("").trim();
+    let amount = parts.next().unwrap_or("").trim();
+    let comment = parts.next().unwrap_or("").trim();
+
+    if account.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "posting account cannot be empty",
+        )
+        .into());
+    }
+
+    Ok(crate::ledger_add::NewPosting {
+        account: account.to_string(),
+        amount: if amount.is_empty() {
+            None
+        } else {
+            Some(amount.to_string())
+        },
+        comment: if comment.is_empty() {
+            None
+        } else {
+            Some(comment.to_string())
+        },
+    })
+}
+
 fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Box<dyn Error>> {
     let app = tauri::Builder::default().build(context)?;
     let documents_dir = app.path().document_dir()?;
@@ -56,7 +203,7 @@ fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Bo
 
 #[cfg(test)]
 mod tests {
-    use super::run_new_with_ledger_path;
+    use super::{run_gl_add_with_dir, run_new_with_ledger_path, AddArgs};
     use crate::ledger::ensure_refreshmint_extension;
     use serde_json::Value;
     use std::fs;
@@ -169,6 +316,130 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gl_add_appends_transaction() {
+        if Command::new("git").arg("--version").status().is_err() {
+            return;
+        }
+        if Command::new("hledger").arg("--version").status().is_err() {
+            return;
+        }
+
+        let base_dir = create_temp_dir();
+        let ledger_path = base_dir.join("ledger.refreshmint");
+
+        if let Err(err) = run_new_with_ledger_path(ledger_path.clone()) {
+            panic!("run_new_with_ledger_path failed: {err}");
+        }
+
+        let args = AddArgs {
+            ledger: Some(ledger_path.clone()),
+            raw: None,
+            date: Some("2025-01-01".to_string()),
+            description: Some("Test transaction".to_string()),
+            comment: Some("tag:test".to_string()),
+            posting: vec![
+                "Assets:Checking|10 USD|".to_string(),
+                "Expenses:Food||note:snack".to_string(),
+            ],
+        };
+
+        if let Err(err) = run_gl_add_with_dir(args, ledger_path.clone()) {
+            panic!("run_gl_add_with_dir failed: {err}");
+        }
+
+        let journal_path = ledger_path.join("general.journal");
+        let contents = fs::read_to_string(&journal_path).unwrap_or_else(|err| {
+            panic!("failed to read general.journal: {err}");
+        });
+
+        if !contents.contains("2025-01-01  Test transaction  ; tag:test") {
+            panic!("journal missing transaction header: {contents}");
+        }
+        if !contents.contains("  Assets:Checking  10 USD") {
+            panic!("journal missing first posting: {contents}");
+        }
+        if !contents.contains("  Expenses:Food  ; note:snack") {
+            panic!("journal missing second posting: {contents}");
+        }
+
+        let commit_subject = match git_output(&ledger_path, &["log", "-1", "--pretty=%s"]) {
+            Ok(output) => output,
+            Err(err) => {
+                panic!("git log failed: {err}");
+            }
+        };
+        if commit_subject.trim() != "Add transaction 2025-01-01 Test transaction" {
+            panic!("unexpected git commit subject: {commit_subject}");
+        }
+
+        if let Err(err) = fs::remove_dir_all(&base_dir) {
+            panic!("failed to clean up temp dir: {err}");
+        }
+    }
+
+    #[test]
+    fn gl_add_raw_appends_transaction() {
+        if Command::new("git").arg("--version").status().is_err() {
+            return;
+        }
+        if Command::new("hledger").arg("--version").status().is_err() {
+            return;
+        }
+
+        let base_dir = create_temp_dir();
+        let ledger_path = base_dir.join("ledger.refreshmint");
+
+        if let Err(err) = run_new_with_ledger_path(ledger_path.clone()) {
+            panic!("run_new_with_ledger_path failed: {err}");
+        }
+
+        let raw_path = base_dir.join("txn.journal");
+        let raw = "; precomment\n2025-02-01=2025-02-03 * (INV-1) Coffee ; tag:food\n    Assets:Cash  -5 USD\n    Expenses:Food  5 USD ; note:snack\n";
+        if let Err(err) = fs::write(&raw_path, raw) {
+            panic!("failed to write raw transaction: {err}");
+        }
+
+        let args = AddArgs {
+            ledger: Some(ledger_path.clone()),
+            raw: Some(raw_path.clone()),
+            date: None,
+            description: None,
+            comment: None,
+            posting: Vec::new(),
+        };
+
+        if let Err(err) = run_gl_add_with_dir(args, ledger_path.clone()) {
+            panic!("run_gl_add_with_dir failed: {err}");
+        }
+
+        let journal_path = ledger_path.join("general.journal");
+        let contents = fs::read_to_string(&journal_path).unwrap_or_else(|err| {
+            panic!("failed to read general.journal: {err}");
+        });
+
+        if !contents.contains("2025-02-01=2025-02-03 * (INV-1) Coffee") {
+            panic!("journal missing raw transaction header: {contents}");
+        }
+        if !contents.contains("    Expenses:Food  5 USD ; note:snack") {
+            panic!("journal missing raw posting: {contents}");
+        }
+
+        let commit_subject = match git_output(&ledger_path, &["log", "-1", "--pretty=%s"]) {
+            Ok(output) => output,
+            Err(err) => {
+                panic!("git log failed: {err}");
+            }
+        };
+        if commit_subject.trim() != "Add transaction 2025-02-01=2025-02-03 * (INV-1) Coffee" {
+            panic!("unexpected git commit subject: {commit_subject}");
+        }
+
+        if let Err(err) = fs::remove_dir_all(&base_dir) {
+            panic!("failed to clean up temp dir: {err}");
+        }
+    }
+
     fn expect_ok<T, E: std::fmt::Display>(result: Result<T, E>, label: &str) -> T {
         match result {
             Ok(value) => value,
@@ -199,6 +470,13 @@ mod tests {
             .env("GIT_CONFIG_GLOBAL", crate::ledger::NULL_DEVICE)
             .env("GIT_CONFIG_SYSTEM", crate::ledger::NULL_DEVICE)
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            .env_remove("GIT_QUARANTINE_PATH")
             .env("GIT_AUTHOR_NAME", crate::ledger::GIT_USER_NAME)
             .env("GIT_AUTHOR_EMAIL", crate::ledger::GIT_USER_EMAIL)
             .env("GIT_COMMITTER_NAME", crate::ledger::GIT_USER_NAME)

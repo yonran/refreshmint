@@ -50,6 +50,32 @@ pub fn new_ledger_at_dir(target_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn commit_general_journal(dir: &Path, message: &str) -> io::Result<()> {
+    if !dir.join(".git").is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "ledger git repository not found",
+        ));
+    }
+    run_git(
+        dir,
+        &[OsString::from("add"), OsString::from("general.journal")],
+    )?;
+    run_git(
+        dir,
+        &[
+            OsString::from("-c"),
+            OsString::from(format!("user.name={GIT_USER_NAME}")),
+            OsString::from("-c"),
+            OsString::from(format!("user.email={GIT_USER_EMAIL}")),
+            OsString::from("commit"),
+            OsString::from("-m"),
+            OsString::from(message),
+        ],
+    )?;
+    Ok(())
+}
+
 fn create_ledger_dir(dir: &Path) -> io::Result<()> {
     std::fs::create_dir(dir)
 }
@@ -119,6 +145,13 @@ fn run_git(dir: &Path, args: &[OsString]) -> io::Result<()> {
         .env("GIT_CONFIG_GLOBAL", NULL_DEVICE)
         .env("GIT_CONFIG_SYSTEM", NULL_DEVICE)
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_QUARANTINE_PATH")
         .env("GIT_AUTHOR_NAME", GIT_USER_NAME)
         .env("GIT_AUTHOR_EMAIL", GIT_USER_EMAIL)
         .env("GIT_COMMITTER_NAME", GIT_USER_NAME)
