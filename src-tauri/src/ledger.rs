@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -10,9 +10,9 @@ pub(crate) const GIT_USER_NAME: &str = "Refreshmint";
 pub(crate) const GIT_USER_EMAIL: &str = "refreshmint@noreply.example.com";
 pub(crate) const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
-#[derive(Serialize)]
-struct RefreshmintConfig<'a> {
-    version: &'a str,
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RefreshmintConfig {
+    pub(crate) version: String,
 }
 
 pub fn default_ledger_dir_from_documents(documents_dir: PathBuf) -> PathBuf {
@@ -28,6 +28,16 @@ pub fn ensure_refreshmint_extension(path: PathBuf) -> io::Result<PathBuf> {
             io::ErrorKind::InvalidInput,
             "invalid ledger path",
         ))
+    }
+}
+
+pub(crate) fn require_refreshmint_extension(path: &Path) -> io::Result<()> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("refreshmint") => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ledger directory must end with .refreshmint",
+        )),
     }
 }
 
@@ -48,11 +58,17 @@ fn write_refreshmint_json(dir: &Path) -> io::Result<()> {
     let path = dir.join("refreshmint.json");
     let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
     let config = RefreshmintConfig {
-        version: crate::version::APP_VERSION,
+        version: crate::version::APP_VERSION.to_string(),
     };
     serde_json::to_writer(&mut file, &config).map_err(io::Error::other)?;
     file.write_all(b"\n")?;
     Ok(())
+}
+
+pub(crate) fn read_refreshmint_config(dir: &Path) -> io::Result<RefreshmintConfig> {
+    let path = dir.join("refreshmint.json");
+    let file = OpenOptions::new().read(true).open(path)?;
+    serde_json::from_reader(file).map_err(io::Error::other)
 }
 
 fn create_general_journal(dir: &Path) -> io::Result<()> {
