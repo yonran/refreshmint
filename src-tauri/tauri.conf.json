@@ -2,9 +2,9 @@
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
     "productName": "refreshmint",
     "version": "0.1.0",
-    "identifier": "com.tauri.dev",
+    "identifier": "com.refreshmint.desktop",
     "build": {
-        "frontendDist": "../build",
+        "frontendDist": "../dist",
         "devUrl": "http://localhost:3003",
         "beforeDevCommand": "npm run dev",
         "beforeBuildCommand": "npm run build"
@@ -26,6 +26,7 @@
     "bundle": {
         "active": true,
         "targets": "all",
+        "externalBin": ["binaries/hledger"],
         "icon": [
             "icons/32x32.png",
             "icons/128x128.png",

@@ -289,7 +289,7 @@ fn transaction_commit_message_from_text(transaction: &str) -> String {
 }
 
 fn run_hledger_check(transaction: &str, extra_files: &[&Path], context: &str) -> io::Result<()> {
-    let mut cmd = Command::new("hledger");
+    let mut cmd = Command::new(crate::binpath::hledger_path());
     cmd.arg("check");
     cmd.arg("--color=never");
     for path in extra_files {

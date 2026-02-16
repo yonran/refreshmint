@@ -98,7 +98,7 @@ pub fn open_ledger_dir(path: &Path) -> Result<LedgerView, Box<dyn std::error::Er
 }
 
 fn run_hledger_print(journal_path: &Path) -> io::Result<Vec<Transaction>> {
-    let output = Command::new("hledger")
+    let output = Command::new(crate::binpath::hledger_path())
         .arg("print")
         .arg("--output-format=json")
         .arg("-f")

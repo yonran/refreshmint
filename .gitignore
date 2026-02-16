@@ -16,6 +16,7 @@ dist-ssr
 # but we combine them into the root .gitignore so that prettier will read them
 src-tauri/target/
 src-tauri/gen/schemas
+src-tauri/binaries/
 
 # Editor directories and files
 .vscode/*

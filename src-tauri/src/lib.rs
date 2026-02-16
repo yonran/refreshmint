@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod hledger;
 
+mod binpath;
 mod ledger;
 mod ledger_add;
 mod ledger_open;
@@ -29,6 +30,7 @@ pub fn run_with_context(
             validate_transaction_text
         ])
         .setup(|app| {
+            binpath::init_from_app(app.handle());
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
