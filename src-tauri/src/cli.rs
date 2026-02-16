@@ -246,10 +246,6 @@ mod tests {
 
     #[test]
     fn new_command_creates_ledger_dir_and_git_repo() {
-        if Command::new("git").arg("--version").status().is_err() {
-            return;
-        }
-
         let base_dir = create_temp_dir();
         let ledger_path = base_dir.join("ledger.journal");
 
@@ -301,10 +297,10 @@ mod tests {
             panic!(".git was not created");
         }
 
-        let commit_subject = match git_output(&ledger_dir, &["log", "-1", "--pretty=%s"]) {
+        let commit_subject = match latest_commit_subject(&ledger_dir) {
             Ok(output) => output,
             Err(err) => {
-                panic!("git log failed: {err}");
+                panic!("read latest commit failed: {err}");
             }
         };
         if commit_subject.trim() != "Initial commit" {
@@ -318,9 +314,6 @@ mod tests {
 
     #[test]
     fn gl_add_appends_transaction() {
-        if Command::new("git").arg("--version").status().is_err() {
-            return;
-        }
         if Command::new("hledger").arg("--version").status().is_err() {
             return;
         }
@@ -363,10 +356,10 @@ mod tests {
             panic!("journal missing second posting: {contents}");
         }
 
-        let commit_subject = match git_output(&ledger_path, &["log", "-1", "--pretty=%s"]) {
+        let commit_subject = match latest_commit_subject(&ledger_path) {
             Ok(output) => output,
             Err(err) => {
-                panic!("git log failed: {err}");
+                panic!("read latest commit failed: {err}");
             }
         };
         if commit_subject.trim() != "Add transaction 2025-01-01 Test transaction" {
@@ -380,9 +373,6 @@ mod tests {
 
     #[test]
     fn gl_add_raw_appends_transaction() {
-        if Command::new("git").arg("--version").status().is_err() {
-            return;
-        }
         if Command::new("hledger").arg("--version").status().is_err() {
             return;
         }
@@ -425,10 +415,10 @@ mod tests {
             panic!("journal missing raw posting: {contents}");
         }
 
-        let commit_subject = match git_output(&ledger_path, &["log", "-1", "--pretty=%s"]) {
+        let commit_subject = match latest_commit_subject(&ledger_path) {
             Ok(output) => output,
             Err(err) => {
-                panic!("git log failed: {err}");
+                panic!("read latest commit failed: {err}");
             }
         };
         if commit_subject.trim() != "Add transaction 2025-02-01=2025-02-03 * (INV-1) Coffee" {
@@ -463,32 +453,14 @@ mod tests {
         dir
     }
 
-    fn git_output(dir: &Path, args: &[&str]) -> Result<String, std::io::Error> {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", crate::ledger::NULL_DEVICE)
-            .env("GIT_CONFIG_SYSTEM", crate::ledger::NULL_DEVICE)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_OBJECT_DIRECTORY")
-            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-            .env_remove("GIT_QUARANTINE_PATH")
-            .env("GIT_AUTHOR_NAME", crate::ledger::GIT_USER_NAME)
-            .env("GIT_AUTHOR_EMAIL", crate::ledger::GIT_USER_EMAIL)
-            .env("GIT_COMMITTER_NAME", crate::ledger::GIT_USER_NAME)
-            .env("GIT_COMMITTER_EMAIL", crate::ledger::GIT_USER_EMAIL)
-            .output()?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            Err(std::io::Error::other(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ))
-        }
+    fn latest_commit_subject(dir: &Path) -> Result<String, std::io::Error> {
+        let repo = git2::Repository::open(dir).map_err(|e| std::io::Error::other(e.to_string()))?;
+        let head = repo
+            .head()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let commit = head
+            .peel_to_commit()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(commit.summary().unwrap_or("").to_string())
     }
 }

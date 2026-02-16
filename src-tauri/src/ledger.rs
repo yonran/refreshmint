@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const DEFAULT_LEDGER_DIR: &str = "accounting.refreshmint";
 pub(crate) const GIT_USER_NAME: &str = "Refreshmint";
@@ -51,28 +49,26 @@ pub fn new_ledger_at_dir(target_dir: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn commit_general_journal(dir: &Path, message: &str) -> io::Result<()> {
-    if !dir.join(".git").is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "ledger git repository not found",
-        ));
-    }
-    run_git(
-        dir,
-        &[OsString::from("add"), OsString::from("general.journal")],
-    )?;
-    run_git(
-        dir,
-        &[
-            OsString::from("-c"),
-            OsString::from(format!("user.name={GIT_USER_NAME}")),
-            OsString::from("-c"),
-            OsString::from(format!("user.email={GIT_USER_EMAIL}")),
-            OsString::from("commit"),
-            OsString::from("-m"),
-            OsString::from(message),
-        ],
-    )?;
+    let repo = git2::Repository::open(dir).map_err(|e| io::Error::other(e.to_string()))?;
+    let mut index = repo.index().map_err(|e| io::Error::other(e.to_string()))?;
+    index
+        .add_path(Path::new("general.journal"))
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    index.write().map_err(|e| io::Error::other(e.to_string()))?;
+    let tree_oid = index
+        .write_tree()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let tree = repo
+        .find_tree(tree_oid)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let sig = git2::Signature::now(GIT_USER_NAME, GIT_USER_EMAIL)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let head = repo.head().map_err(|e| io::Error::other(e.to_string()))?;
+    let parent = head
+        .peel_to_commit()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+        .map_err(|e| io::Error::other(e.to_string()))?;
     Ok(())
 }
 
@@ -104,67 +100,38 @@ fn create_general_journal(dir: &Path) -> io::Result<()> {
 }
 
 fn init_git_repo(dir: &Path) -> io::Result<()> {
-    run_git(
-        dir,
-        &[
-            OsString::from("-c"),
-            OsString::from("init.defaultBranch=main"),
-            OsString::from("init"),
-        ],
-    )?;
+    let repo = git2::Repository::init(dir).map_err(|e| io::Error::other(e.to_string()))?;
 
-    run_git(
-        dir,
-        &[
-            OsString::from("add"),
-            OsString::from("general.journal"),
-            OsString::from("refreshmint.json"),
-        ],
-    )?;
+    // Set default branch to main
+    repo.config()
+        .and_then(|mut cfg| cfg.set_str("init.defaultBranch", "main"))
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    repo.set_head("refs/heads/main")
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
-    run_git(
-        dir,
-        &[
-            OsString::from("-c"),
-            OsString::from(format!("user.name={GIT_USER_NAME}")),
-            OsString::from("-c"),
-            OsString::from(format!("user.email={GIT_USER_EMAIL}")),
-            OsString::from("commit"),
-            OsString::from("-m"),
-            OsString::from("Initial commit"),
-        ],
-    )?;
+    // Stage files
+    let mut index = repo.index().map_err(|e| io::Error::other(e.to_string()))?;
+    index
+        .add_path(Path::new("general.journal"))
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    index
+        .add_path(Path::new("refreshmint.json"))
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    index.write().map_err(|e| io::Error::other(e.to_string()))?;
+    let tree_oid = index
+        .write_tree()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let tree = repo
+        .find_tree(tree_oid)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Create initial commit (no parents)
+    let sig = git2::Signature::now(GIT_USER_NAME, GIT_USER_EMAIL)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
     Ok(())
-}
-
-fn run_git(dir: &Path, args: &[OsString]) -> io::Result<()> {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_CONFIG_GLOBAL", NULL_DEVICE)
-        .env("GIT_CONFIG_SYSTEM", NULL_DEVICE)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .env_remove("GIT_QUARANTINE_PATH")
-        .env("GIT_AUTHOR_NAME", GIT_USER_NAME)
-        .env("GIT_AUTHOR_EMAIL", GIT_USER_EMAIL)
-        .env("GIT_COMMITTER_NAME", GIT_USER_NAME)
-        .env("GIT_COMMITTER_EMAIL", GIT_USER_EMAIL)
-        .status()?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "git command failed with status {status}"
-        )))
-    }
 }
 
 #[cfg(target_os = "macos")]
