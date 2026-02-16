@@ -3,5 +3,14 @@
     "identifier": "default",
     "description": "enables the default permissions",
     "windows": ["main"],
-    "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
+    "permissions": [
+        "core:default",
+        "dialog:allow-open",
+        "dialog:allow-save",
+        "store:allow-get",
+        "store:allow-set",
+        "store:allow-delete",
+        "store:allow-save",
+        "store:allow-load"
+    ]
 }

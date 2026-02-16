@@ -19,6 +19,7 @@ pub fn run_with_context(
 ) -> Result<(), Box<dyn std::error::Error>> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_store::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
             new_ledger,
             open_ledger,

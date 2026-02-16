@@ -1,11 +1,21 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { Menu, MenuItem, Submenu } from '@tauri-apps/api/menu';
 import { documentDir, join } from '@tauri-apps/api/path';
 import {
     open as openDialog,
     save as saveDialog,
 } from '@tauri-apps/plugin-dialog';
 import './App.css';
+import {
+    type ActiveTab,
+    addRecentLedger,
+    getLastActiveTab,
+    getRecentLedgers,
+    removeRecentLedger,
+    setLastActiveTab,
+    setRecentLedgers,
+} from './store.ts';
 import {
     type AmountStyleHint,
     type AmountTotal,
@@ -60,9 +70,8 @@ function App() {
     const [openStatus, setOpenStatus] = useState<string | null>(null);
     const [isOpening, setIsOpening] = useState(false);
     const [ledger, setLedger] = useState<LedgerView | null>(null);
-    const [activeTab, setActiveTab] = useState<'accounts' | 'transactions'>(
-        'accounts',
-    );
+    const [activeTab, setActiveTab] = useState<ActiveTab>('accounts');
+    const [recentLedgers, setRecentLedgersState] = useState<string[]>([]);
     const [transactionDraft, setTransactionDraft] = useState<TransactionDraft>(
         createTransactionDraft,
     );
@@ -72,6 +81,34 @@ function App() {
     const [isAdding, setIsAdding] = useState(false);
     const [draftStatus, setDraftStatus] = useState<string | null>(null);
     const [isValidatingDraft, setIsValidatingDraft] = useState(false);
+    const updateRecentLedgers = useCallback(
+        (updater: (current: string[]) => string[]) => {
+            setRecentLedgersState((current) => {
+                const next = updater(current);
+                void setRecentLedgers(next);
+                return next;
+            });
+        },
+        [],
+    );
+    const recordRecentLedger = useCallback(
+        (path: string) => {
+            updateRecentLedgers((current) => addRecentLedger(current, path));
+        },
+        [updateRecentLedgers],
+    );
+    const pruneRecentLedger = useCallback(
+        (path: string) => {
+            updateRecentLedgers((current) => removeRecentLedger(current, path));
+        },
+        [updateRecentLedgers],
+    );
+    const menuHandlers = useRef({
+        openLedger: () => {},
+        newLedger: () => {},
+        openRecent: (_path: string) => {},
+    });
+    const startupCancelledRef = useRef(false);
 
     useEffect(() => {
         if (ledger) {
@@ -81,6 +118,70 @@ function App() {
             setDraftStatus(null);
         }
     }, [ledger]);
+
+    useEffect(() => {
+        startupCancelledRef.current = false;
+        const isStartupCancelled = () => startupCancelledRef.current;
+
+        async function startup() {
+            const storedTab = await getLastActiveTab();
+            if (isStartupCancelled()) {
+                return;
+            }
+            if (storedTab) {
+                setActiveTab(storedTab);
+            }
+
+            const storedRecents = await getRecentLedgers();
+            if (isStartupCancelled()) {
+                return;
+            }
+            setRecentLedgersState(storedRecents);
+
+            if (storedRecents.length === 0) {
+                return;
+            }
+
+            setIsOpening(true);
+            setOpenStatus('Opening recent ledger...');
+            try {
+                for (const path of storedRecents) {
+                    try {
+                        const opened = await openLedger(path);
+                        if (isStartupCancelled()) {
+                            return;
+                        }
+                        setLedger(opened);
+                        recordRecentLedger(path);
+                        setOpenStatus(`Opened ${opened.path}`);
+                        return;
+                    } catch {
+                        if (!isStartupCancelled()) {
+                            pruneRecentLedger(path);
+                        }
+                    }
+                }
+                setOpenStatus(null);
+            } finally {
+                if (!isStartupCancelled()) {
+                    setIsOpening(false);
+                }
+            }
+        }
+
+        void startup();
+
+        return () => {
+            startupCancelledRef.current = true;
+        };
+    }, [pruneRecentLedger, recordRecentLedger]);
+
+    useEffect(() => {
+        if (!ledger) {
+            return;
+        }
+        void setLastActiveTab(activeTab);
+    }, [activeTab, ledger]);
 
     const buildTransactionInput = (
         draft: TransactionDraft,
@@ -273,9 +374,28 @@ function App() {
             setOpenStatus('Opening ledger...');
             const opened = await openLedger(path);
             setLedger(opened);
-            setActiveTab('accounts');
+            recordRecentLedger(path);
             setOpenStatus(`Opened ${opened.path}`);
         } catch (error) {
+            setOpenStatus(`Failed to open ledger: ${String(error)}`);
+        } finally {
+            setIsOpening(false);
+        }
+    }
+
+    async function handleOpenRecent(path: string) {
+        if (path.length === 0) {
+            return;
+        }
+        setIsOpening(true);
+        setOpenStatus('Opening ledger...');
+        try {
+            const opened = await openLedger(path);
+            setLedger(opened);
+            recordRecentLedger(path);
+            setOpenStatus(`Opened ${opened.path}`);
+        } catch (error) {
+            pruneRecentLedger(path);
             setOpenStatus(`Failed to open ledger: ${String(error)}`);
         } finally {
             setIsOpening(false);
@@ -379,6 +499,76 @@ function App() {
             return undefined;
         }
     }
+
+    menuHandlers.current = {
+        openLedger: () => {
+            void handleOpenLedger();
+        },
+        newLedger: () => {
+            void handleNewLedger();
+        },
+        openRecent: (path: string) => {
+            void handleOpenRecent(path);
+        },
+    };
+
+    useEffect(() => {
+        let cancelled = false;
+
+        async function setupMenu() {
+            const newItem = await MenuItem.new({
+                text: 'New...',
+                accelerator: 'CmdOrCtrl+N',
+                action: () => {
+                    menuHandlers.current.newLedger();
+                },
+            });
+            const openItem = await MenuItem.new({
+                text: 'Open...',
+                accelerator: 'CmdOrCtrl+O',
+                action: () => {
+                    menuHandlers.current.openLedger();
+                },
+            });
+            const recentItems = await Promise.all(
+                recentLedgers.slice(0, 10).map((path) =>
+                    MenuItem.new({
+                        text: path,
+                        action: () => {
+                            menuHandlers.current.openRecent(path);
+                        },
+                    }),
+                ),
+            );
+            if (recentItems.length === 0) {
+                recentItems.push(
+                    await MenuItem.new({
+                        text: 'No recent files',
+                        enabled: false,
+                    }),
+                );
+            }
+            const openRecent = await Submenu.new({
+                text: 'Open Recent',
+                items: recentItems,
+            });
+            const fileMenu = await Submenu.new({
+                text: 'File',
+                items: [newItem, openItem, openRecent],
+            });
+            const menu = await Menu.new({ items: [fileMenu] });
+
+            if (!cancelled) {
+                await menu.setAsAppMenu();
+            }
+        }
+
+        void setupMenu();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [recentLedgers]);
 
     return (
         <div className="app">
