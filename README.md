@@ -35,3 +35,48 @@ git commit --no-verify -m "WIP: debugging"
 ```bash
 npm exec tauri dev
 ```
+
+## Build a Bundle Locally
+
+CI currently builds one bundle type per target:
+
+- `aarch64-apple-darwin` -> `app`
+- `x86_64-apple-darwin` -> `app`
+- `x86_64-unknown-linux-gnu` -> `deb`
+- `x86_64-pc-windows-msvc` -> `nsis`
+
+Example (macOS arm64):
+
+```bash
+npm ci
+bash scripts/download-sidecar.sh aarch64-apple-darwin
+npm exec tauri build -- --target aarch64-apple-darwin --bundles app
+```
+
+Bundle output is written under:
+
+```text
+src-tauri/target/<target>/release/bundle/
+```
+
+## Run CI Workflow Locally with `act` (No Docker)
+
+Example matching the macOS arm64 CI matrix entry:
+
+```bash
+act pull_request \
+  -W .github/workflows/build.yml \
+  -j build \
+  --matrix os:macos-latest \
+  --matrix target:aarch64-apple-darwin \
+  --matrix bundle:app \
+  -P macos-latest=-self-hosted \
+  --container-daemon-socket - \
+  --no-cache-server \
+  --env PATH="$HOME/.cargo/bin:$PATH"
+```
+
+Notes:
+
+- Use `-P macos-13=-self-hosted` for `x86_64-apple-darwin`.
+- The workflow skips `actions/upload-artifact` when `ACT=true`.
