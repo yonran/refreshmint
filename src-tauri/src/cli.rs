@@ -15,6 +15,8 @@ pub struct Cli {
 enum Commands {
     New(NewArgs),
     Gl(GlArgs),
+    Secret(SecretArgs),
+    Scrape(ScrapeArgs),
 }
 
 #[derive(Args)]
@@ -32,6 +34,59 @@ struct GlArgs {
 #[derive(Subcommand)]
 enum GlCommand {
     Add(AddArgs),
+}
+
+#[derive(Args)]
+struct SecretArgs {
+    #[command(subcommand)]
+    command: SecretCommand,
+}
+
+#[derive(Subcommand)]
+enum SecretCommand {
+    Add(SecretAddArgs),
+    Remove(SecretRemoveArgs),
+    List(SecretListArgs),
+}
+
+#[derive(Args)]
+struct SecretAddArgs {
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    domain: String,
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    value: String,
+}
+
+#[derive(Args)]
+struct SecretRemoveArgs {
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    domain: String,
+    #[arg(long)]
+    name: String,
+}
+
+#[derive(Args)]
+struct SecretListArgs {
+    #[arg(long)]
+    account: String,
+}
+
+#[derive(Args)]
+struct ScrapeArgs {
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    extension: String,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+    #[arg(long)]
+    profile: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -65,6 +120,8 @@ pub fn run(context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
     match cli.command {
         Some(Commands::New(args)) => run_new(args, context),
         Some(Commands::Gl(args)) => run_gl(args, context),
+        Some(Commands::Secret(args)) => run_secret(args),
+        Some(Commands::Scrape(args)) => run_scrape(args, context),
         None => crate::run_with_context(context),
     }
 }
@@ -191,6 +248,52 @@ fn parse_posting(input: &str) -> Result<crate::ledger_add::NewPosting, Box<dyn E
             Some(comment.to_string())
         },
     })
+}
+
+fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
+    match args.command {
+        SecretCommand::Add(a) => {
+            let store = crate::secret::SecretStore::new(a.account);
+            store.set(&a.domain, &a.name, &a.value)?;
+            eprintln!("Secret stored.");
+            Ok(())
+        }
+        SecretCommand::Remove(a) => {
+            let store = crate::secret::SecretStore::new(a.account);
+            store.delete(&a.domain, &a.name)?;
+            eprintln!("Secret removed.");
+            Ok(())
+        }
+        SecretCommand::List(a) => {
+            let account_name = a.account.clone();
+            let store = crate::secret::SecretStore::new(a.account);
+            let entries = store.list()?;
+            if entries.is_empty() {
+                println!("No secrets stored for account '{account_name}'.");
+            } else {
+                for (domain, name) in &entries {
+                    println!("{domain}/{name}");
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = match args.ledger.as_ref() {
+        Some(path) => crate::ledger::ensure_refreshmint_extension(path.clone())?,
+        None => default_ledger_dir(context)?,
+    };
+
+    let config = crate::scrape::ScrapeConfig {
+        account: args.account,
+        extension_name: args.extension,
+        ledger_dir,
+        profile_override: args.profile,
+    };
+
+    crate::scrape::run_scrape(config)
 }
 
 fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Box<dyn Error>> {

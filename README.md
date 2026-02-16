@@ -80,3 +80,17 @@ Notes:
 
 - Use `-P macos-13=-self-hosted` for `x86_64-apple-darwin`.
 - The workflow skips `actions/upload-artifact` when `ACT=true`.
+
+## Scrape Smoke Test
+
+There is an ignored integration test that verifies the scrape pipeline can launch a browser, execute a driver script, and write output.
+
+Prerequisites:
+
+- Chrome or Edge installed locally
+
+Run it manually (recommended for periodic checks / CI jobs):
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --test scrape_integration -- --ignored --nocapture
+```

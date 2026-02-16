@@ -1,5 +1,7 @@
 pub mod cli;
 pub mod hledger;
+pub mod scrape;
+pub mod secret;
 
 mod binpath;
 mod ledger;

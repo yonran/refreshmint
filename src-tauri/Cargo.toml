@@ -27,6 +27,19 @@ tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"
 clap = { version = "4.5.58", features = ["derive"] }
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+rquickjs = { version = "0.9", features = ["classes", "futures", "macro", "parallel"] }
+# Compatibility notes (verified with minimal repro crates in /tmp):
+# - spider_chrome 2.37.129 + spider_chromiumoxide_cdp 0.7.8 => compile errors
+# - spider_chrome 2.37.129 + spider_chromiumoxide_cdp 0.7.7 => compiles
+# Use chromey main for both crates to keep CDP types/API in sync.
+# Keep dependency key as `chromiumoxide` because the code imports `chromiumoxide::...`.
+chromiumoxide = { package = "chromey", git = "https://github.com/spider-rs/chromey", branch = "main" }
+spider_chromiumoxide_cdp = { package = "spider_chromiumoxide_cdp", git = "https://github.com/spider-rs/chromey", branch = "main" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+futures = "0.3"
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+which = "7"
+dirs = "6"
 
 [lints.rust]
 unsafe_code = "deny"
