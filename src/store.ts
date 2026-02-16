@@ -4,7 +4,7 @@ const STORE_NAME = 'settings.json';
 const RECENT_LEDGER_KEY = 'recentLedgerPaths';
 const ACTIVE_TAB_KEY = 'recentActiveTab';
 
-export type ActiveTab = 'accounts' | 'transactions';
+export type ActiveTab = 'accounts' | 'transactions' | 'scrape';
 
 async function getStore() {
     return await load(STORE_NAME, { autoSave: true, defaults: {} });
@@ -44,7 +44,11 @@ export function removeRecentLedger(entries: string[], path: string): string[] {
 export async function getLastActiveTab(): Promise<ActiveTab | null> {
     const store = await getStore();
     const value = await store.get<unknown>(ACTIVE_TAB_KEY);
-    if (value === 'accounts' || value === 'transactions') {
+    if (
+        value === 'accounts' ||
+        value === 'transactions' ||
+        value === 'scrape'
+    ) {
         return value;
     }
     return null;

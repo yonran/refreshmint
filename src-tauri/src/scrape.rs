@@ -17,6 +17,35 @@ pub struct ScrapeConfig {
     pub profile_override: Option<PathBuf>,
 }
 
+/// List extension names that have a runnable `driver.mjs` script.
+pub fn list_runnable_extensions(
+    ledger_dir: &std::path::Path,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let extensions_dir = ledger_dir.join("extensions");
+    if !extensions_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut extensions = Vec::new();
+    for entry in std::fs::read_dir(&extensions_dir)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        if !entry_path.is_dir() {
+            continue;
+        }
+        if !entry_path.join("driver.mjs").is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+            continue;
+        };
+        extensions.push(name);
+    }
+
+    extensions.sort();
+    Ok(extensions)
+}
+
 /// Run the full scrape orchestration.
 ///
 /// This is the async core called from `run_scrape` which sets up a tokio runtime.
@@ -104,4 +133,53 @@ pub fn run_scrape(config: ScrapeConfig) -> Result<(), Box<dyn std::error::Error>
     rt.block_on(run_scrape_async(config))
         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::list_runnable_extensions;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn create_temp_dir(prefix: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("refreshmint-{prefix}-{}-{now}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap_or_else(|err| {
+            panic!("failed to create temp dir: {err}");
+        });
+        dir
+    }
+
+    #[test]
+    fn list_runnable_extensions_filters_and_sorts() {
+        let root = create_temp_dir("scrape-ext");
+        let extensions = root.join("extensions");
+        fs::create_dir_all(extensions.join("beta")).unwrap_or_else(|err| {
+            panic!("failed to create beta extension: {err}");
+        });
+        fs::create_dir_all(extensions.join("alpha")).unwrap_or_else(|err| {
+            panic!("failed to create alpha extension: {err}");
+        });
+        fs::create_dir_all(extensions.join("empty")).unwrap_or_else(|err| {
+            panic!("failed to create empty extension: {err}");
+        });
+        fs::write(extensions.join("alpha").join("driver.mjs"), "// alpha").unwrap_or_else(|err| {
+            panic!("failed to write alpha driver: {err}");
+        });
+        fs::write(extensions.join("beta").join("driver.mjs"), "// beta").unwrap_or_else(|err| {
+            panic!("failed to write beta driver: {err}");
+        });
+
+        let found = list_runnable_extensions(&root).unwrap_or_else(|err| {
+            panic!("unexpected list_runnable_extensions error: {err}");
+        });
+
+        assert_eq!(found, vec!["alpha".to_string(), "beta".to_string()]);
+        let _ = fs::remove_dir_all(&root);
+    }
 }

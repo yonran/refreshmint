@@ -180,6 +180,14 @@
     background: #fff;
 }
 
+.field select {
+    border: 1px solid #d7d7d7;
+    border-radius: 0.65rem;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.95rem;
+    background: #fff;
+}
+
 .field textarea {
     border: 1px solid #d7d7d7;
     border-radius: 0.65rem;

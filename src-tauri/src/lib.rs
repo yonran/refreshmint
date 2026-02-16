@@ -29,7 +29,9 @@ pub fn run_with_context(
             add_transaction,
             validate_transaction,
             add_transaction_text,
-            validate_transaction_text
+            validate_transaction_text,
+            list_scrape_extensions,
+            run_scrape
         ])
         .setup(|app| {
             binpath::init_from_app(app.handle());
@@ -97,4 +99,38 @@ fn add_transaction_text(
 fn validate_transaction_text(ledger: String, transaction: String) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
     ledger_add::validate_transaction_text(&target_dir, &transaction).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn list_scrape_extensions(ledger: String) -> Result<Vec<String>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    scrape::list_runnable_extensions(&target_dir).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn run_scrape(ledger: String, account: String, extension: String) -> Result<(), String> {
+    let account = account.trim().to_string();
+    if account.is_empty() {
+        return Err("account is required".to_string());
+    }
+    let extension = extension.trim().to_string();
+    if extension.is_empty() {
+        return Err("extension is required".to_string());
+    }
+
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+
+    let config = scrape::ScrapeConfig {
+        account,
+        extension_name: extension,
+        ledger_dir: target_dir,
+        profile_override: None,
+    };
+
+    tokio::task::spawn_blocking(move || scrape::run_scrape(config).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| err.to_string())?
+        .map_err(|err| err.to_string())
 }

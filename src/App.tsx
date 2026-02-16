@@ -21,11 +21,13 @@ import {
     type AmountTotal,
     addTransaction,
     addTransactionText,
+    listScrapeExtensions,
     openLedger,
     type AccountRow,
     type LedgerView,
     type NewTransactionInput,
     type PostingRow,
+    runScrape,
     type TransactionRow,
     validateTransaction,
     validateTransactionText,
@@ -81,6 +83,13 @@ function App() {
     const [isAdding, setIsAdding] = useState(false);
     const [draftStatus, setDraftStatus] = useState<string | null>(null);
     const [isValidatingDraft, setIsValidatingDraft] = useState(false);
+    const [scrapeAccount, setScrapeAccount] = useState('');
+    const [scrapeExtension, setScrapeExtension] = useState('');
+    const [scrapeExtensions, setScrapeExtensions] = useState<string[]>([]);
+    const [scrapeStatus, setScrapeStatus] = useState<string | null>(null);
+    const [isRunningScrape, setIsRunningScrape] = useState(false);
+    const [isLoadingScrapeExtensions, setIsLoadingScrapeExtensions] =
+        useState(false);
     const updateRecentLedgers = useCallback(
         (updater: (current: string[]) => string[]) => {
             setRecentLedgersState((current) => {
@@ -109,6 +118,15 @@ function App() {
         openRecent: (_path: string) => {},
     });
     const startupCancelledRef = useRef(false);
+    const ledgerPath = ledger?.path ?? null;
+    const scrapeAccountOptions = ledger
+        ? ledger.accounts
+              .map((account) => account.name.trim())
+              .filter(
+                  (name, index, names) =>
+                      name.length > 0 && names.indexOf(name) === index,
+              )
+        : [];
 
     useEffect(() => {
         if (ledger) {
@@ -116,8 +134,54 @@ function App() {
             setRawDraft('');
             setAddStatus(null);
             setDraftStatus(null);
+            setScrapeStatus(null);
+            setScrapeAccount('');
         }
     }, [ledger]);
+
+    useEffect(() => {
+        if (ledgerPath === null) {
+            setScrapeExtensions([]);
+            setScrapeExtension('');
+            setIsLoadingScrapeExtensions(false);
+            return;
+        }
+
+        let cancelled = false;
+        setIsLoadingScrapeExtensions(true);
+        setScrapeStatus(null);
+        void listScrapeExtensions(ledgerPath)
+            .then((extensions) => {
+                if (cancelled) {
+                    return;
+                }
+                setScrapeExtensions(extensions);
+                setScrapeExtension((current) => {
+                    if (current.length > 0 && extensions.includes(current)) {
+                        return current;
+                    }
+                    return extensions[0] ?? '';
+                });
+            })
+            .catch((error: unknown) => {
+                if (!cancelled) {
+                    setScrapeExtensions([]);
+                    setScrapeExtension('');
+                    setScrapeStatus(
+                        `Failed to load scrape extensions: ${String(error)}`,
+                    );
+                }
+            })
+            .finally(() => {
+                if (!cancelled) {
+                    setIsLoadingScrapeExtensions(false);
+                }
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [ledgerPath]);
 
     useEffect(() => {
         startupCancelledRef.current = false;
@@ -446,6 +510,33 @@ function App() {
         }
     }
 
+    async function handleRunScrape() {
+        if (!ledger) {
+            return;
+        }
+        const account = scrapeAccount.trim();
+        if (account.length === 0) {
+            setScrapeStatus('Account is required.');
+            return;
+        }
+        const extension = scrapeExtension.trim();
+        if (extension.length === 0) {
+            setScrapeStatus('Extension is required.');
+            return;
+        }
+
+        setIsRunningScrape(true);
+        setScrapeStatus(`Running ${extension} for ${account}...`);
+        try {
+            await runScrape(ledger.path, account, extension);
+            setScrapeStatus(`Scrape completed for ${extension}.`);
+        } catch (error) {
+            setScrapeStatus(`Scrape failed: ${String(error)}`);
+        } finally {
+            setIsRunningScrape(false);
+        }
+    }
+
     function selectMostRecentTransaction(
         transactions: TransactionRow[],
     ): TransactionRow | null {
@@ -578,7 +669,7 @@ function App() {
                     <h1>Ledger workspace</h1>
                     <p className="app-subtitle">
                         Open a <span>.refreshmint</span> directory to review
-                        accounts and transactions.
+                        accounts, transactions, and scraping extensions.
                     </p>
                 </div>
                 <div className="app-actions">
@@ -640,13 +731,24 @@ function App() {
                         >
                             Transactions
                         </button>
+                        <button
+                            className={
+                                activeTab === 'scrape' ? 'tab active' : 'tab'
+                            }
+                            onClick={() => {
+                                setActiveTab('scrape');
+                            }}
+                            type="button"
+                        >
+                            Scraping
+                        </button>
                     </div>
 
                     {activeTab === 'accounts' ? (
                         <div className="table-wrap">
                             <AccountsTable accounts={ledger.accounts} />
                         </div>
-                    ) : (
+                    ) : activeTab === 'transactions' ? (
                         <div className="transactions-panel">
                             <section className="txn-form">
                                 <div className="txn-form-header">
@@ -1104,6 +1206,97 @@ function App() {
                                     transactions={ledger.transactions}
                                 />
                             </div>
+                        </div>
+                    ) : (
+                        <div className="transactions-panel">
+                            <section className="txn-form">
+                                <div className="txn-form-header">
+                                    <div>
+                                        <h2>Run scrape</h2>
+                                        <p>
+                                            Choose an account and extension,
+                                            then run the same scraper pipeline
+                                            as the CLI command.
+                                        </p>
+                                    </div>
+                                </div>
+                                <div className="txn-grid">
+                                    <label className="field">
+                                        <span>Account</span>
+                                        <input
+                                            type="text"
+                                            value={scrapeAccount}
+                                            placeholder="Account name"
+                                            list="scrape-account-options"
+                                            onChange={(event) => {
+                                                setScrapeAccount(
+                                                    event.target.value,
+                                                );
+                                                setScrapeStatus(null);
+                                            }}
+                                        />
+                                    </label>
+                                    <label className="field">
+                                        <span>Extension</span>
+                                        <select
+                                            value={scrapeExtension}
+                                            onChange={(event) => {
+                                                setScrapeExtension(
+                                                    event.target.value,
+                                                );
+                                                setScrapeStatus(null);
+                                            }}
+                                            disabled={
+                                                isLoadingScrapeExtensions ||
+                                                scrapeExtensions.length === 0
+                                            }
+                                        >
+                                            <option value="">
+                                                {isLoadingScrapeExtensions
+                                                    ? 'Loading extensions...'
+                                                    : 'Select extension'}
+                                            </option>
+                                            {scrapeExtensions.map((name) => (
+                                                <option key={name} value={name}>
+                                                    {name}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                </div>
+                                <datalist id="scrape-account-options">
+                                    {scrapeAccountOptions.map((name) => (
+                                        <option key={name} value={name} />
+                                    ))}
+                                </datalist>
+                                <div className="txn-actions">
+                                    <button
+                                        type="button"
+                                        className="primary-button"
+                                        onClick={() => {
+                                            void handleRunScrape();
+                                        }}
+                                        disabled={
+                                            isRunningScrape ||
+                                            isLoadingScrapeExtensions
+                                        }
+                                    >
+                                        {isRunningScrape
+                                            ? 'Running scrape...'
+                                            : 'Run scrape'}
+                                    </button>
+                                </div>
+                                {scrapeExtensions.length === 0 &&
+                                !isLoadingScrapeExtensions ? (
+                                    <p className="hint">
+                                        No runnable extensions found in
+                                        extensions/*/driver.mjs.
+                                    </p>
+                                ) : null}
+                                {scrapeStatus === null ? null : (
+                                    <p className="status">{scrapeStatus}</p>
+                                )}
+                            </section>
                         </div>
                     )}
                 </section>

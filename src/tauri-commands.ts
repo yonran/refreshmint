@@ -85,3 +85,15 @@ export async function validateTransactionText(
 ): Promise<void> {
     await invoke('validate_transaction_text', { ledger, transaction });
 }
+
+export async function listScrapeExtensions(ledger: string): Promise<string[]> {
+    return invoke('list_scrape_extensions', { ledger });
+}
+
+export async function runScrape(
+    ledger: string,
+    account: string,
+    extension: string,
+): Promise<void> {
+    await invoke('run_scrape', { ledger, account, extension });
+}
