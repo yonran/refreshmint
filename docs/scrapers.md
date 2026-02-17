@@ -170,7 +170,7 @@ All methods are async and should be awaited.
 | `await page.click(selector)`                         | Click first element matching selector.                              |
 | `await page.type(selector, text)`                    | Click and type text into element.                                   |
 | `await page.fill(selector, value)`                   | Set input value and dispatch `input`/`change` events.               |
-| `await page.ensureSecretsExist(names)`               | Throw if any named secrets are missing for the current page domain. |
+| `await page.ensureSecretsExist(domain, names)`       | Validate and declare secret names for a specific top-level domain.  |
 | `await page.innerHTML(selector)`                     | Return `innerHTML` for an element.                                  |
 | `await page.innerText(selector)`                     | Return visible text for an element.                                 |
 | `await page.textContent(selector)`                   | Return `textContent` for an element.                                |
@@ -228,10 +228,13 @@ Use `ensureSecretsExist` to fail fast before login steps:
 
 ```js
 await page.goto('https://example.com/login');
-await ensureSecretsExist(['bank_username', 'bank_password']);
+await ensureSecretsExist('example.com', ['bank_username', 'bank_password']);
 ```
 
-`ensureSecretsExist` is a global alias for `page.ensureSecretsExist(...)`. It checks names against the current page domain and throws with the missing names if any are absent.
+`ensureSecretsExist` is a global alias for `page.ensureSecretsExist(domain, names)`.
+It verifies the secrets exist for that domain and records the declaration.
+
+After declaration, if a request references a secret name (for example `page.fill(..., 'bank_password')`), the runtime requires that name to have been declared for the current top-level navigation domain. If the name was only declared for a different domain, the call throws.
 
 Check configured secrets via:
 
