@@ -16,6 +16,7 @@ enum Commands {
     New(NewArgs),
     Gl(GlArgs),
     Extension(ExtensionArgs),
+    Debug(DebugArgs),
     Secret(SecretArgs),
     Scrape(ScrapeArgs),
 }
@@ -56,6 +57,47 @@ struct ExtensionLoadArgs {
     ledger: Option<PathBuf>,
     #[arg(long, default_value_t = false)]
     replace: bool,
+}
+
+#[derive(Args)]
+struct DebugArgs {
+    #[command(subcommand)]
+    command: DebugCommand,
+}
+
+#[derive(Subcommand)]
+enum DebugCommand {
+    Start(DebugStartArgs),
+    Exec(DebugExecArgs),
+    Stop(DebugStopArgs),
+}
+
+#[derive(Args)]
+struct DebugStartArgs {
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    extension: String,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+    #[arg(long)]
+    profile: Option<PathBuf>,
+    #[arg(long)]
+    socket: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct DebugExecArgs {
+    #[arg(long)]
+    socket: PathBuf,
+    #[arg(long, value_name = "PATH", help = "Script path ('-' for stdin).")]
+    script: PathBuf,
+}
+
+#[derive(Args)]
+struct DebugStopArgs {
+    #[arg(long)]
+    socket: PathBuf,
 }
 
 #[derive(Args)]
@@ -143,6 +185,7 @@ pub fn run(context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
         Some(Commands::New(args)) => run_new(args, context),
         Some(Commands::Gl(args)) => run_gl(args, context),
         Some(Commands::Extension(args)) => run_extension(args, context),
+        Some(Commands::Debug(args)) => run_debug(args, context),
         Some(Commands::Secret(args)) => run_secret(args),
         Some(Commands::Scrape(args)) => run_scrape(args, context),
         None => crate::run_with_context(context),
@@ -178,6 +221,14 @@ fn run_extension(
 ) -> Result<(), Box<dyn Error>> {
     match args.command {
         ExtensionCommand::Load(load_args) => run_extension_load(load_args, context),
+    }
+}
+
+fn run_debug(args: DebugArgs, context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
+    match args.command {
+        DebugCommand::Start(start_args) => run_debug_start(start_args, context),
+        DebugCommand::Exec(exec_args) => run_debug_exec(exec_args),
+        DebugCommand::Stop(stop_args) => run_debug_stop(stop_args),
     }
 }
 
@@ -244,13 +295,17 @@ fn run_gl_add_with_dir(args: AddArgs, ledger_dir: PathBuf) -> Result<(), Box<dyn
     Ok(())
 }
 
-fn read_raw_transaction(path: &PathBuf) -> Result<String, Box<dyn Error>> {
+fn read_text_input(path: &PathBuf) -> Result<String, Box<dyn Error>> {
     if path.as_os_str() == "-" {
         let mut buffer = String::new();
         std::io::stdin().read_to_string(&mut buffer)?;
         return Ok(buffer);
     }
     Ok(std::fs::read_to_string(path)?)
+}
+
+fn read_raw_transaction(path: &PathBuf) -> Result<String, Box<dyn Error>> {
+    read_text_input(path)
 }
 
 fn parse_posting(input: &str) -> Result<crate::ledger_add::NewPosting, Box<dyn Error>> {
@@ -322,6 +377,61 @@ fn run_extension_load(
     };
 
     run_extension_load_with_dir(args, ledger_dir)?;
+    Ok(())
+}
+
+fn run_debug_start(
+    args: DebugStartArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = match args.ledger.as_ref() {
+        Some(path) => crate::ledger::ensure_refreshmint_extension(path.clone())?,
+        None => default_ledger_dir(context)?,
+    };
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+
+    let account = args.account.trim().to_string();
+    if account.is_empty() {
+        return Err(
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "account is required").into(),
+        );
+    }
+    let extension = args.extension.trim().to_string();
+    if extension.is_empty() {
+        return Err(
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "extension is required").into(),
+        );
+    }
+
+    let socket = match args.socket {
+        Some(path) => path,
+        None => crate::scrape::debug::default_debug_socket_path(&account)?,
+    };
+    let config = crate::scrape::debug::DebugStartConfig {
+        account,
+        extension_name: extension,
+        ledger_dir,
+        profile_override: args.profile,
+        socket_path: Some(socket),
+    };
+    crate::scrape::debug::run_debug_session(config)
+}
+
+fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
+    let script_source = read_text_input(&args.script)?;
+    if script_source.trim().is_empty() {
+        return Err(
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "script is empty").into(),
+        );
+    }
+    crate::scrape::debug::exec_debug_script(&args.socket, &script_source)?;
+    println!("Script executed.");
+    Ok(())
+}
+
+fn run_debug_stop(args: DebugStopArgs) -> Result<(), Box<dyn Error>> {
+    crate::scrape::debug::stop_debug_session(&args.socket)?;
+    println!("Debug session stopped.");
     Ok(())
 }
 

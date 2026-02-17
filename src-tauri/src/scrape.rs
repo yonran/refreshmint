@@ -1,4 +1,5 @@
 pub mod browser;
+pub mod debug;
 pub mod js_api;
 pub mod profile;
 pub mod sandbox;

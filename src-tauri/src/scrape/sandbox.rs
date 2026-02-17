@@ -15,6 +15,16 @@ pub async fn run_driver(
     eprintln!("[sandbox] Reading driver source...");
     let driver_source = tokio::fs::read_to_string(driver_path).await?;
     eprintln!("[sandbox] Driver source: {} bytes", driver_source.len());
+    run_script_source(&driver_source, page_inner, refreshmint_inner).await
+}
+
+/// Run arbitrary JS source inside the same QuickJS sandbox used by drivers.
+pub async fn run_script_source(
+    source: &str,
+    page_inner: Arc<Mutex<PageInner>>,
+    refreshmint_inner: Arc<Mutex<RefreshmintInner>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let driver_source = source.to_string();
 
     eprintln!("[sandbox] Creating QuickJS runtime...");
     let runtime = AsyncRuntime::new()?;

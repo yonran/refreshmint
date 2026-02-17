@@ -1,0 +1,322 @@
+use std::error::Error;
+use std::path::{Path, PathBuf};
+
+#[derive(Clone)]
+pub struct DebugStartConfig {
+    pub account: String,
+    pub extension_name: String,
+    pub ledger_dir: PathBuf,
+    pub profile_override: Option<PathBuf>,
+    pub socket_path: Option<PathBuf>,
+}
+
+pub fn default_debug_socket_path(account: &str) -> Result<PathBuf, Box<dyn Error>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        let account_sanitized = sanitize_segment(account);
+        let preferred_base = dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("refreshmint")
+            .join("debug");
+        let preferred = preferred_base.join(format!(
+            "rm-{}-{}.sock",
+            std::process::id(),
+            account_sanitized
+        ));
+
+        // Keep socket path short enough for sockaddr_un.
+        if preferred.as_os_str().as_bytes().len() < 100 {
+            return Ok(preferred);
+        }
+
+        let fallback = std::env::temp_dir().join(format!(
+            "rm-debug-{}-{}.sock",
+            std::process::id(),
+            account_sanitized
+        ));
+        return Ok(fallback);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = account;
+        Err("debug sockets are currently supported only on unix platforms".into())
+    }
+}
+
+pub fn run_debug_session(config: DebugStartConfig) -> Result<(), Box<dyn Error>> {
+    #[cfg(unix)]
+    {
+        return run_debug_session_unix(config);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = config;
+        Err("debug sessions are currently supported only on unix platforms".into())
+    }
+}
+
+pub fn exec_debug_script(socket_path: &Path, script_source: &str) -> Result<(), Box<dyn Error>> {
+    let response = send_request(
+        socket_path,
+        Request::Exec {
+            script: script_source.to_string(),
+        },
+    )?;
+    if response.ok {
+        return Ok(());
+    }
+    Err(response
+        .error
+        .unwrap_or_else(|| "exec failed".to_string())
+        .into())
+}
+
+pub fn stop_debug_session(socket_path: &Path) -> Result<(), Box<dyn Error>> {
+    let response = send_request(socket_path, Request::Stop)?;
+    if response.ok {
+        return Ok(());
+    }
+    Err(response
+        .error
+        .unwrap_or_else(|| "stop failed".to_string())
+        .into())
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+enum Request {
+    Exec { script: String },
+    Stop,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Response {
+    ok: bool,
+    error: Option<String>,
+}
+
+#[cfg(unix)]
+fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>> {
+    use chromiumoxide::browser::Browser;
+    use std::io::Read;
+    use std::os::unix::net::UnixListener;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
+
+    let socket_path = match config.socket_path {
+        Some(path) => path,
+        None => default_debug_socket_path(&config.account)?,
+    };
+
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path)?;
+    }
+    let _cleanup = SocketCleanup {
+        path: socket_path.clone(),
+    };
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let (browser_instance, handler_handle, page_inner, refreshmint_inner): (
+        Browser,
+        tokio::task::JoinHandle<()>,
+        Arc<Mutex<super::js_api::PageInner>>,
+        Arc<Mutex<super::js_api::RefreshmintInner>>,
+    ) = rt.block_on(async {
+        let secret_store = crate::secret::SecretStore::new(config.account.clone());
+        let profile_dir = super::profile::resolve_profile_dir(
+            &config.ledger_dir,
+            &config.account,
+            config.profile_override.as_deref(),
+        )
+        .map_err(|err| err.to_string())?;
+        let download_dir = super::profile::resolve_download_dir(
+            &config.extension_name,
+            config.profile_override.as_deref(),
+        )
+        .map_err(|err| err.to_string())?;
+        std::fs::create_dir_all(&download_dir).map_err(|err| err.to_string())?;
+
+        let extension_dir = config
+            .ledger_dir
+            .join("extensions")
+            .join(&config.extension_name);
+        let output_dir = extension_dir.join("output");
+        std::fs::create_dir_all(&output_dir).map_err(|err| err.to_string())?;
+
+        let chrome_path = super::browser::find_chrome_binary().map_err(|err| err.to_string())?;
+        eprintln!("Using browser: {}", chrome_path.display());
+        eprintln!("Profile dir: {}", profile_dir.display());
+
+        let (browser, handler) = super::browser::launch_browser(&chrome_path, &profile_dir)
+            .await
+            .map_err(|err| err.to_string())?;
+        let page = browser.new_page("about:blank").await?;
+
+        let page_inner = Arc::new(Mutex::new(super::js_api::PageInner {
+            page,
+            secret_store,
+            download_dir,
+        }));
+        let refreshmint_inner =
+            Arc::new(Mutex::new(super::js_api::RefreshmintInner { output_dir }));
+        Ok::<_, Box<dyn Error>>((browser, handler, page_inner, refreshmint_inner))
+    })?;
+
+    let listener = UnixListener::bind(&socket_path)?;
+    listener.set_nonblocking(true)?;
+
+    println!("Debug session socket: {}", socket_path.display());
+    eprintln!("Debug session started. Press Ctrl+C to stop.");
+
+    let mut running = true;
+    while running {
+        rt.block_on(async {
+            tokio::task::yield_now().await;
+        });
+        if handler_handle.is_finished() {
+            eprintln!("Browser event handler stopped; ending debug session.");
+            break;
+        }
+
+        match listener.accept() {
+            Ok((mut stream, _addr)) => {
+                let mut body = String::new();
+                let response = match stream.read_to_string(&mut body) {
+                    Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
+                        Ok(Request::Exec { script }) => {
+                            match rt.block_on(super::sandbox::run_script_source(
+                                &script,
+                                page_inner.clone(),
+                                refreshmint_inner.clone(),
+                            )) {
+                                Ok(()) => Response {
+                                    ok: true,
+                                    error: None,
+                                },
+                                Err(err) => Response {
+                                    ok: false,
+                                    error: Some(err.to_string()),
+                                },
+                            }
+                        }
+                        Ok(Request::Stop) => {
+                            running = false;
+                            Response {
+                                ok: true,
+                                error: None,
+                            }
+                        }
+                        Err(err) => Response {
+                            ok: false,
+                            error: Some(format!("invalid request: {err}")),
+                        },
+                    },
+                    Err(err) => Response {
+                        ok: false,
+                        error: Some(format!("failed to read request: {err}")),
+                    },
+                };
+
+                if let Err(err) = write_response(&mut stream, &response) {
+                    eprintln!("failed to write debug response: {err}");
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    drop(listener);
+    drop(browser_instance);
+    let _ =
+        rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), handler_handle).await });
+    Ok(())
+}
+
+#[cfg(unix)]
+fn send_request(socket_path: &Path, request: Request) -> Result<Response, Box<dyn Error>> {
+    use std::io::{Read, Write};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket_path)?;
+    serde_json::to_writer(&mut stream, &request)?;
+    stream.write_all(b"\n")?;
+    stream.shutdown(Shutdown::Write)?;
+
+    let mut response_body = String::new();
+    stream.read_to_string(&mut response_body)?;
+    let response: Response = serde_json::from_str(response_body.trim())?;
+    Ok(response)
+}
+
+#[cfg(not(unix))]
+fn send_request(_socket_path: &Path, _request: Request) -> Result<Response, Box<dyn Error>> {
+    Err("debug sockets are currently supported only on unix platforms".into())
+}
+
+#[cfg(unix)]
+fn write_response(
+    stream: &mut std::os::unix::net::UnixStream,
+    response: &Response,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    serde_json::to_writer(&mut *stream, response)?;
+    stream.write_all(b"\n")?;
+    stream.flush()
+}
+
+fn sanitize_segment(input: &str) -> String {
+    let cleaned: String = input
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "default".to_string()
+    } else {
+        cleaned
+    }
+}
+
+#[cfg(unix)]
+struct SocketCleanup {
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for SocketCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_segment;
+
+    #[test]
+    fn sanitize_segment_preserves_safe_chars() {
+        assert_eq!(sanitize_segment("abc-DEF_123"), "abc-DEF_123");
+    }
+
+    #[test]
+    fn sanitize_segment_replaces_unsafe_chars() {
+        assert_eq!(sanitize_segment("a/b:c"), "a_b_c");
+    }
+}

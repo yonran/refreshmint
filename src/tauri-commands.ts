@@ -98,6 +98,22 @@ export async function loadScrapeExtension(
     return invoke('load_scrape_extension', { ledger, source, replace });
 }
 
+export async function startScrapeDebugSession(
+    ledger: string,
+    account: string,
+    extension: string,
+): Promise<string> {
+    return invoke('start_scrape_debug_session', { ledger, account, extension });
+}
+
+export async function stopScrapeDebugSession(): Promise<void> {
+    await invoke('stop_scrape_debug_session');
+}
+
+export async function getScrapeDebugSessionSocket(): Promise<string | null> {
+    return invoke('get_scrape_debug_session_socket');
+}
+
 export async function runScrape(
     ledger: string,
     account: string,

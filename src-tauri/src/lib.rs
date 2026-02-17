@@ -12,6 +12,18 @@ mod version;
 
 use tauri::Manager;
 
+struct UiDebugSession {
+    socket_path: std::path::PathBuf,
+    join_handle: std::thread::JoinHandle<()>,
+}
+
+static UI_DEBUG_SESSION: std::sync::OnceLock<std::sync::Mutex<Option<UiDebugSession>>> =
+    std::sync::OnceLock::new();
+
+fn ui_debug_session_state() -> &'static std::sync::Mutex<Option<UiDebugSession>> {
+    UI_DEBUG_SESSION.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -33,6 +45,9 @@ pub fn run_with_context(
             validate_transaction_text,
             list_scrape_extensions,
             load_scrape_extension,
+            start_scrape_debug_session,
+            stop_scrape_debug_session,
+            get_scrape_debug_session_socket,
             run_scrape
         ])
         .setup(|app| {
@@ -118,6 +133,110 @@ fn load_scrape_extension(ledger: String, source: String, replace: bool) -> Resul
     let source_path = std::path::PathBuf::from(source);
     crate::extension::load_extension_from_source(&target_dir, &source_path, replace)
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn start_scrape_debug_session(
+    ledger: String,
+    account: String,
+    extension: String,
+) -> Result<String, String> {
+    let account = account.trim().to_string();
+    if account.is_empty() {
+        return Err("account is required".to_string());
+    }
+    let extension = extension.trim().to_string();
+    if extension.is_empty() {
+        return Err("extension is required".to_string());
+    }
+
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let socket_path =
+        crate::scrape::debug::default_debug_socket_path(&account).map_err(|err| err.to_string())?;
+
+    let state = ui_debug_session_state();
+    let mut guard = state
+        .lock()
+        .map_err(|_| "failed to acquire debug session lock".to_string())?;
+
+    if let Some(session) = guard.as_ref() {
+        if !session.join_handle.is_finished() {
+            return Err(format!(
+                "a debug session is already running at {}",
+                session.socket_path.display()
+            ));
+        }
+    }
+
+    if let Some(finished) = guard.take() {
+        let _ = finished.join_handle.join();
+    }
+
+    let config = crate::scrape::debug::DebugStartConfig {
+        account,
+        extension_name: extension,
+        ledger_dir: target_dir,
+        profile_override: None,
+        socket_path: Some(socket_path.clone()),
+    };
+    let socket_for_thread = socket_path.clone();
+    let join_handle = std::thread::spawn(move || {
+        if let Err(err) = crate::scrape::debug::run_debug_session(config) {
+            eprintln!("debug session exited with error: {err}");
+        }
+    });
+
+    *guard = Some(UiDebugSession {
+        socket_path: socket_for_thread,
+        join_handle,
+    });
+
+    Ok(socket_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn stop_scrape_debug_session() -> Result<(), String> {
+    let state = ui_debug_session_state();
+    let session = {
+        let mut guard = state
+            .lock()
+            .map_err(|_| "failed to acquire debug session lock".to_string())?;
+        guard.take()
+    };
+    let Some(session) = session else {
+        return Ok(());
+    };
+
+    let stop_result = crate::scrape::debug::stop_debug_session(&session.socket_path);
+    let _ = session.join_handle.join();
+
+    if let Err(err) = stop_result {
+        return Err(err.to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_scrape_debug_session_socket() -> Result<Option<String>, String> {
+    let state = ui_debug_session_state();
+    let finished = {
+        let mut guard = state
+            .lock()
+            .map_err(|_| "failed to acquire debug session lock".to_string())?;
+        let Some(session) = guard.as_ref() else {
+            return Ok(None);
+        };
+        if session.join_handle.is_finished() {
+            guard.take()
+        } else {
+            return Ok(Some(session.socket_path.to_string_lossy().to_string()));
+        }
+    };
+    if let Some(session) = finished {
+        let _ = session.join_handle.join();
+    }
+    Ok(None)
 }
 
 #[tauri::command]

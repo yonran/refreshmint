@@ -22,6 +22,7 @@ import {
     type AmountTotal,
     addTransaction,
     addTransactionText,
+    getScrapeDebugSessionSocket,
     listScrapeExtensions,
     loadScrapeExtension,
     openLedger,
@@ -29,6 +30,8 @@ import {
     type LedgerView,
     type NewTransactionInput,
     type PostingRow,
+    startScrapeDebugSession,
+    stopScrapeDebugSession,
     runScrape,
     type TransactionRow,
     validateTransaction,
@@ -89,11 +92,16 @@ function App() {
     const [scrapeExtension, setScrapeExtension] = useState('');
     const [scrapeExtensions, setScrapeExtensions] = useState<string[]>([]);
     const [scrapeStatus, setScrapeStatus] = useState<string | null>(null);
+    const [scrapeDebugSocket, setScrapeDebugSocket] = useState<string | null>(
+        null,
+    );
     const [isRunningScrape, setIsRunningScrape] = useState(false);
     const [isLoadingScrapeExtensions, setIsLoadingScrapeExtensions] =
         useState(false);
     const [isImportingScrapeExtension, setIsImportingScrapeExtension] =
         useState(false);
+    const [isStartingScrapeDebug, setIsStartingScrapeDebug] = useState(false);
+    const [isStoppingScrapeDebug, setIsStoppingScrapeDebug] = useState(false);
     const updateRecentLedgers = useCallback(
         (updater: (current: string[]) => string[]) => {
             setRecentLedgersState((current) => {
@@ -139,6 +147,7 @@ function App() {
             setAddStatus(null);
             setDraftStatus(null);
             setScrapeStatus(null);
+            setScrapeDebugSocket(null);
             setScrapeAccount('');
         }
     }, [ledger]);
@@ -147,6 +156,7 @@ function App() {
         if (ledgerPath === null) {
             setScrapeExtensions([]);
             setScrapeExtension('');
+            setScrapeDebugSocket(null);
             setIsLoadingScrapeExtensions(false);
             return;
         }
@@ -179,6 +189,30 @@ function App() {
             .finally(() => {
                 if (!cancelled) {
                     setIsLoadingScrapeExtensions(false);
+                }
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [ledgerPath]);
+
+    useEffect(() => {
+        if (ledgerPath === null) {
+            setScrapeDebugSocket(null);
+            return;
+        }
+
+        let cancelled = false;
+        void getScrapeDebugSessionSocket()
+            .then((socket) => {
+                if (!cancelled) {
+                    setScrapeDebugSocket(socket);
+                }
+            })
+            .catch(() => {
+                if (!cancelled) {
+                    setScrapeDebugSocket(null);
                 }
             });
 
@@ -604,6 +638,63 @@ function App() {
             setScrapeStatus(`Failed to load extension: ${String(error)}`);
         } finally {
             setIsImportingScrapeExtension(false);
+        }
+    }
+
+    async function handleStartScrapeDebug() {
+        if (!ledger) {
+            return;
+        }
+        const account = scrapeAccount.trim();
+        if (account.length === 0) {
+            setScrapeStatus('Account is required.');
+            return;
+        }
+        const extension = scrapeExtension.trim();
+        if (extension.length === 0) {
+            setScrapeStatus('Extension is required.');
+            return;
+        }
+
+        setIsStartingScrapeDebug(true);
+        setScrapeStatus(`Starting debug session for ${extension}...`);
+        try {
+            const socket = await startScrapeDebugSession(
+                ledger.path,
+                account,
+                extension,
+            );
+            setScrapeDebugSocket(socket);
+            setScrapeStatus(`Debug session started. Socket: ${socket}`);
+        } catch (error) {
+            setScrapeStatus(`Failed to start debug session: ${String(error)}`);
+        } finally {
+            setIsStartingScrapeDebug(false);
+        }
+    }
+
+    async function handleStopScrapeDebug() {
+        setIsStoppingScrapeDebug(true);
+        try {
+            await stopScrapeDebugSession();
+            setScrapeDebugSocket(null);
+            setScrapeStatus('Debug session stopped.');
+        } catch (error) {
+            setScrapeStatus(`Failed to stop debug session: ${String(error)}`);
+        } finally {
+            setIsStoppingScrapeDebug(false);
+        }
+    }
+
+    async function handleCopyDebugSocket() {
+        if (scrapeDebugSocket === null) {
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(scrapeDebugSocket);
+            setScrapeStatus('Debug socket copied to clipboard.');
+        } catch (error) {
+            setScrapeStatus(`Failed to copy socket: ${String(error)}`);
         }
     }
 
@@ -1406,7 +1497,9 @@ function App() {
                                         disabled={
                                             isRunningScrape ||
                                             isLoadingScrapeExtensions ||
-                                            isImportingScrapeExtension
+                                            isImportingScrapeExtension ||
+                                            isStartingScrapeDebug ||
+                                            isStoppingScrapeDebug
                                         }
                                     >
                                         {isRunningScrape
@@ -1414,6 +1507,54 @@ function App() {
                                             : 'Run scrape'}
                                     </button>
                                 </div>
+                                <div className="txn-actions">
+                                    <button
+                                        type="button"
+                                        className="ghost-button"
+                                        onClick={() => {
+                                            void handleStartScrapeDebug();
+                                        }}
+                                        disabled={
+                                            scrapeDebugSocket !== null ||
+                                            isStartingScrapeDebug ||
+                                            isStoppingScrapeDebug
+                                        }
+                                    >
+                                        {isStartingScrapeDebug
+                                            ? 'Starting debug...'
+                                            : 'Start debug session'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="ghost-button"
+                                        onClick={() => {
+                                            void handleStopScrapeDebug();
+                                        }}
+                                        disabled={
+                                            scrapeDebugSocket === null ||
+                                            isStoppingScrapeDebug
+                                        }
+                                    >
+                                        {isStoppingScrapeDebug
+                                            ? 'Stopping debug...'
+                                            : 'Stop debug session'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="ghost-button"
+                                        onClick={() => {
+                                            void handleCopyDebugSocket();
+                                        }}
+                                        disabled={scrapeDebugSocket === null}
+                                    >
+                                        Copy socket
+                                    </button>
+                                </div>
+                                {scrapeDebugSocket === null ? null : (
+                                    <p className="hint mono">
+                                        Debug socket: {scrapeDebugSocket}
+                                    </p>
+                                )}
                                 {scrapeExtensions.length === 0 &&
                                 !isLoadingScrapeExtensions ? (
                                     <p className="hint">
