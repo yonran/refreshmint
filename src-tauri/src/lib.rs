@@ -17,6 +17,12 @@ struct UiDebugSession {
     join_handle: std::thread::JoinHandle<()>,
 }
 
+#[derive(serde::Serialize)]
+struct SecretEntry {
+    domain: String,
+    name: String,
+}
+
 static UI_DEBUG_SESSION: std::sync::OnceLock<std::sync::Mutex<Option<UiDebugSession>>> =
     std::sync::OnceLock::new();
 
@@ -45,6 +51,10 @@ pub fn run_with_context(
             validate_transaction_text,
             list_scrape_extensions,
             load_scrape_extension,
+            list_account_secrets,
+            add_account_secret,
+            reenter_account_secret,
+            remove_account_secret,
             start_scrape_debug_session,
             stop_scrape_debug_session,
             get_scrape_debug_session_socket,
@@ -133,6 +143,69 @@ fn load_scrape_extension(ledger: String, source: String, replace: bool) -> Resul
     let source_path = std::path::PathBuf::from(source);
     crate::extension::load_extension_from_source(&target_dir, &source_path, replace)
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn list_account_secrets(account: String) -> Result<Vec<SecretEntry>, String> {
+    let account = require_non_empty_input("account", account)?;
+    let store = crate::secret::SecretStore::new(account);
+    let mut entries = store
+        .list()
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .map(|(domain, name)| SecretEntry { domain, name })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
+    Ok(entries)
+}
+
+#[tauri::command]
+fn add_account_secret(
+    account: String,
+    domain: String,
+    name: String,
+    value: String,
+) -> Result<(), String> {
+    let account = require_non_empty_input("account", account)?;
+    let domain = require_non_empty_input("domain", domain)?;
+    let name = require_non_empty_input("name", name)?;
+    let store = crate::secret::SecretStore::new(account);
+    store
+        .set(&domain, &name, &value)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn reenter_account_secret(
+    account: String,
+    domain: String,
+    name: String,
+    value: String,
+) -> Result<(), String> {
+    let account = require_non_empty_input("account", account)?;
+    let domain = require_non_empty_input("domain", domain)?;
+    let name = require_non_empty_input("name", name)?;
+    let store = crate::secret::SecretStore::new(account);
+    store
+        .set(&domain, &name, &value)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn remove_account_secret(account: String, domain: String, name: String) -> Result<(), String> {
+    let account = require_non_empty_input("account", account)?;
+    let domain = require_non_empty_input("domain", domain)?;
+    let name = require_non_empty_input("name", name)?;
+    let store = crate::secret::SecretStore::new(account);
+    store.delete(&domain, &name).map_err(|err| err.to_string())
+}
+
+fn require_non_empty_input(field_name: &str, value: String) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field_name} is required"));
+    }
+    Ok(trimmed.to_string())
 }
 
 #[tauri::command]
@@ -264,4 +337,27 @@ async fn run_scrape(ledger: String, account: String, extension: String) -> Resul
         .await
         .map_err(|err| err.to_string())?
         .map_err(|err| err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_non_empty_input;
+
+    #[test]
+    fn require_non_empty_input_trims() {
+        let value = require_non_empty_input("account", " Assets:Cash ".to_string());
+        match value {
+            Ok(account) => assert_eq!(account, "Assets:Cash"),
+            Err(err) => panic!("expected trimmed account, got error: {err}"),
+        }
+    }
+
+    #[test]
+    fn require_non_empty_input_rejects_blank() {
+        let value = require_non_empty_input("account", " ".to_string());
+        match value {
+            Ok(_) => panic!("expected validation error for blank input"),
+            Err(err) => assert_eq!(err, "account is required"),
+        }
+    }
 }

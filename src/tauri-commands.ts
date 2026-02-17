@@ -41,6 +41,11 @@ export interface PostingRow {
     totals: AmountTotal[] | null;
 }
 
+export interface SecretEntry {
+    domain: string;
+    name: string;
+}
+
 export interface NewTransactionInput {
     date: string;
     description: string;
@@ -96,6 +101,38 @@ export async function loadScrapeExtension(
     replace: boolean,
 ): Promise<string> {
     return invoke('load_scrape_extension', { ledger, source, replace });
+}
+
+export async function listAccountSecrets(
+    account: string,
+): Promise<SecretEntry[]> {
+    return invoke('list_account_secrets', { account });
+}
+
+export async function addAccountSecret(
+    account: string,
+    domain: string,
+    name: string,
+    value: string,
+): Promise<void> {
+    await invoke('add_account_secret', { account, domain, name, value });
+}
+
+export async function reenterAccountSecret(
+    account: string,
+    domain: string,
+    name: string,
+    value: string,
+): Promise<void> {
+    await invoke('reenter_account_secret', { account, domain, name, value });
+}
+
+export async function removeAccountSecret(
+    account: string,
+    domain: string,
+    name: string,
+): Promise<void> {
+    await invoke('remove_account_secret', { account, domain, name });
 }
 
 export async function startScrapeDebugSession(
