@@ -90,7 +90,10 @@ pub async fn run_script_source(
                     Ok(())
                 }
                 Some(Err(err)) => {
-                    let msg = format!("{err:?}");
+                    let msg = match Err::<(), _>(err).catch(&ctx) {
+                        Err(caught) => caught.to_string(),
+                        Ok(()) => "unknown JavaScript exception".to_string(),
+                    };
                     eprintln!("[sandbox] Promise rejected: {msg}");
                     Err(msg)
                 }
