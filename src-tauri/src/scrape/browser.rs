@@ -92,11 +92,15 @@ pub async fn launch_browser(
         let mut count = 0u64;
         loop {
             match handler.next().await {
-                Some(_event) => {
+                Some(Ok(())) => {
                     count += 1;
                     if count <= 5 || count % 100 == 0 {
                         eprintln!("[browser] Handler event #{count}");
                     }
+                }
+                Some(Err(err)) => {
+                    eprintln!("[browser] Handler error after {count} events: {err}");
+                    break;
                 }
                 None => {
                     eprintln!("[browser] Handler stream ended after {count} events.");
