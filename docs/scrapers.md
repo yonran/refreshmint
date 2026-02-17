@@ -66,6 +66,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 
 The same flow can be run from the GUI Scraping tab.
 
+Site-specific notes can live under `knowledge/sites/<site>/README.md` (example: `knowledge/sites/clipper-card/README.md`).
+
 ## Driver runtime model
 
 - `driver.mjs` is executed inside a QuickJS sandbox.
@@ -76,7 +78,54 @@ The same flow can be run from the GUI Scraping tab.
 
 Errors thrown from your script fail the scrape run.
 
-## Script example
+## Recommended development flow (debug-first)
+
+Do not start by writing a full `driver.mjs` and running it end-to-end.
+
+Use a debug session and build incrementally:
+
+1. Start a debug session
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
+  debug start \
+  --ledger /path/to/ledger.refreshmint \
+  --account Assets:Checking \
+  --extension my-extension
+```
+
+2. Run tiny scripts with one action each
+
+```js
+// step-1.mjs
+await page.goto('https://example.com/login');
+refreshmint.log(`URL: ${await page.url()}`);
+```
+
+```js
+// step-2.mjs
+await page.waitForSelector('form');
+refreshmint.log(await page.innerHTML('form'));
+```
+
+```js
+// step-3.mjs
+await page.fill('#username', 'bank_username');
+await page.fill('#password', 'bank_password');
+refreshmint.log('filled credentials');
+```
+
+3. Verify each step before moving forward
+
+- after fill: check `inputValue`, `isVisible`, `isEnabled`
+- after submit: check URL with `waitForURL` and inspect page text
+- after data loads: use `waitForLoadState('networkidle')` or `waitForResponse`
+
+4. Combine successful steps into final `driver.mjs`
+
+This is faster to debug and avoids opaque failures in long scripts.
+
+## Script example (final combined driver)
 
 ```js
 refreshmint.log('starting scrape');
@@ -85,9 +134,9 @@ await page.goto('https://example.com/login');
 await page.waitForSelector('#username');
 
 await page.fill('#username', 'my_username');
-await page.fill('#password', 'bank_password'); // secret name support; see below
+await page.fill('#password', 'bank_password'); // secret-name substitution supported
 await page.click('button[type="submit"]');
-await page.waitForNavigation();
+await page.waitForURL('https://example.com/dashboard*');
 
 const snapshot = await page.evaluate(
     'JSON.stringify({ title: document.title, url: location.href })',
@@ -105,19 +154,38 @@ refreshmint.reportValue('status', 'ok');
 
 All methods are async and should be awaited.
 
-| Method                                 | Description                                                         |
-| -------------------------------------- | ------------------------------------------------------------------- |
-| `await page.goto(url)`                 | Navigate to a URL.                                                  |
-| `await page.url()`                     | Return current page URL as a string.                                |
-| `await page.reload()`                  | Reload current page.                                                |
-| `await page.waitForSelector(selector)` | Wait for a CSS selector to appear.                                  |
-| `await page.waitForNavigation()`       | Wait for navigation to complete.                                    |
-| `await page.click(selector)`           | Click first element matching selector.                              |
-| `await page.type(selector, text)`      | Click and type text into element.                                   |
-| `await page.fill(selector, value)`     | Set input value and dispatch `input`/`change` events.               |
-| `await page.evaluate(expression)`      | Evaluate JS in browser context. Returns a stringified/debug result. |
-| `await page.screenshot()`              | Capture screenshot and return PNG as base64 string.                 |
-| `await page.waitForDownload()`         | Configure download behavior and return download info object.        |
+| Method                                                 | Description                                                         |
+| ------------------------------------------------------ | ------------------------------------------------------------------- |
+| `await page.goto(url)`                                 | Navigate to a URL.                                                  |
+| `await page.url()`                                     | Return current page URL as a string.                                |
+| `await page.reload()`                                  | Reload current page.                                                |
+| `await page.waitForSelector(selector, timeoutMs?)`     | Wait for a CSS selector to appear, with descriptive timeout errors. |
+| `await page.waitForNavigation(timeoutMs?)`             | Wait for URL change from the current page.                          |
+| `await page.waitForURL(pattern, timeoutMs?)`           | Wait for current URL to match a pattern (`*` wildcard).             |
+| `await page.waitForLoadState(state?, timeoutMs?)`      | Wait for `load`, `domcontentloaded`, or `networkidle`.              |
+| `await page.waitForResponse(urlPattern, timeoutMs?)`   | Wait for captured network response URL pattern.                     |
+| `await page.networkRequests()`                         | Return captured network requests as JSON.                           |
+| `await page.clearNetworkRequests()`                    | Clear captured network requests.                                    |
+| `await page.click(selector)`                           | Click first element matching selector.                              |
+| `await page.type(selector, text)`                      | Click and type text into element.                                   |
+| `await page.fill(selector, value)`                     | Set input value and dispatch `input`/`change` events.               |
+| `await page.innerHTML(selector)`                       | Return `innerHTML` for an element.                                  |
+| `await page.innerText(selector)`                       | Return visible text for an element.                                 |
+| `await page.textContent(selector)`                     | Return `textContent` for an element.                                |
+| `await page.getAttribute(selector, name)`              | Return attribute value (empty string if missing).                   |
+| `await page.inputValue(selector)`                      | Return current input value.                                         |
+| `await page.isVisible(selector)`                       | Return whether element is visible.                                  |
+| `await page.isEnabled(selector)`                       | Return whether element is enabled.                                  |
+| `await page.evaluate(expression)`                      | Evaluate JS in browser context. Returns unwrapped string/JSON text. |
+| `await page.frameEvaluate(frameSelector, expression)`  | Evaluate JS inside a same-origin iframe.                            |
+| `await page.frameFill(frameSelector, selector, value)` | Fill a same-origin iframe input.                                    |
+| `await page.snapshot()`                                | Return an accessibility-like snapshot JSON of interactive elements. |
+| `await page.setDialogHandler(mode, promptText?)`       | Handle JS dialogs (`accept`, `dismiss`, `none`).                    |
+| `await page.lastDialog()`                              | Return most recent intercepted dialog event as JSON.                |
+| `await page.setPopupHandler(mode)`                     | Handle popups (`ignore` or `same_tab`).                             |
+| `await page.popupEvents()`                             | Return captured popup events as JSON.                               |
+| `await page.screenshot()`                              | Capture screenshot and return PNG as base64 string.                 |
+| `await page.waitForDownload()`                         | Configure download behavior and return download info object.        |
 
 `page.waitForDownload()` currently returns:
 
@@ -142,10 +210,18 @@ For `saveResource`, `data` should be bytes (`number[]` is supported).
 - Refreshmint gets the current page domain (host from URL).
 - If `value` matches a stored secret **name** for that domain/account, the secret value is pulled from keychain and injected.
 - Otherwise, `value` is used literally.
+- There is no warning when a name does not match; the literal input is used.
 
 This lets scripts refer to symbolic names instead of embedding credentials.
 
-Secrets are managed via:
+Check configured secrets via:
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
+  secret list --account Assets:Checking
+```
+
+Manage secrets via:
 
 - CLI: `secret add|reenter|remove|list`
 - GUI: Scraping tab, Account secrets section
