@@ -36,7 +36,7 @@ pub fn default_debug_socket_path(account: &str) -> Result<PathBuf, Box<dyn Error
             std::process::id(),
             account_sanitized
         ));
-        return Ok(fallback);
+        Ok(fallback)
     }
 
     #[cfg(not(unix))]
@@ -49,7 +49,7 @@ pub fn default_debug_socket_path(account: &str) -> Result<PathBuf, Box<dyn Error
 pub fn run_debug_session(config: DebugStartConfig) -> Result<(), Box<dyn Error>> {
     #[cfg(unix)]
     {
-        return run_debug_session_unix(config);
+        run_debug_session_unix(config)
     }
 
     #[cfg(not(unix))]
@@ -108,6 +108,13 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
     use std::time::Duration;
     use tokio::sync::Mutex;
 
+    type DebugRuntimeState = (
+        Browser,
+        tokio::task::JoinHandle<()>,
+        Arc<Mutex<super::js_api::PageInner>>,
+        Arc<Mutex<super::js_api::RefreshmintInner>>,
+    );
+
     let socket_path = match config.socket_path {
         Some(path) => path,
         None => default_debug_socket_path(&config.account)?,
@@ -124,51 +131,48 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
     };
 
     let rt = tokio::runtime::Runtime::new()?;
-    let (browser_instance, handler_handle, page_inner, refreshmint_inner): (
-        Browser,
-        tokio::task::JoinHandle<()>,
-        Arc<Mutex<super::js_api::PageInner>>,
-        Arc<Mutex<super::js_api::RefreshmintInner>>,
-    ) = rt.block_on(async {
-        let secret_store = crate::secret::SecretStore::new(config.account.clone());
-        let profile_dir = super::profile::resolve_profile_dir(
-            &config.ledger_dir,
-            &config.account,
-            config.profile_override.as_deref(),
-        )
-        .map_err(|err| err.to_string())?;
-        let download_dir = super::profile::resolve_download_dir(
-            &config.extension_name,
-            config.profile_override.as_deref(),
-        )
-        .map_err(|err| err.to_string())?;
-        std::fs::create_dir_all(&download_dir).map_err(|err| err.to_string())?;
-
-        let extension_dir = config
-            .ledger_dir
-            .join("extensions")
-            .join(&config.extension_name);
-        let output_dir = extension_dir.join("output");
-        std::fs::create_dir_all(&output_dir).map_err(|err| err.to_string())?;
-
-        let chrome_path = super::browser::find_chrome_binary().map_err(|err| err.to_string())?;
-        eprintln!("Using browser: {}", chrome_path.display());
-        eprintln!("Profile dir: {}", profile_dir.display());
-
-        let (browser, handler) = super::browser::launch_browser(&chrome_path, &profile_dir)
-            .await
+    let (browser_instance, handler_handle, page_inner, refreshmint_inner): DebugRuntimeState =
+        rt.block_on(async {
+            let secret_store = crate::secret::SecretStore::new(config.account.clone());
+            let profile_dir = super::profile::resolve_profile_dir(
+                &config.ledger_dir,
+                &config.account,
+                config.profile_override.as_deref(),
+            )
             .map_err(|err| err.to_string())?;
-        let page = browser.new_page("about:blank").await?;
+            let download_dir = super::profile::resolve_download_dir(
+                &config.extension_name,
+                config.profile_override.as_deref(),
+            )
+            .map_err(|err| err.to_string())?;
+            std::fs::create_dir_all(&download_dir).map_err(|err| err.to_string())?;
 
-        let page_inner = Arc::new(Mutex::new(super::js_api::PageInner {
-            page,
-            secret_store,
-            download_dir,
-        }));
-        let refreshmint_inner =
-            Arc::new(Mutex::new(super::js_api::RefreshmintInner { output_dir }));
-        Ok::<_, Box<dyn Error>>((browser, handler, page_inner, refreshmint_inner))
-    })?;
+            let extension_dir = config
+                .ledger_dir
+                .join("extensions")
+                .join(&config.extension_name);
+            let output_dir = extension_dir.join("output");
+            std::fs::create_dir_all(&output_dir).map_err(|err| err.to_string())?;
+
+            let chrome_path =
+                super::browser::find_chrome_binary().map_err(|err| err.to_string())?;
+            eprintln!("Using browser: {}", chrome_path.display());
+            eprintln!("Profile dir: {}", profile_dir.display());
+
+            let (browser, handler) = super::browser::launch_browser(&chrome_path, &profile_dir)
+                .await
+                .map_err(|err| err.to_string())?;
+            let page = browser.new_page("about:blank").await?;
+
+            let page_inner = Arc::new(Mutex::new(super::js_api::PageInner {
+                page,
+                secret_store,
+                download_dir,
+            }));
+            let refreshmint_inner =
+                Arc::new(Mutex::new(super::js_api::RefreshmintInner { output_dir }));
+            Ok::<_, Box<dyn Error>>((browser, handler, page_inner, refreshmint_inner))
+        })?;
 
     let listener = UnixListener::bind(&socket_path)?;
     listener.set_nonblocking(true)?;

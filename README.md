@@ -94,3 +94,65 @@ Run it manually (recommended for periodic checks / CI jobs):
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --test scrape_integration -- --ignored --nocapture
 ```
+
+## Debug Scrape Sessions (LLM + Manual Recovery)
+
+Debug sessions keep a headed browser open so automation can be driven incrementally and humans can intervene when needed.
+
+### Start a debug session
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
+  debug start \
+  --ledger /path/to/ledger.refreshmint \
+  --account Assets:Checking \
+  --extension my-extension
+```
+
+This command stays running in the foreground and prints a local unix socket path (for example: `/tmp/rm-debug-....sock`).
+
+### Execute JS against the live session
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
+  debug exec \
+  --socket /path/to/debug.sock \
+  --script script.mjs
+```
+
+You can also pass script source via stdin:
+
+```bash
+cat script.mjs | cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
+  debug exec \
+  --socket /path/to/debug.sock \
+  --script -
+```
+
+### Stop the session
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
+  debug stop \
+  --socket /path/to/debug.sock
+```
+
+`debug start` also tears down the browser if the process exits (for example Ctrl+C or terminal close).
+
+### GUI controls
+
+In the **Scraping** tab you can:
+
+- Start debug session
+- Stop debug session
+- Copy socket
+
+The UI shows the active debug socket so it can be used by CLI/LLM tooling.
+
+## Debug Session Smoke Test
+
+There is an ignored integration test for the full debug session flow (start, exec script, stop):
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --test debug_integration -- --ignored --nocapture
+```
