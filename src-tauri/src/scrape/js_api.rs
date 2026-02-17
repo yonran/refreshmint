@@ -1337,9 +1337,9 @@ impl RefreshmintApi {
     }
 
     /// Prompt the user: use CLI-provided override when available.
-    pub async fn prompt(&self, message: String) -> JsResult<String> {
+    pub fn prompt(&self, message: String) -> JsResult<String> {
         let (override_value, require_override) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.blocking_lock();
             (
                 inner.prompt_overrides.get(&message).cloned().or_else(|| {
                     let trimmed = message.trim();
@@ -1528,8 +1528,6 @@ mod tests {
 
     #[test]
     fn prompt_returns_override_when_present_in_strict_mode() {
-        let rt = tokio::runtime::Runtime::new()
-            .unwrap_or_else(|err| panic!("failed to create runtime: {err}"));
         let mut overrides = PromptOverrides::new();
         overrides.insert("OTP".to_string(), "123456".to_string());
         let api = RefreshmintApi::new(Arc::new(Mutex::new(RefreshmintInner {
@@ -1538,23 +1536,21 @@ mod tests {
             prompt_requires_override: true,
         })));
 
-        let value = rt
-            .block_on(api.prompt("OTP".to_string()))
+        let value = api
+            .prompt("OTP".to_string())
             .unwrap_or_else(|err| panic!("prompt unexpectedly failed: {err}"));
         assert_eq!(value, "123456");
     }
 
     #[test]
     fn prompt_errors_when_missing_in_strict_mode() {
-        let rt = tokio::runtime::Runtime::new()
-            .unwrap_or_else(|err| panic!("failed to create runtime: {err}"));
         let api = RefreshmintApi::new(Arc::new(Mutex::new(RefreshmintInner {
             output_dir: PathBuf::new(),
             prompt_overrides: PromptOverrides::new(),
             prompt_requires_override: true,
         })));
 
-        let err = match rt.block_on(api.prompt("Security answer".to_string())) {
+        let err = match api.prompt("Security answer".to_string()) {
             Ok(value) => panic!("expected missing prompt override error, got value: {value}"),
             Err(err) => err,
         };
@@ -1565,8 +1561,6 @@ mod tests {
 
     #[test]
     fn prompt_uses_trimmed_message_lookup() {
-        let rt = tokio::runtime::Runtime::new()
-            .unwrap_or_else(|err| panic!("failed to create runtime: {err}"));
         let mut overrides = PromptOverrides::new();
         overrides.insert(
             "Enter the texted MFA code:".to_string(),
@@ -1578,8 +1572,8 @@ mod tests {
             prompt_requires_override: true,
         })));
 
-        let value = rt
-            .block_on(api.prompt("Enter the texted MFA code: ".to_string()))
+        let value = api
+            .prompt("Enter the texted MFA code: ".to_string())
             .unwrap_or_else(|err| panic!("prompt unexpectedly failed: {err}"));
         assert_eq!(value, "245221");
     }
