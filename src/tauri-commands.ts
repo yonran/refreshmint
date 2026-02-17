@@ -90,6 +90,14 @@ export async function listScrapeExtensions(ledger: string): Promise<string[]> {
     return invoke('list_scrape_extensions', { ledger });
 }
 
+export async function loadScrapeExtension(
+    ledger: string,
+    source: string,
+    replace: boolean,
+): Promise<string> {
+    return invoke('load_scrape_extension', { ledger, source, replace });
+}
+
 export async function runScrape(
     ledger: string,
     account: string,

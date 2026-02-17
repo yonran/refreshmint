@@ -32,6 +32,7 @@ pub fn run_with_context(
             add_transaction_text,
             validate_transaction_text,
             list_scrape_extensions,
+            load_scrape_extension,
             run_scrape
         ])
         .setup(|app| {
@@ -107,6 +108,16 @@ fn list_scrape_extensions(ledger: String) -> Result<Vec<String>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
     scrape::list_runnable_extensions(&target_dir).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn load_scrape_extension(ledger: String, source: String, replace: bool) -> Result<String, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+
+    let source_path = std::path::PathBuf::from(source);
+    crate::extension::load_extension_from_source(&target_dir, &source_path, replace)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

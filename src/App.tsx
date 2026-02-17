@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { Menu, MenuItem, Submenu } from '@tauri-apps/api/menu';
 import { documentDir, join } from '@tauri-apps/api/path';
 import {
+    confirm as confirmDialog,
     open as openDialog,
     save as saveDialog,
 } from '@tauri-apps/plugin-dialog';
@@ -22,6 +23,7 @@ import {
     addTransaction,
     addTransactionText,
     listScrapeExtensions,
+    loadScrapeExtension,
     openLedger,
     type AccountRow,
     type LedgerView,
@@ -89,6 +91,8 @@ function App() {
     const [scrapeStatus, setScrapeStatus] = useState<string | null>(null);
     const [isRunningScrape, setIsRunningScrape] = useState(false);
     const [isLoadingScrapeExtensions, setIsLoadingScrapeExtensions] =
+        useState(false);
+    const [isImportingScrapeExtension, setIsImportingScrapeExtension] =
         useState(false);
     const updateRecentLedgers = useCallback(
         (updater: (current: string[]) => string[]) => {
@@ -507,6 +511,99 @@ function App() {
             setAddStatus(`Failed to add transaction: ${String(error)}`);
         } finally {
             setIsAdding(false);
+        }
+    }
+
+    async function reloadScrapeExtensions(
+        path: string,
+        preferredExtension: string,
+    ) {
+        setIsLoadingScrapeExtensions(true);
+        try {
+            const extensions = await listScrapeExtensions(path);
+            setScrapeExtensions(extensions);
+            setScrapeExtension((current) => {
+                if (extensions.includes(preferredExtension)) {
+                    return preferredExtension;
+                }
+                if (current.length > 0 && extensions.includes(current)) {
+                    return current;
+                }
+                return extensions[0] ?? '';
+            });
+        } finally {
+            setIsLoadingScrapeExtensions(false);
+        }
+    }
+
+    async function handleLoadScrapeExtension(sourceType: 'zip' | 'directory') {
+        if (!ledger) {
+            return;
+        }
+
+        const selection = (await openDialog({
+            directory: sourceType === 'directory',
+            multiple: false,
+            title:
+                sourceType === 'directory'
+                    ? 'Load extension from directory'
+                    : 'Load extension from zip',
+            ...(sourceType === 'zip'
+                ? { filters: [{ name: 'ZIP archive', extensions: ['zip'] }] }
+                : {}),
+        })) as string | string[] | null;
+        if (selection === null) {
+            return;
+        }
+        const source = Array.isArray(selection) ? selection[0] : selection;
+        if (typeof source !== 'string' || source.length === 0) {
+            setScrapeStatus('Extension load canceled.');
+            return;
+        }
+
+        setIsImportingScrapeExtension(true);
+        setScrapeStatus('Loading extension...');
+        try {
+            let loadedExtensionName: string;
+            try {
+                loadedExtensionName = await loadScrapeExtension(
+                    ledger.path,
+                    source,
+                    false,
+                );
+            } catch (error) {
+                const message = String(error);
+                if (!message.toLowerCase().includes('already exists')) {
+                    throw error;
+                }
+
+                const shouldReplace = await confirmDialog(
+                    `Extension already exists. Replace it?\n\n${message}`,
+                    {
+                        title: 'Replace extension?',
+                        kind: 'warning',
+                        okLabel: 'Replace',
+                        cancelLabel: 'Cancel',
+                    },
+                );
+                if (!shouldReplace) {
+                    setScrapeStatus('Extension load canceled.');
+                    return;
+                }
+
+                loadedExtensionName = await loadScrapeExtension(
+                    ledger.path,
+                    source,
+                    true,
+                );
+            }
+
+            await reloadScrapeExtensions(ledger.path, loadedExtensionName);
+            setScrapeStatus(`Loaded extension '${loadedExtensionName}'.`);
+        } catch (error) {
+            setScrapeStatus(`Failed to load extension: ${String(error)}`);
+        } finally {
+            setIsImportingScrapeExtension(false);
         }
     }
 
@@ -1219,6 +1316,36 @@ function App() {
                                             as the CLI command.
                                         </p>
                                     </div>
+                                    <div className="header-actions">
+                                        <button
+                                            className="ghost-button"
+                                            type="button"
+                                            disabled={
+                                                isImportingScrapeExtension
+                                            }
+                                            onClick={() => {
+                                                void handleLoadScrapeExtension(
+                                                    'zip',
+                                                );
+                                            }}
+                                        >
+                                            Load .zip...
+                                        </button>
+                                        <button
+                                            className="ghost-button"
+                                            type="button"
+                                            disabled={
+                                                isImportingScrapeExtension
+                                            }
+                                            onClick={() => {
+                                                void handleLoadScrapeExtension(
+                                                    'directory',
+                                                );
+                                            }}
+                                        >
+                                            Load directory...
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className="txn-grid">
                                     <label className="field">
@@ -1278,7 +1405,8 @@ function App() {
                                         }}
                                         disabled={
                                             isRunningScrape ||
-                                            isLoadingScrapeExtensions
+                                            isLoadingScrapeExtensions ||
+                                            isImportingScrapeExtension
                                         }
                                     >
                                         {isRunningScrape
