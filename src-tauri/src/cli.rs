@@ -109,12 +109,25 @@ struct SecretArgs {
 #[derive(Subcommand)]
 enum SecretCommand {
     Add(SecretAddArgs),
+    Reenter(SecretReenterArgs),
     Remove(SecretRemoveArgs),
     List(SecretListArgs),
 }
 
 #[derive(Args)]
 struct SecretAddArgs {
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    domain: String,
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    value: String,
+}
+
+#[derive(Args)]
+struct SecretReenterArgs {
     #[arg(long)]
     account: String,
     #[arg(long)]
@@ -343,6 +356,12 @@ fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
             let store = crate::secret::SecretStore::new(a.account);
             store.set(&a.domain, &a.name, &a.value)?;
             eprintln!("Secret stored.");
+            Ok(())
+        }
+        SecretCommand::Reenter(a) => {
+            let store = crate::secret::SecretStore::new(a.account);
+            store.set(&a.domain, &a.name, &a.value)?;
+            eprintln!("Secret re-entered.");
             Ok(())
         }
         SecretCommand::Remove(a) => {
