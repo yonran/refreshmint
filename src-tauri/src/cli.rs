@@ -863,17 +863,28 @@ mod tests {
     }
 
     fn create_temp_dir() -> PathBuf {
-        let nanos = SystemTime::now()
+        let base_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
-        let dir_name = format!("refreshmint-test-{}-{nanos}", std::process::id());
-        let mut dir = std::env::temp_dir();
-        dir.push(dir_name);
-        if let Err(err) = fs::create_dir(&dir) {
-            panic!("failed to create temp dir: {err}");
+
+        for attempt in 0..64u32 {
+            let dir_name = format!(
+                "refreshmint-test-{}-{}-{}",
+                std::process::id(),
+                base_nanos,
+                attempt
+            );
+            let mut dir = std::env::temp_dir();
+            dir.push(dir_name);
+            match fs::create_dir(&dir) {
+                Ok(()) => return dir,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => panic!("failed to create temp dir: {err}"),
+            }
         }
-        dir
+
+        panic!("failed to create unique temp dir after 64 attempts");
     }
 
     fn latest_commit_subject(dir: &Path) -> Result<String, std::io::Error> {
