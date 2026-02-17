@@ -94,7 +94,7 @@ pub async fn run_scrape_async(
 
     // 6. Open a new page
     eprintln!("Opening new page...");
-    let page = browser_instance.new_page("https://blank.page/").await?;
+    let page = browser_instance.new_page("about:blank").await?;
     eprintln!("Page opened.");
 
     // 7. Set up shared state
