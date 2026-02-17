@@ -353,26 +353,39 @@ fn parse_posting(input: &str) -> Result<crate::ledger_add::NewPosting, Box<dyn E
 fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
     match args.command {
         SecretCommand::Add(a) => {
-            let store = crate::secret::SecretStore::new(a.account);
-            store.set(&a.domain, &a.name, &a.value)?;
+            let account = require_secret_field("account", &a.account)?;
+            let domain = require_secret_field("domain", &a.domain)?;
+            let name = require_secret_field("name", &a.name)?;
+
+            let store = crate::secret::SecretStore::new(account);
+            store.set(&domain, &name, &a.value)?;
             eprintln!("Secret stored.");
             Ok(())
         }
         SecretCommand::Reenter(a) => {
-            let store = crate::secret::SecretStore::new(a.account);
-            store.set(&a.domain, &a.name, &a.value)?;
+            let account = require_secret_field("account", &a.account)?;
+            let domain = require_secret_field("domain", &a.domain)?;
+            let name = require_secret_field("name", &a.name)?;
+
+            let store = crate::secret::SecretStore::new(account);
+            store.set(&domain, &name, &a.value)?;
             eprintln!("Secret re-entered.");
             Ok(())
         }
         SecretCommand::Remove(a) => {
-            let store = crate::secret::SecretStore::new(a.account);
-            store.delete(&a.domain, &a.name)?;
+            let account = require_secret_field("account", &a.account)?;
+            let domain = require_secret_field("domain", &a.domain)?;
+            let name = require_secret_field("name", &a.name)?;
+
+            let store = crate::secret::SecretStore::new(account);
+            store.delete(&domain, &name)?;
             eprintln!("Secret removed.");
             Ok(())
         }
         SecretCommand::List(a) => {
-            let account_name = a.account.clone();
-            let store = crate::secret::SecretStore::new(a.account);
+            let account = require_secret_field("account", &a.account)?;
+            let account_name = account.clone();
+            let store = crate::secret::SecretStore::new(account);
             let entries = store.list()?;
             if entries.is_empty() {
                 println!("No secrets stored for account '{account_name}'.");
@@ -384,6 +397,18 @@ fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
             Ok(())
         }
     }
+}
+
+fn require_secret_field(field_name: &str, value: &str) -> Result<String, Box<dyn Error>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{field_name} is required"),
+        )
+        .into());
+    }
+    Ok(trimmed.to_string())
 }
 
 fn run_extension_load(
@@ -492,8 +517,9 @@ fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Bo
 #[cfg(test)]
 mod tests {
     use super::{
-        run_extension_load_with_dir, run_gl_add_with_dir, run_new_with_ledger_path, AddArgs,
-        ExtensionLoadArgs,
+        run_extension_load_with_dir, run_gl_add_with_dir, run_new_with_ledger_path, run_secret,
+        AddArgs, ExtensionLoadArgs, SecretAddArgs, SecretArgs, SecretCommand, SecretListArgs,
+        SecretRemoveArgs,
     };
     use crate::ledger::ensure_refreshmint_extension;
     use serde_json::Value;
@@ -765,12 +791,74 @@ mod tests {
         }
     }
 
+    #[test]
+    fn secret_add_requires_non_empty_fields() {
+        let missing_account = run_secret(SecretArgs {
+            command: SecretCommand::Add(SecretAddArgs {
+                account: " ".to_string(),
+                domain: "example.com".to_string(),
+                name: "password".to_string(),
+                value: "secret".to_string(),
+            }),
+        });
+        assert!(expect_err(missing_account, "missing account").contains("account is required"));
+
+        let missing_domain = run_secret(SecretArgs {
+            command: SecretCommand::Add(SecretAddArgs {
+                account: "Assets:Bank".to_string(),
+                domain: " ".to_string(),
+                name: "password".to_string(),
+                value: "secret".to_string(),
+            }),
+        });
+        assert!(expect_err(missing_domain, "missing domain").contains("domain is required"));
+
+        let missing_name = run_secret(SecretArgs {
+            command: SecretCommand::Add(SecretAddArgs {
+                account: "Assets:Bank".to_string(),
+                domain: "example.com".to_string(),
+                name: " ".to_string(),
+                value: "secret".to_string(),
+            }),
+        });
+        assert!(expect_err(missing_name, "missing name").contains("name is required"));
+    }
+
+    #[test]
+    fn secret_remove_requires_non_empty_fields() {
+        let missing_domain = run_secret(SecretArgs {
+            command: SecretCommand::Remove(SecretRemoveArgs {
+                account: "Assets:Bank".to_string(),
+                domain: " ".to_string(),
+                name: "password".to_string(),
+            }),
+        });
+        assert!(expect_err(missing_domain, "missing domain").contains("domain is required"));
+    }
+
+    #[test]
+    fn secret_list_requires_non_empty_account() {
+        let missing_account = run_secret(SecretArgs {
+            command: SecretCommand::List(SecretListArgs {
+                account: " ".to_string(),
+            }),
+        });
+        assert!(expect_err(missing_account, "missing account").contains("account is required"));
+    }
+
     fn expect_ok<T, E: std::fmt::Display>(result: Result<T, E>, label: &str) -> T {
         match result {
             Ok(value) => value,
             Err(err) => {
                 panic!("expected Ok for {label}, got error: {err}");
             }
+        }
+    }
+
+    fn expect_err<T, E: std::fmt::Display>(result: Result<T, E>, label: &str) -> String {
+        match result {
+            Ok(_) => panic!("expected Err for {label}, got Ok"),
+            Err(err) => err.to_string(),
         }
     }
 
