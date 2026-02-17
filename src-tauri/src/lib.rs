@@ -4,6 +4,7 @@ pub mod scrape;
 pub mod secret;
 
 mod binpath;
+mod extension;
 mod ledger;
 mod ledger_add;
 mod ledger_open;

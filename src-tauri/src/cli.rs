@@ -15,6 +15,7 @@ pub struct Cli {
 enum Commands {
     New(NewArgs),
     Gl(GlArgs),
+    Extension(ExtensionArgs),
     Secret(SecretArgs),
     Scrape(ScrapeArgs),
 }
@@ -34,6 +35,27 @@ struct GlArgs {
 #[derive(Subcommand)]
 enum GlCommand {
     Add(AddArgs),
+}
+
+#[derive(Args)]
+struct ExtensionArgs {
+    #[command(subcommand)]
+    command: ExtensionCommand,
+}
+
+#[derive(Subcommand)]
+enum ExtensionCommand {
+    Load(ExtensionLoadArgs),
+}
+
+#[derive(Args)]
+struct ExtensionLoadArgs {
+    #[arg(value_name = "PATH")]
+    source: PathBuf,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    replace: bool,
 }
 
 #[derive(Args)]
@@ -120,6 +142,7 @@ pub fn run(context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
     match cli.command {
         Some(Commands::New(args)) => run_new(args, context),
         Some(Commands::Gl(args)) => run_gl(args, context),
+        Some(Commands::Extension(args)) => run_extension(args, context),
         Some(Commands::Secret(args)) => run_secret(args),
         Some(Commands::Scrape(args)) => run_scrape(args, context),
         None => crate::run_with_context(context),
@@ -146,6 +169,15 @@ fn run_new_with_ledger_path(path: PathBuf) -> Result<(), Box<dyn Error>> {
 fn run_gl(args: GlArgs, context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
     match args.command {
         GlCommand::Add(add_args) => run_gl_add(add_args, context),
+    }
+}
+
+fn run_extension(
+    args: ExtensionArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    match args.command {
+        ExtensionCommand::Load(load_args) => run_extension_load(load_args, context),
     }
 }
 
@@ -280,6 +312,30 @@ fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
     }
 }
 
+fn run_extension_load(
+    args: ExtensionLoadArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = match args.ledger.as_ref() {
+        Some(path) => crate::ledger::ensure_refreshmint_extension(path.clone())?,
+        None => default_ledger_dir(context)?,
+    };
+
+    run_extension_load_with_dir(args, ledger_dir)?;
+    Ok(())
+}
+
+fn run_extension_load_with_dir(
+    args: ExtensionLoadArgs,
+    ledger_dir: PathBuf,
+) -> Result<String, Box<dyn Error>> {
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let loaded =
+        crate::extension::load_extension_from_source(&ledger_dir, &args.source, args.replace)?;
+    println!("Loaded extension '{loaded}'.");
+    Ok(loaded)
+}
+
 fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
     let ledger_dir = match args.ledger.as_ref() {
         Some(path) => crate::ledger::ensure_refreshmint_extension(path.clone())?,
@@ -306,7 +362,10 @@ fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Bo
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gl_add_with_dir, run_new_with_ledger_path, AddArgs};
+    use super::{
+        run_extension_load_with_dir, run_gl_add_with_dir, run_new_with_ledger_path, AddArgs,
+        ExtensionLoadArgs,
+    };
     use crate::ledger::ensure_refreshmint_extension;
     use serde_json::Value;
     use std::fs;
@@ -409,6 +468,50 @@ mod tests {
         if commit_subject.trim() != "Initial commit" {
             panic!("unexpected git commit subject: {commit_subject}");
         }
+
+        if let Err(err) = fs::remove_dir_all(&base_dir) {
+            panic!("failed to clean up temp dir: {err}");
+        }
+    }
+
+    #[test]
+    fn extension_load_command_copies_manifest_named_directory() {
+        let base_dir = create_temp_dir();
+        let ledger_path = base_dir.join("ledger.refreshmint");
+
+        if let Err(err) = fs::create_dir_all(&ledger_path) {
+            panic!("failed to create ledger directory: {err}");
+        }
+
+        let source_dir = base_dir.join("extension-src");
+        if let Err(err) = fs::create_dir_all(&source_dir) {
+            panic!("failed to create source directory: {err}");
+        }
+        if let Err(err) = fs::write(source_dir.join("manifest.json"), r#"{"name":"bank-sync"}"#) {
+            panic!("failed to write manifest.json: {err}");
+        }
+        if let Err(err) = fs::write(source_dir.join("driver.mjs"), "// driver") {
+            panic!("failed to write driver.mjs: {err}");
+        }
+
+        let args = ExtensionLoadArgs {
+            source: source_dir.clone(),
+            ledger: Some(ledger_path.clone()),
+            replace: false,
+        };
+
+        let loaded = match run_extension_load_with_dir(args, ledger_path.clone()) {
+            Ok(name) => name,
+            Err(err) => {
+                panic!("run_extension_load_with_dir failed: {err}");
+            }
+        };
+        assert_eq!(loaded, "bank-sync");
+        assert!(ledger_path
+            .join("extensions")
+            .join("bank-sync")
+            .join("driver.mjs")
+            .is_file());
 
         if let Err(err) = fs::remove_dir_all(&base_dir) {
             panic!("failed to clean up temp dir: {err}");

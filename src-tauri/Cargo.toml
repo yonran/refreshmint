@@ -40,6 +40,7 @@ futures = "0.3"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 which = "7"
 dirs = "6"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [lints.rust]
 unsafe_code = "deny"
