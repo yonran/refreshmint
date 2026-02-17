@@ -102,10 +102,10 @@ struct Response {
 #[cfg(unix)]
 fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>> {
     use chromiumoxide::browser::Browser;
-    use std::io::{BufRead, BufReader};
-    use std::os::unix::net::UnixListener;
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::UnixListener;
     use tokio::sync::Mutex;
 
     type DebugRuntimeState = (
@@ -176,89 +176,80 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
             Ok::<_, Box<dyn Error>>((browser, handler, page_inner, refreshmint_inner))
         })?;
 
-    let listener = UnixListener::bind(&socket_path)?;
-    listener.set_nonblocking(true)?;
+    rt.block_on(async move {
+        let listener = UnixListener::bind(&socket_path)?;
+        println!("Debug session socket: {}", socket_path.display());
+        eprintln!("Debug session started. Press Ctrl+C to stop.");
 
-    println!("Debug session socket: {}", socket_path.display());
-    eprintln!("Debug session started. Press Ctrl+C to stop.");
+        let mut running = true;
+        while running {
+            if handler_handle.is_finished() {
+                eprintln!("Browser event handler stopped; ending debug session.");
+                break;
+            }
 
-    let mut running = true;
-    while running {
-        rt.block_on(async {
-            tokio::task::yield_now().await;
-        });
-        if handler_handle.is_finished() {
-            eprintln!("Browser event handler stopped; ending debug session.");
-            break;
-        }
-
-        match listener.accept() {
-            Ok((mut stream, _addr)) => {
-                let response = match stream.set_nonblocking(false) {
-                    Ok(()) => {
-                        let mut body = String::new();
-                        let mut reader = BufReader::new(&stream);
-                        match reader.read_line(&mut body) {
-                            Ok(0) => Response {
-                                ok: false,
-                                error: Some("failed to read request: empty request".to_string()),
-                            },
-                            Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
-                                Ok(Request::Exec { script }) => {
-                                    match rt.block_on(super::sandbox::run_script_source(
-                                        &script,
-                                        page_inner.clone(),
-                                        refreshmint_inner.clone(),
-                                    )) {
-                                        Ok(()) => Response {
-                                            ok: true,
-                                            error: None,
-                                        },
-                                        Err(err) => Response {
-                                            ok: false,
-                                            error: Some(err.to_string()),
-                                        },
-                                    }
-                                }
-                                Ok(Request::Stop) => {
-                                    running = false;
-                                    Response {
+            match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
+                Ok(Ok((stream, _addr))) => {
+                    let mut reader = BufReader::new(stream);
+                    let mut body = String::new();
+                    let response = match reader.read_line(&mut body).await {
+                        Ok(0) => Response {
+                            ok: false,
+                            error: Some("failed to read request: empty request".to_string()),
+                        },
+                        Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
+                            Ok(Request::Exec { script }) => {
+                                match super::sandbox::run_script_source(
+                                    &script,
+                                    page_inner.clone(),
+                                    refreshmint_inner.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(()) => Response {
                                         ok: true,
                                         error: None,
-                                    }
+                                    },
+                                    Err(err) => Response {
+                                        ok: false,
+                                        error: Some(err.to_string()),
+                                    },
                                 }
-                                Err(err) => Response {
-                                    ok: false,
-                                    error: Some(format!("invalid request: {err}")),
-                                },
-                            },
+                            }
+                            Ok(Request::Stop) => {
+                                running = false;
+                                Response {
+                                    ok: true,
+                                    error: None,
+                                }
+                            }
                             Err(err) => Response {
                                 ok: false,
-                                error: Some(format!("failed to read request: {err}")),
+                                error: Some(format!("invalid request: {err}")),
                             },
-                        }
+                        },
+                        Err(err) => Response {
+                            ok: false,
+                            error: Some(format!("failed to read request: {err}")),
+                        },
+                    };
+
+                    let mut stream = reader.into_inner();
+                    if let Err(err) = write_response_async(&mut stream, &response).await {
+                        eprintln!("failed to write debug response: {err}");
                     }
-                    Err(err) => Response {
-                        ok: false,
-                        error: Some(format!("failed to configure request stream: {err}")),
-                    },
-                };
-
-                if let Err(err) = write_response(&mut stream, &response) {
-                    eprintln!("failed to write debug response: {err}");
                 }
+                Ok(Err(err)) => return Err::<(), Box<dyn Error>>(err.into()),
+                Err(_) => continue,
             }
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(err) => return Err(err.into()),
         }
-    }
 
-    drop(listener);
-    drop(browser_instance);
-    let _ =
-        rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), handler_handle).await });
+        drop(listener);
+        drop(browser_instance);
+        let _ = tokio::time::timeout(Duration::from_secs(5), handler_handle).await;
+        Ok::<(), Box<dyn Error>>(())
+    })?;
+
     Ok(())
 }
 
@@ -285,14 +276,14 @@ fn send_request(_socket_path: &Path, _request: Request) -> Result<Response, Box<
 }
 
 #[cfg(unix)]
-fn write_response(
-    stream: &mut std::os::unix::net::UnixStream,
+async fn write_response_async(
+    stream: &mut tokio::net::UnixStream,
     response: &Response,
 ) -> std::io::Result<()> {
-    use std::io::Write;
-    serde_json::to_writer(&mut *stream, response)?;
-    stream.write_all(b"\n")?;
-    stream.flush()
+    let mut out = serde_json::to_vec(response)?;
+    out.push(b'\n');
+    tokio::io::AsyncWriteExt::write_all(stream, &out).await?;
+    tokio::io::AsyncWriteExt::flush(stream).await
 }
 
 fn sanitize_segment(input: &str) -> String {
