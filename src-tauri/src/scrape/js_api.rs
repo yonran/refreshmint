@@ -30,6 +30,11 @@ struct NetworkRequest {
     error: Option<String>,
 }
 
+struct ResponseCaptureState {
+    entries: Arc<Mutex<Vec<NetworkRequest>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
 /// Shared state backing the `page` JS object.
 pub struct PageInner {
     pub page: chromiumoxide::Page,
@@ -45,6 +50,8 @@ pub struct PageInner {
 pub struct PageApi {
     #[qjs(skip_trace)]
     inner: Arc<Mutex<PageInner>>,
+    #[qjs(skip_trace)]
+    response_capture: Arc<Mutex<Option<ResponseCaptureState>>>,
 }
 
 // Safety: PageApi only contains Arc<Mutex<...>> which is 'static and has no JS lifetimes.
@@ -55,7 +62,10 @@ unsafe impl<'js> JsLifetime<'js> for PageApi {
 
 impl PageApi {
     pub fn new(inner: Arc<Mutex<PageInner>>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            response_capture: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -209,16 +219,31 @@ impl PageApi {
         }
 
         let timeout_ms = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         if state == "networkidle" {
-            self.ensure_network_monitor().await?;
+            let page = {
+                let inner = self.inner.lock().await;
+                inner.page.clone()
+            };
+            let timeout = std::time::Duration::from_millis(timeout_ms);
+            return tokio::time::timeout(timeout, page.wait_for_network_idle())
+                .await
+                .map_err(|_| {
+                    js_err(format!(
+                        "TimeoutError: waiting for load state \"{requested_state}\" failed: timeout {timeout_ms}ms exceeded"
+                    ))
+                })
+                .and_then(|result| {
+                    result
+                        .map(|_| ())
+                        .map_err(|e| js_err(format!("waitForLoadState(networkidle) failed: {e}")))
+                });
         }
 
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         loop {
             let ready = match state.as_str() {
                 "load" => self.ready_state_is_complete().await?,
                 "domcontentloaded" => self.ready_state_is_interactive_or_complete().await?,
-                "networkidle" => self.is_network_idle().await?,
                 _ => false,
             };
             if ready {
@@ -241,12 +266,12 @@ impl PageApi {
         timeout_ms: Option<u64>,
     ) -> JsResult<String> {
         let timeout_ms = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
-        self.ensure_network_monitor().await?;
-        let baseline_len = self.read_network_requests().await?.len();
+        let entries = self.ensure_response_capture().await?;
+        let baseline_len = entries.lock().await.len();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
 
         loop {
-            let requests = self.read_network_requests().await?;
+            let requests = entries.lock().await.clone();
             if let Some(found) = requests
                 .iter()
                 .skip(baseline_len)
@@ -267,8 +292,8 @@ impl PageApi {
     /// List captured network requests as JSON.
     #[qjs(rename = "networkRequests")]
     pub async fn js_network_requests(&self) -> JsResult<String> {
-        self.ensure_network_monitor().await?;
-        let requests = self.read_network_requests().await?;
+        let entries = self.ensure_response_capture().await?;
+        let requests = entries.lock().await.clone();
         serde_json::to_string(&requests)
             .map_err(|e| js_err(format!("networkRequests serialization failed: {e}")))
     }
@@ -276,21 +301,15 @@ impl PageApi {
     /// Clear captured network requests.
     #[qjs(rename = "clearNetworkRequests")]
     pub async fn js_clear_network_requests(&self) -> JsResult<()> {
-        self.ensure_network_monitor().await?;
-        let inner = self.inner.lock().await;
-        inner
-            .page
-            .evaluate(
-                r#"(() => {
-                    if (window.__refreshmintNetwork && Array.isArray(window.__refreshmintNetwork.requests)) {
-                        window.__refreshmintNetwork.requests = [];
-                    }
-                    return true;
-                })()"#,
-            )
-            .await
-            .map_err(|e| js_err(format!("clearNetworkRequests failed: {e}")))?;
+        let entries = self.ensure_response_capture().await?;
+        entries.lock().await.clear();
         Ok(())
+    }
+
+    /// Playwright-style alias for captured network responses.
+    #[qjs(rename = "responsesReceived")]
+    pub async fn js_responses_received(&self) -> JsResult<String> {
+        self.js_network_requests().await
     }
 
     /// Configure JS dialog handling mode (`accept`, `dismiss`, or `none`).
@@ -645,30 +664,33 @@ impl PageApi {
         .await
     }
 
-    /// Evaluate a JS expression inside a same-origin iframe.
+    /// Evaluate a JS expression inside a frame execution context.
+    ///
+    /// `frame_ref` may be a frame id, frame name, or frame URL.
     #[qjs(rename = "frameEvaluate")]
     pub async fn js_frame_evaluate(
         &self,
-        frame_selector: String,
+        frame_ref: String,
         expression: String,
     ) -> JsResult<String> {
-        let frame_selector_json =
-            serde_json::to_string(&frame_selector).unwrap_or_else(|_| "\"\"".to_string());
-        let expression_json =
-            serde_json::to_string(&expression).unwrap_or_else(|_| "\"\"".to_string());
-        let script = format!(
-            r#"(() => {{
-                const frame = document.querySelector({frame_selector_json});
-                if (!frame) throw new Error('frameEvaluate: frame not found: ' + {frame_selector_json});
-                const win = frame.contentWindow;
-                if (!win) throw new Error('frameEvaluate: frame has no contentWindow');
-                return win.eval({expression_json});
-            }})()"#
-        );
         let inner = self.inner.lock().await;
+        let frame_id = resolve_frame_id(&inner.page, &frame_ref)
+            .await
+            .map_err(|e| js_err(format!("frameEvaluate failed: {e}")))?;
+        let context_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
+            .await
+            .map_err(|e| js_err(format!("frameEvaluate failed: {e}")))?;
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+        let eval = EvaluateParams::builder()
+            .expression(expression)
+            .context_id(context_id)
+            .await_promise(true)
+            .return_by_value(true)
+            .build()
+            .map_err(|e| js_err(format!("frameEvaluate invalid expression params: {e}")))?;
         let result = inner
             .page
-            .evaluate(script)
+            .evaluate_expression(eval)
             .await
             .map_err(|e| js_err(format!("frameEvaluate failed: {e}")))?;
         let mut text =
@@ -677,28 +699,37 @@ impl PageApi {
         Ok(text)
     }
 
-    /// Fill a value in a same-origin iframe.
+    /// Fill a value in a frame execution context.
+    ///
+    /// `frame_ref` may be a frame id, frame name, or frame URL.
     #[qjs(rename = "frameFill")]
     pub async fn js_frame_fill(
         &self,
-        frame_selector: String,
+        frame_ref: String,
         selector: String,
         value: String,
     ) -> JsResult<()> {
         let inner = self.inner.lock().await;
-        let actual_value = resolve_secret_if_applicable(&inner, &value).await;
-        let frame_selector_json =
-            serde_json::to_string(&frame_selector).unwrap_or_else(|_| "\"\"".to_string());
+        let frame_id = resolve_frame_id(&inner.page, &frame_ref)
+            .await
+            .map_err(|e| js_err(format!("frameFill failed: {e}")))?;
+        let frame_url = inner
+            .page
+            .frame_url(frame_id.clone())
+            .await
+            .map_err(|e| js_err(format!("frameFill failed: {e}")))?
+            .unwrap_or_default();
+        let actual_value = resolve_secret_for_url(&inner.secret_store, &frame_url, &value);
+        let context_id = wait_for_frame_execution_context(&inner.page, frame_id)
+            .await
+            .map_err(|e| js_err(format!("frameFill failed: {e}")))?;
         let selector_json = serde_json::to_string(&selector).unwrap_or_else(|_| "\"\"".to_string());
         let value_json =
             serde_json::to_string(&actual_value).unwrap_or_else(|_| "\"\"".to_string());
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
         let script = format!(
             r#"(() => {{
-                const frame = document.querySelector({frame_selector_json});
-                if (!frame) throw new Error('frameFill: frame not found: ' + {frame_selector_json});
-                const doc = frame.contentDocument;
-                if (!doc) throw new Error('frameFill: frame has no contentDocument (cross-origin?)');
-                const el = doc.querySelector({selector_json});
+                const el = document.querySelector({selector_json});
                 if (!el) throw new Error('frameFill: element not found: ' + {selector_json});
                 el.focus();
                 el.value = {value_json};
@@ -707,9 +738,16 @@ impl PageApi {
                 return true;
             }})()"#
         );
+        let eval = EvaluateParams::builder()
+            .expression(script)
+            .context_id(context_id)
+            .await_promise(true)
+            .return_by_value(true)
+            .build()
+            .map_err(|e| js_err(format!("frameFill invalid expression params: {e}")))?;
         inner
             .page
-            .evaluate(script)
+            .evaluate_expression(eval)
             .await
             .map_err(|e| js_err(format!("frameFill failed: {e}")))?;
         Ok(())
@@ -871,134 +909,65 @@ impl PageApi {
         .await
     }
 
-    async fn ensure_network_monitor(&self) -> JsResult<()> {
-        let inner = self.inner.lock().await;
-        inner
-            .page
-            .evaluate(
-                r#"(() => {
-                    if (window.__refreshmintNetwork) return true;
-                    const state = {
-                        requests: [],
-                        inFlight: 0,
-                        lastActivity: Date.now(),
-                    };
-                    const markActivity = () => { state.lastActivity = Date.now(); };
-                    const push = (entry) => {
-                        state.requests.push(entry);
-                        if (state.requests.length > 2000) state.requests.shift();
-                    };
+    async fn ensure_response_capture(&self) -> JsResult<Arc<Mutex<Vec<NetworkRequest>>>> {
+        let mut guard = self.response_capture.lock().await;
+        if let Some(state) = guard.as_ref() {
+            if !state.task.is_finished() {
+                return Ok(state.entries.clone());
+            }
+        }
 
-                    const originalFetch = window.fetch;
-                    if (typeof originalFetch === 'function') {
-                        window.fetch = async (...args) => {
-                            let url = '';
-                            try {
-                                const first = args[0];
-                                url = String((first && first.url) ? first.url : first ?? '');
-                            } catch {}
-                            const method = String((args[1] && args[1].method) || 'GET');
-                            state.inFlight += 1;
-                            markActivity();
-                            try {
-                                const response = await originalFetch(...args);
-                                push({
-                                    url,
-                                    status: Number(response.status || 0),
-                                    ok: !!response.ok,
-                                    method,
-                                    ts: Date.now(),
-                                });
-                                return response;
-                            } catch (err) {
-                                push({
-                                    url,
-                                    status: 0,
-                                    ok: false,
-                                    method,
-                                    ts: Date.now(),
-                                    error: String(err),
-                                });
-                                throw err;
-                            } finally {
-                                state.inFlight = Math.max(0, state.inFlight - 1);
-                                markActivity();
-                            }
-                        };
-                    }
+        if let Some(previous) = guard.take() {
+            previous.task.abort();
+        }
 
-                    const originalOpen = XMLHttpRequest.prototype.open;
-                    const originalSend = XMLHttpRequest.prototype.send;
-                    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-                        this.__refreshmintMethod = String(method || 'GET');
-                        this.__refreshmintUrl = String(url || '');
-                        return originalOpen.call(this, method, url, ...rest);
-                    };
-                    XMLHttpRequest.prototype.send = function(...args) {
-                        state.inFlight += 1;
-                        markActivity();
-                        this.addEventListener('loadend', () => {
-                            push({
-                                url: String(this.__refreshmintUrl || ''),
-                                status: Number(this.status || 0),
-                                ok: Number(this.status || 0) >= 200 && Number(this.status || 0) < 400,
-                                method: String(this.__refreshmintMethod || 'GET'),
-                                ts: Date.now(),
-                            });
-                            state.inFlight = Math.max(0, state.inFlight - 1);
-                            markActivity();
-                        }, { once: true });
-                        return originalSend.apply(this, args);
-                    };
+        let page = {
+            let inner = self.inner.lock().await;
+            inner.page.clone()
+        };
 
-                    window.__refreshmintNetwork = state;
-                    return true;
-                })()"#,
-            )
+        use chromiumoxide::cdp::browser_protocol::network::{EnableParams, EventResponseReceived};
+        page.execute(EnableParams::default())
             .await
-            .map_err(|e| js_err(format!("failed to initialize network monitor: {e}")))?;
-        Ok(())
-    }
+            .map_err(|e| js_err(format!("failed to enable Network domain: {e}")))?;
 
-    async fn read_network_requests(&self) -> JsResult<Vec<NetworkRequest>> {
-        let inner = self.inner.lock().await;
-        let result = inner
-            .page
-            .evaluate(
-                r#"(() => {
-                    const state = window.__refreshmintNetwork;
-                    if (!state || !Array.isArray(state.requests)) return [];
-                    return state.requests;
-                })()"#,
-            )
+        let mut events = page
+            .event_listener::<EventResponseReceived>()
             .await
-            .map_err(|e| js_err(format!("networkRequests failed: {e}")))?;
-        let value = result
-            .value()
-            .cloned()
-            .unwrap_or(serde_json::Value::Array(Vec::new()));
-        serde_json::from_value(value)
-            .map_err(|e| js_err(format!("networkRequests decode failed: {e}")))
-    }
+            .map_err(|e| js_err(format!("failed to attach response listener: {e}")))?;
 
-    async fn is_network_idle(&self) -> JsResult<bool> {
-        let inner = self.inner.lock().await;
-        let result = inner
-            .page
-            .evaluate(
-                r#"(() => {
-                    const state = window.__refreshmintNetwork;
-                    if (!state) return false;
-                    const quietForMs = Date.now() - Number(state.lastActivity || 0);
-                    return Number(state.inFlight || 0) === 0 && quietForMs >= 500;
-                })()"#,
-            )
-            .await
-            .map_err(|e| js_err(format!("waitForLoadState(networkidle) failed: {e}")))?;
-        Ok(result
-            .value()
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false))
+        let entries = Arc::new(Mutex::new(Vec::new()));
+        let entries_for_task = entries.clone();
+        let task = tokio::spawn(async move {
+            use futures::StreamExt;
+
+            while let Some(ev) = events.next().await {
+                let status = ev.response.status;
+                let method = network_method_from_headers(ev.response.request_headers.as_ref());
+                let ts = (*ev.timestamp.inner() * 1000.0) as i64;
+                let item = NetworkRequest {
+                    url: ev.response.url.clone(),
+                    status,
+                    ok: (200..400).contains(&status),
+                    method,
+                    ts,
+                    error: None,
+                };
+
+                let mut guard = entries_for_task.lock().await;
+                guard.push(item);
+                if guard.len() > 5_000 {
+                    let drop_count = guard.len() - 5_000;
+                    guard.drain(0..drop_count);
+                }
+            }
+        });
+
+        *guard = Some(ResponseCaptureState {
+            entries: entries.clone(),
+            task,
+        });
+        Ok(entries)
     }
 }
 
@@ -1071,15 +1040,136 @@ fn url_matches_pattern(url: &str, pattern: &str) -> bool {
     true
 }
 
+fn network_method_from_headers(
+    headers: Option<&chromiumoxide::cdp::browser_protocol::network::Headers>,
+) -> String {
+    let Some(headers) = headers else {
+        return "GET".to_string();
+    };
+    let Some(map) = headers.inner().as_object() else {
+        return "GET".to_string();
+    };
+
+    for key in [":method", "method", "Method"] {
+        if let Some(value) = map.get(key).and_then(serde_json::Value::as_str) {
+            let method = value.trim();
+            if !method.is_empty() {
+                return method.to_string();
+            }
+        }
+    }
+
+    "GET".to_string()
+}
+
+async fn resolve_frame_id(
+    page: &chromiumoxide::Page,
+    frame_ref: &str,
+) -> Result<chromiumoxide::cdp::browser_protocol::page::FrameId, String> {
+    let trimmed = frame_ref.trim();
+
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("main") {
+        let main = page
+            .mainframe()
+            .await
+            .map_err(|e| format!("failed to resolve main frame: {e}"))?;
+        return main.ok_or_else(|| "main frame not available".to_string());
+    }
+
+    let frames = page
+        .frames()
+        .await
+        .map_err(|e| format!("failed to list frames: {e}"))?;
+
+    if let Some(found) = frames.iter().find(|frame_id| frame_id.as_ref() == trimmed) {
+        return Ok(found.clone());
+    }
+
+    for frame_id in &frames {
+        let name = page
+            .frame_name(frame_id.clone())
+            .await
+            .map_err(|e| format!("failed to query frame name: {e}"))?;
+        if name.as_deref() == Some(trimmed) {
+            return Ok(frame_id.clone());
+        }
+    }
+
+    for frame_id in &frames {
+        let url = page
+            .frame_url(frame_id.clone())
+            .await
+            .map_err(|e| format!("failed to query frame URL: {e}"))?
+            .unwrap_or_default();
+        if url == trimmed || url.contains(trimmed) {
+            return Ok(frame_id.clone());
+        }
+    }
+
+    let mut known_frames = Vec::new();
+    for frame_id in &frames {
+        let name = page
+            .frame_name(frame_id.clone())
+            .await
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let url = page
+            .frame_url(frame_id.clone())
+            .await
+            .unwrap_or(None)
+            .unwrap_or_default();
+        known_frames.push(format!(
+            "id={} name={} url={}",
+            frame_id.as_ref(),
+            name,
+            url
+        ));
+    }
+
+    Err(format!(
+        "frame not found for reference '{trimmed}'. Available frames: {}",
+        known_frames.join(" | ")
+    ))
+}
+
+async fn wait_for_frame_execution_context(
+    page: &chromiumoxide::Page,
+    frame_id: chromiumoxide::cdp::browser_protocol::page::FrameId,
+) -> Result<chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId, String> {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    loop {
+        let context = page
+            .frame_execution_context(frame_id.clone())
+            .await
+            .map_err(|e| format!("failed to query frame execution context: {e}"))?;
+        if let Some(context_id) = context {
+            return Ok(context_id);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "timeout waiting for frame execution context (frame id {})",
+                frame_id.as_ref()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+    }
+}
+
 /// Resolve a secret value if the given `value` is a secret name for the current domain.
 async fn resolve_secret_if_applicable(inner: &PageInner, value: &str) -> String {
     let current_url = inner.page.url().await.ok().flatten().unwrap_or_default();
-    let domain = extract_domain(&current_url.to_string());
+    resolve_secret_for_url(&inner.secret_store, &current_url.to_string(), value)
+}
 
-    if let Ok(secrets) = inner.secret_store.list() {
+fn resolve_secret_for_url(secret_store: &SecretStore, url: &str, value: &str) -> String {
+    let domain = extract_domain(url);
+
+    if let Ok(secrets) = secret_store.list() {
         for (d, name) in &secrets {
             if d == &domain && name == value {
-                if let Ok(real_value) = inner.secret_store.get(d, name) {
+                if let Ok(real_value) = secret_store.get(d, name) {
                     return real_value;
                 }
             }

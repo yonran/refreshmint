@@ -154,43 +154,52 @@ refreshmint.reportValue('status', 'ok');
 
 All methods are async and should be awaited.
 
-| Method                                                 | Description                                                         |
-| ------------------------------------------------------ | ------------------------------------------------------------------- |
-| `await page.goto(url)`                                 | Navigate to a URL.                                                  |
-| `await page.url()`                                     | Return current page URL as a string.                                |
-| `await page.reload()`                                  | Reload current page.                                                |
-| `await page.waitForSelector(selector, timeoutMs?)`     | Wait for a CSS selector to appear, with descriptive timeout errors. |
-| `await page.waitForNavigation(timeoutMs?)`             | Wait for URL change from the current page.                          |
-| `await page.waitForURL(pattern, timeoutMs?)`           | Wait for current URL to match a pattern (`*` wildcard).             |
-| `await page.waitForLoadState(state?, timeoutMs?)`      | Wait for `load`, `domcontentloaded`, or `networkidle`.              |
-| `await page.waitForResponse(urlPattern, timeoutMs?)`   | Wait for captured network response URL pattern.                     |
-| `await page.networkRequests()`                         | Return captured network requests as JSON.                           |
-| `await page.clearNetworkRequests()`                    | Clear captured network requests.                                    |
-| `await page.click(selector)`                           | Click first element matching selector.                              |
-| `await page.type(selector, text)`                      | Click and type text into element.                                   |
-| `await page.fill(selector, value)`                     | Set input value and dispatch `input`/`change` events.               |
-| `await page.innerHTML(selector)`                       | Return `innerHTML` for an element.                                  |
-| `await page.innerText(selector)`                       | Return visible text for an element.                                 |
-| `await page.textContent(selector)`                     | Return `textContent` for an element.                                |
-| `await page.getAttribute(selector, name)`              | Return attribute value (empty string if missing).                   |
-| `await page.inputValue(selector)`                      | Return current input value.                                         |
-| `await page.isVisible(selector)`                       | Return whether element is visible.                                  |
-| `await page.isEnabled(selector)`                       | Return whether element is enabled.                                  |
-| `await page.evaluate(expression)`                      | Evaluate JS in browser context. Returns unwrapped string/JSON text. |
-| `await page.frameEvaluate(frameSelector, expression)`  | Evaluate JS inside a same-origin iframe.                            |
-| `await page.frameFill(frameSelector, selector, value)` | Fill a same-origin iframe input.                                    |
-| `await page.snapshot()`                                | Return an accessibility-like snapshot JSON of interactive elements. |
-| `await page.setDialogHandler(mode, promptText?)`       | Handle JS dialogs (`accept`, `dismiss`, `none`).                    |
-| `await page.lastDialog()`                              | Return most recent intercepted dialog event as JSON.                |
-| `await page.setPopupHandler(mode)`                     | Handle popups (`ignore` or `same_tab`).                             |
-| `await page.popupEvents()`                             | Return captured popup events as JSON.                               |
-| `await page.screenshot()`                              | Capture screenshot and return PNG as base64 string.                 |
-| `await page.waitForDownload()`                         | Configure download behavior and return download info object.        |
+| Method                                               | Description                                                         |
+| ---------------------------------------------------- | ------------------------------------------------------------------- |
+| `await page.goto(url)`                               | Navigate to a URL.                                                  |
+| `await page.url()`                                   | Return current page URL as a string.                                |
+| `await page.reload()`                                | Reload current page.                                                |
+| `await page.waitForSelector(selector, timeoutMs?)`   | Wait for a CSS selector to appear, with descriptive timeout errors. |
+| `await page.waitForNavigation(timeoutMs?)`           | Wait for URL change from the current page.                          |
+| `await page.waitForURL(pattern, timeoutMs?)`         | Wait for current URL to match a pattern (`*` wildcard).             |
+| `await page.waitForLoadState(state?, timeoutMs?)`    | Wait for `load`, `domcontentloaded`, or `networkidle`.              |
+| `await page.waitForResponse(urlPattern, timeoutMs?)` | Wait for captured network response URL pattern.                     |
+| `await page.networkRequests()`                       | Return captured network responses as JSON.                          |
+| `await page.responsesReceived()`                     | Alias of `networkRequests()` (Playwright-style naming).             |
+| `await page.clearNetworkRequests()`                  | Clear captured network responses.                                   |
+| `await page.click(selector)`                         | Click first element matching selector.                              |
+| `await page.type(selector, text)`                    | Click and type text into element.                                   |
+| `await page.fill(selector, value)`                   | Set input value and dispatch `input`/`change` events.               |
+| `await page.innerHTML(selector)`                     | Return `innerHTML` for an element.                                  |
+| `await page.innerText(selector)`                     | Return visible text for an element.                                 |
+| `await page.textContent(selector)`                   | Return `textContent` for an element.                                |
+| `await page.getAttribute(selector, name)`            | Return attribute value (empty string if missing).                   |
+| `await page.inputValue(selector)`                    | Return current input value.                                         |
+| `await page.isVisible(selector)`                     | Return whether element is visible.                                  |
+| `await page.isEnabled(selector)`                     | Return whether element is enabled.                                  |
+| `await page.evaluate(expression)`                    | Evaluate JS in browser context. Returns unwrapped string/JSON text. |
+| `await page.frameEvaluate(frameRef, expression)`     | Evaluate JS inside a specific frame execution context.              |
+| `await page.frameFill(frameRef, selector, value)`    | Fill an input inside a specific frame execution context.            |
+| `await page.snapshot()`                              | Return an accessibility-like snapshot JSON of interactive elements. |
+| `await page.setDialogHandler(mode, promptText?)`     | Handle JS dialogs (`accept`, `dismiss`, `none`).                    |
+| `await page.lastDialog()`                            | Return most recent intercepted dialog event as JSON.                |
+| `await page.setPopupHandler(mode)`                   | Handle popups (`ignore` or `same_tab`).                             |
+| `await page.popupEvents()`                           | Return captured popup events as JSON.                               |
+| `await page.screenshot()`                            | Capture screenshot and return PNG as base64 string.                 |
+| `await page.waitForDownload()`                       | Configure download behavior and return download info object.        |
 
 `page.waitForDownload()` currently returns:
 
 - `path`: download directory path
 - `suggestedFilename`: currently empty string
+
+Network response capture (`waitForResponse`, `networkRequests`, `responsesReceived`) is backed by the browser debug protocol (`Network.responseReceived`), not DOM monkeypatching.
+
+For frame APIs, `frameRef` can be any of:
+
+- frame id
+- frame name
+- frame URL (full match or substring)
 
 ### `refreshmint`
 
