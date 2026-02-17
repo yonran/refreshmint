@@ -106,6 +106,13 @@ struct DebugExecArgs {
         conflicts_with = "script"
     )]
     extension_dir: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "MESSAGE=VALUE",
+        action = clap::ArgAction::Append,
+        help = "Answer override for refreshmint.prompt(message). Repeat for multiple prompts."
+    )]
+    prompt: Vec<String>,
 }
 
 #[derive(Args)]
@@ -178,6 +185,13 @@ struct ScrapeArgs {
     ledger: Option<PathBuf>,
     #[arg(long)]
     profile: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "MESSAGE=VALUE",
+        action = clap::ArgAction::Append,
+        help = "Answer override for refreshmint.prompt(message). Repeat for multiple prompts."
+    )]
+    prompt: Vec<String>,
 }
 
 #[derive(Args)]
@@ -471,11 +485,13 @@ fn run_debug_start(
         ledger_dir,
         profile_override: args.profile,
         socket_path: Some(socket),
+        prompt_requires_override: true,
     };
     crate::scrape::debug::run_debug_session(config)
 }
 
 fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
+    let prompt_overrides = parse_prompt_overrides(&args.prompt)?;
     let (script_source, declared_secrets) = if let Some(extension_dir) = args.extension_dir {
         if !extension_dir.is_dir() {
             return Err(std::io::Error::new(
@@ -510,10 +526,12 @@ fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "script is empty").into(),
         );
     }
-    crate::scrape::debug::exec_debug_script_with_declarations(
+    crate::scrape::debug::exec_debug_script_with_options(
         &args.socket,
         &script_source,
         declared_secrets,
+        Some(prompt_overrides),
+        Some(true),
     )?;
     println!("Script executed.");
     Ok(())
@@ -542,14 +560,52 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
         None => default_ledger_dir(context)?,
     };
 
+    let prompt_overrides = parse_prompt_overrides(&args.prompt)?;
+
     let config = crate::scrape::ScrapeConfig {
         account: args.account,
         extension_name: args.extension,
         ledger_dir,
         profile_override: args.profile,
+        prompt_overrides,
+        prompt_requires_override: true,
     };
 
     crate::scrape::run_scrape(config)
+}
+
+fn parse_prompt_overrides(
+    entries: &[String],
+) -> Result<crate::scrape::js_api::PromptOverrides, Box<dyn Error>> {
+    let mut overrides = crate::scrape::js_api::PromptOverrides::new();
+    for entry in entries {
+        let Some((message, value)) = entry.split_once('=') else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid --prompt value '{entry}', expected MESSAGE=VALUE"),
+            )
+            .into());
+        };
+
+        if message.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid --prompt value '{entry}', MESSAGE cannot be empty"),
+            )
+            .into());
+        }
+        if overrides
+            .insert(message.to_string(), value.to_string())
+            .is_some()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("duplicate --prompt message '{message}'"),
+            )
+            .into());
+        }
+    }
+    Ok(overrides)
 }
 
 fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Box<dyn Error>> {
@@ -563,9 +619,9 @@ fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Bo
 #[cfg(test)]
 mod tests {
     use super::{
-        run_extension_load_with_dir, run_gl_add_with_dir, run_new_with_ledger_path, run_secret,
-        AddArgs, ExtensionLoadArgs, SecretAddArgs, SecretArgs, SecretCommand, SecretListArgs,
-        SecretRemoveArgs,
+        parse_prompt_overrides, run_extension_load_with_dir, run_gl_add_with_dir,
+        run_new_with_ledger_path, run_secret, AddArgs, ExtensionLoadArgs, SecretAddArgs,
+        SecretArgs, SecretCommand, SecretListArgs, SecretRemoveArgs,
     };
     use crate::ledger::ensure_refreshmint_extension;
     use serde_json::Value;
@@ -605,6 +661,27 @@ mod tests {
     fn ensure_refreshmint_extension_rejects_empty_path() {
         let empty = PathBuf::from("");
         assert!(ensure_refreshmint_extension(empty).is_err());
+    }
+
+    #[test]
+    fn parse_prompt_overrides_accepts_message_value_pairs() {
+        let entries = vec!["OTP=123456".to_string(), "Security answer=blue".to_string()];
+        let overrides = parse_prompt_overrides(&entries)
+            .unwrap_or_else(|err| panic!("parse_prompt_overrides failed: {err}"));
+        assert_eq!(overrides.get("OTP"), Some(&"123456".to_string()));
+        assert_eq!(overrides.get("Security answer"), Some(&"blue".to_string()));
+    }
+
+    #[test]
+    fn parse_prompt_overrides_rejects_missing_separator() {
+        let entries = vec!["OTP123456".to_string()];
+        assert!(parse_prompt_overrides(&entries).is_err());
+    }
+
+    #[test]
+    fn parse_prompt_overrides_rejects_duplicate_messages() {
+        let entries = vec!["OTP=111111".to_string(), "OTP=222222".to_string()];
+        assert!(parse_prompt_overrides(&entries).is_err());
     }
 
     #[test]

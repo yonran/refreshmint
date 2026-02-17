@@ -252,6 +252,7 @@ fn start_scrape_debug_session(
         ledger_dir: target_dir,
         profile_override: None,
         socket_path: Some(socket_path.clone()),
+        prompt_requires_override: false,
     };
     let socket_for_thread = socket_path.clone();
     let join_handle = std::thread::spawn(move || {
@@ -331,6 +332,8 @@ async fn run_scrape(ledger: String, account: String, extension: String) -> Resul
         extension_name: extension,
         ledger_dir: target_dir,
         profile_override: None,
+        prompt_overrides: scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
     };
 
     tokio::task::spawn_blocking(move || scrape::run_scrape(config).map_err(|err| err.to_string()))

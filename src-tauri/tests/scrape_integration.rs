@@ -67,6 +67,10 @@ fn scrape_smoke_driver_writes_output() -> Result<(), Box<dyn Error>> {
         None => return Err("driver path has no parent".into()),
     };
     fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
     fs::write(&driver_path, DRIVER_SOURCE)?;
 
     let profile_dir = sandbox.path().join("profile");
@@ -75,6 +79,8 @@ fn scrape_smoke_driver_writes_output() -> Result<(), Box<dyn Error>> {
         extension_name: EXTENSION_NAME.to_string(),
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
     };
 
     scrape::run_scrape(config)?;

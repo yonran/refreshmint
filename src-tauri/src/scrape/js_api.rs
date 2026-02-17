@@ -37,6 +37,7 @@ struct ResponseCaptureState {
 }
 
 pub type SecretDeclarations = BTreeMap<String, BTreeSet<String>>;
+pub type PromptOverrides = BTreeMap<String, String>;
 
 /// Shared state backing the `page` JS object.
 pub struct PageInner {
@@ -1276,6 +1277,8 @@ impl DownloadInfo {
 /// Shared state backing the `refreshmint` JS namespace.
 pub struct RefreshmintInner {
     pub output_dir: PathBuf,
+    pub prompt_overrides: PromptOverrides,
+    pub prompt_requires_override: bool,
 }
 
 /// JS-visible `refreshmint` namespace object.
@@ -1296,6 +1299,12 @@ impl RefreshmintApi {
     pub fn new(inner: Arc<Mutex<RefreshmintInner>>) -> Self {
         Self { inner }
     }
+}
+
+fn missing_prompt_override_error(message: &str) -> String {
+    format!(
+        "missing prompt value for refreshmint.prompt(\"{message}\"); supply --prompt \"{message}=VALUE\""
+    )
 }
 
 #[rquickjs::methods]
@@ -1327,8 +1336,31 @@ impl RefreshmintApi {
         Ok(())
     }
 
-    /// Prompt the user: print message to stderr, read a line from stdin.
-    pub fn prompt(&self, message: String) -> JsResult<String> {
+    /// Prompt the user: use CLI-provided override when available.
+    pub async fn prompt(&self, message: String) -> JsResult<String> {
+        let (override_value, require_override) = {
+            let inner = self.inner.lock().await;
+            (
+                inner.prompt_overrides.get(&message).cloned().or_else(|| {
+                    let trimmed = message.trim();
+                    if trimmed == message {
+                        None
+                    } else {
+                        inner.prompt_overrides.get(trimmed).cloned()
+                    }
+                }),
+                inner.prompt_requires_override,
+            )
+        };
+
+        if let Some(value) = override_value {
+            return Ok(value);
+        }
+
+        if require_override {
+            return Err(js_err(missing_prompt_override_error(&message)));
+        }
+
         eprint!("{message} ");
         let mut line = String::new();
         std::io::stdin()
@@ -1485,5 +1517,70 @@ mod tests {
             "example.com"
         );
         assert_eq!(normalize_domain_like_input("Example.com"), "example.com");
+    }
+
+    #[test]
+    fn missing_prompt_override_error_mentions_message_and_flag() {
+        let text = missing_prompt_override_error("OTP");
+        assert!(text.contains("OTP"));
+        assert!(text.contains("--prompt"));
+    }
+
+    #[test]
+    fn prompt_returns_override_when_present_in_strict_mode() {
+        let rt = tokio::runtime::Runtime::new()
+            .unwrap_or_else(|err| panic!("failed to create runtime: {err}"));
+        let mut overrides = PromptOverrides::new();
+        overrides.insert("OTP".to_string(), "123456".to_string());
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(RefreshmintInner {
+            output_dir: PathBuf::new(),
+            prompt_overrides: overrides,
+            prompt_requires_override: true,
+        })));
+
+        let value = rt
+            .block_on(api.prompt("OTP".to_string()))
+            .unwrap_or_else(|err| panic!("prompt unexpectedly failed: {err}"));
+        assert_eq!(value, "123456");
+    }
+
+    #[test]
+    fn prompt_errors_when_missing_in_strict_mode() {
+        let rt = tokio::runtime::Runtime::new()
+            .unwrap_or_else(|err| panic!("failed to create runtime: {err}"));
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(RefreshmintInner {
+            output_dir: PathBuf::new(),
+            prompt_overrides: PromptOverrides::new(),
+            prompt_requires_override: true,
+        })));
+
+        let err = match rt.block_on(api.prompt("Security answer".to_string())) {
+            Ok(value) => panic!("expected missing prompt override error, got value: {value}"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(message.contains("Security answer"));
+        assert!(message.contains("--prompt"));
+    }
+
+    #[test]
+    fn prompt_uses_trimmed_message_lookup() {
+        let rt = tokio::runtime::Runtime::new()
+            .unwrap_or_else(|err| panic!("failed to create runtime: {err}"));
+        let mut overrides = PromptOverrides::new();
+        overrides.insert(
+            "Enter the texted MFA code:".to_string(),
+            "245221".to_string(),
+        );
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(RefreshmintInner {
+            output_dir: PathBuf::new(),
+            prompt_overrides: overrides,
+            prompt_requires_override: true,
+        })));
+
+        let value = rt
+            .block_on(api.prompt("Enter the texted MFA code: ".to_string()))
+            .unwrap_or_else(|err| panic!("prompt unexpectedly failed: {err}"));
+        assert_eq!(value, "245221");
     }
 }

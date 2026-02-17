@@ -63,6 +63,7 @@ mod unix_only {
             ledger_dir: ledger_dir.clone(),
             profile_override: Some(profile_dir),
             socket_path: Some(socket_path.clone()),
+            prompt_requires_override: false,
         };
 
         let session_thread =

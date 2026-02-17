@@ -19,6 +19,8 @@ pub struct ScrapeConfig {
     pub extension_name: String,
     pub ledger_dir: PathBuf,
     pub profile_override: Option<PathBuf>,
+    pub prompt_overrides: js_api::PromptOverrides,
+    pub prompt_requires_override: bool,
 }
 
 #[derive(Deserialize)]
@@ -188,7 +190,11 @@ pub async fn run_scrape_async(
         download_dir,
     }));
 
-    let refreshmint_inner = Arc::new(Mutex::new(js_api::RefreshmintInner { output_dir }));
+    let refreshmint_inner = Arc::new(Mutex::new(js_api::RefreshmintInner {
+        output_dir,
+        prompt_overrides: config.prompt_overrides.clone(),
+        prompt_requires_override: config.prompt_requires_override,
+    }));
 
     // 8. Run the driver script in the sandbox
     eprintln!("Running driver: {}", driver_path.display());

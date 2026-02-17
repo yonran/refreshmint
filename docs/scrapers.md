@@ -67,6 +67,20 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   --extension my-extension
 ```
 
+If the script calls `refreshmint.prompt(message)`, you can pre-supply answers:
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
+  scrape \
+  --ledger /path/to/ledger.refreshmint \
+  --account Assets:Checking \
+  --extension my-extension \
+  --prompt "OTP=123456" \
+  --prompt "Security answer=blue"
+```
+
+When running from the CLI, missing prompt values now fail with an explicit error that includes the missing message and the expected `--prompt "MESSAGE=VALUE"` form.
+
 The same flow can be run from the GUI Scraping tab.
 
 Site-specific notes can live under `knowledge/sites/<site>/README.md` (example: `knowledge/sites/clipper-card/README.md`).
@@ -211,7 +225,7 @@ For frame APIs, `frameRef` can be any of:
 | `await refreshmint.saveResource(filename, data)` | Write bytes to extension output dir. Parent dirs are created automatically. |
 | `refreshmint.reportValue(key, value)`            | Print key/value status line.                                                |
 | `refreshmint.log(message)`                       | Log message to stderr.                                                      |
-| `refreshmint.prompt(message)`                    | Prompt and read one line from stdin.                                        |
+| `refreshmint.prompt(message)`                    | Ask for a value. CLI runs require a matching `--prompt "MESSAGE=VALUE"`.    |
 
 For `saveResource`, `data` should be bytes (`number[]` is supported).
 
@@ -259,7 +273,8 @@ Execute script against live session:
 cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   debug exec \
   --socket /path/to/debug.sock \
-  --script script.mjs
+  --script script.mjs \
+  --prompt "OTP=123456"
 ```
 
 Or execute an extension directory directly (uses `driver.mjs` and applies manifest secret declarations from that directory):

@@ -8,6 +8,7 @@ pub struct DebugStartConfig {
     pub ledger_dir: PathBuf,
     pub profile_override: Option<PathBuf>,
     pub socket_path: Option<PathBuf>,
+    pub prompt_requires_override: bool,
 }
 
 pub fn default_debug_socket_path(account: &str) -> Result<PathBuf, Box<dyn Error>> {
@@ -60,19 +61,23 @@ pub fn run_debug_session(config: DebugStartConfig) -> Result<(), Box<dyn Error>>
 }
 
 pub fn exec_debug_script(socket_path: &Path, script_source: &str) -> Result<(), Box<dyn Error>> {
-    exec_debug_script_with_declarations(socket_path, script_source, None)
+    exec_debug_script_with_options(socket_path, script_source, None, None, None)
 }
 
-pub fn exec_debug_script_with_declarations(
+pub fn exec_debug_script_with_options(
     socket_path: &Path,
     script_source: &str,
     declared_secrets: Option<super::js_api::SecretDeclarations>,
+    prompt_overrides: Option<super::js_api::PromptOverrides>,
+    prompt_requires_override: Option<bool>,
 ) -> Result<(), Box<dyn Error>> {
     let response = send_request(
         socket_path,
         Request::Exec {
             script: script_source.to_string(),
             declared_secrets,
+            prompt_overrides,
+            prompt_requires_override,
         },
     )?;
     if response.ok {
@@ -102,6 +107,10 @@ enum Request {
         script: String,
         #[serde(default)]
         declared_secrets: Option<super::js_api::SecretDeclarations>,
+        #[serde(default)]
+        prompt_overrides: Option<super::js_api::PromptOverrides>,
+        #[serde(default)]
+        prompt_requires_override: Option<bool>,
     },
     Stop,
 }
@@ -187,8 +196,11 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                 declared_secrets,
                 download_dir,
             }));
-            let refreshmint_inner =
-                Arc::new(Mutex::new(super::js_api::RefreshmintInner { output_dir }));
+            let refreshmint_inner = Arc::new(Mutex::new(super::js_api::RefreshmintInner {
+                output_dir,
+                prompt_overrides: super::js_api::PromptOverrides::new(),
+                prompt_requires_override: config.prompt_requires_override,
+            }));
             Ok::<_, Box<dyn Error>>((browser, handler, page_inner, refreshmint_inner))
         })?;
 
@@ -217,10 +229,20 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                             Ok(Request::Exec {
                                 script,
                                 declared_secrets,
+                                prompt_overrides,
+                                prompt_requires_override,
                             }) => {
                                 if let Some(declared) = declared_secrets {
                                     let mut page_inner = page_inner.lock().await;
                                     page_inner.declared_secrets = declared;
+                                }
+                                {
+                                    let mut refreshmint = refreshmint_inner.lock().await;
+                                    refreshmint.prompt_overrides =
+                                        prompt_overrides.unwrap_or_default();
+                                    if let Some(require_override) = prompt_requires_override {
+                                        refreshmint.prompt_requires_override = require_override;
+                                    }
                                 }
                                 match super::sandbox::run_script_source(
                                     &script,
