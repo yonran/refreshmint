@@ -59,4 +59,5 @@ expect_used = "deny"
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2.182"
 xattr = "1.6.1"
+security-framework = { version = "3.6.0", features = ["OSX_10_13"] }
 # in tests, it is ok to #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]

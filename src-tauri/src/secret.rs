@@ -43,9 +43,10 @@ impl SecretStore {
     }
 
     fn write_index(&self, keys: &[String]) -> Result<(), Box<dyn Error>> {
-        let entry = self.index_entry()?;
         let json = serde_json::to_string(keys)?;
-        entry.set_password(&json)?;
+        // Keep index metadata as a plain keychain entry so list/index operations
+        // do not require biometric auth.
+        self.set_entry_password("_index", &json, false)?;
         Ok(())
     }
 
@@ -55,8 +56,7 @@ impl SecretStore {
 
     pub fn set(&self, domain: &str, name: &str, value: &str) -> Result<(), Box<dyn Error>> {
         let user = Self::key(domain, name);
-        let entry = self.entry(&user)?;
-        entry.set_password(value)?;
+        self.set_entry_password(&user, value, true)?;
 
         let mut index = self.read_index()?;
         if !index.contains(&user) {
@@ -113,6 +113,47 @@ impl SecretStore {
             }
         }
         Ok(values)
+    }
+
+    fn set_entry_password(
+        &self,
+        user: &str,
+        value: &str,
+        require_biometry: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        #[cfg(target_os = "macos")]
+        if require_biometry {
+            self.set_entry_password_with_biometry(user, value)?;
+            return Ok(());
+        }
+
+        let entry = self.entry(user)?;
+        entry.set_password(value)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_entry_password_with_biometry(
+        &self,
+        user: &str,
+        value: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        use security_framework::passwords::{
+            set_generic_password_options, AccessControlOptions, PasswordOptions,
+        };
+
+        let service = self.service();
+        let mut options = PasswordOptions::new_generic_password(&service, user);
+        options.set_access_control_options(AccessControlOptions::BIOMETRY_ANY);
+        if set_generic_password_options(value.as_bytes(), options).is_ok() {
+            return Ok(());
+        }
+
+        // Fallback for environments where pure-biometry constraints are unavailable.
+        let mut options = PasswordOptions::new_generic_password(&service, user);
+        options.set_access_control_options(AccessControlOptions::USER_PRESENCE);
+        set_generic_password_options(value.as_bytes(), options)?;
+        Ok(())
     }
 }
 

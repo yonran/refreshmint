@@ -157,6 +157,7 @@ dependencies = [
  "libc",
  "log",
  "rquickjs",
+ "security-framework 3.6.0",
  "serde",
  "serde_json",
  "spider_chromiumoxide_cdp",
