@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -537,6 +538,42 @@ impl PageApi {
             .await
             .map_err(|e| js_err(format!("fill failed: {e}")))?;
         Ok(())
+    }
+
+    /// Ensure all named secrets exist for the current page domain.
+    ///
+    /// Throws with a descriptive error listing missing names.
+    #[qjs(rename = "ensureSecretsExist")]
+    pub async fn js_ensure_secrets_exist(&self, names: Vec<String>) -> JsResult<()> {
+        if names.iter().any(|name| name.trim().is_empty()) {
+            return Err(js_err(
+                "ensureSecretsExist requires non-empty secret names".to_string(),
+            ));
+        }
+
+        let inner = self.inner.lock().await;
+        let current_url = inner.page.url().await.ok().flatten().unwrap_or_default();
+        let domain = extract_domain(&current_url.to_string());
+        if domain.is_empty() {
+            return Err(js_err(
+                "ensureSecretsExist requires a page URL with a host; call page.goto(...) first"
+                    .to_string(),
+            ));
+        }
+
+        let known = inner
+            .secret_store
+            .list()
+            .map_err(|e| js_err(format!("ensureSecretsExist failed to list secrets: {e}")))?;
+        let missing = missing_secret_names_for_domain(&known, &domain, &names);
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        Err(js_err(format!(
+            "Missing required secrets for domain {domain}: {}",
+            missing.join(", ")
+        )))
     }
 
     /// Get an element's innerHTML.
@@ -1179,6 +1216,37 @@ fn resolve_secret_for_url(secret_store: &SecretStore, url: &str, value: &str) ->
     value.to_string()
 }
 
+fn missing_secret_names_for_domain(
+    known: &[(String, String)],
+    domain: &str,
+    required_names: &[String],
+) -> Vec<String> {
+    let available: BTreeSet<&str> = known
+        .iter()
+        .filter_map(|(d, name)| {
+            if d == domain {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut missing = Vec::new();
+    let mut seen = BTreeSet::new();
+    for required in required_names {
+        let required = required.trim();
+        if required.is_empty() || !seen.insert(required) {
+            continue;
+        }
+        if !available.contains(required) {
+            missing.push(required.to_string());
+        }
+    }
+
+    missing
+}
+
 fn extract_domain(url: &str) -> String {
     let without_scheme = url
         .strip_prefix("https://")
@@ -1302,6 +1370,11 @@ pub fn register_globals(
     let rm = RefreshmintApi::new(refreshmint_inner);
     globals.set("refreshmint", rm)?;
 
+    // Convenience alias so scripts can call `await ensureSecretsExist([...])`.
+    ctx.eval::<(), _>(
+        "globalThis.ensureSecretsExist = (names) => page.ensureSecretsExist(names);",
+    )?;
+
     Ok(())
 }
 
@@ -1404,5 +1477,34 @@ mod tests {
             "https://example.com/a/b/c",
             "https://example.org/*"
         ));
+    }
+
+    #[test]
+    fn missing_secret_names_for_domain_filters_by_domain() {
+        let known = vec![
+            ("a.com".to_string(), "username".to_string()),
+            ("a.com".to_string(), "password".to_string()),
+            ("b.com".to_string(), "password".to_string()),
+        ];
+        let required = vec![
+            "username".to_string(),
+            "password".to_string(),
+            "otp".to_string(),
+        ];
+        let missing = missing_secret_names_for_domain(&known, "a.com", &required);
+        assert_eq!(missing, vec!["otp".to_string()]);
+    }
+
+    #[test]
+    fn missing_secret_names_for_domain_dedupes_and_trims_required_names() {
+        let known = vec![("a.com".to_string(), "username".to_string())];
+        let required = vec![
+            "username".to_string(),
+            "password".to_string(),
+            "password".to_string(),
+            " password ".to_string(),
+        ];
+        let missing = missing_secret_names_for_domain(&known, "a.com", &required);
+        assert_eq!(missing, vec!["password".to_string()]);
     }
 }
