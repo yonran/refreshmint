@@ -16,11 +16,14 @@ my-extension/
   driver.mjs
 ```
 
-`manifest.json` must include a `name` field:
+`manifest.json` must include a `name` field. It can also declare domain-scoped secret names:
 
 ```json
 {
-    "name": "my-extension"
+    "name": "my-extension",
+    "secrets": {
+        "example.com": ["bank_username", "bank_password"]
+    }
 }
 ```
 
@@ -170,7 +173,6 @@ All methods are async and should be awaited.
 | `await page.click(selector)`                         | Click first element matching selector.                              |
 | `await page.type(selector, text)`                    | Click and type text into element.                                   |
 | `await page.fill(selector, value)`                   | Set input value and dispatch `input`/`change` events.               |
-| `await page.ensureSecretsExist(domain, names)`       | Validate and declare secret names for a specific top-level domain.  |
 | `await page.innerHTML(selector)`                     | Return `innerHTML` for an element.                                  |
 | `await page.innerText(selector)`                     | Return visible text for an element.                                 |
 | `await page.textContent(selector)`                   | Return `textContent` for an element.                                |
@@ -217,24 +219,13 @@ For `saveResource`, `data` should be bytes (`number[]` is supported).
 
 `page.fill(selector, value)` has secret substitution behavior:
 
-- Refreshmint gets the current page domain (host from URL).
-- If `value` matches a stored secret **name** for that domain/account, the secret value is pulled from keychain and injected.
-- Otherwise, `value` is used literally.
-- There is no warning when a name does not match; the literal input is used.
+- Refreshmint gets the current top-level page domain (host from URL).
+- If `value` is declared in `manifest.json` under `secrets.<domain>` for that top-level domain, Refreshmint treats it as a secret name and resolves it from keychain for that same domain.
+- If a secret name is declared only for a different domain, `fill`/`frameFill` throws.
+- If a secret name exists in keychain but is not declared in manifest for the current top-level domain, `fill`/`frameFill` throws.
+- If `value` is neither a declared secret name nor a known keychain secret name, it is used literally.
 
 This lets scripts refer to symbolic names instead of embedding credentials.
-
-Use `ensureSecretsExist` to fail fast before login steps:
-
-```js
-await page.goto('https://example.com/login');
-await ensureSecretsExist('example.com', ['bank_username', 'bank_password']);
-```
-
-`ensureSecretsExist` is a global alias for `page.ensureSecretsExist(domain, names)`.
-It verifies the secrets exist for that domain and records the declaration.
-
-After declaration, if a request references a secret name (for example `page.fill(..., 'bank_password')`), the runtime requires that name to have been declared for the current top-level navigation domain. If the name was only declared for a different domain, the call throws.
 
 Check configured secrets via:
 

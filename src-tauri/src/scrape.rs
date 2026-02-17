@@ -4,6 +4,9 @@ pub mod js_api;
 pub mod profile;
 pub mod sandbox;
 
+use serde::Deserialize;
+use std::collections::BTreeSet;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -16,6 +19,81 @@ pub struct ScrapeConfig {
     pub extension_name: String,
     pub ledger_dir: PathBuf,
     pub profile_override: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+struct ExtensionManifest {
+    #[serde(default)]
+    secrets: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+pub(crate) fn load_manifest_secret_declarations(
+    extension_dir: &Path,
+) -> Result<js_api::SecretDeclarations, Box<dyn std::error::Error + Send + Sync>> {
+    let manifest_path = extension_dir.join("manifest.json");
+    let manifest_text = std::fs::read_to_string(&manifest_path)?;
+    let manifest: ExtensionManifest = serde_json::from_str(&manifest_text).map_err(|error| {
+        format!(
+            "invalid {}: {error}",
+            manifest_path
+                .strip_prefix(extension_dir)
+                .unwrap_or(&manifest_path)
+                .display()
+        )
+    })?;
+
+    let mut declared = js_api::SecretDeclarations::new();
+    for (domain_input, names) in &manifest.secrets {
+        let domain = normalize_manifest_domain(domain_input);
+        if domain.is_empty() {
+            return Err(format!(
+                "invalid manifest secrets domain '{domain_input}' in {}",
+                manifest_path.display()
+            )
+            .into());
+        }
+
+        let mut normalized = BTreeSet::new();
+        for name in names {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return Err(format!(
+                    "manifest secrets for domain '{domain}' contains an empty name in {}",
+                    manifest_path.display()
+                )
+                .into());
+            }
+            normalized.insert(trimmed.to_string());
+        }
+
+        declared
+            .entry(domain)
+            .or_default()
+            .extend(normalized.into_iter());
+    }
+
+    Ok(declared)
+}
+
+fn normalize_manifest_domain(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+
+    without_scheme
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 /// List extension names that have a runnable `driver.mjs` script.
@@ -53,15 +131,16 @@ pub fn list_runnable_extensions(
 pub async fn run_scrape_async(
     config: ScrapeConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // 1. Locate the driver script
-    let driver_path = config
+    let extension_dir = config
         .ledger_dir
         .join("extensions")
-        .join(&config.extension_name)
-        .join("driver.mjs");
+        .join(&config.extension_name);
+    // 1. Locate the driver script
+    let driver_path = extension_dir.join("driver.mjs");
     if !driver_path.exists() {
         return Err(format!("driver script not found: {}", driver_path.display()).into());
     }
+    let declared_secrets = load_manifest_secret_declarations(&extension_dir)?;
 
     // 2. Create secret store for the account
     let secret_store = SecretStore::new(config.account.clone());
@@ -99,16 +178,13 @@ pub async fn run_scrape_async(
     eprintln!("Page opened.");
 
     // 7. Set up shared state
-    let output_dir = config
-        .ledger_dir
-        .join("extensions")
-        .join(&config.extension_name)
-        .join("output");
+    let output_dir = extension_dir.join("output");
     std::fs::create_dir_all(&output_dir)?;
 
     let page_inner = Arc::new(Mutex::new(js_api::PageInner {
         page,
         secret_store,
+        declared_secrets,
         download_dir,
     }));
 
@@ -139,7 +215,9 @@ pub fn run_scrape(config: ScrapeConfig) -> Result<(), Box<dyn std::error::Error>
 
 #[cfg(test)]
 mod tests {
-    use super::list_runnable_extensions;
+    use super::{
+        list_runnable_extensions, load_manifest_secret_declarations, normalize_manifest_domain,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -182,6 +260,68 @@ mod tests {
         });
 
         assert_eq!(found, vec!["alpha".to_string(), "beta".to_string()]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn normalize_manifest_domain_accepts_host_or_url() {
+        assert_eq!(normalize_manifest_domain("example.com"), "example.com");
+        assert_eq!(
+            normalize_manifest_domain("https://Example.com/login"),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn load_manifest_secret_declarations_reads_and_normalizes() {
+        let root = create_temp_dir("scrape-manifest-secrets");
+        let ext = root.join("ext");
+        fs::create_dir_all(&ext)
+            .unwrap_or_else(|err| panic!("failed to create extension dir: {err}"));
+        let manifest = r#"{
+  "name": "demo",
+  "secrets": {
+    "Example.com": ["username", "password", "password"],
+    "https://sub.example.com/login": ["otp"]
+  }
+}"#;
+        fs::write(ext.join("manifest.json"), manifest)
+            .unwrap_or_else(|err| panic!("failed to write manifest: {err}"));
+
+        let declared = load_manifest_secret_declarations(&ext)
+            .unwrap_or_else(|err| panic!("failed to load manifest secrets: {err}"));
+        let example = declared
+            .get("example.com")
+            .unwrap_or_else(|| panic!("missing normalized example.com declaration"));
+        assert!(example.contains("username"));
+        assert!(example.contains("password"));
+        assert_eq!(example.len(), 2);
+        let sub = declared
+            .get("sub.example.com")
+            .unwrap_or_else(|| panic!("missing normalized subdomain declaration"));
+        assert!(sub.contains("otp"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_manifest_secret_declarations_rejects_empty_name() {
+        let root = create_temp_dir("scrape-manifest-invalid");
+        let ext = root.join("ext");
+        fs::create_dir_all(&ext)
+            .unwrap_or_else(|err| panic!("failed to create extension dir: {err}"));
+        let manifest = r#"{
+  "name": "demo",
+  "secrets": {
+    "example.com": ["ok", " "]
+  }
+}"#;
+        fs::write(ext.join("manifest.json"), manifest)
+            .unwrap_or_else(|err| panic!("failed to write manifest: {err}"));
+
+        let err = load_manifest_secret_declarations(&ext).err();
+        assert!(err.is_some(), "expected empty secret name to fail");
+
         let _ = fs::remove_dir_all(&root);
     }
 }

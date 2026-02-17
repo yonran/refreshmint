@@ -36,15 +36,13 @@ struct ResponseCaptureState {
     task: tokio::task::JoinHandle<()>,
 }
 
-#[derive(Default)]
-struct SecretRequirementState {
-    declared_by_domain: BTreeMap<String, BTreeSet<String>>,
-}
+pub type SecretDeclarations = BTreeMap<String, BTreeSet<String>>;
 
 /// Shared state backing the `page` JS object.
 pub struct PageInner {
     pub page: chromiumoxide::Page,
     pub secret_store: SecretStore,
+    pub declared_secrets: SecretDeclarations,
     pub download_dir: PathBuf,
 }
 
@@ -58,8 +56,6 @@ pub struct PageApi {
     inner: Arc<Mutex<PageInner>>,
     #[qjs(skip_trace)]
     response_capture: Arc<Mutex<Option<ResponseCaptureState>>>,
-    #[qjs(skip_trace)]
-    secret_requirements: Arc<Mutex<SecretRequirementState>>,
 }
 
 // Safety: PageApi only contains Arc<Mutex<...>> which is 'static and has no JS lifetimes.
@@ -73,7 +69,6 @@ impl PageApi {
         Self {
             inner,
             response_capture: Arc::new(Mutex::new(None)),
-            secret_requirements: Arc::new(Mutex::new(SecretRequirementState::default())),
         }
     }
 }
@@ -516,15 +511,14 @@ impl PageApi {
 
     /// Fill an input element's value.
     ///
-    /// If `value` matches a secret name stored for the current page's domain,
-    /// the real secret is resolved from keychain and injected via CDP.
+    /// If `value` matches a manifest-declared secret name for the current
+    /// top-level domain, the real secret is resolved from keychain and injected via CDP.
     /// The JS sandbox only ever sees the placeholder name.
     pub async fn fill(&self, selector: String, value: String) -> JsResult<()> {
         let inner = self.inner.lock().await;
 
         // Determine the actual value to fill
-        let actual_value =
-            resolve_secret_if_applicable(&inner, &self.secret_requirements, &value).await?;
+        let actual_value = resolve_secret_if_applicable(&inner, &value).await?;
 
         // Use CDP to set the value and dispatch events so the JS sandbox
         // never receives the real secret.
@@ -547,53 +541,6 @@ impl PageApi {
             .await
             .map_err(|e| js_err(format!("fill failed: {e}")))?;
         Ok(())
-    }
-
-    /// Ensure all named secrets exist for a given domain and record declaration.
-    ///
-    /// Throws with a descriptive error listing missing names.
-    #[qjs(rename = "ensureSecretsExist")]
-    pub async fn js_ensure_secrets_exist(
-        &self,
-        domain: String,
-        names: Vec<String>,
-    ) -> JsResult<()> {
-        if names.iter().any(|name| name.trim().is_empty()) {
-            return Err(js_err(
-                "ensureSecretsExist requires non-empty secret names".to_string(),
-            ));
-        }
-
-        let domain = normalize_domain_like_input(&domain);
-        if domain.is_empty() {
-            return Err(js_err(
-                "ensureSecretsExist requires a domain (host or URL)".to_string(),
-            ));
-        }
-
-        let inner = self.inner.lock().await;
-        let known = inner
-            .secret_store
-            .list()
-            .map_err(|e| js_err(format!("ensureSecretsExist failed to list secrets: {e}")))?;
-        let missing = missing_secret_names_for_domain(&known, &domain, &names);
-        if missing.is_empty() {
-            let normalized_names: BTreeSet<String> =
-                names.iter().map(|name| name.trim().to_string()).collect();
-            drop(inner);
-            let mut requirements = self.secret_requirements.lock().await;
-            requirements
-                .declared_by_domain
-                .entry(domain)
-                .or_default()
-                .extend(normalized_names);
-            return Ok(());
-        }
-
-        Err(js_err(format!(
-            "Missing required secrets for domain {domain}: {}",
-            missing.join(", ")
-        )))
     }
 
     /// Get an element's innerHTML.
@@ -770,8 +717,7 @@ impl PageApi {
         let frame_id = resolve_frame_id(&inner.page, &frame_ref)
             .await
             .map_err(|e| js_err(format!("frameFill failed: {e}")))?;
-        let actual_value =
-            resolve_secret_if_applicable(&inner, &self.secret_requirements, &value).await?;
+        let actual_value = resolve_secret_if_applicable(&inner, &value).await?;
         let context_id = wait_for_frame_execution_context(&inner.page, frame_id)
             .await
             .map_err(|e| js_err(format!("frameFill failed: {e}")))?;
@@ -1211,14 +1157,9 @@ async fn wait_for_frame_execution_context(
 
 /// Resolve a secret value if `value` is a known secret name.
 ///
-/// Secret usage is guarded by `ensureSecretsExist(domain, names)`:
-/// a secret name is only allowed when it was declared for the current top-level
-/// navigation domain.
-async fn resolve_secret_if_applicable(
-    inner: &PageInner,
-    secret_requirements: &Arc<Mutex<SecretRequirementState>>,
-    value: &str,
-) -> JsResult<String> {
+/// A secret name can only be used when it is declared in the extension
+/// manifest for the current top-level navigation domain.
+async fn resolve_secret_if_applicable(inner: &PageInner, value: &str) -> JsResult<String> {
     let all_known = inner
         .secret_store
         .list()
@@ -1228,8 +1169,9 @@ async fn resolve_secret_if_applicable(
         return Ok(value.to_string());
     }
 
-    let any_domain_match = all_known.iter().any(|(_, name)| name == referenced_name);
-    if !any_domain_match {
+    let declared_domains = declared_domains_for_secret(&inner.declared_secrets, referenced_name);
+    let configured_in_store = all_known.iter().any(|(_, name)| name == referenced_name);
+    if declared_domains.is_empty() && !configured_in_store {
         return Ok(value.to_string());
     }
 
@@ -1237,40 +1179,21 @@ async fn resolve_secret_if_applicable(
     let top_level_domain = normalize_domain_like_input(&current_url.to_string());
     if top_level_domain.is_empty() {
         return Err(js_err(format!(
-            "Secret '{referenced_name}' referenced before top-level navigation; call page.goto(...) and ensureSecretsExist(domain, [...]) first"
+            "Secret '{referenced_name}' referenced before top-level navigation; call page.goto(...) first"
         )));
     }
 
-    let requirements = secret_requirements.lock().await;
-    let declared_for_top_level = requirements
-        .declared_by_domain
-        .get(&top_level_domain)
-        .is_some_and(|names| names.contains(referenced_name));
-
-    if !declared_for_top_level {
-        let declared_elsewhere = requirements
-            .declared_by_domain
-            .iter()
-            .filter_map(|(domain, names)| {
-                if names.contains(referenced_name) {
-                    Some(domain.clone())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        if declared_elsewhere.is_empty() {
+    if !declared_domains.contains(&top_level_domain) {
+        if declared_domains.is_empty() {
             return Err(js_err(format!(
-                "Secret '{referenced_name}' used without ensureSecretsExist('{top_level_domain}', ['{referenced_name}'])"
+                "Secret '{referenced_name}' is configured in keychain but not declared in manifest for domain '{top_level_domain}'"
             )));
         }
-
         return Err(js_err(format!(
             "Secret '{referenced_name}' was declared for domain(s) {} but current top-level domain is '{top_level_domain}'",
-            declared_elsewhere.join(", ")
+            declared_domains.join(", ")
         )));
     }
-    drop(requirements);
 
     for (domain, name) in &all_known {
         if name == referenced_name && domain.eq_ignore_ascii_case(&top_level_domain) {
@@ -1287,36 +1210,19 @@ async fn resolve_secret_if_applicable(
     )))
 }
 
-fn missing_secret_names_for_domain(
-    known: &[(String, String)],
-    domain: &str,
-    required_names: &[String],
-) -> Vec<String> {
-    let domain = normalize_domain_like_input(domain);
-    let available: BTreeSet<&str> = known
+fn declared_domains_for_secret(declared: &SecretDeclarations, secret_name: &str) -> Vec<String> {
+    let mut domains = declared
         .iter()
-        .filter_map(|(d, name)| {
-            if d.eq_ignore_ascii_case(&domain) {
-                Some(name.as_str())
+        .filter_map(|(domain, names)| {
+            if names.contains(secret_name) {
+                Some(domain.clone())
             } else {
                 None
             }
         })
-        .collect();
-
-    let mut missing = Vec::new();
-    let mut seen = BTreeSet::new();
-    for required in required_names {
-        let required = required.trim();
-        if required.is_empty() || !seen.insert(required) {
-            continue;
-        }
-        if !available.contains(required) {
-            missing.push(required.to_string());
-        }
-    }
-
-    missing
+        .collect::<Vec<_>>();
+    domains.sort();
+    domains
 }
 
 fn normalize_domain_like_input(input: &str) -> String {
@@ -1446,11 +1352,6 @@ pub fn register_globals(
     let rm = RefreshmintApi::new(refreshmint_inner);
     globals.set("refreshmint", rm)?;
 
-    // Convenience alias so scripts can call `await ensureSecretsExist(domain, [...])`.
-    ctx.eval::<(), _>(
-        "globalThis.ensureSecretsExist = (domain, names) => page.ensureSecretsExist(domain, names);",
-    )?;
-
     Ok(())
 }
 
@@ -1556,40 +1457,25 @@ mod tests {
     }
 
     #[test]
-    fn missing_secret_names_for_domain_filters_by_domain() {
-        let known = vec![
-            ("a.com".to_string(), "username".to_string()),
-            ("a.com".to_string(), "password".to_string()),
-            ("b.com".to_string(), "password".to_string()),
-        ];
-        let required = vec![
-            "username".to_string(),
-            "password".to_string(),
-            "otp".to_string(),
-        ];
-        let missing = missing_secret_names_for_domain(&known, "a.com", &required);
-        assert_eq!(missing, vec!["otp".to_string()]);
-    }
+    fn declared_domains_for_secret_returns_sorted_domains() {
+        let mut declared = SecretDeclarations::new();
+        declared.insert(
+            "b.com".to_string(),
+            ["password".to_string()].into_iter().collect(),
+        );
+        declared.insert(
+            "a.com".to_string(),
+            ["password".to_string(), "otp".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        declared.insert(
+            "c.com".to_string(),
+            ["username".to_string()].into_iter().collect(),
+        );
 
-    #[test]
-    fn missing_secret_names_for_domain_dedupes_and_trims_required_names() {
-        let known = vec![("a.com".to_string(), "username".to_string())];
-        let required = vec![
-            "username".to_string(),
-            "password".to_string(),
-            "password".to_string(),
-            " password ".to_string(),
-        ];
-        let missing = missing_secret_names_for_domain(&known, "a.com", &required);
-        assert_eq!(missing, vec!["password".to_string()]);
-    }
-
-    #[test]
-    fn missing_secret_names_for_domain_matches_domain_case_insensitively() {
-        let known = vec![("Example.COM".to_string(), "password".to_string())];
-        let required = vec!["password".to_string()];
-        let missing = missing_secret_names_for_domain(&known, "example.com", &required);
-        assert!(missing.is_empty());
+        let domains = declared_domains_for_secret(&declared, "password");
+        assert_eq!(domains, vec!["a.com".to_string(), "b.com".to_string()]);
     }
 
     #[test]

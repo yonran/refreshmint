@@ -151,6 +151,8 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                 .ledger_dir
                 .join("extensions")
                 .join(&config.extension_name);
+            let declared_secrets = super::load_manifest_secret_declarations(&extension_dir)
+                .map_err(|err| err.to_string())?;
             let output_dir = extension_dir.join("output");
             std::fs::create_dir_all(&output_dir).map_err(|err| err.to_string())?;
 
@@ -169,6 +171,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
             let page_inner = Arc::new(Mutex::new(super::js_api::PageInner {
                 page,
                 secret_store,
+                declared_secrets,
                 download_dir,
             }));
             let refreshmint_inner =
