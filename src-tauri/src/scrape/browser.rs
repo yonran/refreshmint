@@ -109,6 +109,32 @@ pub async fn launch_browser(
     Ok((browser, handle))
 }
 
+/// Get a usable initial page handle for a newly launched browser.
+///
+/// Chromium often starts with an already-open tab. Prefer attaching to that tab
+/// to avoid `Target.createTarget(about:blank)` hanging in some configurations.
+pub async fn open_start_page(
+    browser: &mut Browser,
+) -> Result<chromiumoxide::Page, Box<dyn Error + Send + Sync>> {
+    browser.fetch_targets().await?;
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    if let Some(page) = browser.pages().await?.into_iter().next() {
+        return Ok(page);
+    }
+
+    let create_timeout = std::time::Duration::from_secs(10);
+    match tokio::time::timeout(create_timeout, browser.new_page("about:blank")).await {
+        Ok(Ok(page)) => Ok(page),
+        Ok(Err(err)) => Err(format!("failed to create initial page: {err}").into()),
+        Err(_) => Err(format!(
+            "timed out after {}s creating initial page (about:blank)",
+            create_timeout.as_secs()
+        )
+        .into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

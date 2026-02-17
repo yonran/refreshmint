@@ -87,14 +87,15 @@ pub async fn run_scrape_async(
     eprintln!("Profile dir: {}", profile_dir.display());
 
     eprintln!("Launching browser...");
-    let (browser_instance, handler_handle) = browser::launch_browser(&chrome_path, &profile_dir)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    let (mut browser_instance, handler_handle) =
+        browser::launch_browser(&chrome_path, &profile_dir)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
     eprintln!("Browser launched.");
 
     // 6. Open a new page
     eprintln!("Opening new page...");
-    let page = browser_instance.new_page("about:blank").await?;
+    let page = browser::open_start_page(&mut browser_instance).await?;
     eprintln!("Page opened.");
 
     // 7. Set up shared state

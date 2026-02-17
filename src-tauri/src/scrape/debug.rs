@@ -102,7 +102,7 @@ struct Response {
 #[cfg(unix)]
 fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>> {
     use chromiumoxide::browser::Browser;
-    use std::io::Read;
+    use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixListener;
     use std::sync::Arc;
     use std::time::Duration;
@@ -159,10 +159,12 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
             eprintln!("Using browser: {}", chrome_path.display());
             eprintln!("Profile dir: {}", profile_dir.display());
 
-            let (browser, handler) = super::browser::launch_browser(&chrome_path, &profile_dir)
+            let (mut browser, handler) = super::browser::launch_browser(&chrome_path, &profile_dir)
                 .await
                 .map_err(|err| err.to_string())?;
-            let page = browser.new_page("about:blank").await?;
+            let page = super::browser::open_start_page(&mut browser)
+                .await
+                .map_err(|err| err.to_string())?;
 
             let page_inner = Arc::new(Mutex::new(super::js_api::PageInner {
                 page,
@@ -192,40 +194,53 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
 
         match listener.accept() {
             Ok((mut stream, _addr)) => {
-                let mut body = String::new();
-                let response = match stream.read_to_string(&mut body) {
-                    Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
-                        Ok(Request::Exec { script }) => {
-                            match rt.block_on(super::sandbox::run_script_source(
-                                &script,
-                                page_inner.clone(),
-                                refreshmint_inner.clone(),
-                            )) {
-                                Ok(()) => Response {
-                                    ok: true,
-                                    error: None,
-                                },
+                let response = match stream.set_nonblocking(false) {
+                    Ok(()) => {
+                        let mut body = String::new();
+                        let mut reader = BufReader::new(&stream);
+                        match reader.read_line(&mut body) {
+                            Ok(0) => Response {
+                                ok: false,
+                                error: Some("failed to read request: empty request".to_string()),
+                            },
+                            Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
+                                Ok(Request::Exec { script }) => {
+                                    match rt.block_on(super::sandbox::run_script_source(
+                                        &script,
+                                        page_inner.clone(),
+                                        refreshmint_inner.clone(),
+                                    )) {
+                                        Ok(()) => Response {
+                                            ok: true,
+                                            error: None,
+                                        },
+                                        Err(err) => Response {
+                                            ok: false,
+                                            error: Some(err.to_string()),
+                                        },
+                                    }
+                                }
+                                Ok(Request::Stop) => {
+                                    running = false;
+                                    Response {
+                                        ok: true,
+                                        error: None,
+                                    }
+                                }
                                 Err(err) => Response {
                                     ok: false,
-                                    error: Some(err.to_string()),
+                                    error: Some(format!("invalid request: {err}")),
                                 },
-                            }
+                            },
+                            Err(err) => Response {
+                                ok: false,
+                                error: Some(format!("failed to read request: {err}")),
+                            },
                         }
-                        Ok(Request::Stop) => {
-                            running = false;
-                            Response {
-                                ok: true,
-                                error: None,
-                            }
-                        }
-                        Err(err) => Response {
-                            ok: false,
-                            error: Some(format!("invalid request: {err}")),
-                        },
-                    },
+                    }
                     Err(err) => Response {
                         ok: false,
-                        error: Some(format!("failed to read request: {err}")),
+                        error: Some(format!("failed to configure request stream: {err}")),
                     },
                 };
 
