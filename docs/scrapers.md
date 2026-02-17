@@ -262,6 +262,15 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   --script script.mjs
 ```
 
+Or execute an extension directory directly (uses `driver.mjs` and applies manifest secret declarations from that directory):
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
+  debug exec \
+  --socket /path/to/debug.sock \
+  --extension-dir /path/to/my-extension
+```
+
 Stop:
 
 ```bash

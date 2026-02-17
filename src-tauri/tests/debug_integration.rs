@@ -47,6 +47,13 @@ mod unix_only {
         let sandbox = TestSandbox::new("debug")?;
         let ledger_dir = sandbox.path().join("ledger.refreshmint");
         fs::create_dir_all(&ledger_dir)?;
+        let extension_dir = ledger_dir.join("extensions").join("smoke-ext");
+        fs::create_dir_all(&extension_dir)?;
+        fs::write(
+            extension_dir.join("manifest.json"),
+            r#"{"name":"smoke-ext","secrets":{"example.com":["bank_password"]}}"#,
+        )?;
+        fs::write(extension_dir.join("driver.mjs"), "// smoke\n")?;
 
         let socket_path = sandbox.path().join("debug.sock");
         let profile_dir = sandbox.path().join("profile");

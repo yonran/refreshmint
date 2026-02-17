@@ -90,8 +90,22 @@ struct DebugStartArgs {
 struct DebugExecArgs {
     #[arg(long)]
     socket: PathBuf,
-    #[arg(long, value_name = "PATH", help = "Script path ('-' for stdin).")]
-    script: PathBuf,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Script path ('-' for stdin).",
+        required_unless_present = "extension_dir",
+        conflicts_with = "extension_dir"
+    )]
+    script: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Extension directory (loads driver.mjs and manifest secrets).",
+        required_unless_present = "script",
+        conflicts_with = "script"
+    )]
+    extension_dir: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -462,13 +476,45 @@ fn run_debug_start(
 }
 
 fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
-    let script_source = read_text_input(&args.script)?;
+    let (script_source, declared_secrets) = if let Some(extension_dir) = args.extension_dir {
+        if !extension_dir.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "extension directory not found or not a directory: {}",
+                    extension_dir.display()
+                ),
+            )
+            .into());
+        }
+        let script_path = extension_dir.join("driver.mjs");
+        let script_source = read_text_input(&script_path)?;
+        let declared = crate::scrape::load_manifest_secret_declarations(&extension_dir).map_err(
+            |err| -> Box<dyn Error> {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()).into()
+            },
+        )?;
+        (script_source, Some(declared))
+    } else {
+        let script_path = args.script.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "either --script or --extension-dir is required",
+            )
+        })?;
+        (read_text_input(&script_path)?, None)
+    };
+
     if script_source.trim().is_empty() {
         return Err(
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "script is empty").into(),
         );
     }
-    crate::scrape::debug::exec_debug_script(&args.socket, &script_source)?;
+    crate::scrape::debug::exec_debug_script_with_declarations(
+        &args.socket,
+        &script_source,
+        declared_secrets,
+    )?;
     println!("Script executed.");
     Ok(())
 }

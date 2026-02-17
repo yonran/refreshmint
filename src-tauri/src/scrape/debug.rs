@@ -60,10 +60,19 @@ pub fn run_debug_session(config: DebugStartConfig) -> Result<(), Box<dyn Error>>
 }
 
 pub fn exec_debug_script(socket_path: &Path, script_source: &str) -> Result<(), Box<dyn Error>> {
+    exec_debug_script_with_declarations(socket_path, script_source, None)
+}
+
+pub fn exec_debug_script_with_declarations(
+    socket_path: &Path,
+    script_source: &str,
+    declared_secrets: Option<super::js_api::SecretDeclarations>,
+) -> Result<(), Box<dyn Error>> {
     let response = send_request(
         socket_path,
         Request::Exec {
             script: script_source.to_string(),
+            declared_secrets,
         },
     )?;
     if response.ok {
@@ -89,7 +98,11 @@ pub fn stop_debug_session(socket_path: &Path) -> Result<(), Box<dyn Error>> {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum Request {
-    Exec { script: String },
+    Exec {
+        script: String,
+        #[serde(default)]
+        declared_secrets: Option<super::js_api::SecretDeclarations>,
+    },
     Stop,
 }
 
@@ -201,7 +214,14 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                             error: Some("failed to read request: empty request".to_string()),
                         },
                         Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
-                            Ok(Request::Exec { script }) => {
+                            Ok(Request::Exec {
+                                script,
+                                declared_secrets,
+                            }) => {
+                                if let Some(declared) = declared_secrets {
+                                    let mut page_inner = page_inner.lock().await;
+                                    page_inner.declared_secrets = declared;
+                                }
                                 match super::sandbox::run_script_source(
                                     &script,
                                     page_inner.clone(),
