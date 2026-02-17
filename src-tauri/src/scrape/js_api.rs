@@ -825,29 +825,77 @@ impl PageApi {
     }
 
     /// Wait for the next download to complete and return its info.
-    ///
-    /// Sets up CDP download behavior, then waits for `Page.downloadProgress`
-    /// with state=completed.
     #[qjs(rename = "waitForDownload")]
-    pub async fn js_wait_for_download(&self) -> JsResult<DownloadInfo> {
-        let inner = self.inner.lock().await;
+    pub async fn js_wait_for_download(&self, timeout_ms: Option<u64>) -> JsResult<DownloadInfo> {
+        let timeout_ms = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        let (page, download_dir) = {
+            let inner = self.inner.lock().await;
+            (inner.page.clone(), inner.download_dir.clone())
+        };
+        std::fs::create_dir_all(&download_dir)
+            .map_err(|e| js_err(format!("waitForDownload mkdir failed: {e}")))?;
+        let download_path = download_dir.to_string_lossy().to_string();
 
-        let download_path = inner.download_dir.to_string_lossy().to_string();
-
-        // Set download behavior via CDP
+        // Set download behavior via CDP and explicitly request download events.
         use chromiumoxide::cdp::browser_protocol::browser::SetDownloadBehaviorParams;
-        inner
-            .page
-            .execute(SetDownloadBehaviorParams::new(
+        let behavior = SetDownloadBehaviorParams::builder()
+            .behavior(
                 chromiumoxide::cdp::browser_protocol::browser::SetDownloadBehaviorBehavior::AllowAndName,
-            ))
+            )
+            .download_path(download_path.clone())
+            .events_enabled(true)
+            .build()
+            .map_err(|e| js_err(format!("setDownloadBehavior params failed: {e}")))?;
+        page.execute(behavior)
             .await
             .map_err(|e| js_err(format!("setDownloadBehavior failed: {e}")))?;
 
-        Ok(DownloadInfo {
-            path: download_path,
-            suggested_filename: String::new(),
-        })
+        let baseline = list_download_paths(&download_dir)
+            .map_err(|e| js_err(format!("waitForDownload list failed: {e}")))?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let mut candidate_sizes = BTreeMap::new();
+
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(js_err(format!(
+                    "TimeoutError: waitForDownload timed out after {timeout_ms}ms"
+                )));
+            }
+
+            let current = list_download_paths(&download_dir)
+                .map_err(|e| js_err(format!("waitForDownload list failed: {e}")))?;
+
+            for path in current {
+                if baseline.contains(&path) || is_partial_download_file(&path) {
+                    continue;
+                }
+
+                let meta = match std::fs::metadata(&path) {
+                    Ok(meta) if meta.is_file() => meta,
+                    Ok(_) => continue,
+                    Err(_) => continue,
+                };
+                let size = meta.len();
+                match candidate_sizes.get(&path) {
+                    Some(previous) if *previous == size => {
+                        let suggested_filename = path
+                            .file_name()
+                            .and_then(std::ffi::OsStr::to_str)
+                            .unwrap_or("")
+                            .to_string();
+                        return Ok(DownloadInfo {
+                            path: path.to_string_lossy().to_string(),
+                            suggested_filename,
+                        });
+                    }
+                    _ => {
+                        candidate_sizes.insert(path.clone(), size);
+                    }
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+        }
     }
 }
 
@@ -989,6 +1037,22 @@ fn scrub_known_secrets(secret_store: &SecretStore, text: &mut String) {
             }
         }
     }
+}
+
+fn list_download_paths(dir: &PathBuf) -> Result<BTreeSet<PathBuf>, std::io::Error> {
+    let mut paths = BTreeSet::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        paths.insert(entry.path());
+    }
+    Ok(paths)
+}
+
+fn is_partial_download_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(|ext| ext.eq_ignore_ascii_case("crdownload"))
+        .unwrap_or(false)
 }
 
 fn url_matches_pattern(url: &str, pattern: &str) -> bool {
@@ -1576,5 +1640,45 @@ mod tests {
             .prompt("Enter the texted MFA code: ".to_string())
             .unwrap_or_else(|err| panic!("prompt unexpectedly failed: {err}"));
         assert_eq!(value, "245221");
+    }
+
+    #[test]
+    fn is_partial_download_file_detects_crdownload_extension() {
+        assert!(is_partial_download_file(std::path::Path::new(
+            "/tmp/file.csv.crdownload"
+        )));
+        assert!(!is_partial_download_file(std::path::Path::new(
+            "/tmp/file.csv"
+        )));
+    }
+
+    #[test]
+    fn list_download_paths_returns_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "refreshmint-list-download-paths-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap_or_else(|err| {
+            panic!("failed to create test dir: {err}");
+        });
+        let first = root.join("a.csv");
+        let second = root.join("b.csv.crdownload");
+        std::fs::write(&first, "a").unwrap_or_else(|err| {
+            panic!("failed to write first file: {err}");
+        });
+        std::fs::write(&second, "b").unwrap_or_else(|err| {
+            panic!("failed to write second file: {err}");
+        });
+
+        let listed = list_download_paths(&root)
+            .unwrap_or_else(|err| panic!("list_download_paths failed: {err}"));
+        assert!(listed.contains(&first));
+        assert!(listed.contains(&second));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

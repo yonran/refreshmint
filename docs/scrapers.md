@@ -203,12 +203,14 @@ All methods are async and should be awaited.
 | `await page.setPopupHandler(mode)`                   | Handle popups (`ignore` or `same_tab`).                             |
 | `await page.popupEvents()`                           | Return captured popup events as JSON.                               |
 | `await page.screenshot()`                            | Capture screenshot and return PNG as base64 string.                 |
-| `await page.waitForDownload()`                       | Configure download behavior and return download info object.        |
+| `await page.waitForDownload(timeoutMs?)`             | Wait for next completed download and return its file info.          |
 
-`page.waitForDownload()` currently returns:
+`page.waitForDownload(timeoutMs?)` resolves with:
 
-- `path`: download directory path
-- `suggestedFilename`: currently empty string
+- `path`: full path to the downloaded file
+- `suggestedFilename`: file name of the downloaded file
+
+If no completed download appears before the timeout (default `30000` ms), it throws a timeout error.
 
 Network response capture (`waitForResponse`, `networkRequests`, `responsesReceived`) is backed by the browser debug protocol (`Network.responseReceived`), not DOM monkeypatching.
 
