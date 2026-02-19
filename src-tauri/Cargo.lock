@@ -149,6 +149,7 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "chromey",
+ "chrono",
  "clap",
  "dirs",
  "futures",
@@ -167,6 +168,7 @@ dependencies = [
  "tauri-plugin-log",
  "tauri-plugin-store",
  "tokio",
+ "uuid",
  "which 7.0.3",
  "xattr",
  "zip",

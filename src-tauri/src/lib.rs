@@ -3,6 +3,13 @@ pub mod hledger;
 pub mod scrape;
 pub mod secret;
 
+pub mod account_journal;
+pub mod dedup;
+pub mod extract;
+pub mod operations;
+pub mod reconcile;
+pub mod transfer_detector;
+
 mod binpath;
 mod extension;
 mod ledger;
@@ -58,7 +65,14 @@ pub fn run_with_context(
             start_scrape_debug_session,
             stop_scrape_debug_session,
             get_scrape_debug_session_socket,
-            run_scrape
+            run_scrape,
+            list_documents,
+            run_extraction,
+            get_account_journal,
+            get_unreconciled,
+            reconcile_entry,
+            unreconcile_entry,
+            reconcile_transfer,
         ])
         .setup(|app| {
             binpath::init_from_app(app.handle());
@@ -339,6 +353,220 @@ async fn run_scrape(ledger: String, account: String, extension: String) -> Resul
     tokio::task::spawn_blocking(move || scrape::run_scrape(config).map_err(|err| err.to_string()))
         .await
         .map_err(|err| err.to_string())?
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn list_documents(
+    ledger: String,
+    account_name: String,
+) -> Result<Vec<extract::DocumentWithInfo>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let account_name = require_non_empty_input("account_name", account_name)?;
+    extract::list_documents(&target_dir, &account_name).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn run_extraction(
+    ledger: String,
+    account_name: String,
+    extension_name: String,
+    document_names: Vec<String>,
+) -> Result<usize, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let account_name = require_non_empty_input("account_name", account_name)?;
+    let extension_name = require_non_empty_input("extension_name", extension_name)?;
+
+    let result =
+        extract::run_extraction(&target_dir, &account_name, &extension_name, &document_names)
+            .map_err(|err| err.to_string())?;
+
+    // Run dedup on extracted transactions
+    let existing_entries =
+        account_journal::read_journal(&target_dir, &account_name).map_err(|err| err.to_string())?;
+
+    let config = dedup::DedupConfig::default();
+    let mut all_updated = existing_entries;
+    let mut new_count = 0;
+
+    // Process each document's transactions through dedup
+    for doc_name in &result.document_names {
+        let doc_txns: Vec<_> = result
+            .proposed_transactions
+            .iter()
+            .filter(|t| t.evidence_refs().iter().any(|e| e.starts_with(doc_name)))
+            .cloned()
+            .collect();
+
+        if doc_txns.is_empty() {
+            continue;
+        }
+
+        let actions = dedup::run_dedup(&all_updated, &doc_txns, doc_name, &config);
+        new_count += actions
+            .iter()
+            .filter(|a| matches!(a.result, dedup::DedupResult::New))
+            .count();
+
+        // Determine default account and unreconciled equity from existing entries or manifest
+        let default_account = all_updated
+            .first()
+            .and_then(|e| e.postings.first())
+            .map(|p| p.account.clone())
+            .unwrap_or_else(|| format!("Assets:{account_name}"));
+        let unreconciled_equity = format!("Equity:Unreconciled:{account_name}");
+
+        all_updated = dedup::apply_dedup_actions(
+            &target_dir,
+            &account_name,
+            all_updated,
+            &actions,
+            &default_account,
+            &unreconciled_equity,
+            Some(&format!("{extension_name}:latest")),
+        )
+        .map_err(|err| err.to_string())?;
+    }
+
+    // Write updated journal
+    account_journal::write_journal(&target_dir, &account_name, &all_updated)
+        .map_err(|err| err.to_string())?;
+
+    Ok(new_count)
+}
+
+#[derive(serde::Serialize)]
+struct AccountJournalEntry {
+    id: String,
+    date: String,
+    status: String,
+    description: String,
+    comment: String,
+    evidence: Vec<String>,
+    reconciled: Option<String>,
+    #[serde(rename = "isTransfer")]
+    is_transfer: bool,
+}
+
+#[tauri::command]
+fn get_account_journal(
+    ledger: String,
+    account_name: String,
+) -> Result<Vec<AccountJournalEntry>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let account_name = require_non_empty_input("account_name", account_name)?;
+    let entries =
+        account_journal::read_journal(&target_dir, &account_name).map_err(|err| err.to_string())?;
+
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            let is_transfer = transfer_detector::is_probable_transfer(&e.description);
+            let status = match e.status {
+                account_journal::EntryStatus::Cleared => "cleared",
+                account_journal::EntryStatus::Pending => "pending",
+                account_journal::EntryStatus::Unmarked => "unmarked",
+            };
+            AccountJournalEntry {
+                id: e.id,
+                date: e.date,
+                status: status.to_string(),
+                description: e.description,
+                comment: e.comment,
+                evidence: e.evidence,
+                reconciled: e.reconciled,
+                is_transfer,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn get_unreconciled(
+    ledger: String,
+    account_name: String,
+) -> Result<Vec<AccountJournalEntry>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let account_name = require_non_empty_input("account_name", account_name)?;
+    let entries =
+        reconcile::get_unreconciled(&target_dir, &account_name).map_err(|err| err.to_string())?;
+
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            let is_transfer = transfer_detector::is_probable_transfer(&e.description);
+            let status = match e.status {
+                account_journal::EntryStatus::Cleared => "cleared",
+                account_journal::EntryStatus::Pending => "pending",
+                account_journal::EntryStatus::Unmarked => "unmarked",
+            };
+            AccountJournalEntry {
+                id: e.id,
+                date: e.date,
+                status: status.to_string(),
+                description: e.description,
+                comment: e.comment,
+                evidence: e.evidence,
+                reconciled: e.reconciled,
+                is_transfer,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn reconcile_entry(
+    ledger: String,
+    account_name: String,
+    entry_id: String,
+    counterpart_account: String,
+    posting_index: Option<usize>,
+) -> Result<String, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let account_name = require_non_empty_input("account_name", account_name)?;
+    let entry_id = require_non_empty_input("entry_id", entry_id)?;
+    let counterpart_account = require_non_empty_input("counterpart_account", counterpart_account)?;
+
+    reconcile::reconcile_entry(
+        &target_dir,
+        &account_name,
+        &entry_id,
+        &counterpart_account,
+        posting_index,
+    )
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn unreconcile_entry(
+    ledger: String,
+    account_name: String,
+    entry_id: String,
+    posting_index: Option<usize>,
+) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let account_name = require_non_empty_input("account_name", account_name)?;
+    let entry_id = require_non_empty_input("entry_id", entry_id)?;
+
+    reconcile::unreconcile_entry(&target_dir, &account_name, &entry_id, posting_index)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn reconcile_transfer(
+    ledger: String,
+    account1: String,
+    entry_id1: String,
+    account2: String,
+    entry_id2: String,
+) -> Result<String, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let account1 = require_non_empty_input("account1", account1)?;
+    let entry_id1 = require_non_empty_input("entry_id1", entry_id1)?;
+    let account2 = require_non_empty_input("account2", account2)?;
+    let entry_id2 = require_non_empty_input("entry_id2", entry_id2)?;
+
+    reconcile::reconcile_transfer(&target_dir, &account1, &entry_id1, &account2, &entry_id2)
         .map_err(|err| err.to_string())
 }
 

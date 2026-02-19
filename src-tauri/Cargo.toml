@@ -41,6 +41,8 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 which = "7"
 dirs = "6"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [lints.rust]
 unsafe_code = "deny"

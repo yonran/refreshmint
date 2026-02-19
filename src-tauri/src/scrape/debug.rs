@@ -200,6 +200,12 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                 output_dir,
                 prompt_overrides: super::js_api::PromptOverrides::new(),
                 prompt_requires_override: config.prompt_requires_override,
+                session_metadata: super::js_api::SessionMetadata::default(),
+                staged_resources: Vec::new(),
+                scrape_session_id: String::new(),
+                extension_name: config.extension_name.clone(),
+                account_name: config.account.clone(),
+                ledger_dir: config.ledger_dir.clone(),
             }));
             Ok::<_, Box<dyn Error>>((browser, handler, page_inner, refreshmint_inner))
         })?;

@@ -27,11 +27,32 @@ pub struct ScrapeConfig {
 struct ExtensionManifest {
     #[serde(default)]
     secrets: std::collections::BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    account: Option<String>,
+    #[serde(default)]
+    extract: Option<String>,
+    #[serde(default)]
+    rules: Option<String>,
+    #[serde(default, rename = "idField")]
+    id_field: Option<String>,
+    #[serde(default, rename = "autoExtract")]
+    auto_extract: Option<bool>,
 }
 
-pub(crate) fn load_manifest_secret_declarations(
+/// Parsed extension manifest with all fields.
+pub struct ParsedManifest {
+    pub secrets: js_api::SecretDeclarations,
+    pub account: Option<String>,
+    pub extract: Option<String>,
+    pub rules: Option<String>,
+    pub id_field: Option<String>,
+    pub auto_extract: bool,
+}
+
+/// Load and parse the full extension manifest.
+pub fn load_manifest(
     extension_dir: &Path,
-) -> Result<js_api::SecretDeclarations, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ParsedManifest, Box<dyn std::error::Error + Send + Sync>> {
     let manifest_path = extension_dir.join("manifest.json");
     let manifest_text = std::fs::read_to_string(&manifest_path)?;
     let manifest: ExtensionManifest = serde_json::from_str(&manifest_text).map_err(|error| {
@@ -54,7 +75,6 @@ pub(crate) fn load_manifest_secret_declarations(
             )
             .into());
         }
-
         let mut normalized = BTreeSet::new();
         for name in names {
             let trimmed = name.trim();
@@ -67,14 +87,161 @@ pub(crate) fn load_manifest_secret_declarations(
             }
             normalized.insert(trimmed.to_string());
         }
-
         declared
             .entry(domain)
             .or_default()
             .extend(normalized.into_iter());
     }
 
-    Ok(declared)
+    Ok(ParsedManifest {
+        secrets: declared,
+        account: manifest.account,
+        extract: manifest.extract,
+        rules: manifest.rules,
+        id_field: manifest.id_field,
+        auto_extract: manifest.auto_extract.unwrap_or(true),
+    })
+}
+
+/// Generate a scrape session ID from the current timestamp.
+pub fn generate_scrape_session_id() -> String {
+    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+}
+
+/// Document info sidecar written alongside each evidence document.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DocumentInfo {
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+    #[serde(rename = "originalUrl", skip_serializing_if = "Option::is_none")]
+    pub original_url: Option<String>,
+    #[serde(rename = "scrapedAt")]
+    pub scraped_at: String,
+    #[serde(rename = "extensionName")]
+    pub extension_name: String,
+    #[serde(rename = "accountName")]
+    pub account_name: String,
+    #[serde(rename = "scrapeSessionId")]
+    pub scrape_session_id: String,
+    #[serde(rename = "coverageEndDate")]
+    pub coverage_end_date: String,
+    #[serde(rename = "dateRangeStart", skip_serializing_if = "Option::is_none")]
+    pub date_range_start: Option<String>,
+    #[serde(rename = "dateRangeEnd", skip_serializing_if = "Option::is_none")]
+    pub date_range_end: Option<String>,
+}
+
+/// Finalize staged resources: move them to `accounts/<account>/documents/`
+/// with date-prefixed filenames and write `-info.json` sidecars.
+pub fn finalize_staged_resources(
+    inner: &js_api::RefreshmintInner,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let documents_dir =
+        crate::account_journal::account_documents_dir(&inner.ledger_dir, &inner.account_name);
+    std::fs::create_dir_all(&documents_dir)?;
+
+    let scraped_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let fallback_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let mut finalized_names = Vec::new();
+
+    for resource in &inner.staged_resources {
+        let coverage_date = resource
+            .coverage_end_date
+            .as_deref()
+            .unwrap_or(&fallback_date);
+
+        let final_filename =
+            date_prefixed_filename(coverage_date, &resource.filename, &documents_dir);
+        let final_path = documents_dir.join(&final_filename);
+
+        // Copy from staging to documents dir
+        std::fs::copy(&resource.staging_path, &final_path).map_err(|e| {
+            format!(
+                "failed to copy {} to {}: {e}",
+                resource.staging_path.display(),
+                final_path.display()
+            )
+        })?;
+
+        // Guess MIME type from extension
+        let mime = resource
+            .mime_type
+            .clone()
+            .unwrap_or_else(|| guess_mime_type(&resource.filename));
+
+        // Write sidecar
+        let info = DocumentInfo {
+            mime_type: mime,
+            original_url: resource.original_url.clone(),
+            scraped_at: scraped_at.clone(),
+            extension_name: inner.extension_name.clone(),
+            account_name: inner.account_name.clone(),
+            scrape_session_id: inner.scrape_session_id.clone(),
+            coverage_end_date: coverage_date.to_string(),
+            date_range_start: inner.session_metadata.date_range_start.clone(),
+            date_range_end: inner.session_metadata.date_range_end.clone(),
+        };
+
+        let sidecar_path = documents_dir.join(format!("{final_filename}-info.json"));
+        let sidecar_json = serde_json::to_string_pretty(&info)?;
+        std::fs::write(&sidecar_path, sidecar_json)?;
+
+        finalized_names.push(final_filename);
+    }
+
+    Ok(finalized_names)
+}
+
+/// Generate a date-prefixed filename, handling collisions with incrementing suffix.
+fn date_prefixed_filename(date: &str, original: &str, dir: &Path) -> String {
+    let candidate = format!("{date}-{original}");
+    if !dir.join(&candidate).exists() {
+        return candidate;
+    }
+
+    // Split into stem and extension for the incrementing suffix
+    let dot_pos = original.rfind('.');
+    let (stem, ext) = match dot_pos {
+        Some(pos) => (&original[..pos], &original[pos..]),
+        None => (original, ""),
+    };
+
+    for i in 2..1000 {
+        let candidate = format!("{date}-{stem}-{i}{ext}");
+        if !dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+
+    // Fallback with timestamp
+    format!("{date}-{stem}-{}{}", std::process::id(), ext)
+}
+
+/// Guess MIME type from file extension.
+fn guess_mime_type(filename: &str) -> String {
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "txt" => "text/plain",
+        "xml" => "application/xml",
+        "ofx" | "qfx" => "application/x-ofx",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+pub(crate) fn load_manifest_secret_declarations(
+    extension_dir: &Path,
+) -> Result<js_api::SecretDeclarations, Box<dyn std::error::Error + Send + Sync>> {
+    let manifest = load_manifest(extension_dir)?;
+    Ok(manifest.secrets)
 }
 
 fn normalize_manifest_domain(input: &str) -> String {
@@ -142,7 +309,17 @@ pub async fn run_scrape_async(
     if !driver_path.exists() {
         return Err(format!("driver script not found: {}", driver_path.display()).into());
     }
-    let declared_secrets = load_manifest_secret_declarations(&extension_dir)?;
+
+    // Load full manifest
+    let manifest = load_manifest(&extension_dir)?;
+    let declared_secrets = manifest.secrets;
+
+    // Resolve account name: manifest "account" field, or use config.account
+    let account_name = manifest.account.unwrap_or_else(|| config.account.clone());
+
+    // Generate scrape session ID
+    let scrape_session_id = generate_scrape_session_id();
+    eprintln!("Scrape session: {scrape_session_id}");
 
     // 2. Create secret store for the account
     let secret_store = SecretStore::new(config.account.clone());
@@ -194,14 +371,41 @@ pub async fn run_scrape_async(
         output_dir,
         prompt_overrides: config.prompt_overrides.clone(),
         prompt_requires_override: config.prompt_requires_override,
+        session_metadata: js_api::SessionMetadata::default(),
+        staged_resources: Vec::new(),
+        scrape_session_id: scrape_session_id.clone(),
+        extension_name: config.extension_name.clone(),
+        account_name: account_name.clone(),
+        ledger_dir: config.ledger_dir.clone(),
     }));
 
     // 8. Run the driver script in the sandbox
     eprintln!("Running driver: {}", driver_path.display());
-    let result = sandbox::run_driver(&driver_path, page_inner, refreshmint_inner).await;
+    let result = sandbox::run_driver(&driver_path, page_inner, refreshmint_inner.clone()).await;
     eprintln!("Driver finished: {result:?}");
 
-    // 9. Close browser
+    // 9. Finalize staged resources (move to accounts/<name>/documents/)
+    if result.is_ok() {
+        let inner = refreshmint_inner.lock().await;
+        if !inner.staged_resources.is_empty() {
+            eprintln!(
+                "Finalizing {} staged resources...",
+                inner.staged_resources.len()
+            );
+            match finalize_staged_resources(&inner) {
+                Ok(names) => {
+                    for name in &names {
+                        eprintln!("  -> {name}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to finalize staged resources: {e}");
+                }
+            }
+        }
+    }
+
+    // 10. Close browser
     eprintln!("Closing browser...");
     drop(browser_instance);
     // Wait briefly for handler to clean up, but don't block indefinitely

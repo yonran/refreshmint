@@ -1338,11 +1338,36 @@ impl DownloadInfo {
     }
 }
 
+/// Metadata about the current scrape session, set by the driver via `setSessionMetadata`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SessionMetadata {
+    #[serde(rename = "dateRangeStart", skip_serializing_if = "Option::is_none")]
+    pub date_range_start: Option<String>,
+    #[serde(rename = "dateRangeEnd", skip_serializing_if = "Option::is_none")]
+    pub date_range_end: Option<String>,
+}
+
+/// A staged resource from `saveResource`, pending finalization.
+#[derive(Debug, Clone)]
+pub struct StagedResource {
+    pub filename: String,
+    pub staging_path: PathBuf,
+    pub coverage_end_date: Option<String>,
+    pub original_url: Option<String>,
+    pub mime_type: Option<String>,
+}
+
 /// Shared state backing the `refreshmint` JS namespace.
 pub struct RefreshmintInner {
     pub output_dir: PathBuf,
     pub prompt_overrides: PromptOverrides,
     pub prompt_requires_override: bool,
+    pub session_metadata: SessionMetadata,
+    pub staged_resources: Vec<StagedResource>,
+    pub scrape_session_id: String,
+    pub extension_name: String,
+    pub account_name: String,
+    pub ledger_dir: PathBuf,
 }
 
 /// JS-visible `refreshmint` namespace object.
@@ -1374,9 +1399,38 @@ fn missing_prompt_override_error(message: &str) -> String {
 #[rquickjs::methods]
 impl RefreshmintApi {
     /// Save binary data to a file in the extension output directory.
+    ///
+    /// Accepts an optional third argument: an options object with `coverageEndDate`.
+    /// Files are staged during scraping and moved to their final location
+    /// after extraction determines the coverage date.
     #[qjs(rename = "saveResource")]
-    pub async fn js_save_resource(&self, filename: String, data: Vec<u8>) -> JsResult<()> {
-        let inner = self.inner.lock().await;
+    pub async fn js_save_resource(
+        &self,
+        filename: String,
+        data: Vec<u8>,
+        options: Option<rquickjs::Value<'_>>,
+    ) -> JsResult<()> {
+        let mut inner = self.inner.lock().await;
+
+        // Parse optional coverageEndDate from options object
+        let mut coverage_end_date: Option<String> = None;
+        let mut original_url: Option<String> = None;
+        let mut mime_type: Option<String> = None;
+        if let Some(opts) = options {
+            if let Some(obj) = opts.as_object() {
+                if let Ok(val) = obj.get::<_, Option<String>>("coverageEndDate") {
+                    coverage_end_date = val;
+                }
+                if let Ok(val) = obj.get::<_, Option<String>>("originalUrl") {
+                    original_url = val;
+                }
+                if let Ok(val) = obj.get::<_, Option<String>>("mimeType") {
+                    mime_type = val;
+                }
+            }
+        }
+
+        // Always save to the legacy output dir for backward compatibility
         let path = inner.output_dir.join(&filename);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -1384,6 +1438,31 @@ impl RefreshmintApi {
         }
         std::fs::write(&path, &data)
             .map_err(|e| js_err(format!("saveResource write failed: {e}")))?;
+
+        // Also stage the resource for the new evidence pipeline
+        inner.staged_resources.push(StagedResource {
+            filename: filename.clone(),
+            staging_path: path,
+            coverage_end_date,
+            original_url,
+            mime_type,
+        });
+
+        Ok(())
+    }
+
+    /// Set session-level metadata (dateRangeStart, dateRangeEnd).
+    #[qjs(rename = "setSessionMetadata")]
+    pub async fn js_set_session_metadata(&self, metadata: rquickjs::Value<'_>) -> JsResult<()> {
+        let mut inner = self.inner.lock().await;
+        if let Some(obj) = metadata.as_object() {
+            if let Ok(val) = obj.get::<_, Option<String>>("dateRangeStart") {
+                inner.session_metadata.date_range_start = val;
+            }
+            if let Ok(val) = obj.get::<_, Option<String>>("dateRangeEnd") {
+                inner.session_metadata.date_range_end = val;
+            }
+        }
         Ok(())
     }
 
@@ -1590,15 +1669,25 @@ mod tests {
         assert!(text.contains("--prompt"));
     }
 
+    fn test_refreshmint_inner(overrides: PromptOverrides) -> RefreshmintInner {
+        RefreshmintInner {
+            output_dir: PathBuf::new(),
+            prompt_overrides: overrides,
+            prompt_requires_override: true,
+            session_metadata: SessionMetadata::default(),
+            staged_resources: Vec::new(),
+            scrape_session_id: String::new(),
+            extension_name: String::new(),
+            account_name: String::new(),
+            ledger_dir: PathBuf::new(),
+        }
+    }
+
     #[test]
     fn prompt_returns_override_when_present_in_strict_mode() {
         let mut overrides = PromptOverrides::new();
         overrides.insert("OTP".to_string(), "123456".to_string());
-        let api = RefreshmintApi::new(Arc::new(Mutex::new(RefreshmintInner {
-            output_dir: PathBuf::new(),
-            prompt_overrides: overrides,
-            prompt_requires_override: true,
-        })));
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(test_refreshmint_inner(overrides))));
 
         let value = api
             .prompt("OTP".to_string())
@@ -1608,11 +1697,9 @@ mod tests {
 
     #[test]
     fn prompt_errors_when_missing_in_strict_mode() {
-        let api = RefreshmintApi::new(Arc::new(Mutex::new(RefreshmintInner {
-            output_dir: PathBuf::new(),
-            prompt_overrides: PromptOverrides::new(),
-            prompt_requires_override: true,
-        })));
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(test_refreshmint_inner(
+            PromptOverrides::new(),
+        ))));
 
         let err = match api.prompt("Security answer".to_string()) {
             Ok(value) => panic!("expected missing prompt override error, got value: {value}"),
@@ -1630,11 +1717,7 @@ mod tests {
             "Enter the texted MFA code:".to_string(),
             "245221".to_string(),
         );
-        let api = RefreshmintApi::new(Arc::new(Mutex::new(RefreshmintInner {
-            output_dir: PathBuf::new(),
-            prompt_overrides: overrides,
-            prompt_requires_override: true,
-        })));
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(test_refreshmint_inner(overrides))));
 
         let value = api
             .prompt("Enter the texted MFA code: ".to_string())
