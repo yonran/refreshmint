@@ -27,6 +27,18 @@ pub fn reconcile_entry(
 
     let entry = &entries[entry_idx];
 
+    if let Some(posting_idx) = posting_index {
+        if posting_idx >= entry.postings.len() {
+            return Err(format!(
+                "posting index {posting_idx} is out of bounds for entry {entry_id} ({} postings)",
+                entry.postings.len()
+            )
+            .into());
+        }
+    } else if entry.postings.is_empty() {
+        return Err(format!("entry {entry_id} has no postings to reconcile").into());
+    }
+
     // Check if already reconciled
     if let Some(posting_idx) = posting_index {
         if entry
