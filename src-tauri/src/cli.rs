@@ -727,29 +727,11 @@ fn run_account_extract(
 
     let account_name = require_cli_field("account", &args.account)?;
     let extension_name = require_cli_field("extension", &args.extension)?;
-    let mut document_names = if args.document.is_empty() {
-        crate::extract::list_documents(&ledger_dir, &account_name)?
-            .into_iter()
-            .map(|d| d.filename)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    if !args.document.is_empty() {
-        for name in &args.document {
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "document name cannot be empty",
-                )
-                .into());
-            }
-            if !document_names.iter().any(|existing| existing == trimmed) {
-                document_names.push(trimmed.to_string());
-            }
-        }
-    }
+    let listed_documents = crate::extract::list_documents(&ledger_dir, &account_name)?
+        .into_iter()
+        .map(|d| d.filename)
+        .collect::<Vec<_>>();
+    let document_names = resolve_extraction_document_names(&args.document, listed_documents)?;
 
     if document_names.is_empty() {
         println!("No documents found for account '{account_name}'.");
@@ -958,6 +940,31 @@ fn require_cli_field(field_name: &str, value: &str) -> Result<String, Box<dyn Er
     Ok(trimmed.to_string())
 }
 
+fn resolve_extraction_document_names(
+    selected: &[String],
+    listed: Vec<String>,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    if selected.is_empty() {
+        return Ok(listed);
+    }
+
+    let mut names = Vec::new();
+    for name in selected {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "document name cannot be empty",
+            )
+            .into());
+        }
+        if !names.iter().any(|existing| existing == trimmed) {
+            names.push(trimmed.to_string());
+        }
+    }
+    Ok(names)
+}
+
 fn parse_prompt_overrides(
     entries: &[String],
 ) -> Result<crate::scrape::js_api::PromptOverrides, Box<dyn Error>> {
@@ -1003,11 +1010,13 @@ fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Bo
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_prompt_overrides, run_extension_load_with_dir, run_gl_add_with_dir,
-        run_new_with_ledger_path, run_secret, AddArgs, ExtensionLoadArgs, SecretAddArgs,
-        SecretArgs, SecretCommand, SecretListArgs, SecretRemoveArgs,
+        evidence_ref_matches_document, parse_prompt_overrides, resolve_extraction_document_names,
+        run_extension_load_with_dir, run_gl_add_with_dir, run_new_with_ledger_path, run_secret,
+        AccountCommand, AddArgs, Cli, Commands, ExtensionLoadArgs, SecretAddArgs, SecretArgs,
+        SecretCommand, SecretListArgs, SecretRemoveArgs,
     };
     use crate::ledger::ensure_refreshmint_extension;
+    use clap::Parser;
     use serde_json::Value;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1066,6 +1075,107 @@ mod tests {
     fn parse_prompt_overrides_rejects_duplicate_messages() {
         let entries = vec!["OTP=111111".to_string(), "OTP=222222".to_string()];
         assert!(parse_prompt_overrides(&entries).is_err());
+    }
+
+    #[test]
+    fn resolve_extraction_document_names_defaults_to_listed_documents() {
+        let listed = vec!["2024-01.csv".to_string(), "2024-02.csv".to_string()];
+        let resolved = resolve_extraction_document_names(&[], listed.clone())
+            .unwrap_or_else(|err| panic!("resolve_extraction_document_names failed: {err}"));
+        assert_eq!(resolved, listed);
+    }
+
+    #[test]
+    fn resolve_extraction_document_names_trims_and_deduplicates() {
+        let selected = vec![
+            "  2024-01.csv ".to_string(),
+            "2024-01.csv".to_string(),
+            "2024-02.csv".to_string(),
+        ];
+        let resolved = resolve_extraction_document_names(&selected, Vec::new())
+            .unwrap_or_else(|err| panic!("resolve_extraction_document_names failed: {err}"));
+        assert_eq!(
+            resolved,
+            vec!["2024-01.csv".to_string(), "2024-02.csv".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_extraction_document_names_rejects_empty_values() {
+        let selected = vec![" ".to_string()];
+        assert!(resolve_extraction_document_names(&selected, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn evidence_ref_matches_document_requires_delimiter() {
+        assert!(evidence_ref_matches_document("foo.csv:1:1", "foo.csv"));
+        assert!(evidence_ref_matches_document("foo.csv#page=1", "foo.csv"));
+        assert!(!evidence_ref_matches_document("foo.csvx:1:1", "foo.csv"));
+        assert!(!evidence_ref_matches_document("foo.csv", "foo.csv"));
+    }
+
+    #[test]
+    fn account_extract_subcommand_parses_document_flags() {
+        let cli = Cli::try_parse_from([
+            "refreshmint",
+            "account",
+            "extract",
+            "--account",
+            "chase",
+            "--extension",
+            "chase-driver",
+            "--document",
+            "2024-01.csv",
+            "--document",
+            "2024-02.csv",
+        ])
+        .unwrap_or_else(|err| panic!("Cli parsing failed: {err}"));
+
+        match cli.command {
+            Some(Commands::Account(args)) => match args.command {
+                AccountCommand::Extract(extract) => {
+                    assert_eq!(extract.account, "chase");
+                    assert_eq!(extract.extension, "chase-driver");
+                    assert_eq!(
+                        extract.document,
+                        vec!["2024-01.csv".to_string(), "2024-02.csv".to_string()]
+                    );
+                }
+                _ => panic!("expected account extract command"),
+            },
+            _ => panic!("expected account command"),
+        }
+    }
+
+    #[test]
+    fn account_reconcile_subcommand_parses_posting_index() {
+        let cli = Cli::try_parse_from([
+            "refreshmint",
+            "account",
+            "reconcile",
+            "--account",
+            "chase",
+            "--entry-id",
+            "txn-1",
+            "--counterpart-account",
+            "Expenses:Food",
+            "--posting-index",
+            "1",
+        ])
+        .unwrap_or_else(|err| panic!("Cli parsing failed: {err}"));
+
+        match cli.command {
+            Some(Commands::Account(args)) => match args.command {
+                AccountCommand::Reconcile(reconcile) => {
+                    assert_eq!(reconcile.account, "chase");
+                    assert_eq!(reconcile.entry_id, "txn-1");
+                    assert_eq!(reconcile.counterpart_account, "Expenses:Food");
+                    assert_eq!(reconcile.posting_index, Some(1));
+                }
+                _ => panic!("expected account reconcile command"),
+            },
+            _ => panic!("expected account command"),
+        }
     }
 
     #[test]
