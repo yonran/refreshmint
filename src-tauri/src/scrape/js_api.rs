@@ -1585,7 +1585,10 @@ impl RefreshmintApi {
     /// Prompt the user: use CLI-provided override when available.
     pub fn prompt(&self, message: String) -> JsResult<String> {
         let (override_value, require_override) = {
-            let inner = self.inner.blocking_lock();
+            let inner = self
+                .inner
+                .try_lock()
+                .map_err(|_| js_err("prompt unavailable: prompt state is busy".to_string()))?;
             (
                 inner.prompt_overrides.get(&message).cloned().or_else(|| {
                     let trimmed = message.trim();
