@@ -40,6 +40,11 @@ CLI runs fail with an explicit error when a required prompt override is missing.
 
 Errors thrown from your script fail the scrape run.
 
+## Best practices
+
+- Domain checks must compare the URL prefix to the full origin (for example `https://secure.bankofamerica.com/`), not a substring match.
+- Prefer `const url = await page.url(); if (!url.startsWith("https://example.com/")) { ... }` over checks like `url.includes("example.com")`.
+
 ## Recommended debug-first flow
 
 Start a debug session:
