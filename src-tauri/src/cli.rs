@@ -19,6 +19,7 @@ enum Commands {
     Debug(DebugArgs),
     Secret(SecretArgs),
     Scrape(ScrapeArgs),
+    Account(AccountArgs),
 }
 
 #[derive(Args)]
@@ -195,6 +196,104 @@ struct ScrapeArgs {
 }
 
 #[derive(Args)]
+struct AccountArgs {
+    #[command(subcommand)]
+    command: AccountCommand,
+}
+
+#[derive(Subcommand)]
+enum AccountCommand {
+    Documents(AccountDocumentsArgs),
+    Extract(AccountExtractArgs),
+    Journal(AccountJournalArgs),
+    Unreconciled(AccountUnreconciledArgs),
+    Reconcile(AccountReconcileArgs),
+    Unreconcile(AccountUnreconcileArgs),
+    Transfer(AccountTransferArgs),
+}
+
+#[derive(Args)]
+struct AccountDocumentsArgs {
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct AccountExtractArgs {
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    extension: String,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+    #[arg(
+        long = "document",
+        value_name = "FILENAME",
+        action = clap::ArgAction::Append,
+        help = "Document filename to extract. Repeat for multiple files. Defaults to all account documents."
+    )]
+    document: Vec<String>,
+}
+
+#[derive(Args)]
+struct AccountJournalArgs {
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct AccountUnreconciledArgs {
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct AccountReconcileArgs {
+    #[arg(long)]
+    account: String,
+    #[arg(long, value_name = "ENTRY_ID")]
+    entry_id: String,
+    #[arg(long, value_name = "ACCOUNT")]
+    counterpart_account: String,
+    #[arg(long, value_name = "INDEX")]
+    posting_index: Option<usize>,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct AccountUnreconcileArgs {
+    #[arg(long)]
+    account: String,
+    #[arg(long, value_name = "ENTRY_ID")]
+    entry_id: String,
+    #[arg(long, value_name = "INDEX")]
+    posting_index: Option<usize>,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct AccountTransferArgs {
+    #[arg(long)]
+    account1: String,
+    #[arg(long, value_name = "ENTRY_ID")]
+    entry_id1: String,
+    #[arg(long)]
+    account2: String,
+    #[arg(long, value_name = "ENTRY_ID")]
+    entry_id2: String,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
 struct AddArgs {
     #[arg(long)]
     ledger: Option<PathBuf>,
@@ -229,6 +328,7 @@ pub fn run(context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
         Some(Commands::Debug(args)) => run_debug(args, context),
         Some(Commands::Secret(args)) => run_secret(args),
         Some(Commands::Scrape(args)) => run_scrape(args, context),
+        Some(Commands::Account(args)) => run_account(args, context),
         None => crate::run_with_context(context),
     }
 }
@@ -572,6 +672,290 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
     };
 
     crate::scrape::run_scrape(config)
+}
+
+#[derive(serde::Serialize)]
+struct CliAccountJournalEntry {
+    id: String,
+    date: String,
+    status: String,
+    description: String,
+    comment: String,
+    evidence: Vec<String>,
+    reconciled: Option<String>,
+    #[serde(rename = "isTransfer")]
+    is_transfer: bool,
+}
+
+fn run_account(
+    args: AccountArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    match args.command {
+        AccountCommand::Documents(doc_args) => run_account_documents(doc_args, context),
+        AccountCommand::Extract(extract_args) => run_account_extract(extract_args, context),
+        AccountCommand::Journal(journal_args) => run_account_journal(journal_args, context),
+        AccountCommand::Unreconciled(unreconciled_args) => {
+            run_account_unreconciled(unreconciled_args, context)
+        }
+        AccountCommand::Reconcile(reconcile_args) => run_account_reconcile(reconcile_args, context),
+        AccountCommand::Unreconcile(unreconcile_args) => {
+            run_account_unreconcile(unreconcile_args, context)
+        }
+        AccountCommand::Transfer(transfer_args) => run_account_transfer(transfer_args, context),
+    }
+}
+
+fn run_account_documents(
+    args: AccountDocumentsArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let account_name = require_cli_field("account", &args.account)?;
+    let documents = crate::extract::list_documents(&ledger_dir, &account_name)?;
+    println!("{}", serde_json::to_string_pretty(&documents)?);
+    Ok(())
+}
+
+fn run_account_extract(
+    args: AccountExtractArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+
+    let account_name = require_cli_field("account", &args.account)?;
+    let extension_name = require_cli_field("extension", &args.extension)?;
+    let mut document_names = if args.document.is_empty() {
+        crate::extract::list_documents(&ledger_dir, &account_name)?
+            .into_iter()
+            .map(|d| d.filename)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if !args.document.is_empty() {
+        for name in &args.document {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "document name cannot be empty",
+                )
+                .into());
+            }
+            if !document_names.iter().any(|existing| existing == trimmed) {
+                document_names.push(trimmed.to_string());
+            }
+        }
+    }
+
+    if document_names.is_empty() {
+        println!("No documents found for account '{account_name}'.");
+        return Ok(());
+    }
+
+    let extraction = crate::extract::run_extraction(
+        &ledger_dir,
+        &account_name,
+        &extension_name,
+        &document_names,
+    )
+    .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let existing_entries = crate::account_journal::read_journal(&ledger_dir, &account_name)?;
+
+    let config = crate::dedup::DedupConfig::default();
+    let mut all_updated = existing_entries;
+    let mut new_count = 0usize;
+
+    for doc_name in &extraction.document_names {
+        let doc_txns: Vec<_> = extraction
+            .proposed_transactions
+            .iter()
+            .filter(|t| {
+                t.evidence_refs()
+                    .iter()
+                    .any(|e| evidence_ref_matches_document(e, doc_name))
+            })
+            .cloned()
+            .collect();
+        if doc_txns.is_empty() {
+            continue;
+        }
+
+        let actions = crate::dedup::run_dedup(&all_updated, &doc_txns, doc_name, &config);
+        new_count += actions
+            .iter()
+            .filter(|a| matches!(a.result, crate::dedup::DedupResult::New))
+            .count();
+
+        let default_account = all_updated
+            .first()
+            .and_then(|e| e.postings.first())
+            .map(|p| p.account.clone())
+            .unwrap_or_else(|| format!("Assets:{account_name}"));
+        let unreconciled_equity = format!("Equity:Unreconciled:{account_name}");
+
+        all_updated = crate::dedup::apply_dedup_actions(
+            &ledger_dir,
+            &account_name,
+            all_updated,
+            &actions,
+            &default_account,
+            &unreconciled_equity,
+            Some(&format!("{extension_name}:latest")),
+        )
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    }
+
+    crate::account_journal::write_journal(&ledger_dir, &account_name, &all_updated)?;
+    println!("Extraction complete. Added {new_count} new transaction(s).");
+    Ok(())
+}
+
+fn run_account_journal(
+    args: AccountJournalArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let account_name = require_cli_field("account", &args.account)?;
+    let entries = crate::account_journal::read_journal(&ledger_dir, &account_name)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&map_entries_for_cli(entries))?
+    );
+    Ok(())
+}
+
+fn run_account_unreconciled(
+    args: AccountUnreconciledArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let account_name = require_cli_field("account", &args.account)?;
+    let entries = crate::reconcile::get_unreconciled(&ledger_dir, &account_name)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&map_entries_for_cli(entries))?
+    );
+    Ok(())
+}
+
+fn run_account_reconcile(
+    args: AccountReconcileArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let account_name = require_cli_field("account", &args.account)?;
+    let entry_id = require_cli_field("entry_id", &args.entry_id)?;
+    let counterpart_account = require_cli_field("counterpart_account", &args.counterpart_account)?;
+    let gl_txn_id = crate::reconcile::reconcile_entry(
+        &ledger_dir,
+        &account_name,
+        &entry_id,
+        &counterpart_account,
+        args.posting_index,
+    )
+    .map_err(|err| std::io::Error::other(err.to_string()))?;
+    println!("{gl_txn_id}");
+    Ok(())
+}
+
+fn run_account_unreconcile(
+    args: AccountUnreconcileArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let account_name = require_cli_field("account", &args.account)?;
+    let entry_id = require_cli_field("entry_id", &args.entry_id)?;
+    crate::reconcile::unreconcile_entry(&ledger_dir, &account_name, &entry_id, args.posting_index)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    println!("ok");
+    Ok(())
+}
+
+fn run_account_transfer(
+    args: AccountTransferArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let account1 = require_cli_field("account1", &args.account1)?;
+    let entry_id1 = require_cli_field("entry_id1", &args.entry_id1)?;
+    let account2 = require_cli_field("account2", &args.account2)?;
+    let entry_id2 = require_cli_field("entry_id2", &args.entry_id2)?;
+    let gl_txn_id = crate::reconcile::reconcile_transfer(
+        &ledger_dir,
+        &account1,
+        &entry_id1,
+        &account2,
+        &entry_id2,
+    )
+    .map_err(|err| std::io::Error::other(err.to_string()))?;
+    println!("{gl_txn_id}");
+    Ok(())
+}
+
+fn map_entries_for_cli(
+    entries: Vec<crate::account_journal::AccountEntry>,
+) -> Vec<CliAccountJournalEntry> {
+    entries
+        .into_iter()
+        .map(|entry| {
+            let status = match entry.status {
+                crate::account_journal::EntryStatus::Cleared => "cleared",
+                crate::account_journal::EntryStatus::Pending => "pending",
+                crate::account_journal::EntryStatus::Unmarked => "unmarked",
+            };
+            let is_transfer = crate::transfer_detector::is_probable_transfer(&entry.description);
+            CliAccountJournalEntry {
+                id: entry.id,
+                date: entry.date,
+                status: status.to_string(),
+                description: entry.description,
+                comment: entry.comment,
+                evidence: entry.evidence,
+                reconciled: entry.reconciled,
+                is_transfer,
+            }
+        })
+        .collect()
+}
+
+fn evidence_ref_matches_document(evidence_ref: &str, document_name: &str) -> bool {
+    evidence_ref.starts_with(document_name)
+        && evidence_ref
+            .get(document_name.len()..)
+            .map(|rest| rest.starts_with(':') || rest.starts_with('#'))
+            .unwrap_or(false)
+}
+
+fn resolve_cli_ledger_dir(
+    ledger: Option<PathBuf>,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<PathBuf, Box<dyn Error>> {
+    match ledger {
+        Some(path) => Ok(crate::ledger::ensure_refreshmint_extension(path)?),
+        None => default_ledger_dir(context),
+    }
+}
+
+fn require_cli_field(field_name: &str, value: &str) -> Result<String, Box<dyn Error>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{field_name} is required"),
+        )
+        .into());
+    }
+    Ok(trimmed.to_string())
 }
 
 fn parse_prompt_overrides(
