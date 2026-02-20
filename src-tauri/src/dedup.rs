@@ -226,6 +226,11 @@ fn match_proposed(
                 existing_index: candidates[0],
             };
         }
+        if candidates.len() > 1 {
+            return DedupResult::Ambiguous {
+                candidate_indices: candidates,
+            };
+        }
     }
 
     // Step 3: Fuzzy match (across other documents)
@@ -675,5 +680,88 @@ mod tests {
         assert!(dates_within_tolerance("2024-01-01", "2024-01-01", 1));
         assert!(dates_within_tolerance("2024-01-01", "2024-01-02", 1));
         assert!(!dates_within_tolerance("2024-01-01", "2024-01-03", 1));
+    }
+
+    #[test]
+    fn same_evidence_amount_change_updates_existing_entry() {
+        let root = temp_dir("same-evidence-amount-change");
+        let existing = vec![make_entry(
+            "e1",
+            "2024-01-01",
+            "Coffee",
+            EntryStatus::Pending,
+            "-10.00",
+            &["doc-a.csv:1:1"],
+        )];
+
+        let mut proposed = make_txn("2024-01-01", "Coffee", "Cleared", "doc-a.csv:1:1");
+        proposed
+            .ttags
+            .push(("amount".to_string(), "-11.50 USD".to_string()));
+
+        let actions = run_dedup(
+            &existing,
+            &[proposed.clone()],
+            "doc-a.csv",
+            &DedupConfig::default(),
+        );
+        let updated = apply_dedup_actions(
+            &root,
+            "test-acct",
+            existing,
+            &actions,
+            "Assets:Checking",
+            "Equity:Unreconciled:Checking",
+            Some("test:latest"),
+        )
+        .expect("apply_dedup_actions");
+
+        let updated_amount = updated[0]
+            .postings
+            .first()
+            .and_then(|p| p.amount.as_ref())
+            .map(|a| a.quantity.clone())
+            .expect("first posting amount");
+        assert_eq!(updated_amount, "-11.50");
+        assert_eq!(updated[0].status, EntryStatus::Cleared);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ambiguous_bank_id_match_requires_review() {
+        let mut existing = vec![
+            make_entry(
+                "e1",
+                "2024-01-01",
+                "Transfer A",
+                EntryStatus::Cleared,
+                "-10.00",
+                &["doc-a.csv:1:1"],
+            ),
+            make_entry(
+                "e2",
+                "2024-01-01",
+                "Transfer B",
+                EntryStatus::Cleared,
+                "-10.00",
+                &["doc-c.csv:1:1"],
+            ),
+        ];
+        existing[0]
+            .tags
+            .push(("bankId".to_string(), "FIT-123".to_string()));
+        existing[1]
+            .tags
+            .push(("bankId".to_string(), "FIT-123".to_string()));
+
+        let mut proposed = make_txn("2024-01-01", "Transfer", "Cleared", "doc-b.csv:1:1");
+        proposed
+            .ttags
+            .push(("bankId".to_string(), "FIT-123".to_string()));
+
+        let actions = run_dedup(&existing, &[proposed], "doc-b.csv", &DedupConfig::default());
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0].result, DedupResult::Ambiguous { .. }));
     }
 }
