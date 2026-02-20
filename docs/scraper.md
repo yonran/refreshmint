@@ -44,6 +44,8 @@ Errors thrown from your script fail the scrape run.
 
 - Domain checks must compare the URL prefix to the full origin (for example `https://secure.bankofamerica.com/`), not a substring match.
 - Prefer `const url = await page.url(); if (!url.startsWith("https://example.com/")) { ... }` over checks like `url.includes("example.com")`.
+- When adding a new code path/branch, add a brief `UNTESTED` comment until that exact branch is exercised in a real run; remove or update the comment after verification.
+- For any code path, uniquely log the branch that we take so that you will see whether it is actually being executed. If it is an inner loop, remove the logging after you have tested it if the logging is too verbose.
 
 ## Recommended debug-first flow
 
