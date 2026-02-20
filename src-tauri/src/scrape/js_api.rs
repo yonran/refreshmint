@@ -36,12 +36,37 @@ struct ResponseCaptureState {
     task: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TabSummary {
+    index: usize,
+    target_id: String,
+    url: String,
+    current: bool,
+}
+
+#[derive(Debug, Clone)]
+struct OpenTab {
+    page: chromiumoxide::Page,
+    target_id: String,
+    opener_target_id: Option<String>,
+    url: String,
+}
+
+#[derive(Debug, Clone)]
+struct TabMetadata {
+    target_id: String,
+    opener_target_id: Option<String>,
+}
+
 pub type SecretDeclarations = BTreeMap<String, BTreeSet<String>>;
 pub type PromptOverrides = BTreeMap<String, String>;
 
 /// Shared state backing the `page` JS object.
 pub struct PageInner {
     pub page: chromiumoxide::Page,
+    pub browser: Arc<Mutex<chromiumoxide::browser::Browser>>,
+    pub known_tab_ids: BTreeSet<String>,
     pub secret_store: SecretStore,
     pub declared_secrets: SecretDeclarations,
     pub download_dir: PathBuf,
@@ -438,6 +463,9 @@ impl PageApi {
                         window.location.href = popupEvent.url;
                         return null;
                     }}
+                    if (typeof state.originalOpen === 'function') {{
+                        return state.originalOpen.call(window, url, target, features);
+                    }}
                     return null;
                 }};
                 window.__refreshmintPopupState = state;
@@ -473,6 +501,109 @@ impl PageApi {
         } else {
             Ok("[]".to_string())
         }
+    }
+
+    /// List open tabs as JSON.
+    #[qjs(rename = "tabs")]
+    pub async fn js_tabs(&self) -> JsResult<String> {
+        let current_target = {
+            let inner = self.inner.lock().await;
+            inner.page.target_id().as_ref().to_string()
+        };
+        let tabs = self.fetch_open_tabs().await?;
+        let mut summaries = Vec::new();
+        let mut tab_ids = BTreeSet::new();
+
+        for (index, tab) in tabs.iter().enumerate() {
+            let target_id = tab.target_id.clone();
+            tab_ids.insert(target_id.clone());
+            summaries.push(TabSummary {
+                index,
+                target_id: target_id.clone(),
+                url: tab.url.clone(),
+                current: target_id == current_target,
+            });
+        }
+
+        {
+            let mut inner = self.inner.lock().await;
+            inner.known_tab_ids = tab_ids;
+            if !summaries.iter().any(|s| s.current) {
+                if let Some(first_tab) = tabs.first() {
+                    inner.page = first_tab.page.clone();
+                }
+            }
+        }
+
+        serde_json::to_string(&summaries)
+            .map_err(|e| js_err(format!("tabs serialization failed: {e}")))
+    }
+
+    /// Select the active tab by index and return its URL.
+    #[qjs(rename = "selectTab")]
+    pub async fn js_select_tab(&self, index: i32) -> JsResult<String> {
+        if index < 0 {
+            return Err(js_err(format!(
+                "selectTab index must be >= 0 (got {index})"
+            )));
+        }
+        let tabs = self.fetch_open_tabs().await?;
+        let idx = index as usize;
+        let Some(tab) = tabs.get(idx).cloned() else {
+            return Err(js_err(format!(
+                "selectTab index out of range: {idx} (open tabs: {})",
+                tabs.len()
+            )));
+        };
+
+        tab.page
+            .bring_to_front()
+            .await
+            .map_err(|e| js_err(format!("selectTab bring_to_front failed: {e}")))?;
+
+        let tab_ids = tabs
+            .iter()
+            .map(|t| t.target_id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let mut inner = self.inner.lock().await;
+        inner.page = tab.page;
+        inner.known_tab_ids = tab_ids;
+        Ok(tab.url)
+    }
+
+    /// Wait for a newly opened tab (popup-like page) and switch to it.
+    ///
+    /// Returns the new tab as JSON: `{ index, targetId, url, current }`.
+    #[qjs(rename = "waitForPopup")]
+    pub async fn js_wait_for_popup(&self, timeout_ms: Option<u64>) -> JsResult<String> {
+        let summary = self
+            .wait_for_popup_summary(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS))
+            .await?;
+        serde_json::to_string(&summary)
+            .map_err(|e| js_err(format!("waitForPopup serialization failed: {e}")))
+    }
+
+    /// Playwright-style event waiter.
+    ///
+    /// Currently supports only `popup`.
+    #[qjs(rename = "waitForEvent")]
+    pub async fn js_wait_for_event(
+        &self,
+        event: String,
+        timeout_ms: Option<u64>,
+    ) -> JsResult<String> {
+        let normalized = event.trim().to_ascii_lowercase();
+        if normalized != "popup" {
+            return Err(js_err(format!(
+                "waitForEvent currently supports only \"popup\" (got {event})"
+            )));
+        }
+        let summary = self
+            .wait_for_popup_summary(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS))
+            .await?;
+        serde_json::to_string(&summary)
+            .map_err(|e| js_err(format!("waitForEvent serialization failed: {e}")))
     }
 
     /// Click an element matching the CSS selector.
@@ -906,6 +1037,150 @@ impl PageApi {
 }
 
 impl PageApi {
+    async fn fetch_open_tabs(&self) -> JsResult<Vec<OpenTab>> {
+        let browser = {
+            let inner = self.inner.lock().await;
+            inner.browser.clone()
+        };
+
+        let target_infos = {
+            let mut guard = browser.lock().await;
+            guard
+                .fetch_targets()
+                .await
+                .map_err(|e| js_err(format!("tab sync failed to fetch targets: {e}")))?
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let pages = {
+            let guard = browser.lock().await;
+            guard
+                .pages()
+                .await
+                .map_err(|e| js_err(format!("tab sync failed to list pages: {e}")))?
+        };
+        let mut page_by_target = pages
+            .into_iter()
+            .map(|page| (page.target_id().as_ref().to_string(), page))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut tabs = Vec::new();
+        for info in target_infos {
+            if info.r#type != "page" {
+                continue;
+            }
+            let target_id = info.target_id.as_ref().to_string();
+            let Some(page) = page_by_target.remove(&target_id) else {
+                continue;
+            };
+            tabs.push(OpenTab {
+                page,
+                target_id,
+                opener_target_id: info.opener_id.as_ref().map(|id| id.as_ref().to_string()),
+                url: info.url,
+            });
+        }
+
+        // Keep any pages that were not part of the current target snapshot.
+        for (target_id, page) in page_by_target {
+            let url = page
+                .url()
+                .await
+                .map_err(|e| js_err(format!("tab sync failed to read URL: {e}")))?
+                .unwrap_or_default()
+                .to_string();
+            tabs.push(OpenTab {
+                opener_target_id: page.opener_id().as_ref().map(|id| id.as_ref().to_string()),
+                page,
+                target_id,
+                url,
+            });
+        }
+
+        Ok(tabs)
+    }
+
+    async fn wait_for_popup_summary(&self, timeout_ms: u64) -> JsResult<TabSummary> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let opener_target = {
+            let inner = self.inner.lock().await;
+            inner.page.target_id().as_ref().to_string()
+        };
+        let baseline_tabs = self.fetch_open_tabs().await?;
+        {
+            let mut inner = self.inner.lock().await;
+            inner.known_tab_ids = baseline_tabs
+                .iter()
+                .map(|tab| tab.target_id.clone())
+                .collect::<BTreeSet<_>>();
+        };
+
+        loop {
+            let tabs = self.fetch_open_tabs().await?;
+            let metadata = tabs
+                .iter()
+                .map(|tab| TabMetadata {
+                    target_id: tab.target_id.clone(),
+                    opener_target_id: tab.opener_target_id.clone(),
+                })
+                .collect::<Vec<_>>();
+            let tab_ids = metadata
+                .iter()
+                .map(|tab| tab.target_id.clone())
+                .collect::<BTreeSet<_>>();
+
+            let maybe_new_target = {
+                let mut inner = self.inner.lock().await;
+                let discovered = pick_popup_target(&inner.known_tab_ids, &metadata, &opener_target);
+                inner.known_tab_ids = tab_ids;
+                discovered
+            };
+
+            if let Some(new_target_id) = maybe_new_target {
+                let Some((index, popup_tab)) = tabs
+                    .iter()
+                    .enumerate()
+                    .find(|(_, tab)| tab.target_id == new_target_id)
+                    .map(|(index, tab)| (index, tab.clone()))
+                else {
+                    return Err(js_err(format!(
+                        "waitForPopup failed: discovered target {new_target_id} but could not resolve page handle"
+                    )));
+                };
+
+                popup_tab
+                    .page
+                    .bring_to_front()
+                    .await
+                    .map_err(|e| js_err(format!("waitForPopup bring_to_front failed: {e}")))?;
+                let url = popup_tab
+                    .page
+                    .url()
+                    .await
+                    .map_err(|e| js_err(format!("waitForPopup failed to read URL: {e}")))?
+                    .unwrap_or_default()
+                    .to_string();
+                {
+                    let mut inner = self.inner.lock().await;
+                    inner.page = popup_tab.page;
+                }
+                return Ok(TabSummary {
+                    index,
+                    target_id: new_target_id,
+                    url,
+                    current: true,
+                });
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(js_err(format!(
+                    "TimeoutError: waitForPopup timed out after {timeout_ms}ms"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+        }
+    }
+
     async fn current_url(&self) -> JsResult<String> {
         let inner = self.inner.lock().await;
         let url = inner
@@ -1107,6 +1382,31 @@ fn url_matches_pattern(url: &str, pattern: &str) -> bool {
     }
 
     true
+}
+
+fn pick_popup_target(
+    known_tab_ids: &BTreeSet<String>,
+    tabs: &[TabMetadata],
+    opener_target: &str,
+) -> Option<String> {
+    let mut only_new_without_opener = None;
+    let mut new_without_opener_count = 0usize;
+
+    for tab in tabs {
+        if known_tab_ids.contains(&tab.target_id) {
+            continue;
+        }
+        if tab.opener_target_id.as_deref() == Some(opener_target) {
+            return Some(tab.target_id.clone());
+        }
+        only_new_without_opener = Some(tab.target_id.clone());
+        new_without_opener_count += 1;
+    }
+
+    if new_without_opener_count == 1 {
+        return only_new_without_opener;
+    }
+    None
 }
 
 fn network_method_from_headers(
@@ -1812,6 +2112,62 @@ mod tests {
             "https://example.com/a/b/c",
             "https://example.org/*"
         ));
+    }
+
+    #[test]
+    fn pick_popup_target_prefers_matching_opener() {
+        let known = ["a".to_string()].into_iter().collect::<BTreeSet<_>>();
+        let tabs = vec![
+            TabMetadata {
+                target_id: "a".to_string(),
+                opener_target_id: None,
+            },
+            TabMetadata {
+                target_id: "b".to_string(),
+                opener_target_id: None,
+            },
+            TabMetadata {
+                target_id: "c".to_string(),
+                opener_target_id: Some("a".to_string()),
+            },
+        ];
+        assert_eq!(pick_popup_target(&known, &tabs, "a"), Some("c".to_string()));
+    }
+
+    #[test]
+    fn pick_popup_target_falls_back_to_single_new_tab() {
+        let known = ["a".to_string()].into_iter().collect::<BTreeSet<_>>();
+        let tabs = vec![
+            TabMetadata {
+                target_id: "a".to_string(),
+                opener_target_id: None,
+            },
+            TabMetadata {
+                target_id: "b".to_string(),
+                opener_target_id: None,
+            },
+        ];
+        assert_eq!(pick_popup_target(&known, &tabs, "a"), Some("b".to_string()));
+    }
+
+    #[test]
+    fn pick_popup_target_returns_none_for_ambiguous_new_tabs() {
+        let known = ["a".to_string()].into_iter().collect::<BTreeSet<_>>();
+        let tabs = vec![
+            TabMetadata {
+                target_id: "a".to_string(),
+                opener_target_id: None,
+            },
+            TabMetadata {
+                target_id: "b".to_string(),
+                opener_target_id: None,
+            },
+            TabMetadata {
+                target_id: "c".to_string(),
+                opener_target_id: None,
+            },
+        ];
+        assert_eq!(pick_popup_target(&known, &tabs, "a"), None);
     }
 
     #[test]

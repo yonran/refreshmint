@@ -22,6 +22,39 @@ try {
 }
 "##;
 
+const POPUP_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("integration popup start");
+  const popupHtml = encodeURIComponent("<div id='popup-marker'>popup</div>");
+  const openerHtml = encodeURIComponent(`
+    <button id="open">Open Popup</button>
+    <script>
+      document.getElementById("open").addEventListener("click", () => {
+        window.open("data:text/html,${popupHtml}", "_blank");
+      });
+    </script>
+  `);
+  await page.goto(`data:text/html,${openerHtml}`);
+  const popupPromise = page.waitForEvent("popup", 10000);
+  await page.click("#open");
+  const popup = JSON.parse(await popupPromise);
+  if (!popup || popup.current !== true || typeof popup.targetId !== "string" || popup.targetId.length === 0) {
+    throw new Error("invalid popup summary");
+  }
+  await page.waitForLoadState("domcontentloaded", 10000);
+  const marker = await page.evaluate("document.getElementById('popup-marker') ? 'yes' : 'no'");
+  if (marker !== "yes") {
+    throw new Error("did not switch to popup tab");
+  }
+  await refreshmint.saveResource("popup.bin", [111, 107]);
+  refreshmint.log("integration popup done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("integration popup error: " + msg);
+  throw e;
+}
+"##;
+
 const OVERLAY_DRIVER_SOURCE: &str = r##"
 try {
   refreshmint.log("integration overlay start");
@@ -64,6 +97,7 @@ try {
   throw e;
 }
 "##;
+
 struct TestSandbox {
     root: PathBuf,
 }
@@ -132,6 +166,54 @@ fn scrape_smoke_driver_writes_output() -> Result<(), Box<dyn Error>> {
         .join(EXTENSION_NAME)
         .join("output")
         .join("smoke.bin");
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn scrape_popup_wait_for_event_switches_tab() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping popup scrape test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let sandbox = TestSandbox::new("scrape-popup")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
+    fs::write(&driver_path, POPUP_DRIVER_SOURCE)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        account: ACCOUNT_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    scrape::run_scrape(config)?;
+
+    let output_file = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("popup.bin");
     let bytes = fs::read(&output_file)?;
     assert_eq!(bytes, b"ok");
 

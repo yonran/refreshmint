@@ -150,7 +150,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
     use tokio::sync::Mutex;
 
     type DebugRuntimeState = (
-        Browser,
+        Arc<Mutex<Browser>>,
         tokio::task::JoinHandle<()>,
         Arc<Mutex<super::js_api::PageInner>>,
         Arc<Mutex<super::js_api::RefreshmintInner>>,
@@ -202,15 +202,24 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
             eprintln!("Using browser: {}", chrome_path.display());
             eprintln!("Profile dir: {}", profile_dir.display());
 
-            let (mut browser, handler) = super::browser::launch_browser(&chrome_path, &profile_dir)
-                .await
-                .map_err(|err| err.to_string())?;
-            let page = super::browser::open_start_page(&mut browser)
-                .await
-                .map_err(|err| err.to_string())?;
+            let (browser_instance, handler) =
+                super::browser::launch_browser(&chrome_path, &profile_dir)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            let browser = Arc::new(Mutex::new(browser_instance));
+            let page = {
+                let mut guard = browser.lock().await;
+                super::browser::open_start_page(&mut guard)
+                    .await
+                    .map_err(|err| err.to_string())?
+            };
+            let mut known_tab_ids = std::collections::BTreeSet::new();
+            known_tab_ids.insert(page.target_id().as_ref().to_string());
 
             let page_inner = Arc::new(Mutex::new(super::js_api::PageInner {
                 page,
+                browser: browser.clone(),
+                known_tab_ids,
                 secret_store,
                 declared_secrets,
                 download_dir,
@@ -330,6 +339,10 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
         }
 
         drop(listener);
+        {
+            let guard = browser_instance.lock().await;
+            let _ = guard.close().await;
+        }
         drop(browser_instance);
         let _ = tokio::time::timeout(Duration::from_secs(5), handler_handle).await;
         Ok::<(), Box<dyn Error>>(())

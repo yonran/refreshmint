@@ -344,15 +344,20 @@ pub async fn run_scrape_async(
     eprintln!("Profile dir: {}", profile_dir.display());
 
     eprintln!("Launching browser...");
-    let (mut browser_instance, handler_handle) =
-        browser::launch_browser(&chrome_path, &profile_dir)
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    let (browser_instance, handler_handle) = browser::launch_browser(&chrome_path, &profile_dir)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
     eprintln!("Browser launched.");
+    let browser = Arc::new(Mutex::new(browser_instance));
 
     // 6. Open a new page
     eprintln!("Opening new page...");
-    let page = browser::open_start_page(&mut browser_instance).await?;
+    let page = {
+        let mut guard = browser.lock().await;
+        browser::open_start_page(&mut guard).await?
+    };
+    let mut known_tab_ids = BTreeSet::new();
+    known_tab_ids.insert(page.target_id().as_ref().to_string());
     eprintln!("Page opened.");
 
     // 7. Set up shared state
@@ -361,6 +366,8 @@ pub async fn run_scrape_async(
 
     let page_inner = Arc::new(Mutex::new(js_api::PageInner {
         page,
+        browser: browser.clone(),
+        known_tab_ids,
         secret_store,
         declared_secrets,
         download_dir,
@@ -424,7 +431,11 @@ pub async fn run_scrape_async(
 
     // 11. Close browser
     eprintln!("Closing browser...");
-    drop(browser_instance);
+    {
+        let guard = browser.lock().await;
+        let _ = guard.close().await;
+    }
+    drop(browser);
     // Wait briefly for handler to clean up, but don't block indefinitely
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handler_handle).await;
     eprintln!("Done.");
