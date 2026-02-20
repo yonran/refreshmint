@@ -20,6 +20,7 @@ pub fn reconcile_entry(
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // Read account journal
     let mut entries = account_journal::read_journal(ledger_dir, account_name)?;
+    let original_entries = entries.clone();
     let entry_idx = entries
         .iter()
         .position(|e| e.id == entry_id)
@@ -64,10 +65,6 @@ pub fn reconcile_entry(
         posting_index,
     );
 
-    // Append to general.journal
-    let journal_path = ledger_dir.join("general.journal");
-    append_to_journal(&journal_path, &gl_text)?;
-
     // Update account journal entry with reconciled tag
     let gl_ref = format!("general.journal:{gl_txn_id}");
     if let Some(posting_idx) = posting_index {
@@ -78,8 +75,15 @@ pub fn reconcile_entry(
         entries[entry_idx].reconciled = Some(gl_ref);
     }
 
-    // Write updated account journal
+    // Write updated account journal first. If this fails, nothing else was mutated.
     account_journal::write_journal(ledger_dir, account_name, &entries)?;
+
+    // Append to general.journal; rollback account journal on failure.
+    let journal_path = ledger_dir.join("general.journal");
+    if let Err(err) = append_to_journal(&journal_path, &gl_text) {
+        let _ = account_journal::write_journal(ledger_dir, account_name, &original_entries);
+        return Err(err.into());
+    }
 
     // Log GL operation
     let op = operations::GlOperation::Reconcile {
@@ -89,7 +93,11 @@ pub fn reconcile_entry(
         posting_index,
         timestamp: operations::now_timestamp(),
     };
-    operations::append_gl_operation(ledger_dir, &op)?;
+    if let Err(err) = operations::append_gl_operation(ledger_dir, &op) {
+        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
+        let _ = account_journal::write_journal(ledger_dir, account_name, &original_entries);
+        return Err(err.into());
+    }
 
     Ok(gl_txn_id)
 }
@@ -103,6 +111,7 @@ pub fn unreconcile_entry(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Read account journal
     let mut entries = account_journal::read_journal(ledger_dir, account_name)?;
+    let original_entries = entries.clone();
     let entry_idx = entries
         .iter()
         .position(|e| e.id == entry_id)
@@ -110,28 +119,47 @@ pub fn unreconcile_entry(
 
     // Get the GL reference to remove
     let gl_ref = if let Some(posting_idx) = posting_index {
-        let pos = entries[entry_idx]
+        let pos = original_entries[entry_idx]
             .reconciled_postings
             .iter()
             .position(|(idx, _)| *idx == posting_idx)
             .ok_or_else(|| {
                 format!("posting {posting_idx} of entry {entry_id} is not reconciled")
             })?;
-        let (_, ref_str) = entries[entry_idx].reconciled_postings.remove(pos);
+        let (_, ref_str) = original_entries[entry_idx].reconciled_postings[pos].clone();
         ref_str
     } else {
-        entries[entry_idx]
+        original_entries[entry_idx]
             .reconciled
-            .take()
+            .clone()
             .ok_or_else(|| format!("entry {entry_id} is not reconciled"))?
     };
 
     // Remove the GL transaction from general.journal
     let gl_txn_id = gl_ref.strip_prefix("general.journal:").unwrap_or(&gl_ref);
-    remove_gl_transaction(ledger_dir, gl_txn_id)?;
+    let removed_gl_txn = remove_gl_transaction(ledger_dir, gl_txn_id)?;
+
+    // Update account journal entry state in memory
+    if let Some(posting_idx) = posting_index {
+        if let Some(pos) = entries[entry_idx]
+            .reconciled_postings
+            .iter()
+            .position(|(idx, _)| *idx == posting_idx)
+        {
+            entries[entry_idx].reconciled_postings.remove(pos);
+        }
+    } else {
+        entries[entry_idx].reconciled = None;
+    }
 
     // Write updated account journal
-    account_journal::write_journal(ledger_dir, account_name, &entries)?;
+    if let Err(err) = account_journal::write_journal(ledger_dir, account_name, &entries) {
+        if let Some(removed) = removed_gl_txn {
+            let journal_path = ledger_dir.join("general.journal");
+            let _ = append_to_journal(&journal_path, &removed);
+        }
+        return Err(err.into());
+    }
 
     // Log undo operation
     let op = operations::GlOperation::UndoReconcile {
@@ -140,7 +168,14 @@ pub fn unreconcile_entry(
         posting_index,
         timestamp: operations::now_timestamp(),
     };
-    operations::append_gl_operation(ledger_dir, &op)?;
+    if let Err(err) = operations::append_gl_operation(ledger_dir, &op) {
+        let _ = account_journal::write_journal(ledger_dir, account_name, &original_entries);
+        if let Some(removed) = removed_gl_txn {
+            let journal_path = ledger_dir.join("general.journal");
+            let _ = append_to_journal(&journal_path, &removed);
+        }
+        return Err(err.into());
+    }
 
     Ok(())
 }
@@ -156,6 +191,8 @@ pub fn reconcile_transfer(
     // Read both account journals
     let mut entries1 = account_journal::read_journal(ledger_dir, account1)?;
     let mut entries2 = account_journal::read_journal(ledger_dir, account2)?;
+    let original_entries1 = entries1.clone();
+    let original_entries2 = entries2.clone();
 
     let idx1 = entries1
         .iter()
@@ -184,17 +221,26 @@ pub fn reconcile_transfer(
         &gl_txn_id,
     );
 
-    // Append to general.journal
-    let journal_path = ledger_dir.join("general.journal");
-    append_to_journal(&journal_path, &gl_text)?;
-
     // Update both account journal entries
     let gl_ref = format!("general.journal:{gl_txn_id}");
     entries1[idx1].reconciled = Some(gl_ref.clone());
     entries2[idx2].reconciled = Some(gl_ref);
 
-    account_journal::write_journal(ledger_dir, account1, &entries1)?;
-    account_journal::write_journal(ledger_dir, account2, &entries2)?;
+    if let Err(err) = account_journal::write_journal(ledger_dir, account1, &entries1) {
+        return Err(err.into());
+    }
+    if let Err(err) = account_journal::write_journal(ledger_dir, account2, &entries2) {
+        let _ = account_journal::write_journal(ledger_dir, account1, &original_entries1);
+        return Err(err.into());
+    }
+
+    // Append to general.journal
+    let journal_path = ledger_dir.join("general.journal");
+    if let Err(err) = append_to_journal(&journal_path, &gl_text) {
+        let _ = account_journal::write_journal(ledger_dir, account1, &original_entries1);
+        let _ = account_journal::write_journal(ledger_dir, account2, &original_entries2);
+        return Err(err.into());
+    }
 
     // Log transfer match
     let op = operations::GlOperation::TransferMatch {
@@ -210,7 +256,12 @@ pub fn reconcile_transfer(
         ],
         timestamp: operations::now_timestamp(),
     };
-    operations::append_gl_operation(ledger_dir, &op)?;
+    if let Err(err) = operations::append_gl_operation(ledger_dir, &op) {
+        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
+        let _ = account_journal::write_journal(ledger_dir, account1, &original_entries1);
+        let _ = account_journal::write_journal(ledger_dir, account2, &original_entries2);
+        return Err(err.into());
+    }
 
     Ok(gl_txn_id)
 }
@@ -326,62 +377,57 @@ fn append_to_journal(journal_path: &Path, text: &str) -> io::Result<()> {
 fn remove_gl_transaction(
     ledger_dir: &Path,
     gl_txn_id: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
     let journal_path = ledger_dir.join("general.journal");
     if !journal_path.exists() {
-        return Ok(());
+        return Ok(None);
     }
 
     let content = fs::read_to_string(&journal_path)?;
     let marker = format!("id: {gl_txn_id}");
+    let mut kept_blocks = Vec::new();
+    let mut removed_block = None;
 
-    let mut output = String::new();
-    let mut skip_block = false;
-    let mut last_was_blank = false;
-
-    for line in content.lines() {
-        if skip_block {
-            // Continue skipping indented lines (postings/comments)
-            if line.starts_with(' ') || line.starts_with('\t') || line.is_empty() {
-                if line.is_empty() {
-                    skip_block = false;
-                }
-                continue;
-            }
-            skip_block = false;
-        }
-
-        // Check if this line starts a transaction block containing our marker
-        // We need to look ahead, but a simpler approach: check if the comment
-        // contains our id marker.
-        if line.contains(&marker) {
-            skip_block = true;
-            continue;
-        }
-
-        // Avoid double blank lines
-        if line.is_empty() {
-            if last_was_blank {
-                continue;
-            }
-            last_was_blank = true;
+    for block in split_journal_blocks(&content) {
+        if removed_block.is_none() && block.contains(&marker) {
+            removed_block = Some(block);
         } else {
-            last_was_blank = false;
+            kept_blocks.push(block);
         }
-
-        output.push_str(line);
-        output.push('\n');
     }
 
-    // Trim trailing whitespace
-    let trimmed = output.trim_end();
-    let mut final_content = trimmed.to_string();
+    let mut final_content = kept_blocks.join("\n\n");
     if !final_content.is_empty() {
         final_content.push('\n');
     }
-
     fs::write(&journal_path, final_content)?;
-    Ok(())
+    Ok(removed_block)
+}
+
+fn split_journal_blocks(content: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+
+    for line in content.lines() {
+        let starts_new_block = !line.trim().is_empty()
+            && !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && !current.trim().is_empty();
+        if starts_new_block {
+            blocks.push(current.trim_end().to_string());
+            current.clear();
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line);
+    }
+
+    if !current.trim().is_empty() {
+        blocks.push(current.trim_end().to_string());
+    }
+
+    blocks
 }
 
 #[cfg(test)]
