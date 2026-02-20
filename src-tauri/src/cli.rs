@@ -181,7 +181,7 @@ struct ScrapeArgs {
     #[arg(long)]
     account: String,
     #[arg(long)]
-    extension: String,
+    extension: Option<String>,
     #[arg(long)]
     ledger: Option<PathBuf>,
     #[arg(long)]
@@ -225,7 +225,7 @@ struct AccountExtractArgs {
     #[arg(long)]
     account: String,
     #[arg(long)]
-    extension: String,
+    extension: Option<String>,
     #[arg(long)]
     ledger: Option<PathBuf>,
     #[arg(
@@ -660,11 +660,18 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
         None => default_ledger_dir(context)?,
     };
 
+    let extension_name = crate::account_config::resolve_extension(
+        &ledger_dir,
+        &args.account,
+        args.extension.as_deref(),
+    )
+    .map_err(std::io::Error::other)?;
+
     let prompt_overrides = parse_prompt_overrides(&args.prompt)?;
 
     let config = crate::scrape::ScrapeConfig {
         account: args.account,
-        extension_name: args.extension,
+        extension_name,
         ledger_dir,
         profile_override: args.profile,
         prompt_overrides,
@@ -726,7 +733,12 @@ fn run_account_extract(
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
 
     let account_name = require_cli_field("account", &args.account)?;
-    let extension_name = require_cli_field("extension", &args.extension)?;
+    let extension_name = crate::account_config::resolve_extension(
+        &ledger_dir,
+        &account_name,
+        args.extension.as_deref(),
+    )
+    .map_err(std::io::Error::other)?;
     let listed_documents = crate::extract::list_documents(&ledger_dir, &account_name)?
         .into_iter()
         .map(|d| d.filename)
@@ -1135,7 +1147,7 @@ mod tests {
             Some(Commands::Account(args)) => match args.command {
                 AccountCommand::Extract(extract) => {
                     assert_eq!(extract.account, "chase");
-                    assert_eq!(extract.extension, "chase-driver");
+                    assert_eq!(extract.extension, Some("chase-driver".to_string()));
                     assert_eq!(
                         extract.document,
                         vec!["2024-01.csv".to_string(), "2024-02.csv".to_string()]

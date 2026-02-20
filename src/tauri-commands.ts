@@ -267,3 +267,26 @@ export async function reconcileTransfer(
         entryId2,
     });
 }
+
+export interface AccountConfig {
+    extension?: string;
+}
+
+export async function getAccountConfig(
+    ledger: string,
+    accountName: string,
+): Promise<AccountConfig> {
+    return invoke('get_account_config', { ledger, accountName });
+}
+
+export async function setAccountExtension(
+    ledger: string,
+    accountName: string,
+    extension: string,
+): Promise<void> {
+    await invoke('set_account_extension', {
+        ledger,
+        accountName,
+        extension,
+    });
+}

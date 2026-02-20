@@ -207,7 +207,7 @@ pub fn run_extraction(
     extension_name: &str,
     document_names: &[String],
 ) -> Result<ExtractionResult, Box<dyn std::error::Error + Send + Sync>> {
-    let extension_dir = ledger_dir.join("extensions").join(extension_name);
+    let extension_dir = crate::account_config::resolve_extension_dir(ledger_dir, extension_name);
     let manifest = crate::scrape::load_manifest(&extension_dir)?;
     let documents_dir = account_journal::account_documents_dir(ledger_dir, account_name);
 

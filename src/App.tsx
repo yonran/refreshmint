@@ -24,6 +24,7 @@ import {
     type AmountTotal,
     addTransaction,
     addTransactionText,
+    getAccountConfig,
     getAccountJournal,
     getScrapeDebugSessionSocket,
     getUnreconciled,
@@ -40,6 +41,7 @@ import {
     reconcileEntry,
     reconcileTransfer,
     runExtraction,
+    setAccountExtension,
     startScrapeDebugSession,
     stopScrapeDebugSession,
     runScrape,
@@ -354,6 +356,42 @@ function App() {
                     }
                 });
         }, 250);
+
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timer);
+        };
+    }, [ledgerPath, scrapeAccount]);
+
+    // Load account config and auto-populate extension when account changes
+    useEffect(() => {
+        if (ledgerPath === null) {
+            return;
+        }
+
+        const account = scrapeAccount.trim();
+        if (account.length === 0) {
+            return;
+        }
+
+        let cancelled = false;
+        const timer = window.setTimeout(() => {
+            void getAccountConfig(ledgerPath, account)
+                .then((config) => {
+                    if (cancelled) {
+                        return;
+                    }
+                    if (
+                        config.extension != null &&
+                        config.extension.length > 0
+                    ) {
+                        setScrapeExtension(config.extension);
+                    }
+                })
+                .catch(() => {
+                    // Non-fatal: config may not exist yet
+                });
+        }, 100);
 
         return () => {
             cancelled = true;
@@ -874,11 +912,60 @@ function App() {
             }
 
             await reloadScrapeExtensions(ledger.path, loadedExtensionName);
+            // Save the loaded extension name in account config
+            const account = scrapeAccount.trim();
+            if (account.length > 0) {
+                try {
+                    await setAccountExtension(
+                        ledger.path,
+                        account,
+                        loadedExtensionName,
+                    );
+                } catch {
+                    // Non-fatal
+                }
+            }
             setScrapeStatus(`Loaded extension '${loadedExtensionName}'.`);
         } catch (error) {
             setScrapeStatus(`Failed to load extension: ${String(error)}`);
         } finally {
             setIsImportingScrapeExtension(false);
+        }
+    }
+
+    async function handleLoadUnpackedExtension() {
+        if (!ledger) {
+            return;
+        }
+
+        const selection = (await openDialog({
+            directory: true,
+            multiple: false,
+            title: 'Load unpacked extension directory',
+        })) as string | string[] | null;
+        if (selection === null) {
+            return;
+        }
+        const source = Array.isArray(selection) ? selection[0] : selection;
+        if (typeof source !== 'string' || source.length === 0) {
+            setScrapeStatus('Extension load canceled.');
+            return;
+        }
+
+        const account = scrapeAccount.trim();
+        if (account.length === 0) {
+            setScrapeStatus('Select an account first.');
+            return;
+        }
+
+        try {
+            await setAccountExtension(ledger.path, account, source);
+            setScrapeExtension(source);
+            setScrapeStatus(`Set unpacked extension: ${source}`);
+        } catch (error) {
+            setScrapeStatus(
+                `Failed to set unpacked extension: ${String(error)}`,
+            );
         }
     }
 
@@ -2076,6 +2163,18 @@ function App() {
                                         >
                                             Load directory...
                                         </button>
+                                        <button
+                                            className="ghost-button"
+                                            type="button"
+                                            disabled={
+                                                isImportingScrapeExtension
+                                            }
+                                            onClick={() => {
+                                                void handleLoadUnpackedExtension();
+                                            }}
+                                        >
+                                            Load unpacked...
+                                        </button>
                                     </div>
                                 </div>
                                 <div className="txn-grid">
@@ -2107,10 +2206,7 @@ function App() {
                                                 setScrapeStatus(null);
                                                 setPipelineStatus(null);
                                             }}
-                                            disabled={
-                                                isLoadingScrapeExtensions ||
-                                                scrapeExtensions.length === 0
-                                            }
+                                            disabled={isLoadingScrapeExtensions}
                                         >
                                             <option value="">
                                                 {isLoadingScrapeExtensions
@@ -2122,6 +2218,21 @@ function App() {
                                                     {name}
                                                 </option>
                                             ))}
+                                            {scrapeExtension.length > 0 &&
+                                            !scrapeExtensions.includes(
+                                                scrapeExtension,
+                                            ) ? (
+                                                <option value={scrapeExtension}>
+                                                    {scrapeExtension.includes(
+                                                        '/',
+                                                    ) ||
+                                                    scrapeExtension.includes(
+                                                        '\\',
+                                                    )
+                                                        ? `(unpacked) ${scrapeExtension.split('/').pop() ?? scrapeExtension}`
+                                                        : scrapeExtension}
+                                                </option>
+                                            ) : null}
                                         </select>
                                     </label>
                                 </div>

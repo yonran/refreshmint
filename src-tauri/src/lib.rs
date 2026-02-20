@@ -3,6 +3,7 @@ pub mod hledger;
 pub mod scrape;
 pub mod secret;
 
+pub mod account_config;
 pub mod account_journal;
 pub mod dedup;
 pub mod extract;
@@ -73,6 +74,8 @@ pub fn run_with_context(
             reconcile_entry,
             unreconcile_entry,
             reconcile_transfer,
+            get_account_config,
+            set_account_extension,
         ])
         .setup(|app| {
             binpath::init_from_app(app.handle());
@@ -333,13 +336,12 @@ async fn run_scrape(ledger: String, account: String, extension: String) -> Resul
     if account.is_empty() {
         return Err("account is required".to_string());
     }
-    let extension = extension.trim().to_string();
-    if extension.is_empty() {
-        return Err("extension is required".to_string());
-    }
 
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+
+    let extension = account_config::resolve_extension(&target_dir, &account, Some(&extension))
+        .map_err(|err| err.to_string())?;
 
     let config = scrape::ScrapeConfig {
         account,
@@ -375,7 +377,9 @@ fn run_extraction(
 ) -> Result<usize, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let account_name = require_non_empty_input("account_name", account_name)?;
-    let extension_name = require_non_empty_input("extension_name", extension_name)?;
+    let extension_name =
+        account_config::resolve_extension(&target_dir, &account_name, Some(&extension_name))
+            .map_err(|err| err.to_string())?;
 
     let result =
         extract::run_extraction(&target_dir, &account_name, &extension_name, &document_names)
@@ -437,6 +441,40 @@ fn run_extraction(
         .map_err(|err| err.to_string())?;
 
     Ok(new_count)
+}
+
+#[tauri::command]
+fn get_account_config(
+    ledger: String,
+    account_name: String,
+) -> Result<account_config::AccountConfig, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let account_name = require_non_empty_input("account_name", account_name)?;
+    Ok(account_config::read_account_config(
+        &target_dir,
+        &account_name,
+    ))
+}
+
+#[tauri::command]
+fn set_account_extension(
+    ledger: String,
+    account_name: String,
+    extension: String,
+) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let account_name = require_non_empty_input("account_name", account_name)?;
+    let extension = extension.trim().to_string();
+    let ext_value = if extension.is_empty() {
+        None
+    } else {
+        Some(extension)
+    };
+    let config = account_config::AccountConfig {
+        extension: ext_value,
+    };
+    account_config::write_account_config(&target_dir, &account_name, &config)
+        .map_err(|err| err.to_string())
 }
 
 fn evidence_ref_matches_document(evidence_ref: &str, document_name: &str) -> bool {

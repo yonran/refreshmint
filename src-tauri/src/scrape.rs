@@ -28,8 +28,6 @@ struct ExtensionManifest {
     #[serde(default)]
     secrets: std::collections::BTreeMap<String, Vec<String>>,
     #[serde(default)]
-    account: Option<String>,
-    #[serde(default)]
     extract: Option<String>,
     #[serde(default)]
     rules: Option<String>,
@@ -42,7 +40,6 @@ struct ExtensionManifest {
 /// Parsed extension manifest with all fields.
 pub struct ParsedManifest {
     pub secrets: js_api::SecretDeclarations,
-    pub account: Option<String>,
     pub extract: Option<String>,
     pub rules: Option<String>,
     pub id_field: Option<String>,
@@ -95,7 +92,6 @@ pub fn load_manifest(
 
     Ok(ParsedManifest {
         secrets: declared,
-        account: manifest.account,
         extract: manifest.extract,
         rules: manifest.rules,
         id_field: manifest.id_field,
@@ -300,10 +296,8 @@ pub fn list_runnable_extensions(
 pub async fn run_scrape_async(
     config: ScrapeConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let extension_dir = config
-        .ledger_dir
-        .join("extensions")
-        .join(&config.extension_name);
+    let extension_dir =
+        crate::account_config::resolve_extension_dir(&config.ledger_dir, &config.extension_name);
     // 1. Locate the driver script
     let driver_path = extension_dir.join("driver.mjs");
     if !driver_path.exists() {
@@ -314,8 +308,7 @@ pub async fn run_scrape_async(
     let manifest = load_manifest(&extension_dir)?;
     let declared_secrets = manifest.secrets;
 
-    // Resolve account name: manifest "account" field, or use config.account
-    let account_name = manifest.account.unwrap_or_else(|| config.account.clone());
+    let account_name = config.account.clone();
 
     // Generate scrape session ID
     let scrape_session_id = generate_scrape_session_id();
@@ -405,7 +398,25 @@ pub async fn run_scrape_async(
         }
     }
 
-    // 10. Close browser
+    // 10. Auto-save extension in account config if not already set
+    if result.is_ok() {
+        let existing =
+            crate::account_config::read_account_config(&config.ledger_dir, &account_name);
+        if existing.extension.is_none() {
+            let new_config = crate::account_config::AccountConfig {
+                extension: Some(config.extension_name.clone()),
+            };
+            if let Err(e) = crate::account_config::write_account_config(
+                &config.ledger_dir,
+                &account_name,
+                &new_config,
+            ) {
+                eprintln!("Warning: failed to save account config: {e}");
+            }
+        }
+    }
+
+    // 11. Close browser
     eprintln!("Closing browser...");
     drop(browser_instance);
     // Wait briefly for handler to clean up, but don't block indefinitely
