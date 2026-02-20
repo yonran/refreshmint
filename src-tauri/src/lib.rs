@@ -25,10 +25,27 @@ struct UiDebugSession {
     join_handle: std::thread::JoinHandle<()>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 struct SecretEntry {
     domain: String,
     name: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct AccountSecretEntry {
+    domain: String,
+    name: String,
+    #[serde(rename = "hasValue")]
+    has_value: bool,
+}
+
+#[derive(serde::Serialize)]
+struct SecretSyncResult {
+    required: Vec<SecretEntry>,
+    added: Vec<SecretEntry>,
+    #[serde(rename = "existingRequired")]
+    existing_required: Vec<SecretEntry>,
+    extras: Vec<SecretEntry>,
 }
 
 static UI_DEBUG_SESSION: std::sync::OnceLock<std::sync::Mutex<Option<UiDebugSession>>> =
@@ -60,6 +77,7 @@ pub fn run_with_context(
             list_scrape_extensions,
             load_scrape_extension,
             list_account_secrets,
+            sync_account_secrets_for_extension,
             add_account_secret,
             reenter_account_secret,
             remove_account_secret,
@@ -163,17 +181,113 @@ fn load_scrape_extension(ledger: String, source: String, replace: bool) -> Resul
 }
 
 #[tauri::command]
-fn list_account_secrets(account: String) -> Result<Vec<SecretEntry>, String> {
+fn list_account_secrets(account: String) -> Result<Vec<AccountSecretEntry>, String> {
     let account = require_non_empty_input("account", account)?;
     let store = crate::secret::SecretStore::new(account);
     let mut entries = store
+        .list_with_value_state()
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .map(|(domain, name, has_value)| AccountSecretEntry {
+            domain,
+            name,
+            has_value,
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
+    Ok(entries)
+}
+
+fn flatten_declared_secret_entries(
+    declared: &scrape::js_api::SecretDeclarations,
+) -> Vec<SecretEntry> {
+    let mut entries = declared
+        .iter()
+        .flat_map(|(domain, names)| {
+            names.iter().map(|name| SecretEntry {
+                domain: domain.clone(),
+                name: name.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
+    entries
+}
+
+fn classify_secret_entries(
+    required: &[SecretEntry],
+    existing: &[SecretEntry],
+) -> (Vec<SecretEntry>, Vec<SecretEntry>, Vec<SecretEntry>) {
+    let required_keys = required
+        .iter()
+        .map(|entry| format!("{}/{}", entry.domain, entry.name))
+        .collect::<std::collections::BTreeSet<_>>();
+    let existing_keys = existing
+        .iter()
+        .map(|entry| format!("{}/{}", entry.domain, entry.name))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut added = Vec::new();
+    let mut existing_required = Vec::new();
+    for entry in required {
+        let key = format!("{}/{}", entry.domain, entry.name);
+        if existing_keys.contains(&key) {
+            existing_required.push(entry.clone());
+        } else {
+            added.push(entry.clone());
+        }
+    }
+
+    let mut extras = Vec::new();
+    for entry in existing {
+        let key = format!("{}/{}", entry.domain, entry.name);
+        if !required_keys.contains(&key) {
+            extras.push(entry.clone());
+        }
+    }
+
+    (added, existing_required, extras)
+}
+
+#[tauri::command]
+fn sync_account_secrets_for_extension(
+    ledger: String,
+    account: String,
+    extension: String,
+) -> Result<SecretSyncResult, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let account = require_non_empty_input("account", account)?;
+    let extension = account_config::resolve_extension(&target_dir, &account, Some(&extension))
+        .map_err(|err| err.to_string())?;
+
+    let extension_dir = account_config::resolve_extension_dir(&target_dir, &extension);
+    let declared =
+        scrape::load_manifest_secret_declarations(&extension_dir).map_err(|err| err.to_string())?;
+    let required = flatten_declared_secret_entries(&declared);
+
+    let store = crate::secret::SecretStore::new(account);
+    let mut existing = store
         .list()
         .map_err(|err| err.to_string())?
         .into_iter()
         .map(|(domain, name)| SecretEntry { domain, name })
         .collect::<Vec<_>>();
-    entries.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
-    Ok(entries)
+    existing.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
+
+    let (added, existing_required, extras) = classify_secret_entries(&required, &existing);
+    for entry in &added {
+        store
+            .ensure_indexed(&entry.domain, &entry.name)
+            .map_err(|err| err.to_string())?;
+    }
+
+    Ok(SecretSyncResult {
+        required,
+        added,
+        existing_required,
+        extras,
+    })
 }
 
 #[tauri::command]
@@ -622,7 +736,11 @@ fn reconcile_transfer(
 
 #[cfg(test)]
 mod tests {
-    use super::{evidence_ref_matches_document, require_non_empty_input};
+    use super::{
+        classify_secret_entries, evidence_ref_matches_document, flatten_declared_secret_entries,
+        require_non_empty_input, SecretEntry,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn require_non_empty_input_trims() {
@@ -648,5 +766,96 @@ mod tests {
         assert!(evidence_ref_matches_document("foo.csv#row:1", "foo.csv"));
         assert!(!evidence_ref_matches_document("foo.csvx:1:1", "foo.csv"));
         assert!(!evidence_ref_matches_document("foo.csv", "foo.csv"));
+    }
+
+    #[test]
+    fn flatten_declared_secret_entries_expands_and_sorts() {
+        let mut declared = BTreeMap::<String, BTreeSet<String>>::new();
+        declared.insert(
+            "b.com".to_string(),
+            ["token".to_string()].into_iter().collect(),
+        );
+        declared.insert(
+            "a.com".to_string(),
+            ["password".to_string(), "username".to_string()]
+                .into_iter()
+                .collect(),
+        );
+
+        let entries = flatten_declared_secret_entries(&declared);
+        assert_eq!(
+            entries,
+            vec![
+                SecretEntry {
+                    domain: "a.com".to_string(),
+                    name: "password".to_string(),
+                },
+                SecretEntry {
+                    domain: "a.com".to_string(),
+                    name: "username".to_string(),
+                },
+                SecretEntry {
+                    domain: "b.com".to_string(),
+                    name: "token".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn classify_secret_entries_returns_added_existing_and_extras() {
+        let required = vec![
+            SecretEntry {
+                domain: "a.com".to_string(),
+                name: "username".to_string(),
+            },
+            SecretEntry {
+                domain: "a.com".to_string(),
+                name: "password".to_string(),
+            },
+            SecretEntry {
+                domain: "b.com".to_string(),
+                name: "token".to_string(),
+            },
+        ];
+        let existing = vec![
+            SecretEntry {
+                domain: "a.com".to_string(),
+                name: "username".to_string(),
+            },
+            SecretEntry {
+                domain: "z.com".to_string(),
+                name: "legacy".to_string(),
+            },
+        ];
+
+        let (added, existing_required, extras) = classify_secret_entries(&required, &existing);
+        assert_eq!(
+            added,
+            vec![
+                SecretEntry {
+                    domain: "a.com".to_string(),
+                    name: "password".to_string(),
+                },
+                SecretEntry {
+                    domain: "b.com".to_string(),
+                    name: "token".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            existing_required,
+            vec![SecretEntry {
+                domain: "a.com".to_string(),
+                name: "username".to_string(),
+            }]
+        );
+        assert_eq!(
+            extras,
+            vec![SecretEntry {
+                domain: "z.com".to_string(),
+                name: "legacy".to_string(),
+            }]
+        );
     }
 }

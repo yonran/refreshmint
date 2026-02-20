@@ -19,6 +19,7 @@ import {
 } from './store.ts';
 import {
     addAccountSecret,
+    type AccountSecretEntry,
     type AccountJournalEntry,
     type AmountStyleHint,
     type AmountTotal,
@@ -48,6 +49,7 @@ import {
     reenterAccountSecret,
     removeAccountSecret,
     type SecretEntry,
+    syncAccountSecretsForExtension,
     type TransactionRow,
     unreconcileEntry,
     validateTransaction,
@@ -80,6 +82,17 @@ type TransferDraft = {
     account2: string;
     entryId2: string;
 };
+
+type SecretPromptState = {
+    title: string;
+    message: string;
+    confirmLabel: string;
+    cancelLabel: string;
+};
+
+function secretPairKey(domain: string, name: string): string {
+    return `${domain}/${name}`;
+}
 
 function localIsoDate(): string {
     const now = new Date();
@@ -123,7 +136,12 @@ function App() {
     const [scrapeDebugSocket, setScrapeDebugSocket] = useState<string | null>(
         null,
     );
-    const [accountSecrets, setAccountSecrets] = useState<SecretEntry[]>([]);
+    const [accountSecrets, setAccountSecrets] = useState<AccountSecretEntry[]>(
+        [],
+    );
+    const [requiredSecretsForExtension, setRequiredSecretsForExtension] =
+        useState<SecretEntry[]>([]);
+    const [hasRequiredSecretsSync, setHasRequiredSecretsSync] = useState(false);
     const [secretDomain, setSecretDomain] = useState('');
     const [secretName, setSecretName] = useState('');
     const [secretValue, setSecretValue] = useState('');
@@ -171,6 +189,9 @@ function App() {
         entryId2: '',
     });
     const [isReconcilingTransfer, setIsReconcilingTransfer] = useState(false);
+    const [secretPrompt, setSecretPrompt] = useState<SecretPromptState | null>(
+        null,
+    );
     const updateRecentLedgers = useCallback(
         (updater: (current: string[]) => string[]) => {
             setRecentLedgersState((current) => {
@@ -199,6 +220,11 @@ function App() {
         openRecent: (_path: string) => {},
     });
     const startupCancelledRef = useRef(false);
+    const secretDomainRef = useRef('');
+    const secretNameRef = useRef('');
+    const secretPromptResolverRef = useRef<
+        ((confirmed: boolean) => void) | null
+    >(null);
     const ledgerPath = ledger?.path ?? null;
     const scrapeAccountOptions = ledger
         ? ledger.accounts
@@ -208,6 +234,44 @@ function App() {
                       name.length > 0 && names.indexOf(name) === index,
               )
         : [];
+    const requiredSecretKeySet = new Set(
+        requiredSecretsForExtension.map((entry) =>
+            secretPairKey(entry.domain, entry.name),
+        ),
+    );
+    const trimmedSecretDomain = secretDomain.trim();
+    const trimmedSecretName = secretName.trim();
+    const currentSecretEntry = accountSecrets.find(
+        (entry) =>
+            entry.domain === trimmedSecretDomain &&
+            entry.name === trimmedSecretName,
+    );
+    const currentSecretPairExists = currentSecretEntry !== undefined;
+    const currentSecretHasValue = currentSecretEntry?.hasValue ?? false;
+    const secretValuePlaceholder = currentSecretHasValue ? '●●●●●●●●' : '';
+    const extraSecretCount = hasRequiredSecretsSync
+        ? accountSecrets.reduce((count, entry) => {
+              const key = secretPairKey(entry.domain, entry.name);
+              return requiredSecretKeySet.has(key) ? count : count + 1;
+          }, 0)
+        : 0;
+
+    useEffect(() => {
+        secretDomainRef.current = secretDomain;
+    }, [secretDomain]);
+
+    useEffect(() => {
+        secretNameRef.current = secretName;
+    }, [secretName]);
+
+    useEffect(() => {
+        return () => {
+            if (secretPromptResolverRef.current !== null) {
+                secretPromptResolverRef.current(false);
+                secretPromptResolverRef.current = null;
+            }
+        };
+    }, []);
 
     useEffect(() => {
         if (ledger) {
@@ -219,6 +283,8 @@ function App() {
             setScrapeDebugSocket(null);
             setScrapeAccount('');
             setAccountSecrets([]);
+            setRequiredSecretsForExtension([]);
+            setHasRequiredSecretsSync(false);
             setSecretDomain('');
             setSecretName('');
             setSecretValue('');
@@ -323,6 +389,8 @@ function App() {
         if (ledgerPath === null) {
             setAccountSecrets([]);
             setIsLoadingAccountSecrets(false);
+            setRequiredSecretsForExtension([]);
+            setHasRequiredSecretsSync(false);
             return;
         }
 
@@ -330,6 +398,8 @@ function App() {
         if (account.length === 0) {
             setAccountSecrets([]);
             setIsLoadingAccountSecrets(false);
+            setRequiredSecretsForExtension([]);
+            setHasRequiredSecretsSync(false);
             return;
         }
 
@@ -362,6 +432,113 @@ function App() {
             window.clearTimeout(timer);
         };
     }, [ledgerPath, scrapeAccount]);
+
+    useEffect(() => {
+        if (ledgerPath === null) {
+            setRequiredSecretsForExtension([]);
+            setHasRequiredSecretsSync(false);
+            return;
+        }
+
+        const account = scrapeAccount.trim();
+        const extension = scrapeExtension.trim();
+        if (account.length === 0 || extension.length === 0) {
+            setRequiredSecretsForExtension([]);
+            setHasRequiredSecretsSync(false);
+            return;
+        }
+
+        let cancelled = false;
+        const timer = window.setTimeout(() => {
+            setIsLoadingAccountSecrets(true);
+            void syncAccountSecretsForExtension(ledgerPath, account, extension)
+                .then((result) => {
+                    if (cancelled) {
+                        return;
+                    }
+                    setRequiredSecretsForExtension(result.required);
+                    setHasRequiredSecretsSync(true);
+
+                    const currentDomain = secretDomainRef.current.trim();
+                    const currentName = secretNameRef.current.trim();
+                    const currentHasPair =
+                        currentDomain.length > 0 && currentName.length > 0;
+                    const currentKey = secretPairKey(
+                        currentDomain,
+                        currentName,
+                    );
+                    const requiredKeySet = new Set(
+                        result.required.map((entry) =>
+                            secretPairKey(entry.domain, entry.name),
+                        ),
+                    );
+
+                    if (currentHasPair && !requiredKeySet.has(currentKey)) {
+                        setSecretDomain('');
+                        setSecretName('');
+                        setSecretValue('');
+                    } else if (!currentHasPair && result.required.length > 0) {
+                        const first = result.required[0];
+                        if (first !== undefined) {
+                            setSecretDomain(first.domain);
+                            setSecretName(first.name);
+                        }
+                    }
+
+                    const requiredCount = result.required.length;
+                    const addedCount = result.added.length;
+                    const existingCount = result.existingRequired.length;
+                    const extraCount = result.extras.length;
+                    if (requiredCount === 0) {
+                        setSecretsStatus(
+                            'No declared secrets for this extension.',
+                        );
+                    } else {
+                        const extraSuffix =
+                            extraCount > 0
+                                ? ` ${extraCount} extra secret${extraCount === 1 ? '' : 's'} found.`
+                                : '';
+                        setSecretsStatus(
+                            `Prepared ${requiredCount} required secret${requiredCount === 1 ? '' : 's'}: ${addedCount} added, ${existingCount} already stored.${extraSuffix}`,
+                        );
+                    }
+
+                    return listAccountSecrets(account)
+                        .then((entries) => {
+                            if (!cancelled) {
+                                setAccountSecrets(entries);
+                            }
+                        })
+                        .catch((error: unknown) => {
+                            if (!cancelled) {
+                                setAccountSecrets([]);
+                                setSecretsStatus(
+                                    `Failed to load account secrets: ${String(error)}`,
+                                );
+                            }
+                        });
+                })
+                .catch((error: unknown) => {
+                    if (!cancelled) {
+                        setRequiredSecretsForExtension([]);
+                        setHasRequiredSecretsSync(false);
+                        setSecretsStatus(
+                            `Failed to prepare secrets: ${String(error)}`,
+                        );
+                    }
+                })
+                .finally(() => {
+                    if (!cancelled) {
+                        setIsLoadingAccountSecrets(false);
+                    }
+                });
+        }, 200);
+
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timer);
+        };
+    }, [ledgerPath, scrapeAccount, scrapeExtension]);
 
     // Load account config and auto-populate extension when account changes
     useEffect(() => {
@@ -713,6 +890,12 @@ function App() {
     }, [ledger, rawDraft, entryMode]);
 
     async function handleNewLedger() {
+        const canContinue = await confirmSaveOrDiscardSecretValue(
+            'before creating a new ledger',
+        );
+        if (!canContinue) {
+            return;
+        }
         setIsCreating(true);
         try {
             const created = await promptNewLedgerLocation();
@@ -725,6 +908,12 @@ function App() {
     }
 
     async function handleOpenLedger() {
+        const canContinue = await confirmSaveOrDiscardSecretValue(
+            'before opening another ledger',
+        );
+        if (!canContinue) {
+            return;
+        }
         setIsOpening(true);
         setOpenStatus('Choose a Refreshmint ledger...');
         try {
@@ -768,6 +957,12 @@ function App() {
 
     async function handleOpenRecent(path: string) {
         if (path.length === 0) {
+            return;
+        }
+        const canContinue = await confirmSaveOrDiscardSecretValue(
+            'before opening another ledger',
+        );
+        if (!canContinue) {
             return;
         }
         setIsOpening(true);
@@ -1044,6 +1239,63 @@ function App() {
         }
     }
 
+    function promptSecretDecision(prompt: SecretPromptState): Promise<boolean> {
+        if (secretPromptResolverRef.current !== null) {
+            secretPromptResolverRef.current(false);
+            secretPromptResolverRef.current = null;
+        }
+        setSecretPrompt(prompt);
+        return new Promise((resolve) => {
+            secretPromptResolverRef.current = resolve;
+        });
+    }
+
+    function resolveSecretPrompt(confirmed: boolean) {
+        const resolve = secretPromptResolverRef.current;
+        secretPromptResolverRef.current = null;
+        setSecretPrompt(null);
+        resolve?.(confirmed);
+    }
+
+    async function confirmSaveOrDiscardSecretValue(context: string) {
+        if (secretValue.length === 0) {
+            return true;
+        }
+
+        const shouldSave = await promptSecretDecision({
+            title: 'Unsaved secret value',
+            message: `You have an unsaved secret value ${context}. Save it first?`,
+            confirmLabel: 'Save',
+            cancelLabel: 'Discard',
+        });
+        if (!shouldSave) {
+            setSecretValue('');
+            setSecretsStatus('Discarded unsaved secret value.');
+            return true;
+        }
+
+        const mode: 'add' | 'reenter' = currentSecretPairExists
+            ? 'reenter'
+            : 'add';
+        const saved = await handleSaveAccountSecret(mode);
+        if (saved) {
+            return true;
+        }
+        const shouldDiscardAfterFailedSave = await promptSecretDecision({
+            title: 'Save failed',
+            message: `Could not save the secret value ${context}. Discard it and continue?`,
+            confirmLabel: 'Discard',
+            cancelLabel: 'Keep editing',
+        });
+
+        if (shouldDiscardAfterFailedSave) {
+            setSecretValue('');
+            setSecretsStatus('Discarded unsaved secret value.');
+            return true;
+        }
+        return false;
+    }
+
     async function handleRefreshAccountSecrets() {
         const account = scrapeAccount.trim();
         if (account.length === 0) {
@@ -1064,21 +1316,37 @@ function App() {
         const account = scrapeAccount.trim();
         if (account.length === 0) {
             setSecretsStatus('Account is required.');
-            return;
+            return false;
         }
         const domain = secretDomain.trim();
         if (domain.length === 0) {
             setSecretsStatus('Domain is required.');
-            return;
+            return false;
         }
         const name = secretName.trim();
         if (name.length === 0) {
             setSecretsStatus('Name is required.');
-            return;
+            return false;
+        }
+        const existingEntry = accountSecrets.find(
+            (entry) => entry.domain === domain && entry.name === name,
+        );
+        const existingEntryHasValue = existingEntry?.hasValue === true;
+        if (mode === 'add' && existingEntry !== undefined) {
+            setSecretsStatus(
+                `Secret pair ${domain}/${name} already exists. Use Set/Change value.`,
+            );
+            return false;
+        }
+        if (mode === 'reenter' && existingEntry === undefined) {
+            setSecretsStatus(
+                `Secret pair ${domain}/${name} does not exist. Use Add new pair first.`,
+            );
+            return false;
         }
         if (secretValue.length === 0) {
             setSecretsStatus('Value is required.');
-            return;
+            return false;
         }
 
         setIsSavingAccountSecret(true);
@@ -1091,12 +1359,18 @@ function App() {
             await refreshAccountSecrets(account);
             setSecretValue('');
             setSecretsStatus(
-                mode === 'add' ? 'Secret added.' : 'Secret re-entered.',
+                mode === 'add'
+                    ? 'Secret pair added.'
+                    : existingEntryHasValue
+                      ? 'Secret value changed.'
+                      : 'Secret value set.',
             );
+            return true;
         } catch (error) {
             setSecretsStatus(
-                `Failed to ${mode === 'add' ? 'add' : 're-enter'} secret: ${String(error)}`,
+                `Failed to ${mode === 'add' ? 'add pair' : 'save secret value'}: ${String(error)}`,
             );
+            return false;
         } finally {
             setIsSavingAccountSecret(false);
         }
@@ -1124,11 +1398,64 @@ function App() {
         }
     }
 
-    function handleReenterPreset(domain: string, name: string) {
+    async function handleReenterPreset(
+        domain: string,
+        name: string,
+        hasValue: boolean,
+    ) {
+        const canContinue = await confirmSaveOrDiscardSecretValue(
+            'before selecting another secret pair',
+        );
+        if (!canContinue) {
+            return;
+        }
         setSecretDomain(domain);
         setSecretName(name);
         setSecretValue('');
-        setSecretsStatus(`Re-enter value for ${domain}/${name}.`);
+        setSecretsStatus(
+            `${hasValue ? 'Change' : 'Set'} value for ${domain}/${name}.`,
+        );
+    }
+
+    async function handleScrapeAccountInputChange(nextAccount: string) {
+        if (nextAccount === scrapeAccount) {
+            return;
+        }
+        const canContinue = await confirmSaveOrDiscardSecretValue(
+            'before changing account',
+        );
+        if (!canContinue) {
+            return;
+        }
+        setScrapeAccount(nextAccount);
+        setScrapeStatus(null);
+        setSecretsStatus(null);
+        setPipelineStatus(null);
+    }
+
+    async function handleScrapeExtensionChange(nextExtension: string) {
+        if (nextExtension === scrapeExtension) {
+            return;
+        }
+        const canContinue = await confirmSaveOrDiscardSecretValue(
+            'before changing extension',
+        );
+        if (!canContinue) {
+            return;
+        }
+        setScrapeExtension(nextExtension);
+        setScrapeStatus(null);
+        setPipelineStatus(null);
+    }
+
+    function handleSubmitSecretForm(
+        event: React.SyntheticEvent<HTMLFormElement>,
+    ) {
+        event.preventDefault();
+        const mode: 'add' | 'reenter' = currentSecretPairExists
+            ? 'reenter'
+            : 'add';
+        void handleSaveAccountSecret(mode);
     }
 
     function parseOptionalIndex(raw: string): {
@@ -2206,12 +2533,9 @@ function App() {
                                             placeholder="Account name"
                                             list="scrape-account-options"
                                             onChange={(event) => {
-                                                setScrapeAccount(
+                                                void handleScrapeAccountInputChange(
                                                     event.target.value,
                                                 );
-                                                setScrapeStatus(null);
-                                                setSecretsStatus(null);
-                                                setPipelineStatus(null);
                                             }}
                                         />
                                     </label>
@@ -2220,11 +2544,9 @@ function App() {
                                         <select
                                             value={scrapeExtension}
                                             onChange={(event) => {
-                                                setScrapeExtension(
+                                                void handleScrapeExtensionChange(
                                                     event.target.value,
                                                 );
-                                                setScrapeStatus(null);
-                                                setPipelineStatus(null);
                                             }}
                                             disabled={isLoadingScrapeExtensions}
                                         >
@@ -2360,109 +2682,124 @@ function App() {
                                             </button>
                                         </div>
                                     </div>
-                                    <div className="txn-grid">
-                                        <label className="field">
-                                            <span>Domain</span>
-                                            <input
-                                                type="text"
-                                                value={secretDomain}
-                                                placeholder="example.com"
-                                                onChange={(event) => {
-                                                    setSecretDomain(
-                                                        event.target.value,
+                                    <form
+                                        className="secret-form"
+                                        onSubmit={handleSubmitSecretForm}
+                                    >
+                                        <div className="txn-grid">
+                                            <label className="field">
+                                                <span>Domain</span>
+                                                <input
+                                                    type="text"
+                                                    value={secretDomain}
+                                                    placeholder="example.com"
+                                                    onChange={(event) => {
+                                                        setSecretDomain(
+                                                            event.target.value,
+                                                        );
+                                                        setSecretsStatus(null);
+                                                    }}
+                                                    disabled={
+                                                        scrapeAccount.trim()
+                                                            .length === 0 ||
+                                                        isSavingAccountSecret ||
+                                                        busySecretKey !== null
+                                                    }
+                                                />
+                                            </label>
+                                            <label className="field">
+                                                <span>Name</span>
+                                                <input
+                                                    type="text"
+                                                    value={secretName}
+                                                    placeholder="password"
+                                                    onChange={(event) => {
+                                                        setSecretName(
+                                                            event.target.value,
+                                                        );
+                                                        setSecretsStatus(null);
+                                                    }}
+                                                    disabled={
+                                                        scrapeAccount.trim()
+                                                            .length === 0 ||
+                                                        isSavingAccountSecret ||
+                                                        busySecretKey !== null
+                                                    }
+                                                />
+                                            </label>
+                                            <label className="field">
+                                                <span>Value</span>
+                                                <input
+                                                    type="password"
+                                                    autoComplete="new-password"
+                                                    value={secretValue}
+                                                    placeholder={
+                                                        secretValuePlaceholder
+                                                    }
+                                                    onChange={(event) => {
+                                                        setSecretValue(
+                                                            event.target.value,
+                                                        );
+                                                        setSecretsStatus(null);
+                                                    }}
+                                                    disabled={
+                                                        scrapeAccount.trim()
+                                                            .length === 0 ||
+                                                        isSavingAccountSecret ||
+                                                        busySecretKey !== null
+                                                    }
+                                                />
+                                            </label>
+                                        </div>
+                                        <div className="txn-actions">
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                onClick={() => {
+                                                    void handleSaveAccountSecret(
+                                                        'add',
                                                     );
-                                                    setSecretsStatus(null);
                                                 }}
                                                 disabled={
                                                     scrapeAccount.trim()
                                                         .length === 0 ||
+                                                    (trimmedSecretDomain.length >
+                                                        0 &&
+                                                        trimmedSecretName.length >
+                                                            0 &&
+                                                        currentSecretPairExists) ||
                                                     isSavingAccountSecret ||
                                                     busySecretKey !== null
                                                 }
-                                            />
-                                        </label>
-                                        <label className="field">
-                                            <span>Name</span>
-                                            <input
-                                                type="text"
-                                                value={secretName}
-                                                placeholder="password"
-                                                onChange={(event) => {
-                                                    setSecretName(
-                                                        event.target.value,
-                                                    );
-                                                    setSecretsStatus(null);
-                                                }}
+                                            >
+                                                {isSavingAccountSecret
+                                                    ? 'Saving...'
+                                                    : 'Add new pair'}
+                                            </button>
+                                            <button
+                                                type="submit"
+                                                className="ghost-button"
                                                 disabled={
                                                     scrapeAccount.trim()
                                                         .length === 0 ||
+                                                    !currentSecretPairExists ||
                                                     isSavingAccountSecret ||
                                                     busySecretKey !== null
                                                 }
-                                            />
-                                        </label>
-                                        <label className="field">
-                                            <span>Value</span>
-                                            <input
-                                                type="password"
-                                                autoComplete="new-password"
-                                                value={secretValue}
-                                                placeholder="Secret value"
-                                                onChange={(event) => {
-                                                    setSecretValue(
-                                                        event.target.value,
-                                                    );
-                                                    setSecretsStatus(null);
-                                                }}
-                                                disabled={
-                                                    scrapeAccount.trim()
-                                                        .length === 0 ||
-                                                    isSavingAccountSecret ||
-                                                    busySecretKey !== null
-                                                }
-                                            />
-                                        </label>
-                                    </div>
-                                    <div className="txn-actions">
-                                        <button
-                                            type="button"
-                                            className="ghost-button"
-                                            onClick={() => {
-                                                void handleSaveAccountSecret(
-                                                    'add',
-                                                );
-                                            }}
-                                            disabled={
-                                                scrapeAccount.trim().length ===
-                                                    0 ||
-                                                isSavingAccountSecret ||
-                                                busySecretKey !== null
-                                            }
-                                        >
-                                            {isSavingAccountSecret
-                                                ? 'Saving...'
-                                                : 'Add secret'}
-                                        </button>
-                                        <button
-                                            type="button"
-                                            className="ghost-button"
-                                            onClick={() => {
-                                                void handleSaveAccountSecret(
-                                                    'reenter',
-                                                );
-                                            }}
-                                            disabled={
-                                                scrapeAccount.trim().length ===
-                                                    0 ||
-                                                isSavingAccountSecret ||
-                                                busySecretKey !== null
-                                            }
-                                        >
-                                            {isSavingAccountSecret
-                                                ? 'Saving...'
-                                                : 'Re-enter secret'}
-                                        </button>
-                                    </div>
+                                            >
+                                                {isSavingAccountSecret
+                                                    ? 'Saving...'
+                                                    : currentSecretHasValue
+                                                      ? 'Change value'
+                                                      : 'Set value'}
+                                            </button>
+                                        </div>
+                                        <p className="hint">
+                                            Add new pair creates a new
+                                            domain/name. Press Enter or use Set
+                                            or Change value to save the value.
+                                        </p>
+                                    </form>
                                     {isLoadingAccountSecrets ? (
                                         <p className="status">
                                             Loading account secrets...
@@ -2486,10 +2823,19 @@ function App() {
                                                 <tbody>
                                                     {accountSecrets.map(
                                                         (entry) => {
-                                                            const key = `${entry.domain}/${entry.name}`;
+                                                            const key =
+                                                                secretPairKey(
+                                                                    entry.domain,
+                                                                    entry.name,
+                                                                );
                                                             const isBusy =
                                                                 busySecretKey ===
                                                                 key;
+                                                            const isExtra =
+                                                                hasRequiredSecretsSync &&
+                                                                !requiredSecretKeySet.has(
+                                                                    key,
+                                                                );
                                                             return (
                                                                 <tr key={key}>
                                                                     <td>
@@ -2498,9 +2844,16 @@ function App() {
                                                                         }
                                                                     </td>
                                                                     <td>
-                                                                        {
-                                                                            entry.name
-                                                                        }
+                                                                        <span>
+                                                                            {
+                                                                                entry.name
+                                                                            }
+                                                                        </span>
+                                                                        {isExtra ? (
+                                                                            <span className="secret-chip">
+                                                                                extra
+                                                                            </span>
+                                                                        ) : null}
                                                                     </td>
                                                                     <td>
                                                                         <div className="txn-actions">
@@ -2508,9 +2861,10 @@ function App() {
                                                                                 type="button"
                                                                                 className="ghost-button"
                                                                                 onClick={() => {
-                                                                                    handleReenterPreset(
+                                                                                    void handleReenterPreset(
                                                                                         entry.domain,
                                                                                         entry.name,
+                                                                                        entry.hasValue,
                                                                                     );
                                                                                 }}
                                                                                 disabled={
@@ -2519,7 +2873,9 @@ function App() {
                                                                                         null
                                                                                 }
                                                                             >
-                                                                                Re-enter
+                                                                                {entry.hasValue
+                                                                                    ? 'Change value'
+                                                                                    : 'Set value'}
                                                                             </button>
                                                                             <button
                                                                                 type="button"
@@ -2550,6 +2906,17 @@ function App() {
                                             </table>
                                         </div>
                                     )}
+                                    {hasRequiredSecretsSync &&
+                                    extraSecretCount > 0 ? (
+                                        <p className="hint">
+                                            {extraSecretCount} secret
+                                            {extraSecretCount === 1
+                                                ? ''
+                                                : 's'}{' '}
+                                            stored for this account are not
+                                            declared by the selected extension.
+                                        </p>
+                                    ) : null}
                                     {secretsStatus === null ? null : (
                                         <p className="status">
                                             {secretsStatus}
@@ -3166,6 +3533,38 @@ function App() {
                         </div>
                     )}
                 </section>
+            )}
+            {secretPrompt === null ? null : (
+                <div className="secret-prompt-overlay">
+                    <div
+                        className="secret-prompt"
+                        role="dialog"
+                        aria-modal="true"
+                    >
+                        <h3>{secretPrompt.title}</h3>
+                        <p>{secretPrompt.message}</p>
+                        <div className="txn-actions">
+                            <button
+                                type="button"
+                                className="primary-button"
+                                onClick={() => {
+                                    resolveSecretPrompt(true);
+                                }}
+                            >
+                                {secretPrompt.confirmLabel}
+                            </button>
+                            <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => {
+                                    resolveSecretPrompt(false);
+                                }}
+                            >
+                                {secretPrompt.cancelLabel}
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
         </div>
     );

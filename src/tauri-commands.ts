@@ -46,6 +46,17 @@ export interface SecretEntry {
     name: string;
 }
 
+export interface AccountSecretEntry extends SecretEntry {
+    hasValue: boolean;
+}
+
+export interface SecretSyncResult {
+    required: SecretEntry[];
+    added: SecretEntry[];
+    existingRequired: SecretEntry[];
+    extras: SecretEntry[];
+}
+
 export interface DocumentInfo {
     mimeType: string;
     originalUrl?: string;
@@ -133,8 +144,20 @@ export async function loadScrapeExtension(
 
 export async function listAccountSecrets(
     account: string,
-): Promise<SecretEntry[]> {
+): Promise<AccountSecretEntry[]> {
     return invoke('list_account_secrets', { account });
+}
+
+export async function syncAccountSecretsForExtension(
+    ledger: string,
+    account: string,
+    extension: string,
+): Promise<SecretSyncResult> {
+    return invoke('sync_account_secrets_for_extension', {
+        ledger,
+        account,
+        extension,
+    });
 }
 
 export async function addAccountSecret(

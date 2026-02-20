@@ -1,14 +1,23 @@
 use std::error::Error;
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct SecretIndexEntry {
+    key: String,
+    #[serde(default)]
+    has_value: bool,
+}
+
+pub type SecretValueStateRow = (String, String, bool);
+
 /// Keyring-based secret storage for a single account.
 ///
 /// Secrets are stored in the OS keychain with:
 /// - Service: `refreshmint/<account>`
 /// - User: `<domain>/<name>`
 ///
-/// An index entry at user=`_index` maintains a JSON array of all
+/// An index entry at user=`_index` maintains metadata for all known
 /// `"domain/name"` strings for enumeration (since keyring doesn't
-/// support listing).
+/// support listing) and whether a value is currently stored.
 pub struct SecretStore {
     account: String,
 }
@@ -30,20 +39,31 @@ impl SecretStore {
         self.entry("_index")
     }
 
-    fn read_index(&self) -> Result<Vec<String>, Box<dyn Error>> {
+    fn read_index_entries(&self) -> Result<Vec<SecretIndexEntry>, Box<dyn Error>> {
         let entry = self.index_entry()?;
         match entry.get_password() {
             Ok(json) => {
-                let keys: Vec<String> = serde_json::from_str(&json)?;
-                Ok(keys)
+                if let Ok(entries) = serde_json::from_str::<Vec<SecretIndexEntry>>(&json) {
+                    return Ok(entries);
+                }
+
+                // Backward compatibility with legacy index format: `["domain/name", ...]`.
+                let keys = serde_json::from_str::<Vec<String>>(&json)?;
+                Ok(keys
+                    .into_iter()
+                    .map(|key| SecretIndexEntry {
+                        key,
+                        has_value: false,
+                    })
+                    .collect())
             }
             Err(keyring::Error::NoEntry) => Ok(Vec::new()),
             Err(e) => Err(e.into()),
         }
     }
 
-    fn write_index(&self, keys: &[String]) -> Result<(), Box<dyn Error>> {
-        let json = serde_json::to_string(keys)?;
+    fn write_index_entries(&self, entries: &[SecretIndexEntry]) -> Result<(), Box<dyn Error>> {
+        let json = serde_json::to_string(entries)?;
         // Keep index metadata as a plain keychain entry so list/index operations
         // do not require biometric auth.
         self.set_entry_password("_index", &json, false)?;
@@ -54,15 +74,37 @@ impl SecretStore {
         format!("{domain}/{name}")
     }
 
+    fn upsert_index_entry(entries: &mut Vec<SecretIndexEntry>, key: String, has_value: bool) {
+        if let Some(existing) = entries.iter_mut().find(|entry| entry.key == key) {
+            if has_value {
+                existing.has_value = true;
+            }
+        } else {
+            entries.push(SecretIndexEntry { key, has_value });
+        }
+    }
+
     pub fn set(&self, domain: &str, name: &str, value: &str) -> Result<(), Box<dyn Error>> {
         let user = Self::key(domain, name);
         self.set_entry_password(&user, value, true)?;
 
-        let mut index = self.read_index()?;
-        if !index.contains(&user) {
-            index.push(user);
-            self.write_index(&index)?;
-        }
+        let mut index = self.read_index_entries()?;
+        Self::upsert_index_entry(&mut index, user, true);
+        index.sort_by(|a, b| a.key.cmp(&b.key));
+        self.write_index_entries(&index)?;
+        Ok(())
+    }
+
+    /// Ensure a (domain, name) pair is present in the index without setting a value.
+    ///
+    /// This is useful for preparing required secret slots ahead of time so UI can
+    /// prompt for values later, without forcing a keychain write/biometric prompt.
+    pub fn ensure_indexed(&self, domain: &str, name: &str) -> Result<(), Box<dyn Error>> {
+        let user = Self::key(domain, name);
+        let mut index = self.read_index_entries()?;
+        Self::upsert_index_entry(&mut index, user, false);
+        index.sort_by(|a, b| a.key.cmp(&b.key));
+        self.write_index_entries(&index)?;
         Ok(())
     }
 
@@ -82,30 +124,45 @@ impl SecretStore {
             Err(e) => return Err(e.into()),
         }
 
-        let mut index = self.read_index()?;
-        index.retain(|k| k != &user);
-        self.write_index(&index)?;
+        let mut index = self.read_index_entries()?;
+        index.retain(|entry| entry.key != user);
+        self.write_index_entries(&index)?;
         Ok(())
     }
 
     /// List all (domain, name) pairs stored for this account.
     pub fn list(&self) -> Result<Vec<(String, String)>, Box<dyn Error>> {
-        let index = self.read_index()?;
+        let index = self.read_index_entries()?;
         let mut pairs = Vec::new();
-        for key in &index {
-            if let Some((domain, name)) = key.split_once('/') {
+        for entry in &index {
+            if let Some((domain, name)) = entry.key.split_once('/') {
                 pairs.push((domain.to_string(), name.to_string()));
             }
         }
         Ok(pairs)
     }
 
+    /// List all (domain, name) pairs and whether a value exists.
+    pub fn list_with_value_state(&self) -> Result<Vec<SecretValueStateRow>, Box<dyn Error>> {
+        let index = self.read_index_entries()?;
+        let mut entries = Vec::new();
+        for entry in &index {
+            if let Some((domain, name)) = entry.key.split_once('/') {
+                entries.push((domain.to_string(), name.to_string(), entry.has_value));
+            }
+        }
+        Ok(entries)
+    }
+
     /// Return all secret values for this account (used for scrubbing).
     pub fn all_values(&self) -> Result<Vec<String>, Box<dyn Error>> {
-        let index = self.read_index()?;
+        let index = self.read_index_entries()?;
         let mut values = Vec::new();
-        for key in &index {
-            let entry = self.entry(key)?;
+        for indexed in &index {
+            if !indexed.has_value {
+                continue;
+            }
+            let entry = self.entry(&indexed.key)?;
             match entry.get_password() {
                 Ok(v) => values.push(v),
                 Err(keyring::Error::NoEntry) => {}
@@ -123,7 +180,17 @@ impl SecretStore {
     ) -> Result<(), Box<dyn Error>> {
         #[cfg(target_os = "macos")]
         if require_biometry {
-            self.set_entry_password_with_biometry(user, value)?;
+            if let Err(err) = self.set_entry_password_with_biometry(user, value) {
+                if cfg!(debug_assertions) {
+                    eprintln!(
+                        "Warning: secure keychain write failed for '{user}', using dev fallback: {err}"
+                    );
+                    let entry = self.entry(user)?;
+                    entry.set_password(value)?;
+                    return Ok(());
+                }
+                return Err(err);
+            }
             return Ok(());
         }
 
