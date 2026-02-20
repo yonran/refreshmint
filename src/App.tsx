@@ -19,19 +19,27 @@ import {
 } from './store.ts';
 import {
     addAccountSecret,
+    type AccountJournalEntry,
     type AmountStyleHint,
     type AmountTotal,
     addTransaction,
     addTransactionText,
+    getAccountJournal,
     getScrapeDebugSessionSocket,
+    getUnreconciled,
+    listDocuments,
     listAccountSecrets,
     listScrapeExtensions,
     loadScrapeExtension,
     openLedger,
     type AccountRow,
+    type DocumentWithInfo,
     type LedgerView,
     type NewTransactionInput,
     type PostingRow,
+    reconcileEntry,
+    reconcileTransfer,
+    runExtraction,
     startScrapeDebugSession,
     stopScrapeDebugSession,
     runScrape,
@@ -39,6 +47,7 @@ import {
     removeAccountSecret,
     type SecretEntry,
     type TransactionRow,
+    unreconcileEntry,
     validateTransaction,
     validateTransactionText,
 } from './tauri-commands.ts';
@@ -57,6 +66,18 @@ type DraftPosting = {
 };
 
 type TransactionEntryMode = 'form' | 'raw';
+
+type ReconcileDraft = {
+    counterpartAccount: string;
+    postingIndex: string;
+};
+
+type TransferDraft = {
+    account1: string;
+    entryId1: string;
+    account2: string;
+    entryId2: string;
+};
 
 function localIsoDate(): string {
     const now = new Date();
@@ -116,6 +137,38 @@ function App() {
         useState(false);
     const [isSavingAccountSecret, setIsSavingAccountSecret] = useState(false);
     const [busySecretKey, setBusySecretKey] = useState<string | null>(null);
+    const [documents, setDocuments] = useState<DocumentWithInfo[]>([]);
+    const [selectedDocumentNames, setSelectedDocumentNames] = useState<
+        string[]
+    >([]);
+    const [accountJournalEntries, setAccountJournalEntries] = useState<
+        AccountJournalEntry[]
+    >([]);
+    const [unreconciledEntries, setUnreconciledEntries] = useState<
+        AccountJournalEntry[]
+    >([]);
+    const [pipelineStatus, setPipelineStatus] = useState<string | null>(null);
+    const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
+    const [isRunningExtraction, setIsRunningExtraction] = useState(false);
+    const [isLoadingAccountJournal, setIsLoadingAccountJournal] =
+        useState(false);
+    const [isLoadingUnreconciled, setIsLoadingUnreconciled] = useState(false);
+    const [reconcileDrafts, setReconcileDrafts] = useState<
+        Record<string, ReconcileDraft>
+    >({});
+    const [busyReconcileEntryId, setBusyReconcileEntryId] = useState<
+        string | null
+    >(null);
+    const [unreconcileEntryId, setUnreconcileEntryId] = useState('');
+    const [unreconcilePostingIndex, setUnreconcilePostingIndex] = useState('');
+    const [isUnreconcilingEntry, setIsUnreconcilingEntry] = useState(false);
+    const [transferDraft, setTransferDraft] = useState<TransferDraft>({
+        account1: '',
+        entryId1: '',
+        account2: '',
+        entryId2: '',
+    });
+    const [isReconcilingTransfer, setIsReconcilingTransfer] = useState(false);
     const updateRecentLedgers = useCallback(
         (updater: (current: string[]) => string[]) => {
             setRecentLedgersState((current) => {
@@ -171,6 +224,27 @@ function App() {
             setIsLoadingAccountSecrets(false);
             setIsSavingAccountSecret(false);
             setBusySecretKey(null);
+            setDocuments([]);
+            setSelectedDocumentNames([]);
+            setAccountJournalEntries([]);
+            setUnreconciledEntries([]);
+            setPipelineStatus(null);
+            setIsLoadingDocuments(false);
+            setIsRunningExtraction(false);
+            setIsLoadingAccountJournal(false);
+            setIsLoadingUnreconciled(false);
+            setReconcileDrafts({});
+            setBusyReconcileEntryId(null);
+            setUnreconcileEntryId('');
+            setUnreconcilePostingIndex('');
+            setIsUnreconcilingEntry(false);
+            setTransferDraft({
+                account1: '',
+                entryId1: '',
+                account2: '',
+                entryId2: '',
+            });
+            setIsReconcilingTransfer(false);
         }
     }, [ledger]);
 
@@ -277,6 +351,107 @@ function App() {
                 .finally(() => {
                     if (!cancelled) {
                         setIsLoadingAccountSecrets(false);
+                    }
+                });
+        }, 250);
+
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timer);
+        };
+    }, [ledgerPath, scrapeAccount]);
+
+    useEffect(() => {
+        if (ledgerPath === null) {
+            setDocuments([]);
+            setSelectedDocumentNames([]);
+            setAccountJournalEntries([]);
+            setUnreconciledEntries([]);
+            setReconcileDrafts({});
+            setIsLoadingDocuments(false);
+            setIsLoadingAccountJournal(false);
+            setIsLoadingUnreconciled(false);
+            return;
+        }
+
+        const account = scrapeAccount.trim();
+        if (account.length === 0) {
+            setDocuments([]);
+            setSelectedDocumentNames([]);
+            setAccountJournalEntries([]);
+            setUnreconciledEntries([]);
+            setReconcileDrafts({});
+            setIsLoadingDocuments(false);
+            setIsLoadingAccountJournal(false);
+            setIsLoadingUnreconciled(false);
+            return;
+        }
+
+        let cancelled = false;
+        const timer = window.setTimeout(() => {
+            setIsLoadingDocuments(true);
+            setIsLoadingAccountJournal(true);
+            setIsLoadingUnreconciled(true);
+            void Promise.all([
+                listDocuments(ledgerPath, account),
+                getAccountJournal(ledgerPath, account),
+                getUnreconciled(ledgerPath, account),
+            ])
+                .then(
+                    ([
+                        fetchedDocuments,
+                        fetchedJournal,
+                        fetchedUnreconciled,
+                    ]) => {
+                        if (cancelled) {
+                            return;
+                        }
+                        setDocuments(fetchedDocuments);
+                        setSelectedDocumentNames((current) =>
+                            current.filter((name) =>
+                                fetchedDocuments.some(
+                                    (doc) => doc.filename === name,
+                                ),
+                            ),
+                        );
+                        setAccountJournalEntries(fetchedJournal);
+                        setUnreconciledEntries(fetchedUnreconciled);
+                        setReconcileDrafts((current) => {
+                            const next: Record<string, ReconcileDraft> = {};
+                            for (const entry of fetchedUnreconciled) {
+                                next[entry.id] = current[entry.id] ?? {
+                                    counterpartAccount: '',
+                                    postingIndex: '',
+                                };
+                            }
+                            return next;
+                        });
+                        setTransferDraft((current) => ({
+                            ...current,
+                            account1:
+                                current.account1.trim().length > 0
+                                    ? current.account1
+                                    : account,
+                        }));
+                    },
+                )
+                .catch((error: unknown) => {
+                    if (!cancelled) {
+                        setDocuments([]);
+                        setSelectedDocumentNames([]);
+                        setAccountJournalEntries([]);
+                        setUnreconciledEntries([]);
+                        setReconcileDrafts({});
+                        setPipelineStatus(
+                            `Failed to load account pipeline data: ${String(error)}`,
+                        );
+                    }
+                })
+                .finally(() => {
+                    if (!cancelled) {
+                        setIsLoadingDocuments(false);
+                        setIsLoadingAccountJournal(false);
+                        setIsLoadingUnreconciled(false);
                     }
                 });
         }, 250);
@@ -867,6 +1042,297 @@ function App() {
         setSecretsStatus(`Re-enter value for ${domain}/${name}.`);
     }
 
+    function parseOptionalIndex(raw: string): {
+        value: number | null;
+        error: string | null;
+    } {
+        const trimmed = raw.trim();
+        if (trimmed.length === 0) {
+            return { value: null, error: null };
+        }
+        const parsed = Number.parseInt(trimmed, 10);
+        if (!Number.isFinite(parsed) || Number.isNaN(parsed) || parsed < 0) {
+            return {
+                value: null,
+                error: 'Posting index must be a non-negative integer.',
+            };
+        }
+        return { value: parsed, error: null };
+    }
+
+    async function refreshAccountPipelineData(accountInput: string) {
+        if (!ledger) {
+            return;
+        }
+        const account = accountInput.trim();
+        if (account.length === 0) {
+            setDocuments([]);
+            setSelectedDocumentNames([]);
+            setAccountJournalEntries([]);
+            setUnreconciledEntries([]);
+            setReconcileDrafts({});
+            return;
+        }
+
+        setIsLoadingDocuments(true);
+        setIsLoadingAccountJournal(true);
+        setIsLoadingUnreconciled(true);
+        try {
+            const [fetchedDocuments, fetchedJournal, fetchedUnreconciled] =
+                await Promise.all([
+                    listDocuments(ledger.path, account),
+                    getAccountJournal(ledger.path, account),
+                    getUnreconciled(ledger.path, account),
+                ]);
+            setDocuments(fetchedDocuments);
+            setSelectedDocumentNames((current) =>
+                current.filter((name) =>
+                    fetchedDocuments.some((doc) => doc.filename === name),
+                ),
+            );
+            setAccountJournalEntries(fetchedJournal);
+            setUnreconciledEntries(fetchedUnreconciled);
+            setReconcileDrafts((current) => {
+                const next: Record<string, ReconcileDraft> = {};
+                for (const entry of fetchedUnreconciled) {
+                    next[entry.id] = current[entry.id] ?? {
+                        counterpartAccount: '',
+                        postingIndex: '',
+                    };
+                }
+                return next;
+            });
+            setTransferDraft((current) => ({
+                ...current,
+                account1:
+                    current.account1.trim().length > 0
+                        ? current.account1
+                        : account,
+            }));
+        } finally {
+            setIsLoadingDocuments(false);
+            setIsLoadingAccountJournal(false);
+            setIsLoadingUnreconciled(false);
+        }
+    }
+
+    async function handleRefreshAccountPipelineData() {
+        const account = scrapeAccount.trim();
+        if (account.length === 0) {
+            setPipelineStatus('Account is required.');
+            return;
+        }
+        try {
+            await refreshAccountPipelineData(account);
+            setPipelineStatus(`Loaded documents and journals for ${account}.`);
+        } catch (error) {
+            setPipelineStatus(
+                `Failed to refresh account pipeline data: ${String(error)}`,
+            );
+        }
+    }
+
+    function handleToggleDocumentSelection(filename: string, checked: boolean) {
+        setSelectedDocumentNames((current) => {
+            if (checked) {
+                if (current.includes(filename)) {
+                    return current;
+                }
+                return [...current, filename];
+            }
+            return current.filter((name) => name !== filename);
+        });
+        setPipelineStatus(null);
+    }
+
+    async function handleRunExtraction() {
+        if (!ledger) {
+            return;
+        }
+        const account = scrapeAccount.trim();
+        if (account.length === 0) {
+            setPipelineStatus('Account is required.');
+            return;
+        }
+        const extension = scrapeExtension.trim();
+        if (extension.length === 0) {
+            setPipelineStatus('Extension is required.');
+            return;
+        }
+
+        const documentNames =
+            selectedDocumentNames.length > 0
+                ? selectedDocumentNames
+                : documents.map((doc) => doc.filename);
+        if (documentNames.length === 0) {
+            setPipelineStatus('No documents selected.');
+            return;
+        }
+
+        setIsRunningExtraction(true);
+        setPipelineStatus(
+            `Running extraction for ${documentNames.length} document(s)...`,
+        );
+        try {
+            const newCount = await runExtraction(
+                ledger.path,
+                account,
+                extension,
+                documentNames,
+            );
+            await refreshAccountPipelineData(account);
+            setPipelineStatus(
+                `Extraction complete. Added ${newCount} new transaction(s).`,
+            );
+        } catch (error) {
+            setPipelineStatus(`Extraction failed: ${String(error)}`);
+        } finally {
+            setIsRunningExtraction(false);
+        }
+    }
+
+    function handleSetReconcileDraft(
+        entryId: string,
+        patch: Partial<ReconcileDraft>,
+    ) {
+        setReconcileDrafts((current) => ({
+            ...current,
+            [entryId]: {
+                counterpartAccount: '',
+                postingIndex: '',
+                ...current[entryId],
+                ...patch,
+            },
+        }));
+        setPipelineStatus(null);
+    }
+
+    async function handleReconcileAccountEntry(entryId: string) {
+        if (!ledger) {
+            return;
+        }
+        const account = scrapeAccount.trim();
+        if (account.length === 0) {
+            setPipelineStatus('Account is required.');
+            return;
+        }
+        const draft = reconcileDrafts[entryId] ?? {
+            counterpartAccount: '',
+            postingIndex: '',
+        };
+        const counterpartAccount = draft.counterpartAccount.trim();
+        if (counterpartAccount.length === 0) {
+            setPipelineStatus('Counterpart account is required.');
+            return;
+        }
+
+        const postingIndex = parseOptionalIndex(draft.postingIndex);
+        if (postingIndex.error !== null) {
+            setPipelineStatus(postingIndex.error);
+            return;
+        }
+
+        setBusyReconcileEntryId(entryId);
+        try {
+            const glId = await reconcileEntry(
+                ledger.path,
+                account,
+                entryId,
+                counterpartAccount,
+                postingIndex.value,
+            );
+            await refreshAccountPipelineData(account);
+            setUnreconcileEntryId(entryId);
+            setPipelineStatus(`Reconciled ${entryId} to ${glId}.`);
+        } catch (error) {
+            setPipelineStatus(`Reconcile failed: ${String(error)}`);
+        } finally {
+            setBusyReconcileEntryId(null);
+        }
+    }
+
+    function handlePrepareUnreconcile(entryId: string) {
+        setUnreconcileEntryId(entryId);
+        setPipelineStatus(null);
+    }
+
+    async function handleUnreconcileAccountEntry() {
+        if (!ledger) {
+            return;
+        }
+        const account = scrapeAccount.trim();
+        if (account.length === 0) {
+            setPipelineStatus('Account is required.');
+            return;
+        }
+        const entryId = unreconcileEntryId.trim();
+        if (entryId.length === 0) {
+            setPipelineStatus('Entry ID is required for unreconcile.');
+            return;
+        }
+
+        const postingIndex = parseOptionalIndex(unreconcilePostingIndex);
+        if (postingIndex.error !== null) {
+            setPipelineStatus(postingIndex.error);
+            return;
+        }
+
+        setIsUnreconcilingEntry(true);
+        try {
+            await unreconcileEntry(
+                ledger.path,
+                account,
+                entryId,
+                postingIndex.value,
+            );
+            await refreshAccountPipelineData(account);
+            setPipelineStatus(`Unreconciled ${entryId}.`);
+        } catch (error) {
+            setPipelineStatus(`Unreconcile failed: ${String(error)}`);
+        } finally {
+            setIsUnreconcilingEntry(false);
+        }
+    }
+
+    async function handleReconcileTransferPair() {
+        if (!ledger) {
+            return;
+        }
+        const account1 = transferDraft.account1.trim();
+        const entryId1 = transferDraft.entryId1.trim();
+        const account2 = transferDraft.account2.trim();
+        const entryId2 = transferDraft.entryId2.trim();
+        if (account1.length === 0 || entryId1.length === 0) {
+            setPipelineStatus('Transfer account1 and entryId1 are required.');
+            return;
+        }
+        if (account2.length === 0 || entryId2.length === 0) {
+            setPipelineStatus('Transfer account2 and entryId2 are required.');
+            return;
+        }
+
+        setIsReconcilingTransfer(true);
+        try {
+            const glId = await reconcileTransfer(
+                ledger.path,
+                account1,
+                entryId1,
+                account2,
+                entryId2,
+            );
+            if (scrapeAccount.trim().length > 0) {
+                await refreshAccountPipelineData(scrapeAccount);
+            }
+            setPipelineStatus(
+                `Transfer reconciliation complete: ${entryId1} ↔ ${entryId2} (${glId}).`,
+            );
+        } catch (error) {
+            setPipelineStatus(`Transfer reconcile failed: ${String(error)}`);
+        } finally {
+            setIsReconcilingTransfer(false);
+        }
+    }
+
     async function handleRunScrape() {
         if (!ledger) {
             return;
@@ -887,6 +1353,11 @@ function App() {
         try {
             await runScrape(ledger.path, account, extension);
             setScrapeStatus(`Scrape completed for ${extension}.`);
+            try {
+                await refreshAccountPipelineData(account);
+            } catch {
+                // Surface scrape success first; pipeline reload errors are non-fatal here.
+            }
         } catch (error) {
             setScrapeStatus(`Scrape failed: ${String(error)}`);
         } finally {
@@ -1621,6 +2092,7 @@ function App() {
                                                 );
                                                 setScrapeStatus(null);
                                                 setSecretsStatus(null);
+                                                setPipelineStatus(null);
                                             }}
                                         />
                                     </label>
@@ -1633,6 +2105,7 @@ function App() {
                                                     event.target.value,
                                                 );
                                                 setScrapeStatus(null);
+                                                setPipelineStatus(null);
                                             }}
                                             disabled={
                                                 isLoadingScrapeExtensions ||
@@ -1952,6 +2425,599 @@ function App() {
                                         </p>
                                     )}
                                 </section>
+                                <section className="pipeline-panel">
+                                    <div className="txn-form-header">
+                                        <div>
+                                            <h3>Extraction pipeline</h3>
+                                            <p>
+                                                Select documents, run
+                                                extraction, and review
+                                                account-level journal and
+                                                reconciliation state.
+                                            </p>
+                                        </div>
+                                        <div className="header-actions">
+                                            <button
+                                                className="ghost-button"
+                                                type="button"
+                                                onClick={() => {
+                                                    void handleRefreshAccountPipelineData();
+                                                }}
+                                                disabled={
+                                                    scrapeAccount.trim()
+                                                        .length === 0 ||
+                                                    isLoadingDocuments ||
+                                                    isLoadingAccountJournal ||
+                                                    isLoadingUnreconciled ||
+                                                    isRunningExtraction ||
+                                                    busyReconcileEntryId !==
+                                                        null ||
+                                                    isUnreconcilingEntry ||
+                                                    isReconcilingTransfer
+                                                }
+                                            >
+                                                {isLoadingDocuments ||
+                                                isLoadingAccountJournal ||
+                                                isLoadingUnreconciled
+                                                    ? 'Refreshing...'
+                                                    : 'Refresh pipeline'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="pipeline-actions">
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                setSelectedDocumentNames(
+                                                    documents.map(
+                                                        (doc) => doc.filename,
+                                                    ),
+                                                );
+                                                setPipelineStatus(null);
+                                            }}
+                                            disabled={
+                                                isLoadingDocuments ||
+                                                documents.length === 0
+                                            }
+                                        >
+                                            Select all docs
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                setSelectedDocumentNames([]);
+                                                setPipelineStatus(null);
+                                            }}
+                                            disabled={
+                                                isLoadingDocuments ||
+                                                selectedDocumentNames.length ===
+                                                    0
+                                            }
+                                        >
+                                            Clear selection
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="primary-button"
+                                            onClick={() => {
+                                                void handleRunExtraction();
+                                            }}
+                                            disabled={
+                                                isRunningExtraction ||
+                                                scrapeAccount.trim().length ===
+                                                    0 ||
+                                                scrapeExtension.trim()
+                                                    .length === 0
+                                            }
+                                        >
+                                            {isRunningExtraction
+                                                ? 'Running extraction...'
+                                                : `Run extraction (${selectedDocumentNames.length > 0 ? selectedDocumentNames.length : documents.length})`}
+                                        </button>
+                                    </div>
+                                    {isLoadingDocuments ? (
+                                        <p className="status">
+                                            Loading documents...
+                                        </p>
+                                    ) : documents.length === 0 ? (
+                                        <p className="hint">
+                                            {scrapeAccount.trim().length === 0
+                                                ? 'Choose an account to view documents.'
+                                                : 'No documents found for this account.'}
+                                        </p>
+                                    ) : (
+                                        <div className="table-wrap">
+                                            <table className="ledger-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Select</th>
+                                                        <th>Document</th>
+                                                        <th>Coverage End</th>
+                                                        <th>Scrape Session</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {documents.map(
+                                                        (document) => (
+                                                            <tr
+                                                                key={
+                                                                    document.filename
+                                                                }
+                                                            >
+                                                                <td>
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={selectedDocumentNames.includes(
+                                                                            document.filename,
+                                                                        )}
+                                                                        onChange={(
+                                                                            event,
+                                                                        ) => {
+                                                                            handleToggleDocumentSelection(
+                                                                                document.filename,
+                                                                                event
+                                                                                    .target
+                                                                                    .checked,
+                                                                            );
+                                                                        }}
+                                                                    />
+                                                                </td>
+                                                                <td>
+                                                                    <span className="mono">
+                                                                        {
+                                                                            document.filename
+                                                                        }
+                                                                    </span>
+                                                                </td>
+                                                                <td className="mono">
+                                                                    {document
+                                                                        .info
+                                                                        ?.coverageEndDate ??
+                                                                        '-'}
+                                                                </td>
+                                                                <td className="mono">
+                                                                    {document
+                                                                        .info
+                                                                        ?.scrapeSessionId ??
+                                                                        '-'}
+                                                                </td>
+                                                            </tr>
+                                                        ),
+                                                    )}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                    <div className="txn-form-header">
+                                        <div>
+                                            <h3>Account journal</h3>
+                                            <p>
+                                                Entries extracted for this
+                                                account with evidence and
+                                                reconciliation status.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    {isLoadingAccountJournal ? (
+                                        <p className="status">
+                                            Loading account journal...
+                                        </p>
+                                    ) : accountJournalEntries.length === 0 ? (
+                                        <p className="hint">
+                                            {scrapeAccount.trim().length === 0
+                                                ? 'Choose an account to view its journal.'
+                                                : 'No account journal entries found.'}
+                                        </p>
+                                    ) : (
+                                        <div className="table-wrap">
+                                            <table className="ledger-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Date</th>
+                                                        <th>Status</th>
+                                                        <th>ID</th>
+                                                        <th>Description</th>
+                                                        <th>Evidence</th>
+                                                        <th>Reconciled</th>
+                                                        <th>Actions</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {accountJournalEntries.map(
+                                                        (entry) => (
+                                                            <tr key={entry.id}>
+                                                                <td className="mono">
+                                                                    {entry.date}
+                                                                </td>
+                                                                <td>
+                                                                    {
+                                                                        entry.status
+                                                                    }
+                                                                </td>
+                                                                <td className="mono">
+                                                                    {entry.id}
+                                                                </td>
+                                                                <td>
+                                                                    {
+                                                                        entry.description
+                                                                    }
+                                                                </td>
+                                                                <td className="mono">
+                                                                    {
+                                                                        entry
+                                                                            .evidence
+                                                                            .length
+                                                                    }
+                                                                </td>
+                                                                <td className="mono">
+                                                                    {entry.reconciled ??
+                                                                        '-'}
+                                                                </td>
+                                                                <td>
+                                                                    <div className="pipeline-row-actions">
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            onClick={() => {
+                                                                                handlePrepareUnreconcile(
+                                                                                    entry.id,
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            Set
+                                                                            for
+                                                                            unreconcile
+                                                                        </button>
+                                                                    </div>
+                                                                </td>
+                                                            </tr>
+                                                        ),
+                                                    )}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                    <div className="txn-form-header">
+                                        <div>
+                                            <h3>Reconciliation queue</h3>
+                                            <p>
+                                                Assign counterpart accounts for
+                                                unreconciled entries.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    {isLoadingUnreconciled ? (
+                                        <p className="status">
+                                            Loading unreconciled entries...
+                                        </p>
+                                    ) : unreconciledEntries.length === 0 ? (
+                                        <p className="hint">
+                                            {scrapeAccount.trim().length === 0
+                                                ? 'Choose an account to view unreconciled entries.'
+                                                : 'No unreconciled entries for this account.'}
+                                        </p>
+                                    ) : (
+                                        <div className="table-wrap">
+                                            <table className="ledger-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Date</th>
+                                                        <th>ID</th>
+                                                        <th>Description</th>
+                                                        <th>Counterpart</th>
+                                                        <th>Posting Index</th>
+                                                        <th>Actions</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {unreconciledEntries.map(
+                                                        (entry) => {
+                                                            const draft =
+                                                                reconcileDrafts[
+                                                                    entry.id
+                                                                ] ?? {
+                                                                    counterpartAccount:
+                                                                        '',
+                                                                    postingIndex:
+                                                                        '',
+                                                                };
+                                                            const isBusy =
+                                                                busyReconcileEntryId ===
+                                                                entry.id;
+                                                            return (
+                                                                <tr
+                                                                    key={
+                                                                        entry.id
+                                                                    }
+                                                                >
+                                                                    <td className="mono">
+                                                                        {
+                                                                            entry.date
+                                                                        }
+                                                                    </td>
+                                                                    <td className="mono">
+                                                                        {
+                                                                            entry.id
+                                                                        }
+                                                                    </td>
+                                                                    <td>
+                                                                        {
+                                                                            entry.description
+                                                                        }
+                                                                    </td>
+                                                                    <td>
+                                                                        <input
+                                                                            type="text"
+                                                                            value={
+                                                                                draft.counterpartAccount
+                                                                            }
+                                                                            placeholder="Expenses:Food"
+                                                                            onChange={(
+                                                                                event,
+                                                                            ) => {
+                                                                                handleSetReconcileDraft(
+                                                                                    entry.id,
+                                                                                    {
+                                                                                        counterpartAccount:
+                                                                                            event
+                                                                                                .target
+                                                                                                .value,
+                                                                                    },
+                                                                                );
+                                                                            }}
+                                                                        />
+                                                                    </td>
+                                                                    <td>
+                                                                        <input
+                                                                            type="text"
+                                                                            value={
+                                                                                draft.postingIndex
+                                                                            }
+                                                                            placeholder="optional"
+                                                                            onChange={(
+                                                                                event,
+                                                                            ) => {
+                                                                                handleSetReconcileDraft(
+                                                                                    entry.id,
+                                                                                    {
+                                                                                        postingIndex:
+                                                                                            event
+                                                                                                .target
+                                                                                                .value,
+                                                                                    },
+                                                                                );
+                                                                            }}
+                                                                        />
+                                                                    </td>
+                                                                    <td>
+                                                                        <div className="pipeline-row-actions">
+                                                                            <button
+                                                                                type="button"
+                                                                                className="primary-button"
+                                                                                onClick={() => {
+                                                                                    void handleReconcileAccountEntry(
+                                                                                        entry.id,
+                                                                                    );
+                                                                                }}
+                                                                                disabled={
+                                                                                    isBusy ||
+                                                                                    isUnreconcilingEntry ||
+                                                                                    isReconcilingTransfer
+                                                                                }
+                                                                            >
+                                                                                {isBusy
+                                                                                    ? 'Reconciling...'
+                                                                                    : 'Reconcile'}
+                                                                            </button>
+                                                                            <button
+                                                                                type="button"
+                                                                                className="ghost-button"
+                                                                                onClick={() => {
+                                                                                    setTransferDraft(
+                                                                                        (
+                                                                                            current,
+                                                                                        ) => ({
+                                                                                            ...current,
+                                                                                            account1:
+                                                                                                scrapeAccount,
+                                                                                            entryId1:
+                                                                                                entry.id,
+                                                                                        }),
+                                                                                    );
+                                                                                    setPipelineStatus(
+                                                                                        null,
+                                                                                    );
+                                                                                }}
+                                                                            >
+                                                                                Use
+                                                                                as
+                                                                                A
+                                                                            </button>
+                                                                            <button
+                                                                                type="button"
+                                                                                className="ghost-button"
+                                                                                onClick={() => {
+                                                                                    setTransferDraft(
+                                                                                        (
+                                                                                            current,
+                                                                                        ) => ({
+                                                                                            ...current,
+                                                                                            account2:
+                                                                                                scrapeAccount,
+                                                                                            entryId2:
+                                                                                                entry.id,
+                                                                                        }),
+                                                                                    );
+                                                                                    setPipelineStatus(
+                                                                                        null,
+                                                                                    );
+                                                                                }}
+                                                                            >
+                                                                                Use
+                                                                                as
+                                                                                B
+                                                                            </button>
+                                                                        </div>
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        },
+                                                    )}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                    <div className="txn-grid">
+                                        <label className="field">
+                                            <span>Unreconcile entry ID</span>
+                                            <input
+                                                type="text"
+                                                value={unreconcileEntryId}
+                                                placeholder="entry id"
+                                                onChange={(event) => {
+                                                    setUnreconcileEntryId(
+                                                        event.target.value,
+                                                    );
+                                                    setPipelineStatus(null);
+                                                }}
+                                            />
+                                        </label>
+                                        <label className="field">
+                                            <span>
+                                                Unreconcile posting index
+                                                (optional)
+                                            </span>
+                                            <input
+                                                type="text"
+                                                value={unreconcilePostingIndex}
+                                                placeholder="0"
+                                                onChange={(event) => {
+                                                    setUnreconcilePostingIndex(
+                                                        event.target.value,
+                                                    );
+                                                    setPipelineStatus(null);
+                                                }}
+                                            />
+                                        </label>
+                                    </div>
+                                    <div className="pipeline-actions">
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                void handleUnreconcileAccountEntry();
+                                            }}
+                                            disabled={isUnreconcilingEntry}
+                                        >
+                                            {isUnreconcilingEntry
+                                                ? 'Unreconciling...'
+                                                : 'Unreconcile entry'}
+                                        </button>
+                                    </div>
+                                    <div className="txn-form-header">
+                                        <div>
+                                            <h3>Transfer reconciliation</h3>
+                                            <p>
+                                                Match two entries across
+                                                accounts as a transfer.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="txn-grid">
+                                        <label className="field">
+                                            <span>Account 1</span>
+                                            <input
+                                                type="text"
+                                                value={transferDraft.account1}
+                                                placeholder="account1"
+                                                onChange={(event) => {
+                                                    setTransferDraft(
+                                                        (current) => ({
+                                                            ...current,
+                                                            account1:
+                                                                event.target
+                                                                    .value,
+                                                        }),
+                                                    );
+                                                    setPipelineStatus(null);
+                                                }}
+                                            />
+                                        </label>
+                                        <label className="field">
+                                            <span>Entry ID 1</span>
+                                            <input
+                                                type="text"
+                                                value={transferDraft.entryId1}
+                                                placeholder="entry id"
+                                                onChange={(event) => {
+                                                    setTransferDraft(
+                                                        (current) => ({
+                                                            ...current,
+                                                            entryId1:
+                                                                event.target
+                                                                    .value,
+                                                        }),
+                                                    );
+                                                    setPipelineStatus(null);
+                                                }}
+                                            />
+                                        </label>
+                                        <label className="field">
+                                            <span>Account 2</span>
+                                            <input
+                                                type="text"
+                                                value={transferDraft.account2}
+                                                placeholder="account2"
+                                                onChange={(event) => {
+                                                    setTransferDraft(
+                                                        (current) => ({
+                                                            ...current,
+                                                            account2:
+                                                                event.target
+                                                                    .value,
+                                                        }),
+                                                    );
+                                                    setPipelineStatus(null);
+                                                }}
+                                            />
+                                        </label>
+                                        <label className="field">
+                                            <span>Entry ID 2</span>
+                                            <input
+                                                type="text"
+                                                value={transferDraft.entryId2}
+                                                placeholder="entry id"
+                                                onChange={(event) => {
+                                                    setTransferDraft(
+                                                        (current) => ({
+                                                            ...current,
+                                                            entryId2:
+                                                                event.target
+                                                                    .value,
+                                                        }),
+                                                    );
+                                                    setPipelineStatus(null);
+                                                }}
+                                            />
+                                        </label>
+                                    </div>
+                                    <div className="pipeline-actions">
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                void handleReconcileTransferPair();
+                                            }}
+                                            disabled={isReconcilingTransfer}
+                                        >
+                                            {isReconcilingTransfer
+                                                ? 'Reconciling transfer...'
+                                                : 'Reconcile transfer'}
+                                        </button>
+                                    </div>
+                                </section>
                                 {scrapeExtensions.length === 0 &&
                                 !isLoadingScrapeExtensions ? (
                                     <p className="hint">
@@ -1961,6 +3027,9 @@ function App() {
                                 ) : null}
                                 {scrapeStatus === null ? null : (
                                     <p className="status">{scrapeStatus}</p>
+                                )}
+                                {pipelineStatus === null ? null : (
+                                    <p className="status">{pipelineStatus}</p>
                                 )}
                             </section>
                         </div>
