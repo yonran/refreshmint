@@ -65,3 +65,13 @@ libc = "0.2.182"
 xattr = "1.6.1"
 security-framework = { version = "3.6.0", features = ["OSX_10_13"] }
 # in tests, it is ok to #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+[patch.crates-io]
+# Temporary pin to include macOS special-menu fixes (`set_as_windows_menu_for_nsapp` /
+# `set_as_help_menu_for_nsapp`) so Window/Help get OS-managed entries like
+# `Move & Resize`, `Full Screen Tile`, and Help search on newer macOS.
+# PR: https://github.com/tauri-apps/muda/pull/322
+# Issue: https://github.com/tauri-apps/tauri/issues/13605
+# Related: https://github.com/tauri-apps/tauri/issues/12652
+# muda issue: https://github.com/tauri-apps/muda/issues/263
+muda = { git = "https://github.com/tauri-apps/muda", rev = "23643260921147afa17eeab8e4cf91184814c81a" }
