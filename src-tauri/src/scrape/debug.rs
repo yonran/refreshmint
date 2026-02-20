@@ -257,10 +257,44 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                                 )
                                 .await
                                 {
-                                    Ok(()) => Response {
-                                        ok: true,
-                                        error: None,
-                                    },
+                                    Ok(()) => {
+                                        let finalize_result = {
+                                            let mut refreshmint = refreshmint_inner.lock().await;
+                                            if refreshmint.staged_resources.is_empty() {
+                                                Ok(Vec::new())
+                                            } else {
+                                                eprintln!(
+                                                    "Finalizing {} staged resources from debug exec...",
+                                                    refreshmint.staged_resources.len()
+                                                );
+                                                match super::finalize_staged_resources(&refreshmint) {
+                                                    Ok(names) => {
+                                                        refreshmint.staged_resources.clear();
+                                                        Ok(names)
+                                                    }
+                                                    Err(err) => Err(err.to_string()),
+                                                }
+                                            }
+                                        };
+
+                                        match finalize_result {
+                                            Ok(names) => {
+                                                for name in &names {
+                                                    eprintln!("  -> {name}");
+                                                }
+                                                Response {
+                                                    ok: true,
+                                                    error: None,
+                                                }
+                                            }
+                                            Err(err) => Response {
+                                                ok: false,
+                                                error: Some(format!(
+                                                    "failed to finalize staged resources: {err}"
+                                                )),
+                                            },
+                                        }
+                                    }
                                     Err(err) => Response {
                                         ok: false,
                                         error: Some(err.to_string()),
