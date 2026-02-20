@@ -149,6 +149,9 @@ pub fn finalize_staged_resources(
         let final_filename =
             date_prefixed_filename(coverage_date, &resource.filename, &documents_dir);
         let final_path = documents_dir.join(&final_filename);
+        if let Some(parent) = final_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         // Copy from staging to documents dir
         std::fs::copy(&resource.staging_path, &final_path).map_err(|e| {
@@ -179,6 +182,9 @@ pub fn finalize_staged_resources(
         };
 
         let sidecar_path = documents_dir.join(format!("{final_filename}-info.json"));
+        if let Some(parent) = sidecar_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let sidecar_json = serde_json::to_string_pretty(&info)?;
         std::fs::write(&sidecar_path, sidecar_json)?;
 
@@ -437,7 +443,12 @@ pub fn run_scrape(config: ScrapeConfig) -> Result<(), Box<dyn std::error::Error>
 #[cfg(test)]
 mod tests {
     use super::{
-        list_runnable_extensions, load_manifest_secret_declarations, normalize_manifest_domain,
+        finalize_staged_resources, list_runnable_extensions, load_manifest_secret_declarations,
+        normalize_manifest_domain,
+    };
+    use crate::account_journal::account_documents_dir;
+    use crate::scrape::js_api::{
+        PromptOverrides, RefreshmintInner, SessionMetadata, StagedResource,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -542,6 +553,57 @@ mod tests {
 
         let err = load_manifest_secret_declarations(&ext).err();
         assert!(err.is_some(), "expected empty secret name to fail");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn finalize_staged_resources_creates_parent_directories_for_nested_filenames() {
+        let root = create_temp_dir("scrape-finalize-nested");
+        let ledger_dir = root.join("ledger.refreshmint");
+        fs::create_dir_all(&ledger_dir).unwrap_or_else(|err| {
+            panic!("failed to create ledger dir: {err}");
+        });
+
+        let staged_path = root.join("staged-nested.pdf");
+        fs::write(&staged_path, b"nested").unwrap_or_else(|err| {
+            panic!("failed to write staged file: {err}");
+        });
+
+        let account_name = "Assets:Nested".to_string();
+        let inner = RefreshmintInner {
+            output_dir: root.join("output"),
+            prompt_overrides: PromptOverrides::new(),
+            prompt_requires_override: false,
+            session_metadata: SessionMetadata::default(),
+            staged_resources: vec![StagedResource {
+                filename: "statements/2026/jan.pdf".to_string(),
+                staging_path: staged_path,
+                coverage_end_date: Some("2026-01-31".to_string()),
+                original_url: Some("https://example.com/export".to_string()),
+                mime_type: Some("application/pdf".to_string()),
+            }],
+            scrape_session_id: "nested-test".to_string(),
+            extension_name: "nested-ext".to_string(),
+            account_name: account_name.clone(),
+            ledger_dir: ledger_dir.clone(),
+        };
+
+        let finalized = finalize_staged_resources(&inner).unwrap_or_else(|err| {
+            panic!("finalize_staged_resources failed: {err}");
+        });
+        assert_eq!(finalized, vec!["2026-01-31-statements/2026/jan.pdf"]);
+
+        let documents_dir = account_documents_dir(&ledger_dir, &account_name);
+        let finalized_path = documents_dir.join(&finalized[0]);
+        assert!(finalized_path.exists(), "expected finalized file to exist");
+        let bytes = fs::read(&finalized_path).unwrap_or_else(|err| {
+            panic!("failed to read finalized file: {err}");
+        });
+        assert_eq!(bytes, b"nested");
+
+        let sidecar_path = documents_dir.join(format!("{}-info.json", finalized[0]));
+        assert!(sidecar_path.exists(), "expected sidecar file to exist");
 
         let _ = fs::remove_dir_all(&root);
     }
