@@ -1560,11 +1560,24 @@ function App() {
                 text: 'Open Recent',
                 items: recentItems,
             });
-            const fileMenu = await Submenu.new({
-                text: 'File',
-                items: [newItem, openItem, openRecent],
-            });
-            const menu = await Menu.new({ items: [fileMenu] });
+            const menu = await Menu.default();
+            const topLevelItems = await menu.items();
+            let fileMenu: Submenu | null = null;
+            for (const item of topLevelItems) {
+                if (item instanceof Submenu && (await item.text()) === 'File') {
+                    fileMenu = item;
+                    break;
+                }
+            }
+            if (fileMenu !== null) {
+                await fileMenu.insert([newItem, openItem, openRecent], 0);
+            } else {
+                const fallbackFileMenu = await Submenu.new({
+                    text: 'File',
+                    items: [newItem, openItem, openRecent],
+                });
+                await menu.append(fallbackFileMenu);
+            }
 
             if (!cancelled) {
                 await menu.setAsAppMenu();
