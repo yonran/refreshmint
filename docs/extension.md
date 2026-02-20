@@ -18,8 +18,8 @@ For the full scrape + extract pipeline, add at least one extraction method:
 my-extension/
   manifest.json
   driver.mjs
-  account.rules     # recommended today
-  # or extract.mjs  # declared in manifest, non-browser runtime not yet wired
+  account.rules     # CSV rules-based extraction
+  # or extract.mjs  # JS extraction script
 ```
 
 ## `manifest.json`
@@ -29,7 +29,6 @@ Example:
 ```json
 {
     "name": "my-extension",
-    "rules": "account.rules",
     "extract": "extract.mjs",
     "idField": "bankId",
     "autoExtract": true,
@@ -43,8 +42,9 @@ Fields:
 
 - `name` (required for extension load): extension folder name under `<ledger>.refreshmint/extensions/<name>/`
 - `secrets` (optional): map of domain to secret names
-- `rules` (optional): hledger CSV rules path used by extraction
-- `extract` (optional): JS extraction script path
+- `rules` or `extract` (required, exactly one): choose one extraction method
+- `rules`: hledger CSV rules path used by extraction
+- `extract`: JS extraction script path (`extract.mjs`) exporting `extract(context)`
 - `idField` (optional): source ID field used by extraction mapping
 - `autoExtract` (optional): extraction preference flag (defaults to `true`)
 

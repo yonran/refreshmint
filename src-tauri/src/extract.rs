@@ -1,4 +1,7 @@
+use lopdf::Document as PdfDocument;
+use rquickjs::{CatchResultExt, Context, Module, Runtime, Value};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 
@@ -22,6 +25,82 @@ pub struct ExtractedTransaction {
 
 fn default_status_string() -> String {
     "Unmarked".to_string()
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtractScriptContext {
+    ledger_dir: String,
+    account_name: String,
+    extension_name: String,
+    document: ExtractDocumentContext,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    document_info: Option<crate::scrape::DocumentInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    csv: Option<Vec<Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pdf: Option<PdfExtractContext>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtractDocumentContext {
+    name: String,
+    path: String,
+    format: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PdfExtractContext {
+    pages: Vec<PdfPageContext>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PdfPageContext {
+    page_number: usize,
+    width: f32,
+    height: f32,
+    text: String,
+    items: Vec<PdfTextItemContext>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PdfTextItemContext {
+    text: String,
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocumentFormat {
+    Csv,
+    Pdf,
+    Other,
+}
+
+impl DocumentFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::Pdf => "pdf",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtractionMode<'a> {
+    Script(&'a str),
+    Rules(&'a str),
+}
+
+fn io_error(message: impl Into<String>) -> io::Error {
+    io::Error::other(message.into())
 }
 
 /// A posting from extraction.
@@ -197,6 +276,18 @@ pub struct ExtractionResult {
     pub document_names: Vec<String>,
 }
 
+fn resolve_extraction_mode<'a>(
+    extract: Option<&'a str>,
+    rules: Option<&'a str>,
+) -> Result<ExtractionMode<'a>, String> {
+    match (extract, rules) {
+        (Some(_), Some(_)) => Err("only one of `extract` or `rules` may be defined".to_string()),
+        (None, None) => Err("exactly one of `extract` or `rules` must be defined".to_string()),
+        (Some(path), None) => Ok(ExtractionMode::Script(path)),
+        (None, Some(path)) => Ok(ExtractionMode::Rules(path)),
+    }
+}
+
 /// Run extraction for a set of documents.
 ///
 /// This orchestrates running extract.mjs or account.rules on each document,
@@ -210,36 +301,59 @@ pub fn run_extraction(
     let extension_dir = crate::account_config::resolve_extension_dir(ledger_dir, extension_name);
     let manifest = crate::scrape::load_manifest(&extension_dir)?;
     let documents_dir = account_journal::account_documents_dir(ledger_dir, account_name);
+    let extraction_mode =
+        resolve_extraction_mode(manifest.extract.as_deref(), manifest.rules.as_deref()).map_err(
+            |err| {
+                io_error(format!(
+                    "invalid manifest.json for extension '{extension_name}': {err}"
+                ))
+            },
+        )?;
 
     let mut all_proposed = Vec::new();
 
-    for doc_name in document_names {
-        let doc_path = documents_dir.join(doc_name);
-        if !doc_path.exists() {
-            return Err(format!("document not found: {}", doc_path.display()).into());
-        }
+    match extraction_mode {
+        ExtractionMode::Script(script_rel_path) => {
+            let script_path = extension_dir.join(script_rel_path);
+            if !script_path.exists() {
+                return Err(format!("extract script not found: {}", script_path.display()).into());
+            }
 
-        // Check for extract.mjs script
-        if let Some(ref extract_script) = manifest.extract {
-            let script_path = extension_dir.join(extract_script);
-            if script_path.exists() {
-                let proposed =
-                    run_extract_script(&script_path, &doc_path, doc_name, &documents_dir)?;
-                if !proposed.is_empty() {
-                    all_proposed.extend(proposed);
-                    continue;
+            for doc_name in document_names {
+                let doc_path = documents_dir.join(doc_name);
+                if !doc_path.exists() {
+                    return Err(format!("document not found: {}", doc_path.display()).into());
                 }
-                eprintln!(
-                    "[extract] {} produced no rows; trying rules fallback if configured",
-                    script_path.display()
-                );
+                let proposed = run_extract_script(
+                    &script_path,
+                    &doc_path,
+                    doc_name,
+                    &documents_dir,
+                    ledger_dir,
+                    account_name,
+                    extension_name,
+                )?;
+                all_proposed.extend(proposed);
             }
         }
+        ExtractionMode::Rules(rules_rel_path) => {
+            let rules_path = extension_dir.join(rules_rel_path);
+            if !rules_path.exists() {
+                return Err(format!("rules file not found: {}", rules_path.display()).into());
+            }
 
-        // Check for hledger CSV rules
-        if let Some(ref rules_file) = manifest.rules {
-            let rules_path = extension_dir.join(rules_file);
-            if rules_path.exists() && doc_name.ends_with(".csv") {
+            for doc_name in document_names {
+                let doc_path = documents_dir.join(doc_name);
+                if !doc_path.exists() {
+                    return Err(format!("document not found: {}", doc_path.display()).into());
+                }
+                if !doc_name.to_ascii_lowercase().ends_with(".csv") {
+                    return Err(format!(
+                        "rules extraction only supports CSV documents, got: {doc_name}"
+                    )
+                    .into());
+                }
+
                 let proposed = run_rules_extraction(
                     &rules_path,
                     &doc_path,
@@ -247,11 +361,8 @@ pub fn run_extraction(
                     manifest.id_field.as_deref(),
                 )?;
                 all_proposed.extend(proposed);
-                continue;
             }
         }
-
-        eprintln!("No extraction method for document: {doc_name}");
     }
 
     Ok(ExtractionResult {
@@ -261,21 +372,311 @@ pub fn run_extraction(
 }
 
 /// Run extract.mjs on a document using QuickJS sandbox.
-///
-/// For now, this is a placeholder that reads the script and runs it.
-/// The full implementation would set up the QuickJS runtime with
-/// `refreshmint.reportExtractedTransaction` and `refreshmint.readSessionFile`.
 fn run_extract_script(
-    _script_path: &Path,
-    _doc_path: &Path,
-    _doc_name: &str,
-    _documents_dir: &Path,
+    script_path: &Path,
+    doc_path: &Path,
+    doc_name: &str,
+    documents_dir: &Path,
+    ledger_dir: &Path,
+    account_name: &str,
+    extension_name: &str,
 ) -> Result<Vec<ExtractedTransaction>, Box<dyn std::error::Error + Send + Sync>> {
-    // Extraction via extract.mjs requires the QuickJS sandbox.
-    // This will be fully wired up when the extraction sandbox is built.
-    // For now, return empty (the rules-based extraction below is the primary path).
-    eprintln!("[extract] extract.mjs execution not yet wired up for non-browser context");
-    Ok(Vec::new())
+    let script_source = std::fs::read_to_string(script_path)?;
+    let context = build_extract_script_context(
+        doc_path,
+        doc_name,
+        documents_dir,
+        ledger_dir,
+        account_name,
+        extension_name,
+    )?;
+    let context_json = serde_json::to_string(&context)?;
+
+    let runtime = Runtime::new()?;
+    let context = Context::full(&runtime)?;
+
+    let result_json = context
+        .with(|ctx| {
+            let module_name = script_path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or("extract.mjs");
+
+            let module = Module::declare(ctx.clone(), module_name, script_source.as_str())
+                .catch(&ctx)
+                .map_err(|error| format!("failed to compile {}: {error}", script_path.display()))?;
+            let (module, module_promise) = module.eval().catch(&ctx).map_err(|error| {
+                format!("failed to evaluate {}: {error}", script_path.display())
+            })?;
+
+            module_promise.finish::<()>().catch(&ctx).map_err(|error| {
+                format!(
+                    "module initialization failed in {}: {error}",
+                    script_path.display()
+                )
+            })?;
+
+            let extract_export: Value = module.get("extract").catch(&ctx).map_err(|_| {
+                format!(
+                    "{} must export function `extract(context)`",
+                    script_path.display()
+                )
+            })?;
+            let extract_fn = extract_export.into_function().ok_or_else(|| {
+                format!(
+                    "{} must export function `extract(context)`",
+                    script_path.display()
+                )
+            })?;
+
+            let js_context = ctx
+                .json_parse(context_json.as_str())
+                .catch(&ctx)
+                .map_err(|error| format!("failed to serialize extract context: {error}"))?;
+
+            let returned: Value = extract_fn
+                .call((js_context,))
+                .catch(&ctx)
+                .map_err(|error| format!("extract(context) threw: {error}"))?;
+
+            let resolved = if returned.is_promise() {
+                returned
+                    .into_promise()
+                    .ok_or_else(|| "internal error: promise conversion failed".to_string())?
+                    .finish::<Value>()
+                    .catch(&ctx)
+                    .map_err(|error| format!("extract(context) rejected: {error}"))?
+            } else {
+                returned
+            };
+
+            if !resolved.is_array() {
+                return Err("extract(context) must return an array of transactions".to_string());
+            }
+
+            ctx.json_stringify(resolved)
+                .catch(&ctx)
+                .map_err(|error| format!("failed to serialize extractor result: {error}"))?
+                .ok_or_else(|| "extract(context) returned a non-serializable value".to_string())?
+                .to_string()
+                .map_err(|error| format!("failed to decode extractor result: {error}"))
+        })
+        .map_err(io_error)?;
+
+    let extracted: Vec<ExtractedTransaction> =
+        serde_json::from_str(&result_json).map_err(|error| {
+            io_error(format!(
+                "extract(context) returned invalid transaction JSON: {error}"
+            ))
+        })?;
+
+    for txn in &extracted {
+        validate_extracted_transaction(txn, doc_name)?;
+    }
+
+    Ok(extracted)
+}
+
+fn build_extract_script_context(
+    doc_path: &Path,
+    doc_name: &str,
+    documents_dir: &Path,
+    ledger_dir: &Path,
+    account_name: &str,
+    extension_name: &str,
+) -> Result<ExtractScriptContext, Box<dyn std::error::Error + Send + Sync>> {
+    let document_info = read_document_info(documents_dir, doc_name)?;
+    let format = detect_document_format(doc_name, document_info.as_ref());
+
+    let csv = match format {
+        DocumentFormat::Csv => Some(read_csv_rows(doc_path)?),
+        _ => None,
+    };
+    let pdf = match format {
+        DocumentFormat::Pdf => Some(read_pdf_context(doc_path)?),
+        _ => None,
+    };
+
+    Ok(ExtractScriptContext {
+        ledger_dir: ledger_dir.display().to_string(),
+        account_name: account_name.to_string(),
+        extension_name: extension_name.to_string(),
+        document: ExtractDocumentContext {
+            name: doc_name.to_string(),
+            path: doc_path.display().to_string(),
+            format: format.as_str().to_string(),
+        },
+        document_info,
+        csv,
+        pdf,
+    })
+}
+
+fn read_document_info(
+    documents_dir: &Path,
+    doc_name: &str,
+) -> Result<Option<crate::scrape::DocumentInfo>, Box<dyn std::error::Error + Send + Sync>> {
+    let sidecar_path = documents_dir.join(format!("{doc_name}-info.json"));
+    if !sidecar_path.exists() {
+        return Ok(None);
+    }
+
+    let sidecar_text = std::fs::read_to_string(&sidecar_path)?;
+    let info = serde_json::from_str(&sidecar_text).map_err(|error| {
+        io_error(format!(
+            "invalid document sidecar {}: {error}",
+            sidecar_path.display()
+        ))
+    })?;
+    Ok(Some(info))
+}
+
+fn detect_document_format(
+    doc_name: &str,
+    document_info: Option<&crate::scrape::DocumentInfo>,
+) -> DocumentFormat {
+    let lower_name = doc_name.to_ascii_lowercase();
+    if lower_name.ends_with(".csv") {
+        return DocumentFormat::Csv;
+    }
+    if lower_name.ends_with(".pdf") {
+        return DocumentFormat::Pdf;
+    }
+
+    if let Some(info) = document_info {
+        let mime = info.mime_type.to_ascii_lowercase();
+        if mime.contains("csv") {
+            return DocumentFormat::Csv;
+        }
+        if mime.contains("pdf") {
+            return DocumentFormat::Pdf;
+        }
+    }
+
+    DocumentFormat::Other
+}
+
+fn read_csv_rows(
+    doc_path: &Path,
+) -> Result<Vec<Vec<String>>, Box<dyn std::error::Error + Send + Sync>> {
+    let bytes = std::fs::read(doc_path)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        io_error(format!(
+            "CSV document is not valid UTF-8: {}",
+            doc_path.display()
+        ))
+    })?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(text.as_bytes());
+
+    let mut rows = Vec::new();
+    for row in reader.records() {
+        let row = row?;
+        rows.push(row.iter().map(std::string::ToString::to_string).collect());
+    }
+
+    Ok(rows)
+}
+
+fn read_pdf_context(
+    doc_path: &Path,
+) -> Result<PdfExtractContext, Box<dyn std::error::Error + Send + Sync>> {
+    let document = PdfDocument::load(doc_path).map_err(|error| {
+        io_error(format!(
+            "failed to open PDF document {}: {error}",
+            doc_path.display()
+        ))
+    })?;
+
+    let mut pages = Vec::new();
+    for (page_number, _object_id) in document.get_pages() {
+        let page_text = document.extract_text(&[page_number]).map_err(|error| {
+            io_error(format!(
+                "failed to read text from PDF page {} in {}: {error}",
+                page_number,
+                doc_path.display()
+            ))
+        })?;
+
+        let mut items = Vec::new();
+        for (line_index, line) in page_text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            // lopdf text extraction does not provide layout geometry.
+            // Expose one item per line with synthetic bounds.
+            items.push(PdfTextItemContext {
+                text: line.to_string(),
+                left: 0.0,
+                top: line_index as f32,
+                width: line.chars().count() as f32,
+                height: 1.0,
+            });
+        }
+
+        let text = page_text.trim().to_string();
+        let (width, height) = page_dimensions(&document, page_number);
+        pages.push(PdfPageContext {
+            page_number: page_number as usize,
+            width,
+            height,
+            text,
+            items,
+        });
+    }
+
+    Ok(PdfExtractContext { pages })
+}
+
+fn page_dimensions(document: &PdfDocument, page_number: u32) -> (f32, f32) {
+    let Some(rect) = resolve_page_rect(document, page_number, b"CropBox")
+        .or_else(|| resolve_page_rect(document, page_number, b"MediaBox"))
+    else {
+        return (0.0, 0.0);
+    };
+
+    let width = (rect[2] - rect[0]).abs();
+    let height = (rect[3] - rect[1]).abs();
+    (width, height)
+}
+
+fn resolve_page_rect(document: &PdfDocument, page_number: u32, key: &[u8]) -> Option<[f32; 4]> {
+    let pages = document.get_pages();
+    let mut current_id = *pages.get(&page_number)?;
+    let mut seen = HashSet::new();
+
+    loop {
+        if !seen.insert(current_id) {
+            return None;
+        }
+
+        let current = document.get_dictionary(current_id).ok()?;
+        if let Ok(object) = current.get_deref(key, document) {
+            if let Some(rect) = parse_rect(object) {
+                return Some(rect);
+            }
+        }
+
+        current_id = current
+            .get(b"Parent")
+            .and_then(lopdf::Object::as_reference)
+            .ok()?;
+    }
+}
+
+fn parse_rect(object: &lopdf::Object) -> Option<[f32; 4]> {
+    let values = object.as_array().ok()?;
+    if values.len() < 4 {
+        return None;
+    }
+
+    let left = values[0].as_float().ok()?;
+    let bottom = values[1].as_float().ok()?;
+    let right = values[2].as_float().ok()?;
+    let top = values[3].as_float().ok()?;
+    Some([left, bottom, right, top])
 }
 
 /// Run hledger CSV rules-based extraction on a CSV document.
@@ -450,6 +851,20 @@ pub struct DocumentWithInfo {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("refreshmint-{prefix}-{}-{now}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
 
     #[test]
     fn validate_requires_evidence() {
@@ -565,5 +980,140 @@ mod tests {
             floating_point: 42.0,
         };
         assert_eq!(format_decimal_raw(&raw), "42");
+    }
+
+    #[test]
+    fn resolve_extraction_mode_rejects_both_extract_and_rules() {
+        let err = resolve_extraction_mode(Some("extract.mjs"), Some("account.rules"))
+            .expect_err("expected mode conflict");
+        assert!(err.contains("only one of `extract` or `rules`"));
+    }
+
+    #[test]
+    fn resolve_extraction_mode_rejects_missing_extract_and_rules() {
+        let err = resolve_extraction_mode(None, None).expect_err("expected missing mode");
+        assert!(err.contains("exactly one of `extract` or `rules`"));
+    }
+
+    #[test]
+    fn run_extract_script_executes_async_extract_function() {
+        let root = temp_dir("extract-script-ok");
+        let documents_dir = root.join("documents");
+        fs::create_dir_all(&documents_dir).expect("create docs dir");
+
+        let script_path = root.join("extract.mjs");
+        fs::write(
+            &script_path,
+            r#"
+export async function extract(context) {
+  if (!Array.isArray(context.csv) || context.csv.length !== 2) {
+    throw new Error("unexpected csv shape");
+  }
+  return [{
+    tdate: context.csv[1][0],
+    tstatus: "Cleared",
+    tdescription: context.csv[1][1],
+    tcomment: "",
+    ttags: [
+      ["evidence", `${context.document.name}:2:1`],
+      ["bankId", context.csv[1][2]]
+    ]
+  }];
+}
+"#,
+        )
+        .expect("write extract script");
+
+        let doc_name = "statement.csv";
+        let doc_path = documents_dir.join(doc_name);
+        fs::write(
+            &doc_path,
+            "date,description,bank_id\n2024-01-05,Coffee Shop,fit-123\n",
+        )
+        .expect("write csv document");
+
+        let txns = run_extract_script(
+            &script_path,
+            &doc_path,
+            doc_name,
+            &documents_dir,
+            &root,
+            "Assets:Checking",
+            "example-extension",
+        )
+        .expect("extract script should succeed");
+
+        assert_eq!(txns.len(), 1);
+        assert_eq!(txns[0].tdate, "2024-01-05");
+        assert_eq!(txns[0].tdescription, "Coffee Shop");
+        assert_eq!(txns[0].bank_id(), Some("fit-123"));
+    }
+
+    #[test]
+    fn run_extract_script_requires_extract_export() {
+        let root = temp_dir("extract-script-missing-export");
+        let documents_dir = root.join("documents");
+        fs::create_dir_all(&documents_dir).expect("create docs dir");
+
+        let script_path = root.join("extract.mjs");
+        fs::write(&script_path, "export const version = '1.0.0';\n").expect("write script");
+
+        let doc_name = "statement.csv";
+        let doc_path = documents_dir.join(doc_name);
+        fs::write(&doc_path, "date,description\n2024-01-05,Coffee Shop\n")
+            .expect("write csv document");
+
+        let err = run_extract_script(
+            &script_path,
+            &doc_path,
+            doc_name,
+            &documents_dir,
+            &root,
+            "Assets:Checking",
+            "example-extension",
+        )
+        .expect_err("expected missing export error");
+
+        assert!(err
+            .to_string()
+            .contains("must export function `extract(context)`"));
+    }
+
+    #[test]
+    fn run_extract_script_requires_array_result() {
+        let root = temp_dir("extract-script-bad-result");
+        let documents_dir = root.join("documents");
+        fs::create_dir_all(&documents_dir).expect("create docs dir");
+
+        let script_path = root.join("extract.mjs");
+        fs::write(
+            &script_path,
+            r#"
+export function extract(_context) {
+  return { ok: true };
+}
+"#,
+        )
+        .expect("write script");
+
+        let doc_name = "statement.csv";
+        let doc_path = documents_dir.join(doc_name);
+        fs::write(&doc_path, "date,description\n2024-01-05,Coffee Shop\n")
+            .expect("write csv document");
+
+        let err = run_extract_script(
+            &script_path,
+            &doc_path,
+            doc_name,
+            &documents_dir,
+            &root,
+            "Assets:Checking",
+            "example-extension",
+        )
+        .expect_err("expected non-array result error");
+
+        assert!(err
+            .to_string()
+            .contains("extract(context) must return an array of transactions"));
     }
 }

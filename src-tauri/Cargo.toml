@@ -28,6 +28,8 @@ tauri-plugin-store = "2"
 clap = { version = "4.5.58", features = ["derive"] }
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 rquickjs = { version = "0.9", features = ["classes", "futures", "macro", "parallel"] }
+csv = "1.3"
+lopdf = "0.35"
 # Compatibility notes (verified with minimal repro crates in /tmp):
 # - spider_chrome 2.37.129 + spider_chromiumoxide_cdp 0.7.8 => compile errors
 # - spider_chrome 2.37.129 + spider_chromiumoxide_cdp 0.7.7 => compiles

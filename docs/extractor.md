@@ -39,14 +39,78 @@ Document selection behavior:
 
 Extraction config comes from extension `manifest.json`:
 
-- `rules`: hledger CSV rules file path (primary extraction method today)
-- `extract`: JS extractor script path
+- `rules`: hledger CSV rules file path
+- `extract`: JS extractor script path (`extract.mjs`)
 - `idField`: optional source ID field
 
-Current behavior:
+Manifest contract:
 
-- rules-based extraction is the main path for CLI/UI extraction
-- `extract` is parsed from manifest but non-browser `extract.mjs` execution is not yet wired
+- exactly one of `rules` or `extract` must be defined
+- defining both is an error
+- defining neither is an error
+
+## Example: JS extractor
+
+Minimal extension shape:
+
+```text
+my-extension/
+  manifest.json
+  driver.mjs
+  extract.mjs
+```
+
+`manifest.json`:
+
+```json
+{
+    "name": "my-extension",
+    "extract": "extract.mjs"
+}
+```
+
+`extract.mjs`:
+
+```js
+export async function extract(context) {
+    if (!Array.isArray(context.csv) || context.csv.length < 2) {
+        return [];
+    }
+
+    // context.csv includes header row at index 0.
+    return context.csv.slice(1).map((row, i) => ({
+        tdate: row[0],
+        tstatus: 'Cleared',
+        tdescription: row[1],
+        tcomment: '',
+        ttags: [
+            ['evidence', `${context.document.name}:${i + 2}:1`],
+            ['bankId', row[2]],
+        ],
+    }));
+}
+```
+
+`extract(context)` must return an array of transactions compatible with the `ExtractedTransaction` schema (`tdate`, `tstatus`, `tdescription`, `tcomment`, `ttags`, optional `tpostings`).
+
+### `context` shape
+
+`context` always includes:
+
+- `ledgerDir`, `accountName`, `extensionName`
+- `document`: `{ name, path, format }`
+- `documentInfo` (if sidecar exists): parsed `*-info.json`
+
+For CSV documents, `context.csv` is provided as `string[][]` (UTF-8 rows, including header row).
+
+For PDF documents, `context.pdf` is provided as:
+
+- `pages[]`
+- each page: `pageNumber`, `width`, `height`, `text`, `items[]`
+- each item: `text`, `left`, `top`, `width`, `height`
+
+Current PDF implementation uses `lopdf` text extraction (no external shared library).  
+`items[]` are line-based with synthetic geometry. Page `width` / `height` come from `CropBox` (fallback `MediaBox`) when present.
 
 ## Example: rules-based extractor
 
@@ -103,6 +167,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 ```
 
 With `idField: "txid"`, extractor output includes `bankId` when the parsed transaction has a `txid` tag.
+
+Rules mode only accepts CSV documents.
 
 ## Pipeline behavior
 
