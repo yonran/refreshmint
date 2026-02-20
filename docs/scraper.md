@@ -46,6 +46,9 @@ Errors thrown from your script fail the scrape run.
 - Prefer `const url = await page.url(); if (!url.startsWith("https://example.com/")) { ... }` over checks like `url.includes("example.com")`.
 - When adding a new code path/branch, add a brief `UNTESTED` comment until that exact branch is exercised in a real run; remove or update the comment after verification.
 - For any code path, uniquely log the branch that we take so that you will see whether it is actually being executed. If it is an inner loop, remove the logging after you have tested it if the logging is too verbose.
+- At each page handler/state, add a short comment describing expected page conditions and enforce them with explicit assertions (URL/selector checks) before taking actions.
+- Add comments for non-obvious actions describing what outcome each action is trying to accomplish (not just what selector is clicked).
+- Pace automation actions (especially login, navigation, and repeated downloads) with short delays so behavior is less bot-like and less likely to trigger anti-automation defenses.
 
 ## Recommended debug-first flow
 
