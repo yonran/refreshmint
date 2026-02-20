@@ -1579,7 +1579,12 @@ function App() {
     }, [recentLedgers]);
 
     return (
-        <div className="app">
+        <div
+            className="app"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+        >
             <header className="app-header">
                 <div>
                     <p className="app-eyebrow">Refreshmint</p>
