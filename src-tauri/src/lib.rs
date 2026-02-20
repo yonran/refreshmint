@@ -394,7 +394,11 @@ fn run_extraction(
         let doc_txns: Vec<_> = result
             .proposed_transactions
             .iter()
-            .filter(|t| t.evidence_refs().iter().any(|e| e.starts_with(doc_name)))
+            .filter(|t| {
+                t.evidence_refs()
+                    .iter()
+                    .any(|e| evidence_ref_matches_document(e, doc_name))
+            })
             .cloned()
             .collect();
 
@@ -433,6 +437,14 @@ fn run_extraction(
         .map_err(|err| err.to_string())?;
 
     Ok(new_count)
+}
+
+fn evidence_ref_matches_document(evidence_ref: &str, document_name: &str) -> bool {
+    evidence_ref.starts_with(document_name)
+        && evidence_ref
+            .get(document_name.len()..)
+            .map(|rest| rest.starts_with(':') || rest.starts_with('#'))
+            .unwrap_or(false)
 }
 
 #[derive(serde::Serialize)]
@@ -572,7 +584,7 @@ fn reconcile_transfer(
 
 #[cfg(test)]
 mod tests {
-    use super::require_non_empty_input;
+    use super::{evidence_ref_matches_document, require_non_empty_input};
 
     #[test]
     fn require_non_empty_input_trims() {
@@ -590,5 +602,13 @@ mod tests {
             Ok(_) => panic!("expected validation error for blank input"),
             Err(err) => assert_eq!(err, "account is required"),
         }
+    }
+
+    #[test]
+    fn evidence_ref_matches_document_requires_delimiter() {
+        assert!(evidence_ref_matches_document("foo.csv:1:1", "foo.csv"));
+        assert!(evidence_ref_matches_document("foo.csv#row:1", "foo.csv"));
+        assert!(!evidence_ref_matches_document("foo.csvx:1:1", "foo.csv"));
+        assert!(!evidence_ref_matches_document("foo.csv", "foo.csv"));
     }
 }
