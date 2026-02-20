@@ -69,6 +69,9 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   --prompt "OTP=123456"
 ```
 
+On successful `debug exec`, any resources staged via `refreshmint.saveResource(...)` are finalized into `accounts/<account>/documents/` using the same evidence pipeline used by `scrape`.
+If resource finalization fails, `debug exec` returns an error so the failure is visible immediately.
+
 Stop:
 
 ```bash
@@ -121,13 +124,15 @@ For frame APIs, `frameRef` can be frame id, frame name, or frame URL (full match
 
 ### `refreshmint`
 
-| Method                                                     | Description                                                                 |
-| ---------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `await refreshmint.saveResource(filename, data, options?)` | Write bytes to extension output dir and stage for account-doc finalization. |
-| `await refreshmint.setSessionMetadata(metadata)`           | Set optional sidecar metadata (`dateRangeStart`, `dateRangeEnd`).           |
-| `refreshmint.reportValue(key, value)`                      | Print key/value status line.                                                |
-| `refreshmint.log(message)`                                 | Log message to stderr.                                                      |
-| `refreshmint.prompt(message)`                              | Ask for a value. CLI runs require `--prompt "MESSAGE=VALUE"`.               |
+| Method                                                                | Description                                                                  |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `await refreshmint.saveResource(filename, data, options?)`            | Write bytes to extension output dir and stage for account-doc finalization.  |
+| `await refreshmint.saveDownloadedResource(path, filename?, options?)` | Read a completed local download file and stage it as a resource.             |
+| `await refreshmint.listAccountDocuments()`                            | Return JSON list of existing account documents (with optional sidecar info). |
+| `await refreshmint.setSessionMetadata(metadata)`                      | Set optional sidecar metadata (`dateRangeStart`, `dateRangeEnd`).            |
+| `refreshmint.reportValue(key, value)`                                 | Print key/value status line.                                                 |
+| `refreshmint.log(message)`                                            | Log message to stderr.                                                       |
+| `refreshmint.prompt(message)`                                         | Ask for a value. CLI runs require `--prompt "MESSAGE=VALUE"`.                |
 
 For `saveResource`, `data` should be bytes (`number[]` is supported). `options` may include `coverageEndDate`, `originalUrl`, and `mimeType`.
 

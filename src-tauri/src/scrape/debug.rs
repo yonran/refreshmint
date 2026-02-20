@@ -121,6 +121,25 @@ struct Response {
     error: Option<String>,
 }
 
+fn finalize_debug_exec_resources(
+    refreshmint: &mut super::js_api::RefreshmintInner,
+) -> Result<Vec<String>, String> {
+    if refreshmint.staged_resources.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    eprintln!(
+        "Finalizing {} staged resources from debug exec...",
+        refreshmint.staged_resources.len()
+    );
+    let names = super::finalize_staged_resources(refreshmint).map_err(|err| err.to_string())?;
+    refreshmint.staged_resources.clear();
+    for name in &names {
+        eprintln!("  -> {name}");
+    }
+    Ok(names)
+}
+
 #[cfg(unix)]
 fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>> {
     use chromiumoxide::browser::Browser;
@@ -260,33 +279,14 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                                     Ok(()) => {
                                         let finalize_result = {
                                             let mut refreshmint = refreshmint_inner.lock().await;
-                                            if refreshmint.staged_resources.is_empty() {
-                                                Ok(Vec::new())
-                                            } else {
-                                                eprintln!(
-                                                    "Finalizing {} staged resources from debug exec...",
-                                                    refreshmint.staged_resources.len()
-                                                );
-                                                match super::finalize_staged_resources(&refreshmint) {
-                                                    Ok(names) => {
-                                                        refreshmint.staged_resources.clear();
-                                                        Ok(names)
-                                                    }
-                                                    Err(err) => Err(err.to_string()),
-                                                }
-                                            }
+                                            finalize_debug_exec_resources(&mut refreshmint)
                                         };
 
                                         match finalize_result {
-                                            Ok(names) => {
-                                                for name in &names {
-                                                    eprintln!("  -> {name}");
-                                                }
-                                                Response {
-                                                    ok: true,
-                                                    error: None,
-                                                }
-                                            }
+                                            Ok(_names) => Response {
+                                                ok: true,
+                                                error: None,
+                                            },
                                             Err(err) => Response {
                                                 ok: false,
                                                 error: Some(format!(
@@ -403,7 +403,27 @@ impl Drop for SocketCleanup {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_segment;
+    use super::{finalize_debug_exec_resources, sanitize_segment};
+    use crate::account_journal::account_documents_dir;
+    use crate::scrape::js_api::{
+        PromptOverrides, RefreshmintInner, SessionMetadata, StagedResource,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn create_temp_dir(prefix: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("refreshmint-{prefix}-{}-{now}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap_or_else(|err| {
+            panic!("failed to create temp dir: {err}");
+        });
+        dir
+    }
 
     #[test]
     fn sanitize_segment_preserves_safe_chars() {
@@ -413,5 +433,57 @@ mod tests {
     #[test]
     fn sanitize_segment_replaces_unsafe_chars() {
         assert_eq!(sanitize_segment("a/b:c"), "a_b_c");
+    }
+
+    #[test]
+    fn finalize_debug_exec_resources_moves_and_clears_staged_files() {
+        let root = create_temp_dir("debug-finalize");
+        let ledger_dir = root.join("ledger.refreshmint");
+        fs::create_dir_all(&ledger_dir).unwrap_or_else(|err| {
+            panic!("failed to create ledger dir: {err}");
+        });
+
+        let staged_path = root.join("staged-debug.bin");
+        fs::write(&staged_path, b"ok").unwrap_or_else(|err| {
+            panic!("failed to write staged file: {err}");
+        });
+
+        let account_name = "Assets:Debug".to_string();
+        let mut inner = RefreshmintInner {
+            output_dir: root.join("output"),
+            prompt_overrides: PromptOverrides::new(),
+            prompt_requires_override: false,
+            session_metadata: SessionMetadata::default(),
+            staged_resources: vec![StagedResource {
+                filename: "debug-smoke.bin".to_string(),
+                staging_path: staged_path.clone(),
+                coverage_end_date: Some("2026-02-01".to_string()),
+                original_url: Some("https://example.com/export".to_string()),
+                mime_type: Some("application/octet-stream".to_string()),
+            }],
+            scrape_session_id: "debug-session".to_string(),
+            extension_name: "smoke-ext".to_string(),
+            account_name: account_name.clone(),
+            ledger_dir: ledger_dir.clone(),
+        };
+
+        let finalized =
+            finalize_debug_exec_resources(&mut inner).unwrap_or_else(|err| panic!("failed: {err}"));
+        assert_eq!(inner.staged_resources.len(), 0);
+        assert_eq!(finalized.len(), 1);
+        assert!(finalized[0].starts_with("2026-02-01-debug-smoke.bin"));
+
+        let documents_dir = account_documents_dir(&ledger_dir, &account_name);
+        let finalized_path = documents_dir.join(&finalized[0]);
+        assert!(finalized_path.exists());
+        let bytes = fs::read(finalized_path).unwrap_or_else(|err| {
+            panic!("failed to read finalized file: {err}");
+        });
+        assert_eq!(bytes, b"ok");
+
+        let sidecar_path = documents_dir.join(format!("{}-info.json", finalized[0]));
+        assert!(sidecar_path.exists());
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
