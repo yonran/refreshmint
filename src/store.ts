@@ -10,35 +10,56 @@ async function getStore() {
     return await load(STORE_NAME, { autoSave: true, defaults: {} });
 }
 
+function normalizeRecentLedgerEntries(entries: string[]): string[] {
+    const normalized: string[] = [];
+    const seen = new Set<string>();
+    for (const entry of entries) {
+        const path = entry.trim();
+        if (path.length === 0 || seen.has(path)) {
+            continue;
+        }
+        seen.add(path);
+        normalized.push(path);
+    }
+    return normalized;
+}
+
 export async function getRecentLedgers(): Promise<string[]> {
     const store = await getStore();
     const value = await store.get<unknown>(RECENT_LEDGER_KEY);
     if (Array.isArray(value)) {
-        return value.filter(
-            (entry): entry is string => typeof entry === 'string',
+        return normalizeRecentLedgerEntries(
+            value.filter((entry): entry is string => typeof entry === 'string'),
         );
     }
     if (typeof value === 'string') {
-        return [value];
+        return normalizeRecentLedgerEntries([value]);
     }
     return [];
 }
 
 export async function setRecentLedgers(entries: string[]): Promise<void> {
     const store = await getStore();
-    await store.set(RECENT_LEDGER_KEY, entries);
+    await store.set(RECENT_LEDGER_KEY, normalizeRecentLedgerEntries(entries));
     await store.save();
 }
 
 export function addRecentLedger(entries: string[], path: string): string[] {
-    if (path.length === 0) {
-        return entries;
+    const normalizedPath = path.trim();
+    if (normalizedPath.length === 0) {
+        return normalizeRecentLedgerEntries(entries);
     }
-    return [path, ...entries];
+    return normalizeRecentLedgerEntries([normalizedPath, ...entries]);
 }
 
 export function removeRecentLedger(entries: string[], path: string): string[] {
-    return entries.filter((entry) => entry !== path);
+    const normalizedPath = path.trim();
+    if (normalizedPath.length === 0) {
+        return normalizeRecentLedgerEntries(entries);
+    }
+    return normalizeRecentLedgerEntries(entries).filter(
+        (entry) => entry !== normalizedPath,
+    );
 }
 
 export async function getLastActiveTab(): Promise<ActiveTab | null> {
