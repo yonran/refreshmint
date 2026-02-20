@@ -322,12 +322,12 @@ pub async fn run_scrape_async(
     eprintln!("Scrape session: {scrape_session_id}");
 
     // 2. Create secret store for the account
-    let secret_store = SecretStore::new(config.account.clone());
+    let secret_store = SecretStore::new(account_name.clone());
 
     // 3. Resolve browser profile directory
     let profile_dir = profile::resolve_profile_dir(
         &config.ledger_dir,
-        &config.account,
+        &account_name,
         config.profile_override.as_deref(),
     )
     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
