@@ -381,7 +381,7 @@ pub async fn run_scrape_async(
 
     // 8. Run the driver script in the sandbox
     eprintln!("Running driver: {}", driver_path.display());
-    let result = sandbox::run_driver(&driver_path, page_inner, refreshmint_inner.clone()).await;
+    let mut result = sandbox::run_driver(&driver_path, page_inner, refreshmint_inner.clone()).await;
     eprintln!("Driver finished: {result:?}");
 
     // 9. Finalize staged resources (move to accounts/<name>/documents/)
@@ -399,7 +399,7 @@ pub async fn run_scrape_async(
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: failed to finalize staged resources: {e}");
+                    result = Err(format!("failed to finalize staged resources: {e}").into());
                 }
             }
         }
