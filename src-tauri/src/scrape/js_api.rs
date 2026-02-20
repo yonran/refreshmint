@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rquickjs::class::Trace;
@@ -1396,6 +1396,47 @@ fn missing_prompt_override_error(message: &str) -> String {
     )
 }
 
+fn unique_output_path(output_dir: &Path, filename: &str) -> PathBuf {
+    let candidate = output_dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let original = Path::new(filename);
+    let stem = original
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("resource");
+    let ext = original.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let parent = original.parent().unwrap_or_else(|| Path::new(""));
+    let suffix = if ext.is_empty() {
+        String::new()
+    } else {
+        format!(".{ext}")
+    };
+
+    for i in 2..1000 {
+        let candidate_name = format!("{stem}-{i}{suffix}");
+        let rel = if parent.as_os_str().is_empty() {
+            PathBuf::from(&candidate_name)
+        } else {
+            parent.join(&candidate_name)
+        };
+        let candidate = output_dir.join(&rel);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    let fallback_name = format!("{stem}-{}{}", std::process::id(), suffix);
+    if parent.as_os_str().is_empty() {
+        output_dir.join(fallback_name)
+    } else {
+        output_dir.join(parent).join(fallback_name)
+    }
+}
+
 #[rquickjs::methods]
 impl RefreshmintApi {
     /// Save binary data to a file in the extension output directory.
@@ -1431,7 +1472,7 @@ impl RefreshmintApi {
         }
 
         // Always save to the legacy output dir for backward compatibility
-        let path = inner.output_dir.join(&filename);
+        let path = unique_output_path(&inner.output_dir, &filename);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| js_err(format!("saveResource mkdir failed: {e}")))?;
@@ -1667,6 +1708,32 @@ mod tests {
         let text = missing_prompt_override_error("OTP");
         assert!(text.contains("OTP"));
         assert!(text.contains("--prompt"));
+    }
+
+    #[test]
+    fn unique_output_path_adds_suffix_on_collision() {
+        let root = std::env::temp_dir().join(format!(
+            "refreshmint-unique-output-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap_or_else(|err| {
+            panic!("failed to create test dir: {err}");
+        });
+        std::fs::write(root.join("foo.csv"), "first").unwrap_or_else(|err| {
+            panic!("failed to write fixture file: {err}");
+        });
+
+        let unique = unique_output_path(&root, "foo.csv");
+        assert_eq!(
+            unique.file_name().and_then(|s| s.to_str()),
+            Some("foo-2.csv")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn test_refreshmint_inner(overrides: PromptOverrides) -> RefreshmintInner {
