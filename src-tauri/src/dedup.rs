@@ -1,4 +1,4 @@
-use crate::account_journal::{AccountEntry, EntryStatus};
+use crate::account_journal::{AccountEntry, EntryStatus, SimpleAmount};
 use crate::extract::ExtractedTransaction;
 use crate::operations;
 
@@ -122,6 +122,15 @@ pub fn apply_dedup_actions(
                 // Update status if more finalized
                 if is_more_finalized(&action.proposed.status(), &entries[*existing_index].status) {
                     entries[*existing_index].status = action.proposed.status();
+                }
+                if !amounts_equal(
+                    &entry_primary_amount(&entries[*existing_index]),
+                    &txn_primary_amount(&action.proposed),
+                ) {
+                    update_entry_amount_from_proposed(
+                        &mut entries[*existing_index],
+                        &action.proposed,
+                    );
                 }
             }
             DedupResult::PendingToFinalized { existing_index } => {
@@ -307,6 +316,10 @@ fn has_content_changed(entry: &AccountEntry, txn: &ExtractedTransaction) -> bool
     if entry.status != txn.status() {
         return true;
     }
+    let proposed_amount = txn_primary_amount(txn);
+    if proposed_amount.is_some() && !amounts_equal(&entry_primary_amount(entry), &proposed_amount) {
+        return true;
+    }
     false
 }
 
@@ -325,6 +338,76 @@ fn update_entry_from_proposed(entry: &mut AccountEntry, txn: &ExtractedTransacti
     entry.status = txn.status();
     if !txn.tcomment.is_empty() {
         entry.comment = txn.tcomment.clone();
+    }
+    update_entry_amount_from_proposed(entry, txn);
+}
+
+fn update_entry_amount_from_proposed(entry: &mut AccountEntry, txn: &ExtractedTransaction) {
+    if let Some(ref postings) = txn.tpostings {
+        for (entry_posting, proposed_posting) in entry.postings.iter_mut().zip(postings.iter()) {
+            entry_posting.amount = proposed_posting
+                .pamount
+                .as_ref()
+                .and_then(|amounts| amounts.first())
+                .map(|amount| SimpleAmount {
+                    commodity: amount.acommodity.clone(),
+                    quantity: amount.aquantity.clone(),
+                });
+        }
+        return;
+    }
+
+    let Some(primary_amount) = txn_primary_simple_amount(txn) else {
+        return;
+    };
+
+    if let Some(first) = entry.postings.first_mut() {
+        first.amount = Some(primary_amount.clone());
+    }
+    if entry.postings.len() == 2 && entry.postings[1].account.starts_with("Equity:Unreconciled") {
+        let negated = SimpleAmount {
+            commodity: primary_amount.commodity,
+            quantity: negate_quantity(&primary_amount.quantity),
+        };
+        entry.postings[1].amount = Some(negated);
+    }
+}
+
+fn txn_primary_simple_amount(txn: &ExtractedTransaction) -> Option<SimpleAmount> {
+    if let Some(ref postings) = txn.tpostings {
+        if let Some(first) = postings.first() {
+            if let Some(ref amounts) = first.pamount {
+                if let Some(first_amount) = amounts.first() {
+                    return Some(SimpleAmount {
+                        commodity: first_amount.acommodity.clone(),
+                        quantity: first_amount.aquantity.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    for (key, value) in &txn.ttags {
+        if key == "amount" {
+            let mut parts = value.split_whitespace();
+            let quantity = parts.next().unwrap_or(value).to_string();
+            let commodity = parts.next().unwrap_or("").to_string();
+            return Some(SimpleAmount {
+                commodity,
+                quantity,
+            });
+        }
+    }
+    None
+}
+
+fn negate_quantity(quantity: &str) -> String {
+    if let Some(stripped) = quantity.strip_prefix('-') {
+        stripped.to_string()
+    } else if let Some(stripped) = quantity.strip_prefix('+') {
+        format!("-{stripped}")
+    } else {
+        format!("-{quantity}")
     }
 }
 
@@ -433,6 +516,9 @@ fn normalize_description(desc: &str) -> String {
 mod tests {
     use super::*;
     use crate::account_journal::{EntryPosting, SimpleAmount};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_entry(
         id: &str,
@@ -478,6 +564,19 @@ mod tests {
             ttags: vec![("evidence".to_string(), evidence.to_string())],
             tpostings: None,
         }
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "refreshmint-dedup-{prefix}-{}-{now}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
     }
 
     #[test]
