@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Per-account configuration stored in `accounts/<name>/config.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -25,18 +27,59 @@ pub fn read_account_config(ledger_dir: &Path, account_name: &str) -> AccountConf
     }
 }
 
-/// Write the account config atomically.
+/// Write the account config via temp-file + rename.
+///
+/// On Unix this is an atomic replace. On Windows we fall back to remove+rename
+/// when the destination already exists.
+fn replace_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+    match std::fs::rename(temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            #[cfg(windows)]
+            {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    std::fs::remove_file(path)?;
+                    return std::fs::rename(temp_path, path);
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Write the account config via temp-file + rename.
 pub fn write_account_config(
     ledger_dir: &Path,
     account_name: &str,
     config: &AccountConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = config_path(ledger_dir, account_name);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("config path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+
     let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(&path, json)?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp_path = parent.join(format!(".config.json.tmp-{}-{nanos}", std::process::id()));
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+    }
+    if let Err(err) = replace_file(&temp_path, &path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err.into());
+    }
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
     Ok(())
 }
 
@@ -126,6 +169,26 @@ mod tests {
             .unwrap_or_else(|err| panic!("failed to write config: {err}"));
         let loaded = read_account_config(&dir, "chase");
         assert_eq!(loaded.extension.as_deref(), Some("chase-driver"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_config_overwrites_existing_value() {
+        let dir = create_temp_dir("acfg-overwrite");
+        let first = AccountConfig {
+            extension: Some("first-driver".to_string()),
+        };
+        write_account_config(&dir, "chase", &first)
+            .unwrap_or_else(|err| panic!("failed to write initial config: {err}"));
+
+        let second = AccountConfig {
+            extension: Some("second-driver".to_string()),
+        };
+        write_account_config(&dir, "chase", &second)
+            .unwrap_or_else(|err| panic!("failed to overwrite config: {err}"));
+
+        let loaded = read_account_config(&dir, "chase");
+        assert_eq!(loaded.extension.as_deref(), Some("second-driver"));
         let _ = fs::remove_dir_all(&dir);
     }
 

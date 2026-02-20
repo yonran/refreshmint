@@ -46,7 +46,8 @@ pub fn resolve_download_dir(
     };
 
     let timestamp = chrono_like_timestamp();
-    let dir_name = format!("{extension_name}-{timestamp}");
+    let dir_stem = sanitize_extension_label(extension_name);
+    let dir_name = format!("{dir_stem}-{timestamp}");
     Ok(base.join("downloads").join(dir_name))
 }
 
@@ -67,6 +68,29 @@ fn sanitize_account_name(account: &str) -> String {
             }
         })
         .collect()
+}
+
+fn sanitize_extension_label(extension_name: &str) -> String {
+    let tail = extension_name
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(extension_name);
+    let sanitized: String = tail
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "extension".to_string()
+    } else {
+        sanitized
+    }
 }
 
 /// Generate a timestamp string like `20260215T120000` without pulling in chrono.
@@ -161,5 +185,39 @@ mod tests {
         };
         assert!(dir.starts_with("/tmp/profiles"));
         assert!(dir.ends_with("chase"));
+    }
+
+    #[test]
+    fn test_resolve_download_dir_with_absolute_extension_path_stays_under_base() {
+        let base = std::path::Path::new("/tmp/profiles");
+        let dir = resolve_download_dir("/Users/me/ext-driver", Some(base));
+        let dir = match dir {
+            Ok(d) => d,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert!(dir.starts_with(base.join("downloads")));
+        let file_name = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        assert!(file_name.starts_with("ext-driver-"));
+    }
+
+    #[test]
+    fn test_resolve_download_dir_with_windows_style_path_uses_leaf_name() {
+        let base = std::path::Path::new("/tmp/profiles");
+        let dir = resolve_download_dir(r"C:\Users\me\ext-driver", Some(base));
+        let dir = match dir {
+            Ok(d) => d,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert!(dir.starts_with(base.join("downloads")));
+        let file_name = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        assert!(file_name.starts_with("ext-driver-"));
     }
 }

@@ -366,13 +366,18 @@ function App() {
     // Load account config and auto-populate extension when account changes
     useEffect(() => {
         if (ledgerPath === null) {
+            setScrapeExtension('');
             return;
         }
 
         const account = scrapeAccount.trim();
         if (account.length === 0) {
+            setScrapeExtension('');
             return;
         }
+
+        // Prevent stale extension state from bleeding across accounts.
+        setScrapeExtension('');
 
         let cancelled = false;
         const timer = window.setTimeout(() => {
@@ -381,15 +386,12 @@ function App() {
                     if (cancelled) {
                         return;
                     }
-                    if (
-                        config.extension != null &&
-                        config.extension.length > 0
-                    ) {
-                        setScrapeExtension(config.extension);
-                    }
+                    setScrapeExtension(config.extension?.trim() ?? '');
                 })
                 .catch(() => {
-                    // Non-fatal: config may not exist yet
+                    if (!cancelled) {
+                        setScrapeExtension('');
+                    }
                 });
         }, 100);
 
