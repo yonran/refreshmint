@@ -225,8 +225,14 @@ pub fn run_extraction(
             if script_path.exists() {
                 let proposed =
                     run_extract_script(&script_path, &doc_path, doc_name, &documents_dir)?;
-                all_proposed.extend(proposed);
-                continue;
+                if !proposed.is_empty() {
+                    all_proposed.extend(proposed);
+                    continue;
+                }
+                eprintln!(
+                    "[extract] {} produced no rows; trying rules fallback if configured",
+                    script_path.display()
+                );
             }
         }
 
