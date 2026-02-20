@@ -1452,10 +1452,46 @@ impl RefreshmintApi {
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountDocumentSummary {
+    filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage_end_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extension_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scraped_at: Option<String>,
+}
+
 fn missing_prompt_override_error(message: &str) -> String {
     format!(
         "missing prompt value for refreshmint.prompt(\"{message}\"); supply --prompt \"{message}=VALUE\""
     )
+}
+
+fn parse_save_resource_options(
+    options: Option<rquickjs::Value<'_>>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let mut coverage_end_date: Option<String> = None;
+    let mut original_url: Option<String> = None;
+    let mut mime_type: Option<String> = None;
+    if let Some(opts) = options {
+        if let Some(obj) = opts.as_object() {
+            if let Ok(val) = obj.get::<_, Option<String>>("coverageEndDate") {
+                coverage_end_date = val;
+            }
+            if let Ok(val) = obj.get::<_, Option<String>>("originalUrl") {
+                original_url = val;
+            }
+            if let Ok(val) = obj.get::<_, Option<String>>("mimeType") {
+                mime_type = val;
+            }
+        }
+    }
+    (coverage_end_date, original_url, mime_type)
 }
 
 fn unique_output_path(output_dir: &Path, filename: &str) -> PathBuf {
@@ -1501,6 +1537,33 @@ fn unique_output_path(output_dir: &Path, filename: &str) -> PathBuf {
 
 #[rquickjs::methods]
 impl RefreshmintApi {
+    /// List existing account documents as JSON for "since last scrape" logic.
+    #[qjs(rename = "listAccountDocuments")]
+    pub async fn js_list_account_documents(&self) -> JsResult<String> {
+        let (ledger_dir, account_name) = {
+            let inner = self.inner.lock().await;
+            (inner.ledger_dir.clone(), inner.account_name.clone())
+        };
+
+        let listed = crate::extract::list_documents(&ledger_dir, &account_name)
+            .map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?;
+        let docs = listed
+            .into_iter()
+            .map(|entry| {
+                let info = entry.info;
+                AccountDocumentSummary {
+                    filename: entry.filename,
+                    coverage_end_date: info.as_ref().map(|v| v.coverage_end_date.clone()),
+                    mime_type: info.as_ref().map(|v| v.mime_type.clone()),
+                    extension_name: info.as_ref().map(|v| v.extension_name.clone()),
+                    scraped_at: info.as_ref().map(|v| v.scraped_at.clone()),
+                }
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&docs)
+            .map_err(|e| js_err(format!("listAccountDocuments serialization failed: {e}")))
+    }
+
     /// Save binary data to a file in the extension output directory.
     ///
     /// Accepts an optional third argument: an options object with `coverageEndDate`.
@@ -1516,22 +1579,7 @@ impl RefreshmintApi {
         let mut inner = self.inner.lock().await;
 
         // Parse optional coverageEndDate from options object
-        let mut coverage_end_date: Option<String> = None;
-        let mut original_url: Option<String> = None;
-        let mut mime_type: Option<String> = None;
-        if let Some(opts) = options {
-            if let Some(obj) = opts.as_object() {
-                if let Ok(val) = obj.get::<_, Option<String>>("coverageEndDate") {
-                    coverage_end_date = val;
-                }
-                if let Ok(val) = obj.get::<_, Option<String>>("originalUrl") {
-                    original_url = val;
-                }
-                if let Ok(val) = obj.get::<_, Option<String>>("mimeType") {
-                    mime_type = val;
-                }
-            }
-        }
+        let (coverage_end_date, original_url, mime_type) = parse_save_resource_options(options);
 
         // Always save to the legacy output dir for backward compatibility
         let path = unique_output_path(&inner.output_dir, &filename);
@@ -1552,6 +1600,35 @@ impl RefreshmintApi {
         });
 
         Ok(())
+    }
+
+    /// Save a completed local download file into staged resources.
+    ///
+    /// Useful with `page.waitForDownload(...)` where browser downloaded bytes
+    /// are available on disk but not in JS memory.
+    #[qjs(rename = "saveDownloadedResource")]
+    pub async fn js_save_downloaded_resource(
+        &self,
+        download_path: String,
+        filename: Option<String>,
+        options: Option<rquickjs::Value<'_>>,
+    ) -> JsResult<()> {
+        let input_path = PathBuf::from(download_path.clone());
+        let data = std::fs::read(&input_path).map_err(|e| {
+            js_err(format!(
+                "saveDownloadedResource read failed ({}): {e}",
+                input_path.display()
+            ))
+        })?;
+
+        let final_name = filename.unwrap_or_else(|| {
+            input_path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or("download.bin")
+                .to_string()
+        });
+        self.js_save_resource(final_name, data, options).await
     }
 
     /// Set session-level metadata (dateRangeStart, dateRangeEnd).
