@@ -274,8 +274,28 @@ pub fn get_unreconciled(
     let entries = account_journal::read_journal(ledger_dir, account_name)?;
     Ok(entries
         .into_iter()
-        .filter(|e| e.reconciled.is_none() && e.reconciled_postings.is_empty())
+        .filter(has_unreconciled_portion)
         .collect())
+}
+
+fn has_unreconciled_portion(entry: &AccountEntry) -> bool {
+    if entry.reconciled.is_some() {
+        return false;
+    }
+    if entry.reconciled_postings.is_empty() {
+        return true;
+    }
+    if entry.postings.is_empty() {
+        return false;
+    }
+
+    let mut reconciled_mask = vec![false; entry.postings.len()];
+    for (idx, _) in &entry.reconciled_postings {
+        if *idx < reconciled_mask.len() {
+            reconciled_mask[*idx] = true;
+        }
+    }
+    reconciled_mask.iter().any(|is_reconciled| !is_reconciled)
 }
 
 /// Format a GL transaction for reconciliation.
@@ -559,6 +579,61 @@ mod tests {
         let unreconciled = get_unreconciled(&root, "test-acct").unwrap();
         assert_eq!(unreconciled.len(), 1);
         assert_eq!(unreconciled[0].id, "txn-2");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn get_unreconciled_includes_partially_reconciled_multi_posting_entries() {
+        let root = temp_dir("unreconciled-partial");
+        let mut entry = make_entry("txn-1", "2024-01-15", "Venmo pass-through", "-21.32");
+        entry.reconciled_postings = vec![(0, "general.journal:gl-1".to_string())];
+        account_journal::write_journal(&root, "test-acct", &[entry]).unwrap();
+
+        let unreconciled = get_unreconciled(&root, "test-acct").unwrap();
+        assert_eq!(unreconciled.len(), 1);
+        assert_eq!(unreconciled[0].id, "txn-1");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconcile_rejects_out_of_bounds_posting_index() {
+        let root = temp_dir("posting-index-bounds");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let entries = vec![make_entry("txn-1", "2024-01-15", "Shell Oil", "-21.32")];
+        account_journal::write_journal(&root, "chase", &entries).unwrap();
+
+        let err = reconcile_entry(&root, "chase", "txn-1", "Expenses:Gas", Some(99))
+            .expect_err("out-of-bounds index should error");
+        assert!(err.to_string().contains("out of bounds"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconcile_rejects_entry_without_postings() {
+        let root = temp_dir("empty-postings");
+        fs::write(root.join("general.journal"), "").unwrap();
+
+        let entry = AccountEntry {
+            id: "txn-1".to_string(),
+            date: "2024-01-15".to_string(),
+            status: EntryStatus::Cleared,
+            description: "No postings".to_string(),
+            comment: String::new(),
+            evidence: vec!["doc.csv:1:1".to_string()],
+            postings: Vec::new(),
+            tags: vec![],
+            extracted_by: None,
+            reconciled: None,
+            reconciled_postings: Vec::new(),
+        };
+        account_journal::write_journal(&root, "chase", &[entry]).unwrap();
+
+        let err = reconcile_entry(&root, "chase", "txn-1", "Expenses:Gas", None)
+            .expect_err("empty postings should error");
+        assert!(err.to_string().contains("has no postings"));
 
         let _ = fs::remove_dir_all(&root);
     }
