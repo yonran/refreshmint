@@ -2,11 +2,13 @@
 
 Desktop ledger app built with Tauri, React, TypeScript, and Rust.
 
-## Scraper Docs
+## Extension/Scrape/Extract Docs
 
-For extension authoring and JS API reference, see:
+For focused extension docs, see:
 
-- `docs/scrapers.md`
+- `docs/extension.md`
+- `docs/scraper.md`
+- `docs/extractor.md`
 
 ## Prerequisites
 

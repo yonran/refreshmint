@@ -739,10 +739,14 @@ fn run_account_extract(
         args.extension.as_deref(),
     )
     .map_err(std::io::Error::other)?;
-    let listed_documents = crate::extract::list_documents(&ledger_dir, &account_name)?
-        .into_iter()
-        .map(|d| d.filename)
-        .collect::<Vec<_>>();
+    let listed_documents = if args.document.is_empty() {
+        crate::extract::list_documents(&ledger_dir, &account_name)?
+            .into_iter()
+            .map(|d| d.filename)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let document_names = resolve_extraction_document_names(&args.document, listed_documents)?;
 
     if document_names.is_empty() {
