@@ -483,6 +483,9 @@ impl PageApi {
             .find_element(selector)
             .await
             .map_err(|e| js_err(format!("click find failed: {e}")))?;
+        ensure_element_receives_pointer_events(&element)
+            .await
+            .map_err(|e| js_err(format!("click failed: {e}")))?;
         element
             .click()
             .await
@@ -499,6 +502,9 @@ impl PageApi {
             .find_element(selector)
             .await
             .map_err(|e| js_err(format!("type find failed: {e}")))?;
+        ensure_element_receives_pointer_events(&element)
+            .await
+            .map_err(|e| js_err(format!("type click failed: {e}")))?;
         element
             .click()
             .await
@@ -1217,6 +1223,62 @@ async fn wait_for_frame_execution_context(
             ));
         }
         tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+    }
+}
+
+async fn ensure_element_receives_pointer_events(
+    element: &chromiumoxide::Element,
+) -> Result<(), String> {
+    let check = element
+        .call_js_fn(
+            r#"function() {
+                if (!this.isConnected) return 'Node is detached from document';
+                if (this.nodeType !== Node.ELEMENT_NODE) return 'Node is not of type HTMLElement';
+                this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+                const rect = this.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return 'Element is not visible';
+                const x = rect.left + rect.width / 2;
+                const y = rect.top + rect.height / 2;
+                if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) {
+                    return 'Element is outside of the viewport';
+                }
+                const hit = document.elementFromPoint(x, y);
+                if (!hit) return 'Element is outside of the viewport';
+                const containsComposed = (root, node) => {
+                    let current = node;
+                    while (current) {
+                        if (current === root) return true;
+                        current = current.parentNode || (current instanceof ShadowRoot ? current.host : null);
+                    }
+                    return false;
+                };
+                if (containsComposed(this, hit)) return '';
+                const describe = el => {
+                    if (!(el instanceof Element)) return 'Another node';
+                    let out = el.tagName.toLowerCase();
+                    if (el.id) out += '#' + el.id;
+                    if (el.classList && el.classList.length) {
+                        out += '.' + Array.from(el.classList).slice(0, 3).join('.');
+                    }
+                    return out;
+                };
+                return describe(hit) + ' intercepts pointer events';
+            }"#,
+            false,
+        )
+        .await
+        .map_err(|e| format!("pointer actionability check failed: {e}"))?;
+
+    let message = check
+        .result
+        .value
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if message.is_empty() {
+        Ok(())
+    } else {
+        Err(message.to_string())
     }
 }
 

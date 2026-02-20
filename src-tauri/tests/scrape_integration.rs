@@ -22,6 +22,48 @@ try {
 }
 "##;
 
+const OVERLAY_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("integration overlay start");
+  const blockedHtml = encodeURIComponent(`
+    <style>
+      #target {
+        position: fixed;
+        top: 40px;
+        left: 40px;
+        z-index: 1;
+      }
+      #overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 2;
+        background: rgba(0, 0, 0, 0.1);
+      }
+    </style>
+    <button id="target">Target</button>
+    <div id="overlay"></div>
+  `);
+  await page.goto(`data:text/html,${blockedHtml}`);
+  let sawInterceptError = false;
+  try {
+    await page.click("#target");
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e);
+    if (msg.includes("intercepts pointer events")) {
+      sawInterceptError = true;
+    }
+  }
+  if (!sawInterceptError) {
+    throw new Error("expected click to fail with overlay interception error");
+  }
+  await refreshmint.saveResource("overlay.bin", [111, 107]);
+  refreshmint.log("integration overlay done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("integration overlay error: " + msg);
+  throw e;
+}
+"##;
 struct TestSandbox {
     root: PathBuf,
 }
@@ -90,6 +132,54 @@ fn scrape_smoke_driver_writes_output() -> Result<(), Box<dyn Error>> {
         .join(EXTENSION_NAME)
         .join("output")
         .join("smoke.bin");
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn scrape_click_reports_overlay_interception() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping overlay scrape test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let sandbox = TestSandbox::new("scrape-overlay")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
+    fs::write(&driver_path, OVERLAY_DRIVER_SOURCE)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        account: ACCOUNT_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    scrape::run_scrape(config)?;
+
+    let output_file = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("overlay.bin");
     let bytes = fs::read(&output_file)?;
     assert_eq!(bytes, b"ok");
 
