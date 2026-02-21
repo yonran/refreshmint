@@ -739,7 +739,6 @@ fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
         Some(prompt_overrides),
         Some(true),
     )?;
-    println!("Script executed.");
     Ok(())
 }
 

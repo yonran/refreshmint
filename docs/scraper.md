@@ -79,6 +79,9 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   --prompt "OTP=123456"
 ```
 
+`debug exec` streams `refreshmint.log(...)` and `refreshmint.reportValue(...)` output to its own stderr/stdout.
+`debug start` remains focused on hosting the browser/session and startup diagnostics.
+
 On successful `debug exec`, any resources staged via `refreshmint.saveResource(...)` are finalized into `accounts/<account>/documents/` using the same evidence pipeline used by `scrape`.
 If resource finalization fails, `debug exec` returns an error so the failure is visible immediately.
 

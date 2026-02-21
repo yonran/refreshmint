@@ -71,22 +71,28 @@ pub fn exec_debug_script_with_options(
     prompt_overrides: Option<super::js_api::PromptOverrides>,
     prompt_requires_override: Option<bool>,
 ) -> Result<(), Box<dyn Error>> {
-    let response = send_request(
-        socket_path,
-        Request::Exec {
-            script: script_source.to_string(),
+    #[cfg(unix)]
+    {
+        exec_debug_script_with_options_unix(
+            socket_path,
+            script_source,
             declared_secrets,
             prompt_overrides,
             prompt_requires_override,
-        },
-    )?;
-    if response.ok {
-        return Ok(());
+        )
     }
-    Err(response
-        .error
-        .unwrap_or_else(|| "exec failed".to_string())
-        .into())
+
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            socket_path,
+            script_source,
+            declared_secrets,
+            prompt_overrides,
+            prompt_requires_override,
+        );
+        Err("debug sockets are currently supported only on unix platforms".into())
+    }
 }
 
 pub fn stop_debug_session(socket_path: &Path) -> Result<(), Box<dyn Error>> {
@@ -98,6 +104,79 @@ pub fn stop_debug_session(socket_path: &Path) -> Result<(), Box<dyn Error>> {
         .error
         .unwrap_or_else(|| "stop failed".to_string())
         .into())
+}
+
+#[cfg(unix)]
+fn exec_debug_script_with_options_unix(
+    socket_path: &Path,
+    script_source: &str,
+    declared_secrets: Option<super::js_api::SecretDeclarations>,
+    prompt_overrides: Option<super::js_api::PromptOverrides>,
+    prompt_requires_override: Option<bool>,
+) -> Result<(), Box<dyn Error>> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+
+    let request = Request::Exec {
+        script: script_source.to_string(),
+        declared_secrets,
+        prompt_overrides,
+        prompt_requires_override,
+    };
+
+    let mut stream = UnixStream::connect(socket_path)?;
+    serde_json::to_writer(&mut stream, &request)?;
+    stream.write_all(b"\n")?;
+    stream.shutdown(Shutdown::Write)?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 {
+            return Err("exec failed: missing final result frame".into());
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Ok(frame) = serde_json::from_str::<ExecStreamFrame>(trimmed) {
+            match frame {
+                ExecStreamFrame::Output {
+                    stream: ExecOutputStream::Stdout,
+                    line,
+                } => println!("{line}"),
+                ExecStreamFrame::Output {
+                    stream: ExecOutputStream::Stderr,
+                    line,
+                } => eprintln!("{line}"),
+                ExecStreamFrame::Result { ok, error } => {
+                    if ok {
+                        return Ok(());
+                    }
+                    return Err(error.unwrap_or_else(|| "exec failed".to_string()).into());
+                }
+            }
+            continue;
+        }
+
+        // Backward compatibility with pre-streaming response payloads.
+        if let Ok(response) = serde_json::from_str::<Response>(trimmed) {
+            if response.ok {
+                return Ok(());
+            }
+            return Err(response
+                .error
+                .unwrap_or_else(|| "exec failed".to_string())
+                .into());
+        }
+
+        return Err(format!("invalid exec response frame: {trimmed}").into());
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -119,6 +198,35 @@ enum Request {
 struct Response {
     ok: bool,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ExecOutputStream {
+    Stdout,
+    Stderr,
+}
+
+impl From<super::js_api::DebugOutputStream> for ExecOutputStream {
+    fn from(value: super::js_api::DebugOutputStream) -> Self {
+        match value {
+            super::js_api::DebugOutputStream::Stdout => Self::Stdout,
+            super::js_api::DebugOutputStream::Stderr => Self::Stderr,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ExecStreamFrame {
+    Output {
+        stream: ExecOutputStream,
+        line: String,
+    },
+    Result {
+        ok: bool,
+        error: Option<String>,
+    },
 }
 
 fn finalize_debug_exec_resources(
@@ -233,6 +341,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                 output_dir,
                 prompt_overrides: super::js_api::PromptOverrides::new(),
                 prompt_requires_override: config.prompt_requires_override,
+                debug_output_sink: None,
                 session_metadata: super::js_api::SessionMetadata::default(),
                 staged_resources: Vec::new(),
                 scrape_session_id: String::new(),
@@ -260,11 +369,18 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                 Ok(Ok((stream, _addr))) => {
                     let mut reader = BufReader::new(stream);
                     let mut body = String::new();
-                    let response = match reader.read_line(&mut body).await {
-                        Ok(0) => Response {
-                            ok: false,
-                            error: Some("failed to read request: empty request".to_string()),
-                        },
+                    let read_result = reader.read_line(&mut body).await;
+                    let mut stream = reader.into_inner();
+                    match read_result {
+                        Ok(0) => {
+                            let response = Response {
+                                ok: false,
+                                error: Some("failed to read request: empty request".to_string()),
+                            };
+                            if let Err(err) = write_response_async(&mut stream, &response).await {
+                                eprintln!("failed to write debug response: {err}");
+                            }
+                        }
                         Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
                             Ok(Request::Exec {
                                 script,
@@ -272,71 +388,51 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                                 prompt_overrides,
                                 prompt_requires_override,
                             }) => {
-                                if let Some(declared) = declared_secrets {
-                                    let mut page_inner = page_inner.lock().await;
-                                    page_inner.declared_secrets = declared;
-                                }
-                                {
-                                    let mut refreshmint = refreshmint_inner.lock().await;
-                                    refreshmint.prompt_overrides =
-                                        prompt_overrides.unwrap_or_default();
-                                    if let Some(require_override) = prompt_requires_override {
-                                        refreshmint.prompt_requires_override = require_override;
-                                    }
-                                }
-                                match super::sandbox::run_script_source(
-                                    &script,
+                                if let Err(err) = handle_exec_request_async(
+                                    &mut stream,
                                     page_inner.clone(),
                                     refreshmint_inner.clone(),
+                                    script,
+                                    declared_secrets,
+                                    prompt_overrides,
+                                    prompt_requires_override,
                                 )
                                 .await
                                 {
-                                    Ok(()) => {
-                                        let finalize_result = {
-                                            let mut refreshmint = refreshmint_inner.lock().await;
-                                            finalize_debug_exec_resources(&mut refreshmint)
-                                        };
-
-                                        match finalize_result {
-                                            Ok(_names) => Response {
-                                                ok: true,
-                                                error: None,
-                                            },
-                                            Err(err) => Response {
-                                                ok: false,
-                                                error: Some(format!(
-                                                    "failed to finalize staged resources: {err}"
-                                                )),
-                                            },
-                                        }
-                                    }
-                                    Err(err) => Response {
-                                        ok: false,
-                                        error: Some(err.to_string()),
-                                    },
+                                    eprintln!("failed to write debug exec stream: {err}");
                                 }
                             }
                             Ok(Request::Stop) => {
                                 running = false;
-                                Response {
+                                let response = Response {
                                     ok: true,
                                     error: None,
+                                };
+                                if let Err(err) = write_response_async(&mut stream, &response).await
+                                {
+                                    eprintln!("failed to write debug response: {err}");
                                 }
                             }
-                            Err(err) => Response {
+                            Err(err) => {
+                                let response = Response {
+                                    ok: false,
+                                    error: Some(format!("invalid request: {err}")),
+                                };
+                                if let Err(err) = write_response_async(&mut stream, &response).await
+                                {
+                                    eprintln!("failed to write debug response: {err}");
+                                }
+                            }
+                        },
+                        Err(err) => {
+                            let response = Response {
                                 ok: false,
-                                error: Some(format!("invalid request: {err}")),
-                            },
-                        },
-                        Err(err) => Response {
-                            ok: false,
-                            error: Some(format!("failed to read request: {err}")),
-                        },
-                    };
-
-                    let mut stream = reader.into_inner();
-                    if let Err(err) = write_response_async(&mut stream, &response).await {
-                        eprintln!("failed to write debug response: {err}");
+                                error: Some(format!("failed to read request: {err}")),
+                            };
+                            if let Err(err) = write_response_async(&mut stream, &response).await {
+                                eprintln!("failed to write debug response: {err}");
+                            }
+                        }
                     }
                 }
                 Ok(Err(err)) => return Err::<(), Box<dyn Error>>(err.into()),
@@ -355,6 +451,138 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
     })?;
 
     Ok(())
+}
+
+#[cfg(unix)]
+async fn handle_exec_request_async(
+    stream: &mut tokio::net::UnixStream,
+    page_inner: std::sync::Arc<tokio::sync::Mutex<super::js_api::PageInner>>,
+    refreshmint_inner: std::sync::Arc<tokio::sync::Mutex<super::js_api::RefreshmintInner>>,
+    script: String,
+    declared_secrets: Option<super::js_api::SecretDeclarations>,
+    prompt_overrides: Option<super::js_api::PromptOverrides>,
+    prompt_requires_override: Option<bool>,
+) -> std::io::Result<()> {
+    if let Some(declared) = declared_secrets {
+        let mut page_inner = page_inner.lock().await;
+        page_inner.declared_secrets = declared;
+    }
+
+    let (output_sender, mut output_receiver) =
+        tokio::sync::mpsc::unbounded_channel::<super::js_api::DebugOutputEvent>();
+    {
+        let mut refreshmint = refreshmint_inner.lock().await;
+        refreshmint.prompt_overrides = prompt_overrides.unwrap_or_default();
+        if let Some(require_override) = prompt_requires_override {
+            refreshmint.prompt_requires_override = require_override;
+        }
+        refreshmint.debug_output_sink = Some(output_sender);
+    }
+
+    let refreshmint_inner_for_task = refreshmint_inner.clone();
+    let mut exec_task = tokio::spawn(async move {
+        let run_result = super::sandbox::run_script_source_with_options(
+            &script,
+            page_inner,
+            refreshmint_inner_for_task.clone(),
+            super::sandbox::SandboxRunOptions {
+                emit_diagnostics: false,
+            },
+        )
+        .await;
+
+        let result = match run_result {
+            Ok(()) => {
+                let finalize_result = {
+                    let mut refreshmint = refreshmint_inner_for_task.lock().await;
+                    finalize_debug_exec_resources(&mut refreshmint)
+                };
+                match finalize_result {
+                    Ok(_names) => Ok(()),
+                    Err(err) => Err(format!("failed to finalize staged resources: {err}")),
+                }
+            }
+            Err(err) => Err(err.to_string()),
+        };
+
+        {
+            let mut refreshmint = refreshmint_inner_for_task.lock().await;
+            refreshmint.debug_output_sink = None;
+        }
+
+        result
+    });
+
+    let mut exec_result: Option<Result<(), String>> = None;
+    loop {
+        tokio::select! {
+            maybe_event = output_receiver.recv() => {
+                match maybe_event {
+                    Some(event) => {
+                        let frame = ExecStreamFrame::Output {
+                            stream: event.stream.into(),
+                            line: event.line,
+                        };
+                        write_exec_stream_frame_async(stream, &frame).await?;
+                    }
+                    None => {
+                        if exec_result.is_some() {
+                            break;
+                        }
+                    }
+                }
+            }
+            joined = &mut exec_task, if exec_result.is_none() => {
+                exec_result = Some(match joined {
+                    Ok(result) => result,
+                    Err(err) => Err(format!("failed to join debug exec task: {err}")),
+                });
+
+                // Ensure sender cleanup even if task exits unexpectedly.
+                {
+                    let mut refreshmint = refreshmint_inner.lock().await;
+                    refreshmint.debug_output_sink = None;
+                }
+
+                if output_receiver.is_closed() {
+                    while let Ok(event) = output_receiver.try_recv() {
+                        let frame = ExecStreamFrame::Output {
+                            stream: event.stream.into(),
+                            line: event.line,
+                        };
+                        write_exec_stream_frame_async(stream, &frame).await?;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    let final_result = match exec_result {
+        Some(result) => result,
+        None => {
+            let joined = exec_task.await.map_err(|err| {
+                std::io::Error::other(format!("failed to join debug exec task: {err}"))
+            })?;
+            {
+                let mut refreshmint = refreshmint_inner.lock().await;
+                refreshmint.debug_output_sink = None;
+            }
+            joined
+        }
+    };
+
+    let final_frame = match final_result {
+        Ok(()) => ExecStreamFrame::Result {
+            ok: true,
+            error: None,
+        },
+        Err(err) => ExecStreamFrame::Result {
+            ok: false,
+            error: Some(err),
+        },
+    };
+    write_exec_stream_frame_async(stream, &final_frame).await
 }
 
 #[cfg(unix)]
@@ -385,6 +613,17 @@ async fn write_response_async(
     response: &Response,
 ) -> std::io::Result<()> {
     let mut out = serde_json::to_vec(response)?;
+    out.push(b'\n');
+    tokio::io::AsyncWriteExt::write_all(stream, &out).await?;
+    tokio::io::AsyncWriteExt::flush(stream).await
+}
+
+#[cfg(unix)]
+async fn write_exec_stream_frame_async(
+    stream: &mut tokio::net::UnixStream,
+    frame: &ExecStreamFrame,
+) -> std::io::Result<()> {
+    let mut out = serde_json::to_vec(frame)?;
     out.push(b'\n');
     tokio::io::AsyncWriteExt::write_all(stream, &out).await?;
     tokio::io::AsyncWriteExt::flush(stream).await
@@ -422,7 +661,9 @@ impl Drop for SocketCleanup {
 
 #[cfg(test)]
 mod tests {
-    use super::{finalize_debug_exec_resources, sanitize_segment};
+    use super::{
+        finalize_debug_exec_resources, sanitize_segment, ExecOutputStream, ExecStreamFrame,
+    };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
         PromptOverrides, RefreshmintInner, SessionMetadata, StagedResource,
@@ -455,6 +696,30 @@ mod tests {
     }
 
     #[test]
+    fn exec_stream_output_frame_roundtrip_json() {
+        let frame = ExecStreamFrame::Output {
+            stream: ExecOutputStream::Stdout,
+            line: "hello".to_string(),
+        };
+        let json = serde_json::to_string(&frame).unwrap_or_else(|err| panic!("failed: {err}"));
+        let parsed: ExecStreamFrame =
+            serde_json::from_str(&json).unwrap_or_else(|err| panic!("failed: {err}"));
+        assert_eq!(parsed, frame);
+    }
+
+    #[test]
+    fn exec_stream_result_frame_roundtrip_json() {
+        let frame = ExecStreamFrame::Result {
+            ok: false,
+            error: Some("boom".to_string()),
+        };
+        let json = serde_json::to_string(&frame).unwrap_or_else(|err| panic!("failed: {err}"));
+        let parsed: ExecStreamFrame =
+            serde_json::from_str(&json).unwrap_or_else(|err| panic!("failed: {err}"));
+        assert_eq!(parsed, frame);
+    }
+
+    #[test]
     fn finalize_debug_exec_resources_moves_and_clears_staged_files() {
         let root = create_temp_dir("debug-finalize");
         let ledger_dir = root.join("ledger.refreshmint");
@@ -472,6 +737,7 @@ mod tests {
             output_dir: root.join("output"),
             prompt_overrides: PromptOverrides::new(),
             prompt_requires_override: false,
+            debug_output_sink: None,
             session_metadata: SessionMetadata::default(),
             staged_resources: vec![StagedResource {
                 filename: "debug-smoke.bin".to_string(),

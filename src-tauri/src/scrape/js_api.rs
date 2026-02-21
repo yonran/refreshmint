@@ -62,6 +62,18 @@ struct TabMetadata {
 pub type SecretDeclarations = BTreeMap<String, BTreeSet<String>>;
 pub type PromptOverrides = BTreeMap<String, String>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugOutputStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugOutputEvent {
+    pub stream: DebugOutputStream,
+    pub line: String,
+}
+
 /// Shared state backing the `page` JS object.
 pub struct PageInner {
     pub page: chromiumoxide::Page,
@@ -1725,6 +1737,7 @@ pub struct RefreshmintInner {
     pub output_dir: PathBuf,
     pub prompt_overrides: PromptOverrides,
     pub prompt_requires_override: bool,
+    pub debug_output_sink: Option<tokio::sync::mpsc::UnboundedSender<DebugOutputEvent>>,
     pub session_metadata: SessionMetadata,
     pub staged_resources: Vec<StagedResource>,
     pub scrape_session_id: String,
@@ -1988,13 +2001,18 @@ impl RefreshmintApi {
     /// Report a key-value pair to stdout.
     #[qjs(rename = "reportValue")]
     pub fn js_report_value(&self, key: String, value: String) -> JsResult<()> {
-        println!("{key}: {value}");
+        let message = format!("{key}: {value}");
+        if !self.emit_debug_output(DebugOutputStream::Stdout, message.clone()) {
+            println!("{message}");
+        }
         Ok(())
     }
 
     /// Log a message to stderr.
     pub fn log(&self, message: String) -> JsResult<()> {
-        eprintln!("{message}");
+        if !self.emit_debug_output(DebugOutputStream::Stderr, message.clone()) {
+            eprintln!("{message}");
+        }
         Ok(())
     }
 
@@ -2032,6 +2050,21 @@ impl RefreshmintApi {
             .read_line(&mut line)
             .map_err(|e| js_err(format!("prompt read failed: {e}")))?;
         Ok(line.trim_end().to_string())
+    }
+}
+
+impl RefreshmintApi {
+    fn emit_debug_output(&self, stream: DebugOutputStream, line: String) -> bool {
+        let sender = match self.inner.try_lock() {
+            Ok(inner) => inner.debug_output_sink.clone(),
+            Err(_) => None,
+        };
+
+        if let Some(sender) = sender {
+            return sender.send(DebugOutputEvent { stream, line }).is_ok();
+        }
+
+        false
     }
 }
 
@@ -2278,6 +2311,7 @@ mod tests {
             output_dir: PathBuf::new(),
             prompt_overrides: overrides,
             prompt_requires_override: true,
+            debug_output_sink: None,
             session_metadata: SessionMetadata::default(),
             staged_resources: Vec::new(),
             scrape_session_id: String::new(),
@@ -2286,6 +2320,40 @@ mod tests {
             login_name: String::new(),
             ledger_dir: PathBuf::new(),
         }
+    }
+
+    #[test]
+    fn report_value_uses_debug_output_sink_when_present() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut inner = test_refreshmint_inner(PromptOverrides::new());
+        inner.debug_output_sink = Some(sender);
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(inner)));
+
+        api.js_report_value("alpha".to_string(), "42".to_string())
+            .unwrap_or_else(|err| panic!("reportValue failed: {err}"));
+
+        let event = receiver
+            .try_recv()
+            .unwrap_or_else(|err| panic!("missing output event: {err}"));
+        assert_eq!(event.stream, DebugOutputStream::Stdout);
+        assert_eq!(event.line, "alpha: 42");
+    }
+
+    #[test]
+    fn log_uses_debug_output_sink_when_present() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut inner = test_refreshmint_inner(PromptOverrides::new());
+        inner.debug_output_sink = Some(sender);
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(inner)));
+
+        api.log("hello".to_string())
+            .unwrap_or_else(|err| panic!("log failed: {err}"));
+
+        let event = receiver
+            .try_recv()
+            .unwrap_or_else(|err| panic!("missing output event: {err}"));
+        assert_eq!(event.stream, DebugOutputStream::Stderr);
+        assert_eq!(event.line, "hello");
     }
 
     #[test]

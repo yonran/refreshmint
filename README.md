@@ -118,6 +118,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 ```
 
 This command stays running in the foreground and prints a local unix socket path (for example: `/tmp/rm-debug-....sock`).
+`debug start` hosts the browser session; script logs from `debug exec` are printed by the `debug exec` caller.
 
 ### Execute JS against the live session
 
@@ -136,6 +137,8 @@ cat script.mjs | cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   --socket /path/to/debug.sock \
   --script -
 ```
+
+`debug exec` streams `refreshmint.log(...)` and `refreshmint.reportValue(...)` output to its own stderr/stdout.
 
 ### Stop the session
 

@@ -423,6 +423,7 @@ pub async fn run_scrape_async(
         output_dir,
         prompt_overrides: config.prompt_overrides.clone(),
         prompt_requires_override: config.prompt_requires_override,
+        debug_output_sink: None,
         session_metadata: js_api::SessionMetadata::default(),
         staged_resources: Vec::new(),
         scrape_session_id: scrape_session_id.clone(),
@@ -634,6 +635,7 @@ mod tests {
             output_dir: root.join("output"),
             prompt_overrides: PromptOverrides::new(),
             prompt_requires_override: false,
+            debug_output_sink: None,
             session_metadata: SessionMetadata::default(),
             staged_resources: vec![StagedResource {
                 filename: "statements/2026/jan.pdf".to_string(),
@@ -689,6 +691,7 @@ mod tests {
             output_dir: root.join("output"),
             prompt_overrides: PromptOverrides::new(),
             prompt_requires_override: false,
+            debug_output_sink: None,
             session_metadata: SessionMetadata::default(),
             staged_resources: vec![StagedResource {
                 filename: "jan.pdf".to_string(),

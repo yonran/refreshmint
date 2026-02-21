@@ -6,16 +6,38 @@ use tokio::sync::Mutex;
 
 use super::js_api::{self, PageInner, RefreshmintInner};
 
+#[derive(Clone, Copy)]
+pub struct SandboxRunOptions {
+    pub emit_diagnostics: bool,
+}
+
+impl Default for SandboxRunOptions {
+    fn default() -> Self {
+        Self {
+            emit_diagnostics: true,
+        }
+    }
+}
+
+fn maybe_diag(options: SandboxRunOptions, message: &str) {
+    if options.emit_diagnostics {
+        eprintln!("{message}");
+    }
+}
+
 /// Run a driver script inside a QuickJS sandbox with the given page and config.
 pub async fn run_driver(
     driver_path: &Path,
     page_inner: Arc<Mutex<PageInner>>,
     refreshmint_inner: Arc<Mutex<RefreshmintInner>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    eprintln!("[sandbox] Reading driver source...");
+    let options = SandboxRunOptions::default();
+    maybe_diag(options, "[sandbox] Reading driver source...");
     let driver_source = tokio::fs::read_to_string(driver_path).await?;
-    eprintln!("[sandbox] Driver source: {} bytes", driver_source.len());
-    run_script_source(&driver_source, page_inner, refreshmint_inner).await
+    if options.emit_diagnostics {
+        eprintln!("[sandbox] Driver source: {} bytes", driver_source.len());
+    }
+    run_script_source_with_options(&driver_source, page_inner, refreshmint_inner, options).await
 }
 
 /// Run arbitrary JS source inside the same QuickJS sandbox used by drivers.
@@ -24,20 +46,38 @@ pub async fn run_script_source(
     page_inner: Arc<Mutex<PageInner>>,
     refreshmint_inner: Arc<Mutex<RefreshmintInner>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_script_source_with_options(
+        source,
+        page_inner,
+        refreshmint_inner,
+        SandboxRunOptions::default(),
+    )
+    .await
+}
+
+pub async fn run_script_source_with_options(
+    source: &str,
+    page_inner: Arc<Mutex<PageInner>>,
+    refreshmint_inner: Arc<Mutex<RefreshmintInner>>,
+    options: SandboxRunOptions,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let driver_source = source.to_string();
 
-    eprintln!("[sandbox] Creating QuickJS runtime...");
+    maybe_diag(options, "[sandbox] Creating QuickJS runtime...");
     let runtime = AsyncRuntime::new()?;
     let context = AsyncContext::full(&runtime).await?;
-    eprintln!("[sandbox] Runtime created.");
+    maybe_diag(options, "[sandbox] Runtime created.");
 
     // Register globals and execute the driver module
-    eprintln!("[sandbox] Registering globals and evaluating driver...");
+    maybe_diag(
+        options,
+        "[sandbox] Registering globals and evaluating driver...",
+    );
     let setup_result: Result<(), String> = context
         .with(|ctx| {
             js_api::register_globals(&ctx, page_inner, refreshmint_inner)
                 .map_err(|e| format!("failed to register globals: {e}"))?;
-            eprintln!("[sandbox] Globals registered.");
+            maybe_diag(options, "[sandbox] Globals registered.");
 
             // Wrap the driver source in an async IIFE so top-level await works
             let wrapped = format!(
@@ -45,11 +85,11 @@ pub async fn run_script_source(
                 source = driver_source
             );
 
-            eprintln!("[sandbox] Evaluating wrapped script...");
+            maybe_diag(options, "[sandbox] Evaluating wrapped script...");
             let result = ctx.eval::<Promise, _>(wrapped).catch(&ctx);
             let promise = match result {
                 Ok(p) => {
-                    eprintln!("[sandbox] Script evaluated, got promise.");
+                    maybe_diag(options, "[sandbox] Script evaluated, got promise.");
                     p
                 }
                 Err(e) => return Err(format!("failed to eval driver: {e}")),
@@ -68,9 +108,9 @@ pub async fn run_script_source(
     }
 
     // Drive the QuickJS event loop until all jobs are done
-    eprintln!("[sandbox] Driving event loop (runtime.idle)...");
+    maybe_diag(options, "[sandbox] Driving event loop (runtime.idle)...");
     runtime.idle().await;
-    eprintln!("[sandbox] Event loop done.");
+    maybe_diag(options, "[sandbox] Event loop done.");
 
     // Check if the promise resolved or rejected
     let result: Result<(), String> = context
@@ -82,11 +122,11 @@ pub async fn run_script_source(
             };
             match promise.result::<rquickjs::Value>() {
                 None => {
-                    eprintln!("[sandbox] Promise still pending after idle.");
+                    maybe_diag(options, "[sandbox] Promise still pending after idle.");
                     Ok(())
                 }
                 Some(Ok(_)) => {
-                    eprintln!("[sandbox] Promise resolved successfully.");
+                    maybe_diag(options, "[sandbox] Promise resolved successfully.");
                     Ok(())
                 }
                 Some(Err(err)) => {
@@ -94,7 +134,9 @@ pub async fn run_script_source(
                         Err(caught) => caught.to_string(),
                         Ok(()) => "unknown JavaScript exception".to_string(),
                     };
-                    eprintln!("[sandbox] Promise rejected: {msg}");
+                    if options.emit_diagnostics {
+                        eprintln!("[sandbox] Promise rejected: {msg}");
+                    }
                     Err(msg)
                 }
             }
