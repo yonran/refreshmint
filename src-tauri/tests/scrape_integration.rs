@@ -98,6 +98,42 @@ try {
 }
 "##;
 
+const GOTO_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("integration goto start");
+  const html = encodeURIComponent("<!doctype html><title>goto</title><h1>ok</h1>");
+  const baseUrl = `data:text/html,${html}`;
+
+  await page.goto(baseUrl);
+  await page.goto(baseUrl);
+  const afterSame = await page.url();
+  if (afterSame !== baseUrl) {
+    throw new Error(`same-url goto landed at unexpected URL: ${afterSame}`);
+  }
+
+  const hashFoo = `${baseUrl}#foo`;
+  const hashBar = `${baseUrl}#bar`;
+  await page.goto(hashFoo);
+  const afterHashFoo = await page.url();
+  if (afterHashFoo !== hashFoo) {
+    throw new Error(`hash goto to #foo landed at unexpected URL: ${afterHashFoo}`);
+  }
+
+  await page.goto(hashBar);
+  const afterHashBar = await page.url();
+  if (afterHashBar !== hashBar) {
+    throw new Error(`hash goto to #bar landed at unexpected URL: ${afterHashBar}`);
+  }
+
+  await refreshmint.saveResource("goto.bin", [111, 107]);
+  refreshmint.log("integration goto done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("integration goto error: " + msg);
+  throw e;
+}
+"##;
+
 struct TestSandbox {
     root: PathBuf,
 }
@@ -262,6 +298,54 @@ fn scrape_click_reports_overlay_interception() -> Result<(), Box<dyn Error>> {
         .join(EXTENSION_NAME)
         .join("output")
         .join("overlay.bin");
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn scrape_goto_handles_same_url_and_hash_navigation() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping goto scrape test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let sandbox = TestSandbox::new("scrape-goto")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
+    fs::write(&driver_path, GOTO_DRIVER_SOURCE)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        login_name: LOGIN_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    scrape::run_scrape(config)?;
+
+    let output_file = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("goto.bin");
     let bytes = fs::read(&output_file)?;
     assert_eq!(bytes, b"ok");
 

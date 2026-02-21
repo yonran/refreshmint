@@ -116,6 +116,47 @@ impl PageApi {
     /// Navigate to a URL.
     #[qjs(rename = "goto")]
     pub async fn js_goto(&self, url: String) -> JsResult<()> {
+        let current_url = self.current_url().await?;
+        if current_url == url {
+            let inner = self.inner.lock().await;
+            inner
+                .page
+                .reload()
+                .await
+                .map_err(|e| js_err(format!("goto failed (same-url reload): {e}")))?;
+            return Ok(());
+        }
+
+        if urls_differ_only_by_fragment(&current_url, &url) {
+            let url_json = serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".to_string());
+            let expression =
+                format!("(() => {{ window.location.href = {url_json}; return true; }})()");
+
+            {
+                let inner = self.inner.lock().await;
+                inner
+                    .page
+                    .evaluate(expression.as_str())
+                    .await
+                    .map_err(|e| js_err(format!("goto failed (hash-navigation): {e}")))?;
+            }
+
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS);
+            loop {
+                let observed = self.current_url().await?;
+                if observed == url {
+                    return Ok(());
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(js_err(format!(
+                        "goto failed (hash-navigation): timeout {DEFAULT_TIMEOUT_MS}ms exceeded (current URL {observed})"
+                    )));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+            }
+        }
+
         let inner = self.inner.lock().await;
         inner
             .page
@@ -1396,6 +1437,22 @@ fn url_matches_pattern(url: &str, pattern: &str) -> bool {
     true
 }
 
+fn urls_differ_only_by_fragment(current_url: &str, target_url: &str) -> bool {
+    if current_url == target_url {
+        return false;
+    }
+    let (current_base, current_fragment) = split_url_fragment(current_url);
+    let (target_base, target_fragment) = split_url_fragment(target_url);
+    current_base == target_base && current_fragment != target_fragment
+}
+
+fn split_url_fragment(url: &str) -> (&str, Option<&str>) {
+    match url.split_once('#') {
+        Some((base, fragment)) => (base, Some(fragment)),
+        None => (url, None),
+    }
+}
+
 fn pick_popup_target(
     known_tab_ids: &BTreeSet<String>,
     tabs: &[TabMetadata],
@@ -2183,6 +2240,30 @@ mod tests {
         assert!(!url_matches_pattern(
             "https://example.com/a/b/c",
             "https://example.org/*"
+        ));
+    }
+
+    #[test]
+    fn urls_differ_only_by_fragment_true_for_hash_change() {
+        assert!(urls_differ_only_by_fragment(
+            "https://example.com/path#foo",
+            "https://example.com/path#bar"
+        ));
+        assert!(urls_differ_only_by_fragment(
+            "https://example.com/path",
+            "https://example.com/path#foo"
+        ));
+    }
+
+    #[test]
+    fn urls_differ_only_by_fragment_false_for_other_changes() {
+        assert!(!urls_differ_only_by_fragment(
+            "https://example.com/path#foo",
+            "https://example.com/path#foo"
+        ));
+        assert!(!urls_differ_only_by_fragment(
+            "https://example.com/path#foo",
+            "https://example.com/other#foo"
         ));
     }
 
