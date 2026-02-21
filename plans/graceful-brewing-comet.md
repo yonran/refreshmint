@@ -2,7 +2,7 @@
 
 ## Implementation Status (2026-02-21)
 
-Status: complete in `main`, across commits `9fde2bd` through `7780325`.
+Status: complete in `main`, across commits `9fde2bd` through `5cd097e`.
 
 Recent completion milestones:
 
@@ -15,6 +15,8 @@ Recent completion milestones:
 - GL conflict panel is now actionable: conflicts can be loaded directly into the mapping editor.
 - Scrape/debug can run from selected login even before GL account mappings are finalized.
 - CLI supports `login delete-account` with `remove-account` as a compatibility alias.
+- Tauri/TypeScript command aliases include `delete_login_account` for naming consistency.
+- Login mapping editor now highlights conflicts inline and supports one-click edit/ignore flows.
 
 ## Context
 

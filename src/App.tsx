@@ -3476,6 +3476,27 @@ function App() {
                                                                             type="button"
                                                                             className="ghost-button"
                                                                             onClick={() => {
+                                                                                setLoginLabelDraft(
+                                                                                    label,
+                                                                                );
+                                                                                setLoginGlAccountDraft(
+                                                                                    config.glAccount ??
+                                                                                        '',
+                                                                                );
+                                                                                setLoginConfigStatus(
+                                                                                    `Loaded '${selectedLoginName}/${label}' for editing.`,
+                                                                                );
+                                                                            }}
+                                                                            disabled={
+                                                                                isSavingLoginConfig
+                                                                            }
+                                                                        >
+                                                                            Edit
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            onClick={() => {
                                                                                 void handleRemoveLoginAccountMapping(
                                                                                     label,
                                                                                 );
