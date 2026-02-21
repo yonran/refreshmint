@@ -2,7 +2,7 @@
 
 ## Implementation Status (2026-02-21)
 
-Status: complete in `main`, across commits `9fde2bd` through `1600075`.
+Status: complete in `main`, across commits `9fde2bd` through `7780325`.
 
 Recent completion milestones:
 
@@ -12,6 +12,9 @@ Recent completion milestones:
 - Scraping tab moved to login-based command usage.
 - Login mappings management UI shipped (create/select/delete login, extension updates, label mapping set/remove).
 - Login secrets UX now keys to active login selection, matching the login-centric model.
+- GL conflict panel is now actionable: conflicts can be loaded directly into the mapping editor.
+- Scrape/debug can run from selected login even before GL account mappings are finalized.
+- CLI supports `login delete-account` with `remove-account` as a compatibility alias.
 
 ## Context
 

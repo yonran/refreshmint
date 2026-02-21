@@ -75,7 +75,8 @@ enum LoginCommand {
     SetExtension(LoginSetExtensionArgs),
     Delete(LoginDeleteArgs),
     SetAccount(LoginSetAccountArgs),
-    RemoveAccount(LoginRemoveAccountArgs),
+    #[command(alias = "remove-account")]
+    DeleteAccount(LoginDeleteAccountArgs),
 }
 
 #[derive(Args)]
@@ -125,7 +126,7 @@ struct LoginSetAccountArgs {
 }
 
 #[derive(Args)]
-struct LoginRemoveAccountArgs {
+struct LoginDeleteAccountArgs {
     #[arg(long, value_name = "NAME")]
     name: String,
     #[arg(long)]
@@ -468,7 +469,9 @@ fn run_login(args: LoginArgs, context: tauri::Context<tauri::Wry>) -> Result<(),
         LoginCommand::SetExtension(set_args) => run_login_set_extension(set_args, context),
         LoginCommand::Delete(delete_args) => run_login_delete(delete_args, context),
         LoginCommand::SetAccount(set_args) => run_login_set_account(set_args, context),
-        LoginCommand::RemoveAccount(remove_args) => run_login_remove_account(remove_args, context),
+        LoginCommand::DeleteAccount(delete_account_args) => {
+            run_login_delete_account(delete_account_args, context)
+        }
     }
 }
 
@@ -876,8 +879,8 @@ fn run_login_set_account(
     Ok(())
 }
 
-fn run_login_remove_account(
-    args: LoginRemoveAccountArgs,
+fn run_login_delete_account(
+    args: LoginDeleteAccountArgs,
     context: tauri::Context<tauri::Wry>,
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
@@ -1548,6 +1551,56 @@ mod tests {
                     );
                 }
                 _ => panic!("expected login set-account command"),
+            },
+            _ => panic!("expected login command"),
+        }
+    }
+
+    #[test]
+    fn login_delete_account_subcommand_parses_label() {
+        let cli = Cli::try_parse_from([
+            "refreshmint",
+            "login",
+            "delete-account",
+            "--name",
+            "chase-personal",
+            "--label",
+            "checking",
+        ])
+        .unwrap_or_else(|err| panic!("Cli parsing failed: {err}"));
+
+        match cli.command {
+            Some(Commands::Login(args)) => match args.command {
+                LoginCommand::DeleteAccount(delete_account) => {
+                    assert_eq!(delete_account.name, "chase-personal");
+                    assert_eq!(delete_account.label, "checking");
+                }
+                _ => panic!("expected login delete-account command"),
+            },
+            _ => panic!("expected login command"),
+        }
+    }
+
+    #[test]
+    fn login_remove_account_alias_still_parses() {
+        let cli = Cli::try_parse_from([
+            "refreshmint",
+            "login",
+            "remove-account",
+            "--name",
+            "chase-personal",
+            "--label",
+            "checking",
+        ])
+        .unwrap_or_else(|err| panic!("Cli parsing failed: {err}"));
+
+        match cli.command {
+            Some(Commands::Login(args)) => match args.command {
+                LoginCommand::DeleteAccount(delete_account) => {
+                    assert_eq!(delete_account.name, "chase-personal");
+                    assert_eq!(delete_account.label, "checking");
+                }
+                _ => panic!("expected login delete-account command"),
             },
             _ => panic!("expected login command"),
         }
