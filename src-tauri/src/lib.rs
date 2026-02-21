@@ -1210,10 +1210,26 @@ fn map_account_journal_entries(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_secret_entries, evidence_ref_matches_document, flatten_declared_secret_entries,
-        require_non_empty_input, SecretEntry,
+        classify_secret_entries, delete_login_account, evidence_ref_matches_document,
+        flatten_declared_secret_entries, require_non_empty_input, SecretEntry,
     };
     use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn create_temp_dir(prefix: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("refreshmint-{prefix}-{}-{now}", std::process::id()));
+        if let Err(err) = fs::create_dir_all(&dir) {
+            panic!("failed to create temp dir: {err}");
+        }
+        dir
+    }
 
     #[test]
     fn require_non_empty_input_trims() {
@@ -1330,5 +1346,61 @@ mod tests {
                 name: "legacy".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn delete_login_account_removes_label_mapping() {
+        let dir = create_temp_dir("delete-login-account-ok");
+        let mut accounts = BTreeMap::new();
+        accounts.insert(
+            "checking".to_string(),
+            crate::login_config::LoginAccountConfig {
+                gl_account: Some("Assets:Chase:Checking".to_string()),
+            },
+        );
+        let config = crate::login_config::LoginConfig {
+            extension: Some("chase-driver".to_string()),
+            accounts,
+        };
+        if let Err(err) = crate::login_config::write_login_config(&dir, "chase-personal", &config) {
+            panic!("failed to write login config: {err}");
+        }
+
+        let result = delete_login_account(
+            dir.to_string_lossy().to_string(),
+            "chase-personal".to_string(),
+            "checking".to_string(),
+        );
+        assert!(result.is_ok(), "expected success, got: {result:?}");
+
+        let updated = crate::login_config::read_login_config(&dir, "chase-personal");
+        assert!(
+            !updated.accounts.contains_key("checking"),
+            "expected label to be removed from config"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_login_account_errors_when_label_missing() {
+        let dir = create_temp_dir("delete-login-account-missing");
+        let config = crate::login_config::LoginConfig {
+            extension: Some("chase-driver".to_string()),
+            accounts: BTreeMap::new(),
+        };
+        if let Err(err) = crate::login_config::write_login_config(&dir, "chase-personal", &config) {
+            panic!("failed to write login config: {err}");
+        }
+
+        let result = delete_login_account(
+            dir.to_string_lossy().to_string(),
+            "chase-personal".to_string(),
+            "checking".to_string(),
+        );
+        match result {
+            Ok(()) => panic!("expected error for missing label"),
+            Err(err) => assert!(err.contains("label 'checking' not found")),
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 }
