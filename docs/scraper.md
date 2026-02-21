@@ -42,6 +42,13 @@ Errors thrown from your script fail the scrape run.
 
 ## Best practices
 
+- Scrapers will fail often. Make them fast to debug and retry
+    - The script should have a state machine that keeps working (for loop) until an error or the end state is achieved
+    - Scrapers should define a function for each state (e.g. URL or page) and then the main code should switch on the URL or other identifying information on the page. This allows us to edit the script and re-run it without starting from the original logged out state.
+    - The state machine should also keep track of progress being made (e.g. a set of distinct pages viewed or output identifiers such as last month downloaded) and iterations since last progress. If there are too many steps with no real progress, then throw an error.
+    - Log what state you are in.
+    - Add checks to make sure you are on the page that you expect to be.
+    - When there is an exception or something unexpected, log context before re-throwing so that we can see what went wrong quickly.
 - Domain checks must compare the URL prefix to the full origin (for example `https://secure.bankofamerica.com/`), not a substring match.
 - Prefer `const url = await page.url(); if (!url.startsWith("https://example.com/")) { ... }` over checks like `url.includes("example.com")`.
 - When adding a new code path/branch, add a brief `UNTESTED` comment until that exact branch is exercised in a real run; remove or update the comment after verification.
