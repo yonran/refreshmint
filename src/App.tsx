@@ -267,6 +267,11 @@ function App() {
             : selectedAccountMappings.length === 0
               ? `No login mapping found for account '${selectedScrapeAccount}'. Run migration and set a login account mapping.`
               : `Account '${selectedScrapeAccount}' has multiple login mappings. Resolve GL mapping conflicts first.`;
+    const hasResolvedLoginMapping = selectedLoginMapping !== null;
+    const selectedLoginMappingSummary =
+        selectedLoginMapping === null
+            ? null
+            : `${selectedLoginMapping.loginName}/${selectedLoginMapping.label}`;
     const requiredSecretKeySet = new Set(
         requiredSecretsForExtension.map((entry) =>
             secretPairKey(entry.domain, entry.name),
@@ -2814,9 +2819,10 @@ function App() {
                                     <div>
                                         <h2>Run scrape</h2>
                                         <p>
-                                            Choose an account and extension,
-                                            then run the same scraper pipeline
-                                            as the CLI command.
+                                            Choose a GL account mapped to a
+                                            login and extension, then run the
+                                            same scraper pipeline as the CLI
+                                            command.
                                         </p>
                                     </div>
                                     <div className="header-actions">
@@ -2981,6 +2987,21 @@ function App() {
                                         <option key={name} value={name} />
                                     ))}
                                 </datalist>
+                                {selectedScrapeAccount.length === 0 ? (
+                                    <p className="hint">
+                                        Choose a GL account to resolve its login
+                                        mapping.
+                                    </p>
+                                ) : selectedLoginMappingSummary === null ? (
+                                    <p className="status">
+                                        {selectedLoginMappingError}
+                                    </p>
+                                ) : (
+                                    <p className="hint mono">
+                                        Login mapping:{' '}
+                                        {selectedLoginMappingSummary}
+                                    </p>
+                                )}
                                 <div className="txn-actions">
                                     <button
                                         type="button"
@@ -2990,6 +3011,7 @@ function App() {
                                         }}
                                         disabled={
                                             isRunningScrape ||
+                                            !hasResolvedLoginMapping ||
                                             isLoadingScrapeExtensions ||
                                             isImportingScrapeExtension ||
                                             isMigratingLegacyLedger ||
@@ -3010,6 +3032,7 @@ function App() {
                                             void handleStartScrapeDebug();
                                         }}
                                         disabled={
+                                            !hasResolvedLoginMapping ||
                                             scrapeDebugSocket !== null ||
                                             isStartingScrapeDebug ||
                                             isStoppingScrapeDebug
@@ -3053,11 +3076,11 @@ function App() {
                                 <section className="secrets-panel">
                                     <div className="txn-form-header">
                                         <div>
-                                            <h3>Account secrets</h3>
+                                            <h3>Login secrets</h3>
                                             <p>
-                                                Manage per-account keychain
+                                                Manage per-login keychain
                                                 secrets for the selected scrape
-                                                account.
+                                                mapping.
                                             </p>
                                         </div>
                                         <div className="header-actions">
@@ -3068,8 +3091,7 @@ function App() {
                                                     void handleRefreshAccountSecrets();
                                                 }}
                                                 disabled={
-                                                    scrapeAccount.trim()
-                                                        .length === 0 ||
+                                                    !hasResolvedLoginMapping ||
                                                     isLoadingAccountSecrets ||
                                                     isSavingAccountSecret ||
                                                     busySecretKey !== null
@@ -3099,8 +3121,7 @@ function App() {
                                                         setSecretsStatus(null);
                                                     }}
                                                     disabled={
-                                                        scrapeAccount.trim()
-                                                            .length === 0 ||
+                                                        !hasResolvedLoginMapping ||
                                                         isSavingAccountSecret ||
                                                         busySecretKey !== null
                                                     }
@@ -3119,8 +3140,7 @@ function App() {
                                                         setSecretsStatus(null);
                                                     }}
                                                     disabled={
-                                                        scrapeAccount.trim()
-                                                            .length === 0 ||
+                                                        !hasResolvedLoginMapping ||
                                                         isSavingAccountSecret ||
                                                         busySecretKey !== null
                                                     }
@@ -3142,8 +3162,7 @@ function App() {
                                                         setSecretsStatus(null);
                                                     }}
                                                     disabled={
-                                                        scrapeAccount.trim()
-                                                            .length === 0 ||
+                                                        !hasResolvedLoginMapping ||
                                                         isSavingAccountSecret ||
                                                         busySecretKey !== null
                                                     }
@@ -3160,8 +3179,7 @@ function App() {
                                                     );
                                                 }}
                                                 disabled={
-                                                    scrapeAccount.trim()
-                                                        .length === 0 ||
+                                                    !hasResolvedLoginMapping ||
                                                     (trimmedSecretDomain.length >
                                                         0 &&
                                                         trimmedSecretName.length >
@@ -3179,8 +3197,7 @@ function App() {
                                                 type="submit"
                                                 className="ghost-button"
                                                 disabled={
-                                                    scrapeAccount.trim()
-                                                        .length === 0 ||
+                                                    !hasResolvedLoginMapping ||
                                                     !currentSecretPairExists ||
                                                     isSavingAccountSecret ||
                                                     busySecretKey !== null
@@ -3205,9 +3222,11 @@ function App() {
                                         </p>
                                     ) : accountSecrets.length === 0 ? (
                                         <p className="hint">
-                                            {scrapeAccount.trim().length === 0
-                                                ? 'Choose an account to manage secrets.'
-                                                : 'No secrets stored for this account.'}
+                                            {selectedScrapeAccount.length === 0
+                                                ? 'Choose a GL account to manage login secrets.'
+                                                : !hasResolvedLoginMapping
+                                                  ? 'Resolve login mapping first to manage secrets.'
+                                                  : 'No secrets stored for this login.'}
                                         </p>
                                     ) : (
                                         <div className="table-wrap">
@@ -3312,7 +3331,7 @@ function App() {
                                             {extraSecretCount === 1
                                                 ? ''
                                                 : 's'}{' '}
-                                            stored for this account are not
+                                            stored for this login are not
                                             declared by the selected extension.
                                         </p>
                                     ) : null}
@@ -3341,8 +3360,7 @@ function App() {
                                                     void handleRefreshAccountPipelineData();
                                                 }}
                                                 disabled={
-                                                    scrapeAccount.trim()
-                                                        .length === 0 ||
+                                                    !hasResolvedLoginMapping ||
                                                     isLoadingDocuments ||
                                                     isLoadingAccountJournal ||
                                                     isLoadingUnreconciled ||
@@ -3403,8 +3421,7 @@ function App() {
                                             }}
                                             disabled={
                                                 isRunningExtraction ||
-                                                scrapeAccount.trim().length ===
-                                                    0 ||
+                                                !hasResolvedLoginMapping ||
                                                 scrapeExtension.trim()
                                                     .length === 0
                                             }
@@ -3420,9 +3437,11 @@ function App() {
                                         </p>
                                     ) : documents.length === 0 ? (
                                         <p className="hint">
-                                            {scrapeAccount.trim().length === 0
-                                                ? 'Choose an account to view documents.'
-                                                : 'No documents found for this account.'}
+                                            {selectedScrapeAccount.length === 0
+                                                ? 'Choose a GL account to view documents.'
+                                                : !hasResolvedLoginMapping
+                                                  ? 'Resolve login mapping first to view documents.'
+                                                  : 'No documents found for this login account mapping.'}
                                         </p>
                                     ) : (
                                         <div className="table-wrap">
@@ -3503,9 +3522,11 @@ function App() {
                                         </p>
                                     ) : accountJournalEntries.length === 0 ? (
                                         <p className="hint">
-                                            {scrapeAccount.trim().length === 0
-                                                ? 'Choose an account to view its journal.'
-                                                : 'No account journal entries found.'}
+                                            {selectedScrapeAccount.length === 0
+                                                ? 'Choose a GL account to view its journal.'
+                                                : !hasResolvedLoginMapping
+                                                  ? 'Resolve login mapping first to view journal entries.'
+                                                  : 'No account journal entries found for this login mapping.'}
                                         </p>
                                     ) : (
                                         <div className="table-wrap">
@@ -3591,9 +3612,11 @@ function App() {
                                         </p>
                                     ) : unreconciledEntries.length === 0 ? (
                                         <p className="hint">
-                                            {scrapeAccount.trim().length === 0
-                                                ? 'Choose an account to view unreconciled entries.'
-                                                : 'No unreconciled entries for this account.'}
+                                            {selectedScrapeAccount.length === 0
+                                                ? 'Choose a GL account to view unreconciled entries.'
+                                                : !hasResolvedLoginMapping
+                                                  ? 'Resolve login mapping first to view unreconciled entries.'
+                                                  : 'No unreconciled entries for this login mapping.'}
                                         </p>
                                     ) : (
                                         <div className="table-wrap">
