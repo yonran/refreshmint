@@ -18,19 +18,20 @@ import {
     setRecentLedgers,
 } from './store.ts';
 import {
-    addAccountSecret,
     type AccountSecretEntry,
     type AccountJournalEntry,
     type AmountStyleHint,
     type AmountTotal,
+    addLoginSecret,
     addTransaction,
     addTransactionText,
-    getAccountConfig,
-    getAccountJournal,
+    getLoginAccountJournal,
+    getLoginConfig,
+    getLoginAccountUnreconciled,
     getScrapeDebugSessionSocket,
-    getUnreconciled,
-    listDocuments,
-    listAccountSecrets,
+    listLoginAccountDocuments,
+    listLoginSecrets,
+    listLogins,
     listScrapeExtensions,
     loadScrapeExtension,
     migrateLedger,
@@ -41,19 +42,19 @@ import {
     type MigrationOutcome,
     type NewTransactionInput,
     type PostingRow,
-    reconcileEntry,
+    reconcileLoginAccountEntry,
     reconcileTransfer,
-    runExtraction,
-    setAccountExtension,
+    reenterLoginSecret,
+    removeLoginSecret,
+    runLoginAccountExtraction,
+    runScrapeForLogin,
+    setLoginExtension,
     startScrapeDebugSession,
     stopScrapeDebugSession,
-    runScrape,
-    reenterAccountSecret,
-    removeAccountSecret,
     type SecretEntry,
-    syncAccountSecretsForExtension,
+    syncLoginSecretsForExtension,
     type TransactionRow,
-    unreconcileEntry,
+    unreconcileLoginAccountEntry,
     validateTransaction,
     validateTransactionText,
 } from './tauri-commands.ts';
@@ -90,6 +91,12 @@ type SecretPromptState = {
     message: string;
     confirmLabel: string;
     cancelLabel: string;
+};
+
+type LoginAccountMapping = {
+    loginName: string;
+    label: string;
+    extension: string;
 };
 
 function secretPairKey(domain: string, name: string): string {
@@ -144,6 +151,9 @@ function App() {
         useState(false);
     const [isMigratingLegacyLedger, setIsMigratingLegacyLedger] =
         useState(false);
+    const [loginAccountMappings, setLoginAccountMappings] = useState<
+        Record<string, LoginAccountMapping[]>
+    >({});
     const [accountSecrets, setAccountSecrets] = useState<AccountSecretEntry[]>(
         [],
     );
@@ -242,6 +252,21 @@ function App() {
                       name.length > 0 && names.indexOf(name) === index,
               )
         : [];
+    const selectedScrapeAccount = scrapeAccount.trim();
+    const selectedAccountMappings =
+        selectedScrapeAccount.length === 0
+            ? []
+            : (loginAccountMappings[selectedScrapeAccount] ?? []);
+    const selectedLoginMapping: LoginAccountMapping | null =
+        selectedAccountMappings.length === 1
+            ? (selectedAccountMappings[0] ?? null)
+            : null;
+    const selectedLoginMappingError =
+        selectedScrapeAccount.length === 0
+            ? null
+            : selectedAccountMappings.length === 0
+              ? `No login mapping found for account '${selectedScrapeAccount}'. Run migration and set a login account mapping.`
+              : `Account '${selectedScrapeAccount}' has multiple login mappings. Resolve GL mapping conflicts first.`;
     const requiredSecretKeySet = new Set(
         requiredSecretsForExtension.map((entry) =>
             secretPairKey(entry.domain, entry.name),
@@ -290,6 +315,7 @@ function App() {
             setScrapeStatus(null);
             setScrapeDebugSocket(null);
             setScrapeAccount('');
+            setLoginAccountMappings({});
             setAccountSecrets([]);
             setRequiredSecretsForExtension([]);
             setHasRequiredSecretsSync(false);
@@ -410,6 +436,57 @@ function App() {
 
     useEffect(() => {
         if (ledgerPath === null) {
+            setLoginAccountMappings({});
+            return;
+        }
+
+        let cancelled = false;
+        void listLogins(ledgerPath)
+            .then(async (logins) => {
+                const configs = await Promise.all(
+                    logins.map(async (loginName) => ({
+                        loginName,
+                        config: await getLoginConfig(ledgerPath, loginName),
+                    })),
+                );
+                if (cancelled) {
+                    return;
+                }
+
+                const mappings: Record<string, LoginAccountMapping[]> = {};
+                for (const { loginName, config } of configs) {
+                    const extension = config.extension?.trim() ?? '';
+                    for (const [label, mapping] of Object.entries(
+                        config.accounts,
+                    )) {
+                        const glAccount = mapping.glAccount?.trim() ?? '';
+                        if (glAccount.length === 0) {
+                            continue;
+                        }
+                        const next: LoginAccountMapping = {
+                            loginName,
+                            label,
+                            extension,
+                        };
+                        const current = mappings[glAccount] ?? [];
+                        mappings[glAccount] = [...current, next];
+                    }
+                }
+                setLoginAccountMappings(mappings);
+            })
+            .catch(() => {
+                if (!cancelled) {
+                    setLoginAccountMappings({});
+                }
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [ledgerPath]);
+
+    useEffect(() => {
+        if (ledgerPath === null) {
             setScrapeDebugSocket(null);
             return;
         }
@@ -441,8 +518,7 @@ function App() {
             return;
         }
 
-        const account = scrapeAccount.trim();
-        if (account.length === 0) {
+        if (selectedLoginMapping === null) {
             setAccountSecrets([]);
             setIsLoadingAccountSecrets(false);
             setRequiredSecretsForExtension([]);
@@ -450,10 +526,11 @@ function App() {
             return;
         }
 
+        const mapping = selectedLoginMapping;
         let cancelled = false;
         const timer = window.setTimeout(() => {
             setIsLoadingAccountSecrets(true);
-            void listAccountSecrets(account)
+            void listLoginSecrets(mapping.loginName)
                 .then((entries) => {
                     if (!cancelled) {
                         setAccountSecrets(entries);
@@ -463,7 +540,7 @@ function App() {
                     if (!cancelled) {
                         setAccountSecrets([]);
                         setSecretsStatus(
-                            `Failed to load account secrets: ${String(error)}`,
+                            `Failed to load login secrets: ${String(error)}`,
                         );
                     }
                 })
@@ -478,7 +555,7 @@ function App() {
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [ledgerPath, scrapeAccount]);
+    }, [ledgerPath, selectedLoginMapping]);
 
     useEffect(() => {
         if (ledgerPath === null) {
@@ -487,18 +564,22 @@ function App() {
             return;
         }
 
-        const account = scrapeAccount.trim();
         const extension = scrapeExtension.trim();
-        if (account.length === 0 || extension.length === 0) {
+        if (selectedLoginMapping === null || extension.length === 0) {
             setRequiredSecretsForExtension([]);
             setHasRequiredSecretsSync(false);
             return;
         }
 
+        const mapping = selectedLoginMapping;
         let cancelled = false;
         const timer = window.setTimeout(() => {
             setIsLoadingAccountSecrets(true);
-            void syncAccountSecretsForExtension(ledgerPath, account, extension)
+            void syncLoginSecretsForExtension(
+                ledgerPath,
+                mapping.loginName,
+                extension,
+            )
                 .then((result) => {
                     if (cancelled) {
                         return;
@@ -550,7 +631,7 @@ function App() {
                         );
                     }
 
-                    return listAccountSecrets(account)
+                    return listLoginSecrets(mapping.loginName)
                         .then((entries) => {
                             if (!cancelled) {
                                 setAccountSecrets(entries);
@@ -560,7 +641,7 @@ function App() {
                             if (!cancelled) {
                                 setAccountSecrets([]);
                                 setSecretsStatus(
-                                    `Failed to load account secrets: ${String(error)}`,
+                                    `Failed to load login secrets: ${String(error)}`,
                                 );
                             }
                         });
@@ -585,27 +666,27 @@ function App() {
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [ledgerPath, scrapeAccount, scrapeExtension]);
+    }, [ledgerPath, selectedLoginMapping, scrapeExtension]);
 
-    // Load account config and auto-populate extension when account changes
+    // Load login config and auto-populate extension when account mapping changes.
     useEffect(() => {
         if (ledgerPath === null) {
             setScrapeExtension('');
             return;
         }
 
-        const account = scrapeAccount.trim();
-        if (account.length === 0) {
+        if (selectedLoginMapping === null) {
             setScrapeExtension('');
             return;
         }
 
-        // Prevent stale extension state from bleeding across accounts.
+        // Prevent stale extension state from bleeding across selections.
         setScrapeExtension('');
 
+        const mapping = selectedLoginMapping;
         let cancelled = false;
         const timer = window.setTimeout(() => {
-            void getAccountConfig(ledgerPath, account)
+            void getLoginConfig(ledgerPath, mapping.loginName)
                 .then((config) => {
                     if (cancelled) {
                         return;
@@ -623,7 +704,7 @@ function App() {
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [ledgerPath, scrapeAccount]);
+    }, [ledgerPath, selectedLoginMapping]);
 
     useEffect(() => {
         if (ledgerPath === null) {
@@ -638,8 +719,7 @@ function App() {
             return;
         }
 
-        const account = scrapeAccount.trim();
-        if (account.length === 0) {
+        if (selectedLoginMapping === null) {
             setDocuments([]);
             setSelectedDocumentNames([]);
             setAccountJournalEntries([]);
@@ -651,15 +731,28 @@ function App() {
             return;
         }
 
+        const mapping = selectedLoginMapping;
         let cancelled = false;
         const timer = window.setTimeout(() => {
             setIsLoadingDocuments(true);
             setIsLoadingAccountJournal(true);
             setIsLoadingUnreconciled(true);
             void Promise.all([
-                listDocuments(ledgerPath, account),
-                getAccountJournal(ledgerPath, account),
-                getUnreconciled(ledgerPath, account),
+                listLoginAccountDocuments(
+                    ledgerPath,
+                    mapping.loginName,
+                    mapping.label,
+                ),
+                getLoginAccountJournal(
+                    ledgerPath,
+                    mapping.loginName,
+                    mapping.label,
+                ),
+                getLoginAccountUnreconciled(
+                    ledgerPath,
+                    mapping.loginName,
+                    mapping.label,
+                ),
             ])
                 .then(
                     ([
@@ -695,7 +788,7 @@ function App() {
                             account1:
                                 current.account1.trim().length > 0
                                     ? current.account1
-                                    : account,
+                                    : selectedScrapeAccount,
                         }));
                     },
                 )
@@ -707,7 +800,7 @@ function App() {
                         setUnreconciledEntries([]);
                         setReconcileDrafts({});
                         setPipelineStatus(
-                            `Failed to load account pipeline data: ${String(error)}`,
+                            `Failed to load login pipeline data: ${String(error)}`,
                         );
                     }
                 })
@@ -724,7 +817,7 @@ function App() {
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [ledgerPath, scrapeAccount]);
+    }, [ledgerPath, selectedLoginMapping, selectedScrapeAccount]);
 
     useEffect(() => {
         startupCancelledRef.current = false;
@@ -1156,13 +1249,13 @@ function App() {
             }
 
             await reloadScrapeExtensions(ledger.path, loadedExtensionName);
-            // Save the loaded extension name in account config
-            const account = scrapeAccount.trim();
-            if (account.length > 0) {
+            // Save the loaded extension name in login config when mapping exists.
+            const mapping = selectedLoginMapping;
+            if (mapping !== null) {
                 try {
-                    await setAccountExtension(
+                    await setLoginExtension(
                         ledger.path,
-                        account,
+                        mapping.loginName,
                         loadedExtensionName,
                     );
                 } catch {
@@ -1196,14 +1289,16 @@ function App() {
             return;
         }
 
-        const account = scrapeAccount.trim();
-        if (account.length === 0) {
-            setScrapeStatus('Select an account first.');
+        const mapping = selectedLoginMapping;
+        if (mapping === null) {
+            setScrapeStatus(
+                selectedLoginMappingError ?? 'Select an account first.',
+            );
             return;
         }
 
         try {
-            await setAccountExtension(ledger.path, account, source);
+            await setLoginExtension(ledger.path, mapping.loginName, source);
             setScrapeExtension(source);
             setScrapeStatus(`Set unpacked extension: ${source}`);
         } catch (error) {
@@ -1217,9 +1312,11 @@ function App() {
         if (!ledger) {
             return;
         }
-        const account = scrapeAccount.trim();
-        if (account.length === 0) {
-            setScrapeStatus('Account is required.');
+        const mapping = selectedLoginMapping;
+        if (mapping === null) {
+            setScrapeStatus(
+                selectedLoginMappingError ?? 'Account is required.',
+            );
             return;
         }
         const extension = scrapeExtension.trim();
@@ -1233,7 +1330,7 @@ function App() {
         try {
             const socket = await startScrapeDebugSession(
                 ledger.path,
-                account,
+                mapping.loginName,
                 extension,
             );
             setScrapeDebugSocket(socket);
@@ -1277,9 +1374,21 @@ function App() {
             setIsLoadingAccountSecrets(false);
             return;
         }
+        const mappings = loginAccountMappings[account] ?? [];
+        if (mappings.length !== 1) {
+            throw new Error(
+                mappings.length === 0
+                    ? `No login mapping found for account '${account}'.`
+                    : `Multiple login mappings found for account '${account}'.`,
+            );
+        }
+        const mapping = mappings[0];
+        if (mapping === undefined) {
+            throw new Error(`No login mapping found for account '${account}'.`);
+        }
         setIsLoadingAccountSecrets(true);
         try {
-            const entries = await listAccountSecrets(account);
+            const entries = await listLoginSecrets(mapping.loginName);
             setAccountSecrets(entries);
         } finally {
             setIsLoadingAccountSecrets(false);
@@ -1351,11 +1460,9 @@ function App() {
         }
         try {
             await refreshAccountSecrets(account);
-            setSecretsStatus(`Loaded secrets for ${account}.`);
+            setSecretsStatus(`Loaded login secrets for ${account}.`);
         } catch (error) {
-            setSecretsStatus(
-                `Failed to load account secrets: ${String(error)}`,
-            );
+            setSecretsStatus(`Failed to load login secrets: ${String(error)}`);
         }
     }
 
@@ -1363,6 +1470,22 @@ function App() {
         const account = scrapeAccount.trim();
         if (account.length === 0) {
             setSecretsStatus('Account is required.');
+            return false;
+        }
+        const mappings = loginAccountMappings[account] ?? [];
+        if (mappings.length !== 1) {
+            setSecretsStatus(
+                mappings.length === 0
+                    ? `No login mapping found for account '${account}'.`
+                    : `Multiple login mappings found for account '${account}'.`,
+            );
+            return false;
+        }
+        const mapping = mappings[0];
+        if (mapping === undefined) {
+            setSecretsStatus(
+                `No login mapping found for account '${account}'.`,
+            );
             return false;
         }
         const domain = secretDomain.trim();
@@ -1399,9 +1522,19 @@ function App() {
         setIsSavingAccountSecret(true);
         try {
             if (mode === 'add') {
-                await addAccountSecret(account, domain, name, secretValue);
+                await addLoginSecret(
+                    mapping.loginName,
+                    domain,
+                    name,
+                    secretValue,
+                );
             } else {
-                await reenterAccountSecret(account, domain, name, secretValue);
+                await reenterLoginSecret(
+                    mapping.loginName,
+                    domain,
+                    name,
+                    secretValue,
+                );
             }
             await refreshAccountSecrets(account);
             setSecretValue('');
@@ -1429,10 +1562,26 @@ function App() {
             setSecretsStatus('Account is required.');
             return;
         }
+        const mappings = loginAccountMappings[account] ?? [];
+        if (mappings.length !== 1) {
+            setSecretsStatus(
+                mappings.length === 0
+                    ? `No login mapping found for account '${account}'.`
+                    : `Multiple login mappings found for account '${account}'.`,
+            );
+            return;
+        }
+        const mapping = mappings[0];
+        if (mapping === undefined) {
+            setSecretsStatus(
+                `No login mapping found for account '${account}'.`,
+            );
+            return;
+        }
         const key = `${domain}/${name}`;
         setBusySecretKey(key);
         try {
-            await removeAccountSecret(account, domain, name);
+            await removeLoginSecret(mapping.loginName, domain, name);
             await refreshAccountSecrets(account);
             if (secretDomain === domain && secretName === name) {
                 setSecretValue('');
@@ -1536,6 +1685,18 @@ function App() {
             setReconcileDrafts({});
             return;
         }
+        const mappings = loginAccountMappings[account] ?? [];
+        if (mappings.length !== 1) {
+            throw new Error(
+                mappings.length === 0
+                    ? `No login mapping found for account '${account}'.`
+                    : `Multiple login mappings found for account '${account}'.`,
+            );
+        }
+        const mapping = mappings[0];
+        if (mapping === undefined) {
+            throw new Error(`No login mapping found for account '${account}'.`);
+        }
 
         setIsLoadingDocuments(true);
         setIsLoadingAccountJournal(true);
@@ -1543,9 +1704,21 @@ function App() {
         try {
             const [fetchedDocuments, fetchedJournal, fetchedUnreconciled] =
                 await Promise.all([
-                    listDocuments(ledger.path, account),
-                    getAccountJournal(ledger.path, account),
-                    getUnreconciled(ledger.path, account),
+                    listLoginAccountDocuments(
+                        ledger.path,
+                        mapping.loginName,
+                        mapping.label,
+                    ),
+                    getLoginAccountJournal(
+                        ledger.path,
+                        mapping.loginName,
+                        mapping.label,
+                    ),
+                    getLoginAccountUnreconciled(
+                        ledger.path,
+                        mapping.loginName,
+                        mapping.label,
+                    ),
                 ]);
             setDocuments(fetchedDocuments);
             setSelectedDocumentNames((current) =>
@@ -1617,6 +1790,22 @@ function App() {
             setPipelineStatus('Account is required.');
             return;
         }
+        const mappings = loginAccountMappings[account] ?? [];
+        if (mappings.length !== 1) {
+            setPipelineStatus(
+                mappings.length === 0
+                    ? `No login mapping found for account '${account}'.`
+                    : `Multiple login mappings found for account '${account}'.`,
+            );
+            return;
+        }
+        const mapping = mappings[0];
+        if (mapping === undefined) {
+            setPipelineStatus(
+                `No login mapping found for account '${account}'.`,
+            );
+            return;
+        }
         const extension = scrapeExtension.trim();
         if (extension.length === 0) {
             setPipelineStatus('Extension is required.');
@@ -1637,9 +1826,10 @@ function App() {
             `Running extraction for ${documentNames.length} document(s)...`,
         );
         try {
-            const newCount = await runExtraction(
+            const newCount = await runLoginAccountExtraction(
                 ledger.path,
-                account,
+                mapping.loginName,
+                mapping.label,
                 extension,
                 documentNames,
             );
@@ -1679,6 +1869,22 @@ function App() {
             setPipelineStatus('Account is required.');
             return;
         }
+        const mappings = loginAccountMappings[account] ?? [];
+        if (mappings.length !== 1) {
+            setPipelineStatus(
+                mappings.length === 0
+                    ? `No login mapping found for account '${account}'.`
+                    : `Multiple login mappings found for account '${account}'.`,
+            );
+            return;
+        }
+        const mapping = mappings[0];
+        if (mapping === undefined) {
+            setPipelineStatus(
+                `No login mapping found for account '${account}'.`,
+            );
+            return;
+        }
         const draft = reconcileDrafts[entryId] ?? {
             counterpartAccount: '',
             postingIndex: '',
@@ -1697,9 +1903,10 @@ function App() {
 
         setBusyReconcileEntryId(entryId);
         try {
-            const glId = await reconcileEntry(
+            const glId = await reconcileLoginAccountEntry(
                 ledger.path,
-                account,
+                mapping.loginName,
+                mapping.label,
                 entryId,
                 counterpartAccount,
                 postingIndex.value,
@@ -1728,6 +1935,22 @@ function App() {
             setPipelineStatus('Account is required.');
             return;
         }
+        const mappings = loginAccountMappings[account] ?? [];
+        if (mappings.length !== 1) {
+            setPipelineStatus(
+                mappings.length === 0
+                    ? `No login mapping found for account '${account}'.`
+                    : `Multiple login mappings found for account '${account}'.`,
+            );
+            return;
+        }
+        const mapping = mappings[0];
+        if (mapping === undefined) {
+            setPipelineStatus(
+                `No login mapping found for account '${account}'.`,
+            );
+            return;
+        }
         const entryId = unreconcileEntryId.trim();
         if (entryId.length === 0) {
             setPipelineStatus('Entry ID is required for unreconcile.');
@@ -1742,9 +1965,10 @@ function App() {
 
         setIsUnreconcilingEntry(true);
         try {
-            await unreconcileEntry(
+            await unreconcileLoginAccountEntry(
                 ledger.path,
-                account,
+                mapping.loginName,
+                mapping.label,
                 entryId,
                 postingIndex.value,
             );
@@ -1826,6 +2050,20 @@ function App() {
             setScrapeStatus('Account is required.');
             return;
         }
+        const mappings = loginAccountMappings[account] ?? [];
+        if (mappings.length !== 1) {
+            setScrapeStatus(
+                mappings.length === 0
+                    ? `No login mapping found for account '${account}'.`
+                    : `Multiple login mappings found for account '${account}'.`,
+            );
+            return;
+        }
+        const mapping = mappings[0];
+        if (mapping === undefined) {
+            setScrapeStatus(`No login mapping found for account '${account}'.`);
+            return;
+        }
         const extension = scrapeExtension.trim();
         if (extension.length === 0) {
             setScrapeStatus('Extension is required.');
@@ -1835,7 +2073,7 @@ function App() {
         setIsRunningScrape(true);
         setScrapeStatus(`Running ${extension} for ${account}...`);
         try {
-            await runScrape(ledger.path, account, extension);
+            await runScrapeForLogin(ledger.path, mapping.loginName, extension);
             setScrapeStatus(`Scrape completed for ${extension}.`);
             try {
                 await refreshAccountPipelineData(account);
