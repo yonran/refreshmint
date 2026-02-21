@@ -1,5 +1,18 @@
 # Plan: Decouple Online Logins from Balance Accounts
 
+## Implementation Status (2026-02-21)
+
+Status: complete in `main`, across commits `9fde2bd` through `1600075`.
+
+Recent completion milestones:
+
+- Login-centric CLI and Tauri commands shipped (login CRUD, login-keyed scrape, login+label extraction/reconcile, migration).
+- Ledger migration and migration UI prompt shipped.
+- GL mapping conflict detection and warning UI shipped.
+- Scraping tab moved to login-based command usage.
+- Login mappings management UI shipped (create/select/delete login, extension updates, label mapping set/remove).
+- Login secrets UX now keys to active login selection, matching the login-centric model.
+
 ## Context
 
 Currently, each hledger account name (e.g. `Assets:Chase:Checking`) is the primary key for everything: extension assignment, credentials, browser profile, and scraped documents. This is a 1:1 binding between "web login" and "balance account."
