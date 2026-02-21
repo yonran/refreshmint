@@ -85,8 +85,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 If the `debug exec` client disconnects before completion, the server cancels the in-flight script.
 This is useful when a run is hung or stuck in a loop: you can disconnect to stop it early, edit the script, and immediately try again.
 
-On successful `debug exec`, any resources staged via `refreshmint.saveResource(...)` are finalized into `accounts/<account>/documents/` using the same evidence pipeline used by `scrape`.
-If resource finalization fails, `debug exec` returns an error so the failure is visible immediately.
+When `debug exec` finishes (success or failure), any resources staged via `refreshmint.saveResource(...)` are finalized into `accounts/<account>/documents/` using the same evidence pipeline used by `scrape`.
+If both the driver and finalization fail, `debug exec` reports both failures in the returned error so partial-output persistence issues are visible immediately.
 
 Stop:
 

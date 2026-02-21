@@ -489,18 +489,19 @@ async fn handle_exec_request_async(
         )
         .await;
 
-        let result = match run_result {
-            Ok(()) => {
-                let finalize_result = {
-                    let mut refreshmint = refreshmint_inner_for_task.lock().await;
-                    finalize_debug_exec_resources(&mut refreshmint)
-                };
-                match finalize_result {
-                    Ok(_names) => Ok(()),
-                    Err(err) => Err(format!("failed to finalize staged resources: {err}")),
-                }
-            }
-            Err(err) => Err(err.to_string()),
+        let finalize_result = {
+            let mut refreshmint = refreshmint_inner_for_task.lock().await;
+            finalize_debug_exec_resources(&mut refreshmint)
+        };
+
+        let result = match (run_result, finalize_result) {
+            (Ok(()), Ok(_names)) => Ok(()),
+            (Ok(()), Err(err)) => Err(format!("failed to finalize staged resources: {err}")),
+            (Err(run_err), Ok(_names)) => Err(run_err.to_string()),
+            (Err(run_err), Err(finalize_err)) => Err(format!(
+                "{}; additionally failed to finalize staged resources: {}",
+                run_err, finalize_err
+            )),
         };
 
         {
