@@ -294,8 +294,10 @@ function App() {
         selectedLoginMapping === null
             ? null
             : `${selectedLoginMapping.loginName}/${selectedLoginMapping.label}`;
-    const activeSecretsLoginName =
+    const activeScrapeLoginName =
         selectedLoginMapping?.loginName ?? (selectedLoginName.trim() || null);
+    const hasActiveScrapeLogin = activeScrapeLoginName !== null;
+    const activeSecretsLoginName = activeScrapeLoginName;
     const hasActiveSecretsLogin = activeSecretsLoginName !== null;
     const selectedLoginConfig: LoginConfig | null =
         selectedLoginName.length === 0
@@ -763,7 +765,8 @@ function App() {
             return;
         }
 
-        if (selectedLoginMapping === null) {
+        const loginName = activeScrapeLoginName;
+        if (loginName === null) {
             setScrapeExtension('');
             return;
         }
@@ -771,10 +774,9 @@ function App() {
         // Prevent stale extension state from bleeding across selections.
         setScrapeExtension('');
 
-        const mapping = selectedLoginMapping;
         let cancelled = false;
         const timer = window.setTimeout(() => {
-            void getLoginConfig(ledgerPath, mapping.loginName)
+            void getLoginConfig(ledgerPath, loginName)
                 .then((config) => {
                     if (cancelled) {
                         return;
@@ -792,7 +794,7 @@ function App() {
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [ledgerPath, selectedLoginMapping]);
+    }, [activeScrapeLoginName, ledgerPath]);
 
     useEffect(() => {
         if (ledgerPath === null) {
@@ -1337,13 +1339,13 @@ function App() {
             }
 
             await reloadScrapeExtensions(ledger.path, loadedExtensionName);
-            // Save the loaded extension name in login config when mapping exists.
-            const mapping = selectedLoginMapping;
-            if (mapping !== null) {
+            // Save the loaded extension name in login config when a login is selected.
+            const loginName = activeScrapeLoginName;
+            if (loginName !== null) {
                 try {
                     await setLoginExtension(
                         ledger.path,
-                        mapping.loginName,
+                        loginName,
                         loadedExtensionName,
                     );
                 } catch {
@@ -1377,16 +1379,16 @@ function App() {
             return;
         }
 
-        const mapping = selectedLoginMapping;
-        if (mapping === null) {
+        const loginName = activeScrapeLoginName;
+        if (loginName === null) {
             setScrapeStatus(
-                selectedLoginMappingError ?? 'Select an account first.',
+                selectedLoginMappingError ?? 'Select a login first.',
             );
             return;
         }
 
         try {
-            await setLoginExtension(ledger.path, mapping.loginName, source);
+            await setLoginExtension(ledger.path, loginName, source);
             setScrapeExtension(source);
             setScrapeStatus(`Set unpacked extension: ${source}`);
         } catch (error) {
@@ -1400,11 +1402,9 @@ function App() {
         if (!ledger) {
             return;
         }
-        const mapping = selectedLoginMapping;
-        if (mapping === null) {
-            setScrapeStatus(
-                selectedLoginMappingError ?? 'Account is required.',
-            );
+        const loginName = activeScrapeLoginName;
+        if (loginName === null) {
+            setScrapeStatus(selectedLoginMappingError ?? 'Login is required.');
             return;
         }
         const extension = scrapeExtension.trim();
@@ -1418,7 +1418,7 @@ function App() {
         try {
             const socket = await startScrapeDebugSession(
                 ledger.path,
-                mapping.loginName,
+                loginName,
                 extension,
             );
             setScrapeDebugSocket(socket);
@@ -2261,25 +2261,12 @@ function App() {
         if (!ledger) {
             return;
         }
+        const loginName = activeScrapeLoginName;
+        if (loginName === null) {
+            setScrapeStatus(selectedLoginMappingError ?? 'Login is required.');
+            return;
+        }
         const account = scrapeAccount.trim();
-        if (account.length === 0) {
-            setScrapeStatus('Account is required.');
-            return;
-        }
-        const mappings = loginAccountMappings[account] ?? [];
-        if (mappings.length !== 1) {
-            setScrapeStatus(
-                mappings.length === 0
-                    ? `No login mapping found for account '${account}'.`
-                    : `Multiple login mappings found for account '${account}'.`,
-            );
-            return;
-        }
-        const mapping = mappings[0];
-        if (mapping === undefined) {
-            setScrapeStatus(`No login mapping found for account '${account}'.`);
-            return;
-        }
         const extension = scrapeExtension.trim();
         if (extension.length === 0) {
             setScrapeStatus('Extension is required.');
@@ -2287,12 +2274,14 @@ function App() {
         }
 
         setIsRunningScrape(true);
-        setScrapeStatus(`Running ${extension} for ${account}...`);
+        setScrapeStatus(`Running ${extension} for ${loginName}...`);
         try {
-            await runScrapeForLogin(ledger.path, mapping.loginName, extension);
+            await runScrapeForLogin(ledger.path, loginName, extension);
             setScrapeStatus(`Scrape completed for ${extension}.`);
             try {
-                await refreshAccountPipelineData(account);
+                if (selectedLoginMapping !== null && account.length > 0) {
+                    await refreshAccountPipelineData(account);
+                }
             } catch {
                 // Surface scrape success first; pipeline reload errors are non-fatal here.
             }
@@ -3524,21 +3513,28 @@ function App() {
                                         <option key={name} value={name} />
                                     ))}
                                 </datalist>
-                                {selectedScrapeAccount.length === 0 ? (
-                                    <p className="hint">
-                                        Choose a GL account to resolve its login
-                                        mapping.
-                                    </p>
-                                ) : selectedLoginMappingSummary === null ? (
-                                    <p className="status">
-                                        {selectedScrapeAccountHasConflict
-                                            ? `Account '${selectedScrapeAccount}' has GL mapping conflicts. Use the conflict panel to load and edit a mapping.`
-                                            : selectedLoginMappingError}
-                                    </p>
-                                ) : (
+                                {selectedLoginMappingSummary !== null ? (
                                     <p className="hint mono">
                                         Login mapping:{' '}
                                         {selectedLoginMappingSummary}
+                                    </p>
+                                ) : selectedScrapeAccountHasConflict ? (
+                                    <p className="status">
+                                        {`Account '${selectedScrapeAccount}' has GL mapping conflicts. Use the conflict panel to load and edit a mapping.`}
+                                    </p>
+                                ) : hasActiveScrapeLogin ? (
+                                    <p className="hint mono">
+                                        Using login selection:{' '}
+                                        {activeScrapeLoginName}
+                                    </p>
+                                ) : selectedScrapeAccount.length === 0 ? (
+                                    <p className="hint">
+                                        Choose a GL account or login to run
+                                        scrape/debug.
+                                    </p>
+                                ) : (
+                                    <p className="status">
+                                        {selectedLoginMappingError}
                                     </p>
                                 )}
                                 <div className="txn-actions">
@@ -3550,7 +3546,7 @@ function App() {
                                         }}
                                         disabled={
                                             isRunningScrape ||
-                                            !hasResolvedLoginMapping ||
+                                            !hasActiveScrapeLogin ||
                                             isLoadingScrapeExtensions ||
                                             isImportingScrapeExtension ||
                                             isMigratingLegacyLedger ||
@@ -3571,7 +3567,7 @@ function App() {
                                             void handleStartScrapeDebug();
                                         }}
                                         disabled={
-                                            !hasResolvedLoginMapping ||
+                                            !hasActiveScrapeLogin ||
                                             scrapeDebugSocket !== null ||
                                             isStartingScrapeDebug ||
                                             isStoppingScrapeDebug
