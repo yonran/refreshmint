@@ -62,7 +62,9 @@ export interface DocumentInfo {
     originalUrl?: string;
     scrapedAt: string;
     extensionName: string;
-    accountName: string;
+    accountName?: string;
+    loginName?: string;
+    label?: string;
     scrapeSessionId: string;
     coverageEndDate: string;
     dateRangeStart?: string;
@@ -295,6 +297,15 @@ export interface AccountConfig {
     extension?: string;
 }
 
+export interface LoginAccountConfig {
+    glAccount?: string | null;
+}
+
+export interface LoginConfig {
+    extension?: string;
+    accounts: Record<string, LoginAccountConfig>;
+}
+
 export async function getAccountConfig(
     ledger: string,
     accountName: string,
@@ -312,4 +323,107 @@ export async function setAccountExtension(
         accountName,
         extension,
     });
+}
+
+export async function listLogins(ledger: string): Promise<string[]> {
+    return invoke('list_logins', { ledger });
+}
+
+export async function getLoginConfig(
+    ledger: string,
+    loginName: string,
+): Promise<LoginConfig> {
+    return invoke('get_login_config', { ledger, loginName });
+}
+
+export async function createLogin(
+    ledger: string,
+    loginName: string,
+    extension: string,
+): Promise<void> {
+    await invoke('create_login', { ledger, loginName, extension });
+}
+
+export async function setLoginExtension(
+    ledger: string,
+    loginName: string,
+    extension: string,
+): Promise<void> {
+    await invoke('set_login_extension', { ledger, loginName, extension });
+}
+
+export async function deleteLogin(
+    ledger: string,
+    loginName: string,
+): Promise<void> {
+    await invoke('delete_login', { ledger, loginName });
+}
+
+export async function setLoginAccount(
+    ledger: string,
+    loginName: string,
+    label: string,
+    glAccount: string | null,
+): Promise<void> {
+    await invoke('set_login_account', { ledger, loginName, label, glAccount });
+}
+
+export async function removeLoginAccount(
+    ledger: string,
+    loginName: string,
+    label: string,
+): Promise<void> {
+    await invoke('remove_login_account', { ledger, loginName, label });
+}
+
+export async function listLoginSecrets(
+    loginName: string,
+): Promise<AccountSecretEntry[]> {
+    return invoke('list_login_secrets', { loginName });
+}
+
+export async function syncLoginSecretsForExtension(
+    ledger: string,
+    loginName: string,
+    extension: string,
+): Promise<SecretSyncResult> {
+    return invoke('sync_login_secrets_for_extension', {
+        ledger,
+        loginName,
+        extension,
+    });
+}
+
+export async function addLoginSecret(
+    loginName: string,
+    domain: string,
+    name: string,
+    value: string,
+): Promise<void> {
+    await invoke('add_login_secret', { loginName, domain, name, value });
+}
+
+export async function reenterLoginSecret(
+    loginName: string,
+    domain: string,
+    name: string,
+    value: string,
+): Promise<void> {
+    await invoke('reenter_login_secret', { loginName, domain, name, value });
+}
+
+export async function removeLoginSecret(
+    loginName: string,
+    domain: string,
+    name: string,
+): Promise<void> {
+    await invoke('remove_login_secret', { loginName, domain, name });
+}
+
+export async function runScrapeForLogin(
+    ledger: string,
+    loginName: string,
+    extension: string,
+): Promise<void> {
+    await invoke('run_scrape_for_login', { ledger, loginName, extension });
 }

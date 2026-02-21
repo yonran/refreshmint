@@ -15,7 +15,7 @@ use crate::secret::SecretStore;
 
 /// Configuration for a scrape run.
 pub struct ScrapeConfig {
-    pub account: String,
+    pub login_name: String,
     pub extension_name: String,
     pub ledger_dir: PathBuf,
     pub profile_override: Option<PathBuf>,
@@ -115,8 +115,10 @@ pub struct DocumentInfo {
     pub scraped_at: String,
     #[serde(rename = "extensionName")]
     pub extension_name: String,
-    #[serde(rename = "accountName")]
-    pub account_name: String,
+    #[serde(rename = "loginName", alias = "accountName")]
+    pub login_name: String,
+    #[serde(default = "default_document_label")]
+    pub label: String,
     #[serde(rename = "scrapeSessionId")]
     pub scrape_session_id: String,
     #[serde(rename = "coverageEndDate")]
@@ -127,24 +129,65 @@ pub struct DocumentInfo {
     pub date_range_end: Option<String>,
 }
 
-/// Finalize staged resources: move them to `accounts/<account>/documents/`
+fn default_document_label() -> String {
+    "_default".to_string()
+}
+
+/// Finalize staged resources: move them to `logins/<login>/accounts/<label>/documents/`
 /// with date-prefixed filenames and write `-info.json` sidecars.
 pub fn finalize_staged_resources(
     inner: &js_api::RefreshmintInner,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let documents_dir =
-        crate::account_journal::account_documents_dir(&inner.ledger_dir, &inner.account_name);
-    std::fs::create_dir_all(&documents_dir)?;
-
     let scraped_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let fallback_date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let mut finalized_names = Vec::new();
+    let mut labels_seen = std::collections::BTreeSet::new();
+    let mut resources_with_labels = Vec::new();
 
     for resource in &inner.staged_resources {
+        let label = if let Some(raw) = resource.label.as_ref() {
+            crate::login_config::validate_label(raw).map_err(|err| {
+                format!("invalid label '{}' for '{}': {err}", raw, resource.filename)
+            })?;
+            raw.clone()
+        } else {
+            "_default".to_string()
+        };
+
+        labels_seen.insert(label.clone());
+        resources_with_labels.push((resource, label));
+    }
+
+    let mut login_config =
+        crate::login_config::read_login_config(&inner.ledger_dir, &inner.login_name);
+    let mut login_config_changed = false;
+    for label in labels_seen {
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            login_config.accounts.entry(label)
+        {
+            entry.insert(crate::login_config::LoginAccountConfig { gl_account: None });
+            login_config_changed = true;
+        }
+    }
+    if login_config_changed {
+        crate::login_config::write_login_config(
+            &inner.ledger_dir,
+            &inner.login_name,
+            &login_config,
+        )?;
+    }
+
+    for (resource, label) in resources_with_labels {
         let coverage_date = resource
             .coverage_end_date
             .as_deref()
             .unwrap_or(&fallback_date);
+        let documents_dir = crate::login_config::login_account_documents_dir(
+            &inner.ledger_dir,
+            &inner.login_name,
+            &label,
+        );
+        std::fs::create_dir_all(&documents_dir)?;
 
         let final_filename =
             date_prefixed_filename(coverage_date, &resource.filename, &documents_dir);
@@ -174,7 +217,8 @@ pub fn finalize_staged_resources(
             original_url: resource.original_url.clone(),
             scraped_at: scraped_at.clone(),
             extension_name: inner.extension_name.clone(),
-            account_name: inner.account_name.clone(),
+            login_name: inner.login_name.clone(),
+            label: label.clone(),
             scrape_session_id: inner.scrape_session_id.clone(),
             coverage_end_date: coverage_date.to_string(),
             date_range_start: inner.session_metadata.date_range_start.clone(),
@@ -302,6 +346,10 @@ pub fn list_runnable_extensions(
 pub async fn run_scrape_async(
     config: ScrapeConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let login_name = config.login_name.clone();
+    let _login_lock = crate::login_config::acquire_login_lock(&config.ledger_dir, &login_name)
+        .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { err })?;
+
     let extension_dir =
         crate::account_config::resolve_extension_dir(&config.ledger_dir, &config.extension_name);
     // 1. Locate the driver script
@@ -314,19 +362,17 @@ pub async fn run_scrape_async(
     let manifest = load_manifest(&extension_dir)?;
     let declared_secrets = manifest.secrets;
 
-    let account_name = config.account.clone();
-
     // Generate scrape session ID
     let scrape_session_id = generate_scrape_session_id();
     eprintln!("Scrape session: {scrape_session_id}");
 
-    // 2. Create secret store for the account
-    let secret_store = SecretStore::new(account_name.clone());
+    // 2. Create secret store for the login
+    let secret_store = SecretStore::new(format!("login/{login_name}"));
 
     // 3. Resolve browser profile directory
     let profile_dir = profile::resolve_profile_dir(
         &config.ledger_dir,
-        &account_name,
+        &login_name,
         config.profile_override.as_deref(),
     )
     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
@@ -381,7 +427,8 @@ pub async fn run_scrape_async(
         staged_resources: Vec::new(),
         scrape_session_id: scrape_session_id.clone(),
         extension_name: config.extension_name.clone(),
-        account_name: account_name.clone(),
+        account_name: login_name.clone(),
+        login_name: login_name.clone(),
         ledger_dir: config.ledger_dir.clone(),
     }));
 
@@ -411,20 +458,21 @@ pub async fn run_scrape_async(
         }
     }
 
-    // 10. Auto-save extension in account config if not already set
+    // 10. Auto-save extension in login config if not already set
     if result.is_ok() {
-        let existing =
-            crate::account_config::read_account_config(&config.ledger_dir, &account_name);
-        if existing.extension.is_none() {
-            let new_config = crate::account_config::AccountConfig {
-                extension: Some(config.extension_name.clone()),
-            };
-            if let Err(e) = crate::account_config::write_account_config(
-                &config.ledger_dir,
-                &account_name,
-                &new_config,
-            ) {
-                eprintln!("Warning: failed to save account config: {e}");
+        let mut existing = crate::login_config::read_login_config(&config.ledger_dir, &login_name);
+        let should_save = existing
+            .extension
+            .as_deref()
+            .map(str::trim)
+            .map(str::is_empty)
+            .unwrap_or(true);
+        if should_save {
+            existing.extension = Some(config.extension_name.clone());
+            if let Err(e) =
+                crate::login_config::write_login_config(&config.ledger_dir, &login_name, &existing)
+            {
+                eprintln!("Warning: failed to save login config: {e}");
             }
         }
     }
@@ -457,7 +505,7 @@ mod tests {
         finalize_staged_resources, list_runnable_extensions, load_manifest_secret_declarations,
         normalize_manifest_domain,
     };
-    use crate::account_journal::account_documents_dir;
+    use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
         PromptOverrides, RefreshmintInner, SessionMetadata, StagedResource,
     };
@@ -581,7 +629,7 @@ mod tests {
             panic!("failed to write staged file: {err}");
         });
 
-        let account_name = "Assets:Nested".to_string();
+        let login_name = "chase-personal".to_string();
         let inner = RefreshmintInner {
             output_dir: root.join("output"),
             prompt_overrides: PromptOverrides::new(),
@@ -593,10 +641,12 @@ mod tests {
                 coverage_end_date: Some("2026-01-31".to_string()),
                 original_url: Some("https://example.com/export".to_string()),
                 mime_type: Some("application/pdf".to_string()),
+                label: Some("checking".to_string()),
             }],
             scrape_session_id: "nested-test".to_string(),
             extension_name: "nested-ext".to_string(),
-            account_name: account_name.clone(),
+            account_name: login_name.clone(),
+            login_name: login_name.clone(),
             ledger_dir: ledger_dir.clone(),
         };
 
@@ -605,7 +655,7 @@ mod tests {
         });
         assert_eq!(finalized, vec!["2026-01-31-statements/2026/jan.pdf"]);
 
-        let documents_dir = account_documents_dir(&ledger_dir, &account_name);
+        let documents_dir = login_account_documents_dir(&ledger_dir, &login_name, "checking");
         let finalized_path = documents_dir.join(&finalized[0]);
         assert!(finalized_path.exists(), "expected finalized file to exist");
         let bytes = fs::read(&finalized_path).unwrap_or_else(|err| {
@@ -615,6 +665,52 @@ mod tests {
 
         let sidecar_path = documents_dir.join(format!("{}-info.json", finalized[0]));
         assert!(sidecar_path.exists(), "expected sidecar file to exist");
+        let sidecar = fs::read_to_string(&sidecar_path)
+            .unwrap_or_else(|err| panic!("failed to read sidecar file: {err}"));
+        assert!(sidecar.contains("\"loginName\": \"chase-personal\""));
+        assert!(sidecar.contains("\"label\": \"checking\""));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn finalize_staged_resources_rejects_invalid_label() {
+        let root = create_temp_dir("scrape-finalize-invalid-label");
+        let ledger_dir = root.join("ledger.refreshmint");
+        fs::create_dir_all(&ledger_dir).unwrap_or_else(|err| {
+            panic!("failed to create ledger dir: {err}");
+        });
+        let staged_path = root.join("staged.pdf");
+        fs::write(&staged_path, b"pdf").unwrap_or_else(|err| {
+            panic!("failed to write staged file: {err}");
+        });
+
+        let inner = RefreshmintInner {
+            output_dir: root.join("output"),
+            prompt_overrides: PromptOverrides::new(),
+            prompt_requires_override: false,
+            session_metadata: SessionMetadata::default(),
+            staged_resources: vec![StagedResource {
+                filename: "jan.pdf".to_string(),
+                staging_path: staged_path,
+                coverage_end_date: Some("2026-01-31".to_string()),
+                original_url: None,
+                mime_type: Some("application/pdf".to_string()),
+                label: Some("bad/label".to_string()),
+            }],
+            scrape_session_id: "invalid-label-test".to_string(),
+            extension_name: "nested-ext".to_string(),
+            account_name: "chase-personal".to_string(),
+            login_name: "chase-personal".to_string(),
+            ledger_dir: ledger_dir.clone(),
+        };
+
+        let err = finalize_staged_resources(&inner)
+            .err()
+            .unwrap_or_else(|| panic!("expected invalid label error"));
+        let message = err.to_string();
+        assert!(message.contains("invalid label"));
+        assert!(message.contains("bad/label"));
 
         let _ = fs::remove_dir_all(&root);
     }

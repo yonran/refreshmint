@@ -58,7 +58,7 @@ mod unix_only {
         let socket_path = sandbox.path().join("debug.sock");
         let profile_dir = sandbox.path().join("profile");
         let config = DebugStartConfig {
-            account: "smoke-account".to_string(),
+            login_name: "smoke-account".to_string(),
             extension_name: "smoke-ext".to_string(),
             ledger_dir: ledger_dir.clone(),
             profile_override: Some(profile_dir),

@@ -1717,6 +1717,7 @@ pub struct StagedResource {
     pub coverage_end_date: Option<String>,
     pub original_url: Option<String>,
     pub mime_type: Option<String>,
+    pub label: Option<String>,
 }
 
 /// Shared state backing the `refreshmint` JS namespace.
@@ -1729,6 +1730,7 @@ pub struct RefreshmintInner {
     pub scrape_session_id: String,
     pub extension_name: String,
     pub account_name: String,
+    pub login_name: String,
     pub ledger_dir: PathBuf,
 }
 
@@ -1772,26 +1774,37 @@ fn missing_prompt_override_error(message: &str) -> String {
     )
 }
 
-fn parse_save_resource_options(
-    options: Option<rquickjs::Value<'_>>,
-) -> (Option<String>, Option<String>, Option<String>) {
-    let mut coverage_end_date: Option<String> = None;
-    let mut original_url: Option<String> = None;
-    let mut mime_type: Option<String> = None;
+struct SaveResourceOptions {
+    coverage_end_date: Option<String>,
+    original_url: Option<String>,
+    mime_type: Option<String>,
+    label: Option<String>,
+}
+
+fn parse_save_resource_options(options: Option<rquickjs::Value<'_>>) -> SaveResourceOptions {
+    let mut result = SaveResourceOptions {
+        coverage_end_date: None,
+        original_url: None,
+        mime_type: None,
+        label: None,
+    };
     if let Some(opts) = options {
         if let Some(obj) = opts.as_object() {
             if let Ok(val) = obj.get::<_, Option<String>>("coverageEndDate") {
-                coverage_end_date = val;
+                result.coverage_end_date = val;
             }
             if let Ok(val) = obj.get::<_, Option<String>>("originalUrl") {
-                original_url = val;
+                result.original_url = val;
             }
             if let Ok(val) = obj.get::<_, Option<String>>("mimeType") {
-                mime_type = val;
+                result.mime_type = val;
+            }
+            if let Ok(val) = obj.get::<_, Option<String>>("label") {
+                result.label = val;
             }
         }
     }
-    (coverage_end_date, original_url, mime_type)
+    result
 }
 
 fn unique_output_path(output_dir: &Path, filename: &str) -> PathBuf {
@@ -1840,26 +1853,46 @@ impl RefreshmintApi {
     /// List existing account documents as JSON for "since last scrape" logic.
     #[qjs(rename = "listAccountDocuments")]
     pub async fn js_list_account_documents(&self) -> JsResult<String> {
-        let (ledger_dir, account_name) = {
+        let (ledger_dir, login_name) = {
             let inner = self.inner.lock().await;
-            (inner.ledger_dir.clone(), inner.account_name.clone())
+            (inner.ledger_dir.clone(), inner.login_name.clone())
         };
 
-        let listed = crate::extract::list_documents(&ledger_dir, &account_name)
-            .map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?;
-        let docs = listed
-            .into_iter()
-            .map(|entry| {
-                let info = entry.info;
-                AccountDocumentSummary {
-                    filename: entry.filename,
+        // listAccountDocuments currently returns the default label's document history.
+        let documents_dir =
+            crate::login_config::login_account_documents_dir(&ledger_dir, &login_name, "_default");
+        let mut docs = Vec::new();
+        if documents_dir.exists() {
+            for entry in std::fs::read_dir(&documents_dir)
+                .map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?
+            {
+                let entry =
+                    entry.map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?;
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                if file_name.ends_with("-info.json") || !entry.path().is_file() {
+                    continue;
+                }
+
+                let sidecar_path = documents_dir.join(format!("{file_name}-info.json"));
+                let info = if sidecar_path.exists() {
+                    std::fs::read_to_string(&sidecar_path)
+                        .ok()
+                        .and_then(|content| {
+                            serde_json::from_str::<crate::scrape::DocumentInfo>(&content).ok()
+                        })
+                } else {
+                    None
+                };
+                docs.push(AccountDocumentSummary {
+                    filename: file_name,
                     coverage_end_date: info.as_ref().map(|v| v.coverage_end_date.clone()),
                     mime_type: info.as_ref().map(|v| v.mime_type.clone()),
                     extension_name: info.as_ref().map(|v| v.extension_name.clone()),
                     scraped_at: info.as_ref().map(|v| v.scraped_at.clone()),
-                }
-            })
-            .collect::<Vec<_>>();
+                });
+            }
+            docs.sort_by(|a, b| a.filename.cmp(&b.filename));
+        }
         serde_json::to_string(&docs)
             .map_err(|e| js_err(format!("listAccountDocuments serialization failed: {e}")))
     }
@@ -1878,8 +1911,13 @@ impl RefreshmintApi {
     ) -> JsResult<()> {
         let mut inner = self.inner.lock().await;
 
-        // Parse optional coverageEndDate from options object
-        let (coverage_end_date, original_url, mime_type) = parse_save_resource_options(options);
+        // Parse optional fields from options object
+        let SaveResourceOptions {
+            coverage_end_date,
+            original_url,
+            mime_type,
+            label,
+        } = parse_save_resource_options(options);
 
         // Always save to the legacy output dir for backward compatibility
         let path = unique_output_path(&inner.output_dir, &filename);
@@ -1897,6 +1935,7 @@ impl RefreshmintApi {
             coverage_end_date,
             original_url,
             mime_type,
+            label,
         });
 
         Ok(())
@@ -2244,6 +2283,7 @@ mod tests {
             scrape_session_id: String::new(),
             extension_name: String::new(),
             account_name: String::new(),
+            login_name: String::new(),
             ledger_dir: PathBuf::new(),
         }
     }

@@ -580,7 +580,7 @@ fn run_debug_start(
         None => crate::scrape::debug::default_debug_socket_path(&account)?,
     };
     let config = crate::scrape::debug::DebugStartConfig {
-        account,
+        login_name: account,
         extension_name: extension,
         ledger_dir,
         profile_override: args.profile,
@@ -660,7 +660,7 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
         None => default_ledger_dir(context)?,
     };
 
-    let extension_name = crate::account_config::resolve_extension(
+    let extension_name = crate::login_config::resolve_login_extension(
         &ledger_dir,
         &args.account,
         args.extension.as_deref(),
@@ -670,7 +670,7 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
     let prompt_overrides = parse_prompt_overrides(&args.prompt)?;
 
     let config = crate::scrape::ScrapeConfig {
-        account: args.account,
+        login_name: args.account,
         extension_name,
         ledger_dir,
         profile_override: args.profile,

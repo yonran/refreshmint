@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
 pub struct DebugStartConfig {
-    pub account: String,
+    pub login_name: String,
     pub extension_name: String,
     pub ledger_dir: PathBuf,
     pub profile_override: Option<PathBuf>,
@@ -11,12 +11,12 @@ pub struct DebugStartConfig {
     pub prompt_requires_override: bool,
 }
 
-pub fn default_debug_socket_path(account: &str) -> Result<PathBuf, Box<dyn Error>> {
+pub fn default_debug_socket_path(login_name: &str) -> Result<PathBuf, Box<dyn Error>> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
 
-        let account_sanitized = sanitize_segment(account);
+        let account_sanitized = sanitize_segment(login_name);
         let preferred_base = dirs::cache_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("refreshmint")
@@ -42,7 +42,7 @@ pub fn default_debug_socket_path(account: &str) -> Result<PathBuf, Box<dyn Error
 
     #[cfg(not(unix))]
     {
-        let _ = account;
+        let _ = login_name;
         Err("debug sockets are currently supported only on unix platforms".into())
     }
 }
@@ -156,9 +156,13 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
         Arc<Mutex<super::js_api::RefreshmintInner>>,
     );
 
+    let _login_lock =
+        crate::login_config::acquire_login_lock(&config.ledger_dir, &config.login_name)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+
     let socket_path = match config.socket_path {
         Some(path) => path,
-        None => default_debug_socket_path(&config.account)?,
+        None => default_debug_socket_path(&config.login_name)?,
     };
 
     if let Some(parent) = socket_path.parent() {
@@ -174,10 +178,11 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
     let rt = tokio::runtime::Runtime::new()?;
     let (browser_instance, handler_handle, page_inner, refreshmint_inner): DebugRuntimeState =
         rt.block_on(async {
-            let secret_store = crate::secret::SecretStore::new(config.account.clone());
+            let secret_store =
+                crate::secret::SecretStore::new(format!("login/{}", config.login_name));
             let profile_dir = super::profile::resolve_profile_dir(
                 &config.ledger_dir,
-                &config.account,
+                &config.login_name,
                 config.profile_override.as_deref(),
             )
             .map_err(|err| err.to_string())?;
@@ -232,7 +237,8 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                 staged_resources: Vec::new(),
                 scrape_session_id: String::new(),
                 extension_name: config.extension_name.clone(),
-                account_name: config.account.clone(),
+                account_name: config.login_name.clone(),
+                login_name: config.login_name.clone(),
                 ledger_dir: config.ledger_dir.clone(),
             }));
             Ok::<_, Box<dyn Error>>((browser, handler, page_inner, refreshmint_inner))
@@ -417,7 +423,7 @@ impl Drop for SocketCleanup {
 #[cfg(test)]
 mod tests {
     use super::{finalize_debug_exec_resources, sanitize_segment};
-    use crate::account_journal::account_documents_dir;
+    use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
         PromptOverrides, RefreshmintInner, SessionMetadata, StagedResource,
     };
@@ -461,7 +467,7 @@ mod tests {
             panic!("failed to write staged file: {err}");
         });
 
-        let account_name = "Assets:Debug".to_string();
+        let login_name = "debug-login".to_string();
         let mut inner = RefreshmintInner {
             output_dir: root.join("output"),
             prompt_overrides: PromptOverrides::new(),
@@ -473,10 +479,12 @@ mod tests {
                 coverage_end_date: Some("2026-02-01".to_string()),
                 original_url: Some("https://example.com/export".to_string()),
                 mime_type: Some("application/octet-stream".to_string()),
+                label: Some("checking".to_string()),
             }],
             scrape_session_id: "debug-session".to_string(),
             extension_name: "smoke-ext".to_string(),
-            account_name: account_name.clone(),
+            account_name: login_name.clone(),
+            login_name: login_name.clone(),
             ledger_dir: ledger_dir.clone(),
         };
 
@@ -486,7 +494,7 @@ mod tests {
         assert_eq!(finalized.len(), 1);
         assert!(finalized[0].starts_with("2026-02-01-debug-smoke.bin"));
 
-        let documents_dir = account_documents_dir(&ledger_dir, &account_name);
+        let documents_dir = login_account_documents_dir(&ledger_dir, &login_name, "checking");
         let finalized_path = documents_dir.join(&finalized[0]);
         assert!(finalized_path.exists());
         let bytes = fs::read(finalized_path).unwrap_or_else(|err| {

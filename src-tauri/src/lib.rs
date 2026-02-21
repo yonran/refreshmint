@@ -7,6 +7,7 @@ pub mod account_config;
 pub mod account_journal;
 pub mod dedup;
 pub mod extract;
+pub mod login_config;
 pub mod operations;
 pub mod reconcile;
 pub mod transfer_detector;
@@ -84,6 +85,7 @@ pub fn run_with_context(
             start_scrape_debug_session,
             stop_scrape_debug_session,
             get_scrape_debug_session_socket,
+            run_scrape_for_login,
             run_scrape,
             list_documents,
             run_extraction,
@@ -94,6 +96,18 @@ pub fn run_with_context(
             reconcile_transfer,
             get_account_config,
             set_account_extension,
+            list_logins,
+            get_login_config,
+            create_login,
+            set_login_extension,
+            delete_login,
+            set_login_account,
+            remove_login_account,
+            list_login_secrets,
+            sync_login_secrets_for_extension,
+            add_login_secret,
+            reenter_login_secret,
+            remove_login_secret,
         ])
         .setup(|app| {
             binpath::init_from_app(app.handle());
@@ -378,7 +392,7 @@ fn start_scrape_debug_session(
     }
 
     let config = crate::scrape::debug::DebugStartConfig {
-        account,
+        login_name: account,
         extension_name: extension,
         ledger_dir: target_dir,
         profile_override: None,
@@ -445,20 +459,22 @@ fn get_scrape_debug_session_socket() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn run_scrape(ledger: String, account: String, extension: String) -> Result<(), String> {
-    let account = account.trim().to_string();
-    if account.is_empty() {
-        return Err("account is required".to_string());
-    }
+async fn run_scrape_for_login(
+    ledger: String,
+    login_name: String,
+    extension: String,
+) -> Result<(), String> {
+    let login_name = require_non_empty_input("login_name", login_name)?;
 
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
 
-    let extension = account_config::resolve_extension(&target_dir, &account, Some(&extension))
-        .map_err(|err| err.to_string())?;
+    let extension =
+        login_config::resolve_login_extension(&target_dir, &login_name, Some(&extension))
+            .map_err(|err| err.to_string())?;
 
     let config = scrape::ScrapeConfig {
-        account,
+        login_name,
         extension_name: extension,
         ledger_dir: target_dir,
         profile_override: None,
@@ -470,6 +486,12 @@ async fn run_scrape(ledger: String, account: String, extension: String) -> Resul
         .await
         .map_err(|err| err.to_string())?
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn run_scrape(ledger: String, account: String, extension: String) -> Result<(), String> {
+    let login_name = require_non_empty_input("account", account)?;
+    run_scrape_for_login(ledger, login_name, extension).await
 }
 
 #[tauri::command]
@@ -597,6 +619,230 @@ fn evidence_ref_matches_document(evidence_ref: &str, document_name: &str) -> boo
             .get(document_name.len()..)
             .map(|rest| rest.starts_with(':') || rest.starts_with('#'))
             .unwrap_or(false)
+}
+
+// --- Login CRUD commands ---
+
+#[tauri::command]
+fn list_logins(ledger: String) -> Result<Vec<String>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    Ok(login_config::list_logins(&target_dir))
+}
+
+#[tauri::command]
+fn get_login_config(
+    ledger: String,
+    login_name: String,
+) -> Result<login_config::LoginConfig, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    Ok(login_config::read_login_config(&target_dir, &login_name))
+}
+
+#[tauri::command]
+fn create_login(ledger: String, login_name: String, extension: String) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    login_config::validate_label(&login_name)
+        .map_err(|err| format!("invalid login name: {err}"))?;
+
+    // Check if login already exists
+    let config_path = login_config::login_config_path(&target_dir, &login_name);
+    if config_path.exists() {
+        return Err(format!("login '{login_name}' already exists"));
+    }
+
+    let extension = extension.trim().to_string();
+    let ext_value = if extension.is_empty() {
+        None
+    } else {
+        Some(extension)
+    };
+
+    let config = login_config::LoginConfig {
+        extension: ext_value,
+        accounts: std::collections::BTreeMap::new(),
+    };
+    login_config::write_login_config(&target_dir, &login_name, &config)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn set_login_extension(
+    ledger: String,
+    login_name: String,
+    extension: String,
+) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
+        .map_err(|err| err.to_string())?;
+
+    let mut config = login_config::read_login_config(&target_dir, &login_name);
+    let extension = extension.trim().to_string();
+    config.extension = if extension.is_empty() {
+        None
+    } else {
+        Some(extension)
+    };
+    login_config::write_login_config(&target_dir, &login_name, &config)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn delete_login(ledger: String, login_name: String) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    login_config::delete_login(&target_dir, &login_name).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn set_login_account(
+    ledger: String,
+    login_name: String,
+    label: String,
+    gl_account: Option<String>,
+) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let label = require_non_empty_input("label", label)?;
+    login_config::validate_label(&label)?;
+
+    let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
+        .map_err(|err| err.to_string())?;
+
+    // Check GL account uniqueness if setting a non-null GL account
+    let gl_account = gl_account
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(ref gl) = gl_account {
+        login_config::check_gl_account_uniqueness(&target_dir, &login_name, &label, gl)?;
+    }
+
+    let mut config = login_config::read_login_config(&target_dir, &login_name);
+    config
+        .accounts
+        .insert(label, login_config::LoginAccountConfig { gl_account });
+    login_config::write_login_config(&target_dir, &login_name, &config)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn remove_login_account(ledger: String, login_name: String, label: String) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let label = require_non_empty_input("label", label)?;
+
+    let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
+        .map_err(|err| err.to_string())?;
+
+    login_config::remove_login_account(&target_dir, &login_name, &label)
+        .map_err(|err| err.to_string())
+}
+
+// --- Login-keyed secret commands ---
+
+#[tauri::command]
+fn list_login_secrets(login_name: String) -> Result<Vec<AccountSecretEntry>, String> {
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
+    let mut entries = store
+        .list_with_value_state()
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .map(|(domain, name, has_value)| AccountSecretEntry {
+            domain,
+            name,
+            has_value,
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
+    Ok(entries)
+}
+
+#[tauri::command]
+fn sync_login_secrets_for_extension(
+    ledger: String,
+    login_name: String,
+    extension: String,
+) -> Result<SecretSyncResult, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let extension =
+        login_config::resolve_login_extension(&target_dir, &login_name, Some(&extension))
+            .map_err(|err| err.to_string())?;
+
+    let extension_dir = account_config::resolve_extension_dir(&target_dir, &extension);
+    let declared =
+        scrape::load_manifest_secret_declarations(&extension_dir).map_err(|err| err.to_string())?;
+    let required = flatten_declared_secret_entries(&declared);
+
+    let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
+    let mut existing = store
+        .list()
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .map(|(domain, name)| SecretEntry { domain, name })
+        .collect::<Vec<_>>();
+    existing.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
+
+    let (added, existing_required, extras) = classify_secret_entries(&required, &existing);
+    for entry in &added {
+        store
+            .ensure_indexed(&entry.domain, &entry.name)
+            .map_err(|err| err.to_string())?;
+    }
+
+    Ok(SecretSyncResult {
+        required,
+        added,
+        existing_required,
+        extras,
+    })
+}
+
+#[tauri::command]
+fn add_login_secret(
+    login_name: String,
+    domain: String,
+    name: String,
+    value: String,
+) -> Result<(), String> {
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let domain = require_non_empty_input("domain", domain)?;
+    let name = require_non_empty_input("name", name)?;
+    let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
+    store
+        .set(&domain, &name, &value)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn reenter_login_secret(
+    login_name: String,
+    domain: String,
+    name: String,
+    value: String,
+) -> Result<(), String> {
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let domain = require_non_empty_input("domain", domain)?;
+    let name = require_non_empty_input("name", name)?;
+    let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
+    store
+        .set(&domain, &name, &value)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn remove_login_secret(login_name: String, domain: String, name: String) -> Result<(), String> {
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let domain = require_non_empty_input("domain", domain)?;
+    let name = require_non_empty_input("name", name)?;
+    let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
+    store.delete(&domain, &name).map_err(|err| err.to_string())
 }
 
 #[derive(serde::Serialize)]

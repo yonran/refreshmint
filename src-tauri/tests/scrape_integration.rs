@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const EXTENSION_NAME: &str = "smoke";
-const ACCOUNT_NAME: &str = "smoke-account";
+const LOGIN_NAME: &str = "smoke-account";
 const DRIVER_SOURCE: &str = r##"
 try {
   refreshmint.log("integration smoke start");
@@ -151,7 +151,7 @@ fn scrape_smoke_driver_writes_output() -> Result<(), Box<dyn Error>> {
 
     let profile_dir = sandbox.path().join("profile");
     let config = ScrapeConfig {
-        account: ACCOUNT_NAME.to_string(),
+        login_name: LOGIN_NAME.to_string(),
         extension_name: EXTENSION_NAME.to_string(),
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
@@ -199,7 +199,7 @@ fn scrape_popup_wait_for_event_switches_tab() -> Result<(), Box<dyn Error>> {
 
     let profile_dir = sandbox.path().join("profile");
     let config = ScrapeConfig {
-        account: ACCOUNT_NAME.to_string(),
+        login_name: LOGIN_NAME.to_string(),
         extension_name: EXTENSION_NAME.to_string(),
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
@@ -247,7 +247,7 @@ fn scrape_click_reports_overlay_interception() -> Result<(), Box<dyn Error>> {
 
     let profile_dir = sandbox.path().join("profile");
     let config = ScrapeConfig {
-        account: ACCOUNT_NAME.to_string(),
+        login_name: LOGIN_NAME.to_string(),
         extension_name: EXTENSION_NAME.to_string(),
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
