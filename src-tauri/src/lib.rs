@@ -363,13 +363,20 @@ fn require_non_empty_input(field_name: &str, value: String) -> Result<String, St
     Ok(trimmed.to_string())
 }
 
+fn require_login_name_input(value: String) -> Result<String, String> {
+    let login_name = require_non_empty_input("login_name", value)?;
+    login_config::validate_label(&login_name)
+        .map_err(|err| format!("invalid login_name: {err}"))?;
+    Ok(login_name)
+}
+
 #[tauri::command]
 fn start_scrape_debug_session_for_login(
     ledger: String,
     login_name: String,
     extension: String,
 ) -> Result<String, String> {
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let extension = extension.trim().to_string();
     if extension.is_empty() {
         return Err("extension is required".to_string());
@@ -482,7 +489,7 @@ async fn run_scrape_for_login(
     login_name: String,
     extension: String,
 ) -> Result<(), String> {
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
 
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
@@ -529,7 +536,7 @@ fn list_login_account_documents(
     label: String,
 ) -> Result<Vec<extract::DocumentWithInfo>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let label = require_non_empty_input("label", label)?;
     login_config::validate_label(&label)?;
     extract::list_documents_for_login_account(&target_dir, &login_name, &label)
@@ -620,7 +627,7 @@ fn run_login_account_extraction(
     document_names: Vec<String>,
 ) -> Result<usize, String> {
     let target_dir = std::path::PathBuf::from(ledger);
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let label = require_non_empty_input("label", label)?;
     login_config::validate_label(&label)?;
 
@@ -794,7 +801,7 @@ fn get_login_config(
     login_name: String,
 ) -> Result<login_config::LoginConfig, String> {
     let target_dir = std::path::PathBuf::from(ledger);
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     Ok(login_config::read_login_config(&target_dir, &login_name))
 }
 
@@ -802,9 +809,7 @@ fn get_login_config(
 fn create_login(ledger: String, login_name: String, extension: String) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
-    let login_name = require_non_empty_input("login_name", login_name)?;
-    login_config::validate_label(&login_name)
-        .map_err(|err| format!("invalid login name: {err}"))?;
+    let login_name = require_login_name_input(login_name)?;
 
     // Check if login already exists
     let config_path = login_config::login_config_path(&target_dir, &login_name);
@@ -834,7 +839,7 @@ fn set_login_extension(
     extension: String,
 ) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
         .map_err(|err| err.to_string())?;
 
@@ -852,7 +857,7 @@ fn set_login_extension(
 #[tauri::command]
 fn delete_login(ledger: String, login_name: String) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     login_config::delete_login(&target_dir, &login_name).map_err(|err| err.to_string())
 }
 
@@ -864,7 +869,7 @@ fn set_login_account(
     gl_account: Option<String>,
 ) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let label = require_non_empty_input("label", label)?;
     login_config::validate_label(&label)?;
 
@@ -890,7 +895,7 @@ fn set_login_account(
 #[tauri::command]
 fn remove_login_account(ledger: String, login_name: String, label: String) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let label = require_non_empty_input("label", label)?;
 
     let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
@@ -909,7 +914,7 @@ fn delete_login_account(ledger: String, login_name: String, label: String) -> Re
 
 #[tauri::command]
 fn list_login_secrets(login_name: String) -> Result<Vec<AccountSecretEntry>, String> {
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
     let mut entries = store
         .list_with_value_state()
@@ -933,7 +938,7 @@ fn sync_login_secrets_for_extension(
 ) -> Result<SecretSyncResult, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let extension =
         login_config::resolve_login_extension(&target_dir, &login_name, Some(&extension))
             .map_err(|err| err.to_string())?;
@@ -974,7 +979,7 @@ fn add_login_secret(
     name: String,
     value: String,
 ) -> Result<(), String> {
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let domain = require_non_empty_input("domain", domain)?;
     let name = require_non_empty_input("name", name)?;
     let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
@@ -990,7 +995,7 @@ fn reenter_login_secret(
     name: String,
     value: String,
 ) -> Result<(), String> {
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let domain = require_non_empty_input("domain", domain)?;
     let name = require_non_empty_input("name", name)?;
     let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
@@ -1001,7 +1006,7 @@ fn reenter_login_secret(
 
 #[tauri::command]
 fn remove_login_secret(login_name: String, domain: String, name: String) -> Result<(), String> {
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let domain = require_non_empty_input("domain", domain)?;
     let name = require_non_empty_input("name", name)?;
     let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
@@ -1047,7 +1052,7 @@ fn get_login_account_journal(
     label: String,
 ) -> Result<Vec<AccountJournalEntry>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let label = require_non_empty_input("label", label)?;
     let journal_path =
         account_journal::login_account_journal_path(&target_dir, &login_name, &label);
@@ -1075,7 +1080,7 @@ fn get_login_account_unreconciled(
     label: String,
 ) -> Result<Vec<AccountJournalEntry>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let label = require_non_empty_input("label", label)?;
     let entries = reconcile::get_unreconciled_login_account(&target_dir, &login_name, &label)
         .map_err(|err| err.to_string())?;
@@ -1115,7 +1120,7 @@ fn reconcile_login_account_entry(
     posting_index: Option<usize>,
 ) -> Result<String, String> {
     let target_dir = std::path::PathBuf::from(ledger);
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let label = require_non_empty_input("label", label)?;
     let entry_id = require_non_empty_input("entry_id", entry_id)?;
     let counterpart_account = require_non_empty_input("counterpart_account", counterpart_account)?;
@@ -1158,7 +1163,7 @@ fn unreconcile_login_account_entry(
     posting_index: Option<usize>,
 ) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
-    let login_name = require_non_empty_input("login_name", login_name)?;
+    let login_name = require_login_name_input(login_name)?;
     let label = require_non_empty_input("label", label)?;
     let entry_id = require_non_empty_input("entry_id", entry_id)?;
 
@@ -1220,7 +1225,8 @@ fn map_account_journal_entries(
 mod tests {
     use super::{
         classify_secret_entries, delete_login_account, evidence_ref_matches_document,
-        flatten_declared_secret_entries, require_non_empty_input, SecretEntry,
+        flatten_declared_secret_entries, require_login_name_input, require_non_empty_input,
+        SecretEntry,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -1255,6 +1261,24 @@ mod tests {
         match value {
             Ok(_) => panic!("expected validation error for blank input"),
             Err(err) => assert_eq!(err, "account is required"),
+        }
+    }
+
+    #[test]
+    fn require_login_name_input_accepts_valid_login_name() {
+        let value = require_login_name_input("chase-main".to_string());
+        match value {
+            Ok(login_name) => assert_eq!(login_name, "chase-main"),
+            Err(err) => panic!("expected valid login name, got error: {err}"),
+        }
+    }
+
+    #[test]
+    fn require_login_name_input_rejects_path_like_name() {
+        let value = require_login_name_input("../chase".to_string());
+        match value {
+            Ok(_) => panic!("expected validation error for invalid login name"),
+            Err(err) => assert!(err.contains("invalid login_name")),
         }
     }
 
