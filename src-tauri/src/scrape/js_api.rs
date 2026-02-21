@@ -45,6 +45,79 @@ struct TabSummary {
     current: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotNode {
+    #[serde(default)]
+    r#ref: String,
+    #[serde(default)]
+    parent_ref: Option<String>,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    tag: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    value: String,
+    #[serde(default)]
+    visible: bool,
+    #[serde(default)]
+    disabled: bool,
+    #[serde(default)]
+    expanded: Option<bool>,
+    #[serde(default)]
+    selected: Option<bool>,
+    #[serde(default)]
+    checked: Option<String>,
+    #[serde(default)]
+    level: Option<u32>,
+    #[serde(default)]
+    aria_labelled_by: Option<String>,
+    #[serde(default)]
+    aria_described_by: Option<String>,
+    #[serde(default)]
+    selector_hint: String,
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotOptions {
+    incremental: bool,
+    track: String,
+}
+
+impl Default for SnapshotOptions {
+    fn default() -> Self {
+        Self {
+            incremental: false,
+            track: "default".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotDiffEntry {
+    change: String,
+    node: SnapshotNode,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotDiff {
+    mode: String,
+    track: String,
+    base_node_count: usize,
+    node_count: usize,
+    changed_count: usize,
+    removed_count: usize,
+    unchanged_count: usize,
+    changed: Vec<SnapshotDiffEntry>,
+    removed_refs: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct OpenTab {
     page: chromiumoxide::Page,
@@ -94,6 +167,8 @@ pub struct PageApi {
     inner: Arc<Mutex<PageInner>>,
     #[qjs(skip_trace)]
     response_capture: Arc<Mutex<Option<ResponseCaptureState>>>,
+    #[qjs(skip_trace)]
+    snapshot_tracks: Arc<Mutex<BTreeMap<String, Vec<SnapshotNode>>>>,
 }
 
 // Safety: PageApi only contains Arc<Mutex<...>> which is 'static and has no JS lifetimes.
@@ -107,6 +182,7 @@ impl PageApi {
         Self {
             inner,
             response_capture: Arc::new(Mutex::new(None)),
+            snapshot_tracks: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -942,32 +1018,166 @@ impl PageApi {
         Ok(())
     }
 
-    /// Accessibility-like snapshot of interactive page elements as JSON.
-    pub async fn snapshot(&self) -> JsResult<String> {
+    /// Accessibility-oriented snapshot of interactive page elements as JSON.
+    ///
+    /// Accepts optional options object:
+    /// - `incremental: boolean` to return only changed nodes vs the previous snapshot in the same track
+    /// - `track: string` to isolate snapshot history (default: `"default"`)
+    pub async fn snapshot(&self, options: Option<rquickjs::Value<'_>>) -> JsResult<String> {
+        let options = parse_snapshot_options(options)?;
         let inner = self.inner.lock().await;
         let result = inner
             .page
             .evaluate(
                 r#"(() => {
                     const nodes = [];
-                    const interesting = document.querySelectorAll(
-                        'a,button,input,select,textarea,[role],[aria-label]'
-                    );
-                    for (const el of interesting) {
-                        const role = el.getAttribute('role') ||
-                            (el.tagName ? el.tagName.toLowerCase() : 'node');
-                        const label = el.getAttribute('aria-label') ||
+                    const interactiveTags = new Set(['a', 'button', 'input', 'select', 'textarea', 'summary', 'details', 'option']);
+                    const implicitRole = (el) => {
+                        const tag = (el.tagName || '').toLowerCase();
+                        if (tag === 'a' && el.hasAttribute('href')) return 'link';
+                        if (tag === 'button') return 'button';
+                        if (tag === 'input') {
+                            const type = (el.getAttribute('type') || 'text').toLowerCase();
+                            if (type === 'checkbox') return 'checkbox';
+                            if (type === 'radio') return 'radio';
+                            if (type === 'submit' || type === 'button' || type === 'reset') return 'button';
+                            return 'textbox';
+                        }
+                        if (tag === 'select') return 'combobox';
+                        if (tag === 'textarea') return 'textbox';
+                        if (tag === 'summary') return 'button';
+                        return '';
+                    };
+                    const selectorHint = (el) => {
+                        if (el.id) return '#' + el.id;
+                        if (el.getAttribute('name')) return '[name="' + el.getAttribute('name') + '"]';
+                        return (el.tagName || '').toLowerCase();
+                    };
+                    const domPath = (el) => {
+                        const parts = [];
+                        let node = el;
+                        let depth = 0;
+                        while (node && node.nodeType === Node.ELEMENT_NODE && depth < 10) {
+                            const tag = (node.tagName || '').toLowerCase();
+                            let part = tag;
+                            if (node.id) {
+                                part += '#' + node.id;
+                                parts.unshift(part);
+                                break;
+                            }
+                            let nth = 1;
+                            let sib = node;
+                            while ((sib = sib.previousElementSibling)) {
+                                if ((sib.tagName || '').toLowerCase() === tag) nth++;
+                            }
+                            part += ':nth-of-type(' + nth + ')';
+                            parts.unshift(part);
+                            node = node.parentElement;
+                            depth++;
+                        }
+                        return parts.join('>');
+                    };
+                    const isInteresting = (el) => {
+                        const tag = (el.tagName || '').toLowerCase();
+                        if (interactiveTags.has(tag)) return true;
+                        if (el.hasAttribute('role')) return true;
+                        if (el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby')) return true;
+                        if (el.tabIndex >= 0) return true;
+                        return false;
+                    };
+                    const resolveByReference = (el, attrName) => {
+                        const ids = (el.getAttribute(attrName) || '')
+                            .trim()
+                            .split(/\s+/)
+                            .filter(Boolean);
+                        if (!ids.length) return '';
+                        return ids
+                            .map((id) => document.getElementById(id))
+                            .filter(Boolean)
+                            .map((node) => (node.innerText || node.textContent || '').trim())
+                            .filter(Boolean)
+                            .join(' ');
+                    };
+                    const computeLabel = (el) => {
+                        const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+                        if (ariaLabel) return ariaLabel;
+                        const labelledByText = resolveByReference(el, 'aria-labelledby');
+                        if (labelledByText) return labelledByText;
+                        if (typeof el.labels !== 'undefined' && el.labels && el.labels.length) {
+                            const fromLabels = Array.from(el.labels)
+                                .map((node) => (node.innerText || node.textContent || '').trim())
+                                .filter(Boolean)
+                                .join(' ');
+                            if (fromLabels) return fromLabels;
+                        }
+                        const fallback = (el.getAttribute('placeholder') ||
                             el.getAttribute('name') ||
-                            el.getAttribute('id') ||
-                            (el.innerText ? el.innerText.trim() : '') ||
-                            (el.textContent ? el.textContent.trim() : '');
+                            el.getAttribute('title') ||
+                            el.getAttribute('alt') ||
+                            el.innerText ||
+                            el.textContent ||
+                            el.value ||
+                            '').trim();
+                        return String(fallback).slice(0, 240);
+                    };
+                    const isVisible = (el) => {
                         const rect = el.getBoundingClientRect();
-                        const visible = !!(rect.width > 0 && rect.height > 0);
+                        if (!(rect.width > 0 && rect.height > 0)) return false;
+                        const style = window.getComputedStyle(el);
+                        return style.visibility !== 'hidden' &&
+                            style.display !== 'none' &&
+                            style.opacity !== '0';
+                    };
+
+                    const elements = Array.from(document.querySelectorAll('*')).filter(isInteresting);
+                    const refByElement = new Map();
+                    for (const el of elements) refByElement.set(el, domPath(el));
+
+                    for (const el of elements) {
+                        const role = (el.getAttribute('role') || implicitRole(el) || (el.tagName || '').toLowerCase()).trim();
+                        const label = computeLabel(el);
+                        const value = typeof el.value === 'string' ? String(el.value) : '';
+                        const text = String((el.innerText || el.textContent || '').trim()).slice(0, 240);
+                        const ariaChecked = el.getAttribute('aria-checked');
+                        let checked = null;
+                        if (ariaChecked === 'mixed') checked = 'mixed';
+                        else if (ariaChecked === 'true') checked = 'true';
+                        else if (ariaChecked === 'false') checked = 'false';
+                        else if (typeof el.checked === 'boolean') checked = el.checked ? 'true' : 'false';
+
+                        let parentRef = null;
+                        let parent = el.parentElement;
+                        while (parent) {
+                            if (refByElement.has(parent)) {
+                                parentRef = refByElement.get(parent);
+                                break;
+                            }
+                            parent = parent.parentElement;
+                        }
+
+                        const levelAttr = el.getAttribute('aria-level');
+                        const parsedLevel = levelAttr ? Number.parseInt(levelAttr, 10) : Number.NaN;
                         nodes.push({
+                            ref: refByElement.get(el) || '',
+                            parentRef,
                             role,
-                            label: String(label || ''),
-                            visible,
-                            selectorHint: el.id ? ('#' + el.id) : (el.name ? ('[name="' + el.name + '"]') : el.tagName.toLowerCase()),
+                            label,
+                            tag: (el.tagName || '').toLowerCase(),
+                            text,
+                            value,
+                            visible: isVisible(el),
+                            disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
+                            expanded: el.hasAttribute('aria-expanded')
+                                ? el.getAttribute('aria-expanded') === 'true'
+                                : null,
+                            selected: el.hasAttribute('aria-selected')
+                                ? el.getAttribute('aria-selected') === 'true'
+                                : null,
+                            checked,
+                            level: Number.isFinite(parsedLevel) ? parsedLevel : null,
+                            ariaLabelledBy: (el.getAttribute('aria-labelledby') || '').trim() || null,
+                            ariaDescribedBy: (el.getAttribute('aria-describedby') || '').trim() || null,
+                            selectorHint: selectorHint(el),
                         });
                     }
                     return nodes;
@@ -975,11 +1185,27 @@ impl PageApi {
             )
             .await
             .map_err(|e| js_err(format!("snapshot failed: {e}")))?;
-        if let Some(value) = result.value() {
-            serde_json::to_string_pretty(value)
+        drop(inner);
+
+        let nodes = if let Some(value) = result.value() {
+            serde_json::from_value::<Vec<SnapshotNode>>(value.clone())
+                .map_err(|e| js_err(format!("snapshot parse failed: {e}")))?
+        } else {
+            Vec::new()
+        };
+
+        let mut tracks = self.snapshot_tracks.lock().await;
+        let previous = tracks.get(&options.track).cloned().unwrap_or_default();
+        tracks.insert(options.track.clone(), nodes.clone());
+        drop(tracks);
+
+        if options.incremental {
+            let diff = build_snapshot_diff(&previous, &nodes, &options.track);
+            serde_json::to_string_pretty(&diff)
                 .map_err(|e| js_err(format!("snapshot serialization failed: {e}")))
         } else {
-            Ok("[]".to_string())
+            serde_json::to_string_pretty(&nodes)
+                .map_err(|e| js_err(format!("snapshot serialization failed: {e}")))
         }
     }
 
@@ -1877,6 +2103,83 @@ fn parse_save_resource_options(options: Option<rquickjs::Value<'_>>) -> SaveReso
     result
 }
 
+fn parse_snapshot_options(options: Option<rquickjs::Value<'_>>) -> JsResult<SnapshotOptions> {
+    let mut result = SnapshotOptions::default();
+    if let Some(opts) = options {
+        let Some(obj) = opts.as_object() else {
+            return Err(js_err(
+                "snapshot options must be an object when provided".to_string(),
+            ));
+        };
+        if let Ok(val) = obj.get::<_, Option<bool>>("incremental") {
+            result.incremental = val.unwrap_or(false);
+        }
+        if let Ok(Some(track)) = obj.get::<_, Option<String>>("track") {
+            let trimmed = track.trim();
+            if !trimmed.is_empty() {
+                result.track = trimmed.to_string();
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn snapshot_nodes_by_ref(nodes: &[SnapshotNode]) -> BTreeMap<String, SnapshotNode> {
+    let mut map = BTreeMap::new();
+    for (index, node) in nodes.iter().enumerate() {
+        let key = if node.r#ref.trim().is_empty() {
+            format!("index:{index}")
+        } else {
+            node.r#ref.clone()
+        };
+        map.insert(key, node.clone());
+    }
+    map
+}
+
+fn build_snapshot_diff(
+    previous: &[SnapshotNode],
+    current: &[SnapshotNode],
+    track: &str,
+) -> SnapshotDiff {
+    let previous_by_ref = snapshot_nodes_by_ref(previous);
+    let current_by_ref = snapshot_nodes_by_ref(current);
+
+    let mut changed = Vec::new();
+    let mut unchanged_count = 0usize;
+    for (ref_id, node) in &current_by_ref {
+        match previous_by_ref.get(ref_id) {
+            None => changed.push(SnapshotDiffEntry {
+                change: "added".to_string(),
+                node: node.clone(),
+            }),
+            Some(previous_node) if previous_node != node => changed.push(SnapshotDiffEntry {
+                change: "updated".to_string(),
+                node: node.clone(),
+            }),
+            Some(_) => unchanged_count += 1,
+        }
+    }
+
+    let removed_refs = previous_by_ref
+        .keys()
+        .filter(|ref_id| !current_by_ref.contains_key(*ref_id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    SnapshotDiff {
+        mode: "incremental".to_string(),
+        track: track.to_string(),
+        base_node_count: previous.len(),
+        node_count: current.len(),
+        changed_count: changed.len(),
+        removed_count: removed_refs.len(),
+        unchanged_count,
+        changed,
+        removed_refs,
+    }
+}
+
 fn unique_output_path(output_dir: &Path, filename: &str) -> PathBuf {
     let candidate = output_dir.join(filename);
     if !candidate.exists() {
@@ -2385,6 +2688,58 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn snapshot_node(reference: &str, label: &str) -> SnapshotNode {
+        SnapshotNode {
+            r#ref: reference.to_string(),
+            parent_ref: None,
+            role: "button".to_string(),
+            label: label.to_string(),
+            tag: "button".to_string(),
+            text: label.to_string(),
+            value: String::new(),
+            visible: true,
+            disabled: false,
+            expanded: None,
+            selected: None,
+            checked: None,
+            level: None,
+            aria_labelled_by: None,
+            aria_described_by: None,
+            selector_hint: "button".to_string(),
+        }
+    }
+
+    #[test]
+    fn build_snapshot_diff_reports_added_updated_and_removed_nodes() {
+        let previous = vec![snapshot_node("a", "Alpha"), snapshot_node("b", "Bravo")];
+        let current = vec![snapshot_node("a", "Alpha"), snapshot_node("c", "Charlie")];
+
+        let diff = build_snapshot_diff(&previous, &current, "main");
+        assert_eq!(diff.mode, "incremental");
+        assert_eq!(diff.track, "main");
+        assert_eq!(diff.base_node_count, 2);
+        assert_eq!(diff.node_count, 2);
+        assert_eq!(diff.changed_count, 1);
+        assert_eq!(diff.removed_count, 1);
+        assert_eq!(diff.unchanged_count, 1);
+        assert_eq!(diff.changed[0].change, "added");
+        assert_eq!(diff.changed[0].node.r#ref, "c");
+        assert_eq!(diff.removed_refs, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn build_snapshot_diff_marks_existing_ref_changes_as_updated() {
+        let previous = vec![snapshot_node("a", "Alpha")];
+        let current = vec![snapshot_node("a", "Alpha updated")];
+
+        let diff = build_snapshot_diff(&previous, &current, "main");
+        assert_eq!(diff.changed_count, 1);
+        assert_eq!(diff.changed[0].change, "updated");
+        assert_eq!(diff.changed[0].node.r#ref, "a");
+        assert_eq!(diff.removed_refs.len(), 0);
+        assert_eq!(diff.unchanged_count, 0);
     }
 
     fn test_refreshmint_inner(overrides: PromptOverrides) -> RefreshmintInner {

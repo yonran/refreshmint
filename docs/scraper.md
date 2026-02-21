@@ -56,6 +56,7 @@ Errors thrown from your script fail the scrape run.
 - At each page handler/state, add a short comment describing expected page conditions and enforce them with explicit assertions (URL/selector checks) before taking actions.
 - Add comments for non-obvious actions describing what outcome each action is trying to accomplish (not just what selector is clicked).
 - Pace automation actions (especially login, navigation, and repeated downloads) with short delays so behavior is less bot-like and less likely to trigger anti-automation defenses.
+- Add a reusable snapshot logger for state loops. Prefer `await page.snapshot({ incremental: true, track: 'state-loop' })` so logs show only page changes from the previous checkpoint.
 
 ## Recommended debug-first flow
 
@@ -99,43 +100,43 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 
 All methods are async and should be awaited.
 
-| Method                                               | Description                                                                                            |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `await page.goto(url)`                               | Navigate to a URL.                                                                                     |
-| `await page.url()`                                   | Return current page URL as a string.                                                                   |
-| `await page.reload()`                                | Reload current page.                                                                                   |
-| `await page.waitForSelector(selector, timeoutMs?)`   | Wait for a CSS selector to appear, with descriptive timeout errors.                                    |
-| `await page.waitForNavigation(timeoutMs?)`           | Wait for URL change from the current page.                                                             |
-| `await page.waitForURL(pattern, timeoutMs?)`         | Wait for current URL to match a pattern (`*` wildcard).                                                |
-| `await page.waitForLoadState(state?, timeoutMs?)`    | Wait for `load`, `domcontentloaded`, or `networkidle`.                                                 |
-| `await page.waitForResponse(urlPattern, timeoutMs?)` | Wait for captured network response URL pattern.                                                        |
-| `await page.networkRequests()`                       | Return captured network responses as JSON.                                                             |
-| `await page.responsesReceived()`                     | Alias of `networkRequests()` (Playwright-style naming).                                                |
-| `await page.clearNetworkRequests()`                  | Clear captured network responses.                                                                      |
-| `await page.tabs()`                                  | Return open tabs as JSON (`index`, `targetId`, `url`, `current`).                                      |
-| `await page.selectTab(index)`                        | Switch the active `page` handle to a tab index and return its URL.                                     |
-| `await page.waitForPopup(timeoutMs?)`                | Wait for popup tab (prefers `window.open`/opener match), switch `page`, and return popup summary JSON. |
-| `await page.waitForEvent('popup', timeoutMs?)`       | Playwright-style alias for `waitForPopup` that returns popup summary JSON.                             |
-| `await page.click(selector)`                         | Click first element matching selector.                                                                 |
-| `await page.type(selector, text)`                    | Click and type text into element.                                                                      |
-| `await page.fill(selector, value)`                   | Set input value and dispatch `input`/`change` events.                                                  |
-| `await page.innerHTML(selector)`                     | Return `innerHTML` for an element.                                                                     |
-| `await page.innerText(selector)`                     | Return visible text for an element.                                                                    |
-| `await page.textContent(selector)`                   | Return `textContent` for an element.                                                                   |
-| `await page.getAttribute(selector, name)`            | Return attribute value (empty string if missing).                                                      |
-| `await page.inputValue(selector)`                    | Return current input value.                                                                            |
-| `await page.isVisible(selector)`                     | Return whether element is visible.                                                                     |
-| `await page.isEnabled(selector)`                     | Return whether element is enabled.                                                                     |
-| `await page.evaluate(expression)`                    | Evaluate JS in browser context. Returns unwrapped string/JSON text.                                    |
-| `await page.frameEvaluate(frameRef, expression)`     | Evaluate JS inside a specific frame execution context.                                                 |
-| `await page.frameFill(frameRef, selector, value)`    | Fill an input inside a specific frame execution context.                                               |
-| `await page.snapshot()`                              | Return an accessibility-like snapshot JSON of interactive elements.                                    |
-| `await page.setDialogHandler(mode, promptText?)`     | Handle JS dialogs (`accept`, `dismiss`, `none`).                                                       |
-| `await page.lastDialog()`                            | Return most recent intercepted dialog event as JSON.                                                   |
-| `await page.setPopupHandler(mode)`                   | Handle `window.open` popups (`ignore` preserves native behavior, `same_tab` redirects current tab).    |
-| `await page.popupEvents()`                           | Return captured popup events as JSON.                                                                  |
-| `await page.screenshot()`                            | Capture screenshot and return PNG as base64 string.                                                    |
-| `await page.waitForDownload(timeoutMs?)`             | Wait for next completed download and return its file info.                                             |
+| Method                                               | Description                                                                                                                                                      |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `await page.goto(url)`                               | Navigate to a URL.                                                                                                                                               |
+| `await page.url()`                                   | Return current page URL as a string.                                                                                                                             |
+| `await page.reload()`                                | Reload current page.                                                                                                                                             |
+| `await page.waitForSelector(selector, timeoutMs?)`   | Wait for a CSS selector to appear, with descriptive timeout errors.                                                                                              |
+| `await page.waitForNavigation(timeoutMs?)`           | Wait for URL change from the current page.                                                                                                                       |
+| `await page.waitForURL(pattern, timeoutMs?)`         | Wait for current URL to match a pattern (`*` wildcard).                                                                                                          |
+| `await page.waitForLoadState(state?, timeoutMs?)`    | Wait for `load`, `domcontentloaded`, or `networkidle`.                                                                                                           |
+| `await page.waitForResponse(urlPattern, timeoutMs?)` | Wait for captured network response URL pattern.                                                                                                                  |
+| `await page.networkRequests()`                       | Return captured network responses as JSON.                                                                                                                       |
+| `await page.responsesReceived()`                     | Alias of `networkRequests()` (Playwright-style naming).                                                                                                          |
+| `await page.clearNetworkRequests()`                  | Clear captured network responses.                                                                                                                                |
+| `await page.tabs()`                                  | Return open tabs as JSON (`index`, `targetId`, `url`, `current`).                                                                                                |
+| `await page.selectTab(index)`                        | Switch the active `page` handle to a tab index and return its URL.                                                                                               |
+| `await page.waitForPopup(timeoutMs?)`                | Wait for popup tab (prefers `window.open`/opener match), switch `page`, and return popup summary JSON.                                                           |
+| `await page.waitForEvent('popup', timeoutMs?)`       | Playwright-style alias for `waitForPopup` that returns popup summary JSON.                                                                                       |
+| `await page.click(selector)`                         | Click first element matching selector.                                                                                                                           |
+| `await page.type(selector, text)`                    | Click and type text into element.                                                                                                                                |
+| `await page.fill(selector, value)`                   | Set input value and dispatch `input`/`change` events.                                                                                                            |
+| `await page.innerHTML(selector)`                     | Return `innerHTML` for an element.                                                                                                                               |
+| `await page.innerText(selector)`                     | Return visible text for an element.                                                                                                                              |
+| `await page.textContent(selector)`                   | Return `textContent` for an element.                                                                                                                             |
+| `await page.getAttribute(selector, name)`            | Return attribute value (empty string if missing).                                                                                                                |
+| `await page.inputValue(selector)`                    | Return current input value.                                                                                                                                      |
+| `await page.isVisible(selector)`                     | Return whether element is visible.                                                                                                                               |
+| `await page.isEnabled(selector)`                     | Return whether element is enabled.                                                                                                                               |
+| `await page.evaluate(expression)`                    | Evaluate JS in browser context. Returns unwrapped string/JSON text.                                                                                              |
+| `await page.frameEvaluate(frameRef, expression)`     | Evaluate JS inside a specific frame execution context.                                                                                                           |
+| `await page.frameFill(frameRef, selector, value)`    | Fill an input inside a specific frame execution context.                                                                                                         |
+| `await page.snapshot(options?)`                      | Return ARIA-oriented interactive-element snapshot JSON. With `{ incremental: true, track?: string }`, returns only changes from previous snapshot in that track. |
+| `await page.setDialogHandler(mode, promptText?)`     | Handle JS dialogs (`accept`, `dismiss`, `none`).                                                                                                                 |
+| `await page.lastDialog()`                            | Return most recent intercepted dialog event as JSON.                                                                                                             |
+| `await page.setPopupHandler(mode)`                   | Handle `window.open` popups (`ignore` preserves native behavior, `same_tab` redirects current tab).                                                              |
+| `await page.popupEvents()`                           | Return captured popup events as JSON.                                                                                                                            |
+| `await page.screenshot()`                            | Capture screenshot and return PNG as base64 string.                                                                                                              |
+| `await page.waitForDownload(timeoutMs?)`             | Wait for next completed download and return its file info.                                                                                                       |
 
 For frame APIs, `frameRef` can be frame id, frame name, or frame URL (full match or substring).
 
@@ -148,6 +149,15 @@ const popupPromise = page.waitForEvent('popup', 10000);
 await page.click('#open-popup');
 const popup = JSON.parse(await popupPromise);
 // popup: { index, targetId, url, current }
+```
+
+Suggested debug helper for state machines:
+
+```js
+async function logSnapshot(tag, track = 'state-loop') {
+    const diff = await page.snapshot({ incremental: true, track });
+    refreshmint.log(`${tag} snapshot: ${diff}`);
+}
 ```
 
 ### `refreshmint`

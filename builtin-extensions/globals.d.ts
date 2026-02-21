@@ -1,0 +1,87 @@
+interface PageDownload {
+    path: string;
+    suggestedFilename?: string;
+    [key: string]: unknown;
+}
+
+interface PageSnapshotOptions {
+    incremental?: boolean;
+    track?: string;
+}
+
+interface PageApi {
+    goto(url: string): Promise<void>;
+    url(): Promise<string>;
+    reload(): Promise<void>;
+    waitForSelector(selector: string, timeoutMs?: number): Promise<void>;
+    waitForNavigation(timeoutMs?: number): Promise<void>;
+    waitForURL(pattern: string, timeoutMs?: number): Promise<void>;
+    waitForLoadState(
+        state?: 'load' | 'domcontentloaded' | 'networkidle',
+        timeoutMs?: number,
+    ): Promise<void>;
+    waitForResponse(urlPattern: string, timeoutMs?: number): Promise<string>;
+    networkRequests(): Promise<string>;
+    responsesReceived(): Promise<string>;
+    clearNetworkRequests(): Promise<void>;
+    tabs(): Promise<string>;
+    selectTab(index: number): Promise<string>;
+    waitForPopup(timeoutMs?: number): Promise<string>;
+    waitForEvent(event: 'popup', timeoutMs?: number): Promise<string>;
+    click(selector: string): Promise<void>;
+    type(selector: string, text: string): Promise<void>;
+    fill(selector: string, value: string): Promise<void>;
+    innerHTML(selector: string): Promise<string>;
+    innerText(selector: string): Promise<string>;
+    textContent(selector: string): Promise<string>;
+    getAttribute(selector: string, name: string): Promise<string>;
+    inputValue(selector: string): Promise<string>;
+    isVisible(selector: string): Promise<boolean>;
+    isEnabled(selector: string): Promise<boolean>;
+    evaluate(expression: string): Promise<unknown>;
+    frameEvaluate(frameRef: string, expression: string): Promise<unknown>;
+    frameFill(frameRef: string, selector: string, value: string): Promise<void>;
+    snapshot(options?: PageSnapshotOptions): Promise<string>;
+    setDialogHandler(
+        mode: 'accept' | 'dismiss' | 'none',
+        promptText?: string,
+    ): Promise<void>;
+    lastDialog(): Promise<string>;
+    setPopupHandler(mode: 'ignore' | 'same_tab'): Promise<void>;
+    popupEvents(): Promise<string>;
+    screenshot(): Promise<string>;
+    waitForDownload(timeoutMs?: number): Promise<PageDownload>;
+}
+
+interface SaveResourceOptions {
+    coverageEndDate?: string | undefined;
+    originalUrl?: string;
+    mimeType?: string;
+}
+
+interface SessionMetadata {
+    dateRangeStart?: string;
+    dateRangeEnd?: string;
+    [key: string]: unknown;
+}
+
+interface RefreshmintApi {
+    saveResource(
+        filename: string,
+        data: string | Uint8Array | number[] | ArrayLike<number>,
+        options?: SaveResourceOptions,
+    ): Promise<void>;
+    saveDownloadedResource(
+        path: string,
+        filename?: string,
+        options?: SaveResourceOptions,
+    ): Promise<void>;
+    listAccountDocuments(): Promise<string>;
+    setSessionMetadata(metadata: SessionMetadata): Promise<void>;
+    reportValue(key: string, value: string): void;
+    log(message: string): void;
+    prompt(message: string): Promise<string>;
+}
+
+declare const page: PageApi;
+declare const refreshmint: RefreshmintApi;
