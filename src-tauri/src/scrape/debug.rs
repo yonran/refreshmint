@@ -115,7 +115,6 @@ fn exec_debug_script_with_options_unix(
     prompt_requires_override: Option<bool>,
 ) -> Result<(), Box<dyn Error>> {
     use std::io::{BufRead, BufReader, Write};
-    use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
 
     let request = Request::Exec {
@@ -128,7 +127,6 @@ fn exec_debug_script_with_options_unix(
     let mut stream = UnixStream::connect(socket_path)?;
     serde_json::to_writer(&mut stream, &request)?;
     stream.write_all(b"\n")?;
-    stream.shutdown(Shutdown::Write)?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -523,12 +521,48 @@ async fn handle_exec_request_async(
                             stream: event.stream.into(),
                             line: event.line,
                         };
-                        write_exec_stream_frame_async(stream, &frame).await?;
+                        if let Err(err) = write_exec_stream_frame_async(stream, &frame).await {
+                            eprintln!(
+                                "debug exec client disconnected while streaming output; canceling script: {err}"
+                            );
+                            cancel_exec_task(&mut exec_task, &refreshmint_inner).await;
+                            return Ok(());
+                        }
                     }
                     None => {
                         if exec_result.is_some() {
                             break;
                         }
+                    }
+                }
+            }
+            readable = stream.readable(), if exec_result.is_none() => {
+                match readable {
+                    Ok(()) => {
+                        let mut buf = [0u8; 64];
+                        match stream.try_read(&mut buf) {
+                            Ok(0) => {
+                                eprintln!("debug exec client disconnected; canceling script.");
+                                cancel_exec_task(&mut exec_task, &refreshmint_inner).await;
+                                return Ok(());
+                            }
+                            Ok(_n) => {
+                                // Ignore unexpected extra client bytes while script is running.
+                            }
+                            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                            Err(err) => {
+                                eprintln!(
+                                    "failed to read debug exec client stream; canceling script: {err}"
+                                );
+                                cancel_exec_task(&mut exec_task, &refreshmint_inner).await;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("debug exec client stream readability error; canceling script: {err}");
+                        cancel_exec_task(&mut exec_task, &refreshmint_inner).await;
+                        return Ok(());
                     }
                 }
             }
@@ -550,7 +584,10 @@ async fn handle_exec_request_async(
                             stream: event.stream.into(),
                             line: event.line,
                         };
-                        write_exec_stream_frame_async(stream, &frame).await?;
+                        if let Err(err) = write_exec_stream_frame_async(stream, &frame).await {
+                            eprintln!("debug exec client disconnected while draining output: {err}");
+                            return Ok(());
+                        }
                     }
                     break;
                 }
@@ -582,7 +619,21 @@ async fn handle_exec_request_async(
             error: Some(err),
         },
     };
-    write_exec_stream_frame_async(stream, &final_frame).await
+    if let Err(err) = write_exec_stream_frame_async(stream, &final_frame).await {
+        eprintln!("debug exec client disconnected before final result frame: {err}");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn cancel_exec_task(
+    exec_task: &mut tokio::task::JoinHandle<Result<(), String>>,
+    refreshmint_inner: &std::sync::Arc<tokio::sync::Mutex<super::js_api::RefreshmintInner>>,
+) {
+    exec_task.abort();
+    let _ = exec_task.await;
+    let mut refreshmint = refreshmint_inner.lock().await;
+    refreshmint.debug_output_sink = None;
 }
 
 #[cfg(unix)]

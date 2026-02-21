@@ -82,6 +82,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 
 `debug exec` streams `refreshmint.log(...)` and `refreshmint.reportValue(...)` output to its own stderr/stdout.
 `debug start` remains focused on hosting the browser/session and startup diagnostics.
+If the `debug exec` client disconnects before completion, the server cancels the in-flight script.
+This is useful when a run is hung or stuck in a loop: you can disconnect to stop it early, edit the script, and immediately try again.
 
 On successful `debug exec`, any resources staged via `refreshmint.saveResource(...)` are finalized into `accounts/<account>/documents/` using the same evidence pipeline used by `scrape`.
 If resource finalization fails, `debug exec` returns an error so the failure is visible immediately.
