@@ -592,7 +592,7 @@ function App() {
                     if (current.length > 0 && logins.includes(current)) {
                         return current;
                     }
-                    return logins[0] ?? '';
+                    return '';
                 });
                 setLoginAccountMappings(mappings);
                 setHasLoadedLoginConfigs(true);
