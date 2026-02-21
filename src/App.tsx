@@ -25,10 +25,13 @@ import {
     addLoginSecret,
     addTransaction,
     addTransactionText,
+    createLogin,
+    deleteLogin,
     getLoginAccountJournal,
     getLoginConfig,
     getLoginAccountUnreconciled,
     getScrapeDebugSessionSocket,
+    type LoginConfig,
     listLoginAccountDocuments,
     listLoginSecrets,
     listLogins,
@@ -45,9 +48,11 @@ import {
     reconcileLoginAccountEntry,
     reconcileTransfer,
     reenterLoginSecret,
+    removeLoginAccount,
     removeLoginSecret,
     runLoginAccountExtraction,
     runScrapeForLogin,
+    setLoginAccount,
     setLoginExtension,
     startScrapeDebugSession,
     stopScrapeDebugSession,
@@ -151,6 +156,23 @@ function App() {
         useState(false);
     const [isMigratingLegacyLedger, setIsMigratingLegacyLedger] =
         useState(false);
+    const [loginNames, setLoginNames] = useState<string[]>([]);
+    const [loginConfigsByName, setLoginConfigsByName] = useState<
+        Record<string, LoginConfig>
+    >({});
+    const [selectedLoginName, setSelectedLoginName] = useState('');
+    const [selectedLoginExtensionDraft, setSelectedLoginExtensionDraft] =
+        useState('');
+    const [newLoginName, setNewLoginName] = useState('');
+    const [newLoginExtension, setNewLoginExtension] = useState('');
+    const [loginLabelDraft, setLoginLabelDraft] = useState('');
+    const [loginGlAccountDraft, setLoginGlAccountDraft] = useState('');
+    const [loginConfigStatus, setLoginConfigStatus] = useState<string | null>(
+        null,
+    );
+    const [isLoadingLoginConfigs, setIsLoadingLoginConfigs] = useState(false);
+    const [isSavingLoginConfig, setIsSavingLoginConfig] = useState(false);
+    const [loginConfigsReloadToken, setLoginConfigsReloadToken] = useState(0);
     const [loginAccountMappings, setLoginAccountMappings] = useState<
         Record<string, LoginAccountMapping[]>
     >({});
@@ -272,6 +294,19 @@ function App() {
         selectedLoginMapping === null
             ? null
             : `${selectedLoginMapping.loginName}/${selectedLoginMapping.label}`;
+    const selectedLoginConfig: LoginConfig | null =
+        selectedLoginName.length === 0
+            ? null
+            : (loginConfigsByName[selectedLoginName] ?? null);
+    const selectedLoginAccounts =
+        selectedLoginConfig === null
+            ? []
+            : Object.entries(selectedLoginConfig.accounts).sort(([a], [b]) =>
+                  a.localeCompare(b),
+              );
+    const requestLoginConfigReload = useCallback(() => {
+        setLoginConfigsReloadToken((current) => current + 1);
+    }, []);
     const requiredSecretKeySet = new Set(
         requiredSecretsForExtension.map((entry) =>
             secretPairKey(entry.domain, entry.name),
@@ -320,6 +355,18 @@ function App() {
             setScrapeStatus(null);
             setScrapeDebugSocket(null);
             setScrapeAccount('');
+            setLoginNames([]);
+            setLoginConfigsByName({});
+            setSelectedLoginName('');
+            setSelectedLoginExtensionDraft('');
+            setNewLoginName('');
+            setNewLoginExtension('');
+            setLoginLabelDraft('');
+            setLoginGlAccountDraft('');
+            setLoginConfigStatus(null);
+            setIsLoadingLoginConfigs(false);
+            setIsSavingLoginConfig(false);
+            setLoginConfigsReloadToken(0);
             setLoginAccountMappings({});
             setAccountSecrets([]);
             setRequiredSecretsForExtension([]);
@@ -441,11 +488,16 @@ function App() {
 
     useEffect(() => {
         if (ledgerPath === null) {
+            setLoginNames([]);
+            setLoginConfigsByName({});
+            setSelectedLoginName('');
             setLoginAccountMappings({});
+            setIsLoadingLoginConfigs(false);
             return;
         }
 
         let cancelled = false;
+        setIsLoadingLoginConfigs(true);
         void listLogins(ledgerPath)
             .then(async (logins) => {
                 const configs = await Promise.all(
@@ -458,8 +510,10 @@ function App() {
                     return;
                 }
 
+                const configMap: Record<string, LoginConfig> = {};
                 const mappings: Record<string, LoginAccountMapping[]> = {};
                 for (const { loginName, config } of configs) {
+                    configMap[loginName] = config;
                     const extension = config.extension?.trim() ?? '';
                     for (const [label, mapping] of Object.entries(
                         config.accounts,
@@ -477,18 +531,37 @@ function App() {
                         mappings[glAccount] = [...current, next];
                     }
                 }
+                setLoginNames(logins);
+                setLoginConfigsByName(configMap);
+                setSelectedLoginName((current) => {
+                    if (current.length > 0 && logins.includes(current)) {
+                        return current;
+                    }
+                    return logins[0] ?? '';
+                });
                 setLoginAccountMappings(mappings);
             })
-            .catch(() => {
+            .catch((error: unknown) => {
                 if (!cancelled) {
+                    setLoginNames([]);
+                    setLoginConfigsByName({});
+                    setSelectedLoginName('');
                     setLoginAccountMappings({});
+                    setLoginConfigStatus(
+                        `Failed to load login configs: ${String(error)}`,
+                    );
+                }
+            })
+            .finally(() => {
+                if (!cancelled) {
+                    setIsLoadingLoginConfigs(false);
                 }
             });
 
         return () => {
             cancelled = true;
         };
-    }, [ledgerPath]);
+    }, [ledgerPath, loginConfigsReloadToken]);
 
     useEffect(() => {
         if (ledgerPath === null) {
@@ -513,6 +586,11 @@ function App() {
             cancelled = true;
         };
     }, [ledgerPath]);
+
+    useEffect(() => {
+        const extension = selectedLoginConfig?.extension?.trim() ?? '';
+        setSelectedLoginExtensionDraft(extension);
+    }, [selectedLoginConfig]);
 
     useEffect(() => {
         if (ledgerPath === null) {
@@ -1647,6 +1725,164 @@ function App() {
         setScrapeExtension(nextExtension);
         setScrapeStatus(null);
         setPipelineStatus(null);
+    }
+
+    async function handleCreateLoginConfig() {
+        if (!ledger) {
+            return;
+        }
+        const loginName = newLoginName.trim();
+        if (loginName.length === 0) {
+            setLoginConfigStatus('Login name is required.');
+            return;
+        }
+
+        setIsSavingLoginConfig(true);
+        try {
+            await createLogin(ledger.path, loginName, newLoginExtension.trim());
+            setNewLoginName('');
+            setNewLoginExtension('');
+            setSelectedLoginName(loginName);
+            setLoginConfigStatus(`Created login '${loginName}'.`);
+            requestLoginConfigReload();
+        } catch (error) {
+            setLoginConfigStatus(`Failed to create login: ${String(error)}`);
+        } finally {
+            setIsSavingLoginConfig(false);
+        }
+    }
+
+    async function handleDeleteSelectedLoginConfig() {
+        if (!ledger) {
+            return;
+        }
+        const loginName = selectedLoginName.trim();
+        if (loginName.length === 0) {
+            setLoginConfigStatus('Select a login to delete.');
+            return;
+        }
+        const shouldDelete = await confirmDialog(
+            `Delete login '${loginName}'? This fails if it still has documents or journal data.`,
+            {
+                title: 'Delete login?',
+                kind: 'warning',
+                okLabel: 'Delete',
+                cancelLabel: 'Cancel',
+            },
+        );
+        if (!shouldDelete) {
+            setLoginConfigStatus('Delete login canceled.');
+            return;
+        }
+
+        setIsSavingLoginConfig(true);
+        try {
+            await deleteLogin(ledger.path, loginName);
+            setSelectedLoginName('');
+            setLoginConfigStatus(`Deleted login '${loginName}'.`);
+            requestLoginConfigReload();
+        } catch (error) {
+            setLoginConfigStatus(`Failed to delete login: ${String(error)}`);
+        } finally {
+            setIsSavingLoginConfig(false);
+        }
+    }
+
+    async function handleSaveSelectedLoginExtension() {
+        if (!ledger) {
+            return;
+        }
+        const loginName = selectedLoginName.trim();
+        if (loginName.length === 0) {
+            setLoginConfigStatus('Select a login first.');
+            return;
+        }
+
+        setIsSavingLoginConfig(true);
+        try {
+            await setLoginExtension(
+                ledger.path,
+                loginName,
+                selectedLoginExtensionDraft.trim(),
+            );
+            setLoginConfigStatus(`Saved extension for '${loginName}'.`);
+            requestLoginConfigReload();
+        } catch (error) {
+            setLoginConfigStatus(`Failed to save extension: ${String(error)}`);
+        } finally {
+            setIsSavingLoginConfig(false);
+        }
+    }
+
+    async function handleSetLoginAccountMapping() {
+        if (!ledger) {
+            return;
+        }
+        const loginName = selectedLoginName.trim();
+        if (loginName.length === 0) {
+            setLoginConfigStatus('Select a login first.');
+            return;
+        }
+        const label = loginLabelDraft.trim();
+        if (label.length === 0) {
+            setLoginConfigStatus('Label is required.');
+            return;
+        }
+        const glAccount = loginGlAccountDraft.trim();
+
+        setIsSavingLoginConfig(true);
+        try {
+            await setLoginAccount(
+                ledger.path,
+                loginName,
+                label,
+                glAccount.length === 0 ? null : glAccount,
+            );
+            setLoginConfigStatus(
+                glAccount.length === 0
+                    ? `Set '${loginName}/${label}' as ignored (no GL account).`
+                    : `Mapped '${loginName}/${label}' to '${glAccount}'.`,
+            );
+            requestLoginConfigReload();
+        } catch (error) {
+            setLoginConfigStatus(`Failed to set mapping: ${String(error)}`);
+        } finally {
+            setIsSavingLoginConfig(false);
+        }
+    }
+
+    async function handleRemoveLoginAccountMapping(label: string) {
+        if (!ledger) {
+            return;
+        }
+        const loginName = selectedLoginName.trim();
+        if (loginName.length === 0) {
+            setLoginConfigStatus('Select a login first.');
+            return;
+        }
+        const shouldRemove = await confirmDialog(
+            `Remove label '${label}' from login '${loginName}'?`,
+            {
+                title: 'Remove mapping?',
+                kind: 'warning',
+                okLabel: 'Remove',
+                cancelLabel: 'Cancel',
+            },
+        );
+        if (!shouldRemove) {
+            return;
+        }
+
+        setIsSavingLoginConfig(true);
+        try {
+            await removeLoginAccount(ledger.path, loginName, label);
+            setLoginConfigStatus(`Removed '${loginName}/${label}'.`);
+            requestLoginConfigReload();
+        } catch (error) {
+            setLoginConfigStatus(`Failed to remove mapping: ${String(error)}`);
+        } finally {
+            setIsSavingLoginConfig(false);
+        }
     }
 
     function handleSubmitSecretForm(
@@ -2928,6 +3164,295 @@ function App() {
                                         ) : null}
                                     </section>
                                 )}
+                                <section className="pipeline-panel">
+                                    <div className="txn-form-header">
+                                        <div>
+                                            <h3>Login mappings</h3>
+                                            <p>
+                                                Configure login names, extension
+                                                defaults, and label to GL
+                                                account mappings.
+                                            </p>
+                                        </div>
+                                        <div className="header-actions">
+                                            <button
+                                                className="ghost-button"
+                                                type="button"
+                                                onClick={() => {
+                                                    requestLoginConfigReload();
+                                                }}
+                                                disabled={
+                                                    isLoadingLoginConfigs ||
+                                                    isSavingLoginConfig
+                                                }
+                                            >
+                                                {isLoadingLoginConfigs
+                                                    ? 'Refreshing...'
+                                                    : 'Refresh logins'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="txn-grid">
+                                        <label className="field">
+                                            <span>Create login name</span>
+                                            <input
+                                                type="text"
+                                                value={newLoginName}
+                                                placeholder="chase-personal"
+                                                onChange={(event) => {
+                                                    setNewLoginName(
+                                                        event.target.value,
+                                                    );
+                                                    setLoginConfigStatus(null);
+                                                }}
+                                                disabled={isSavingLoginConfig}
+                                            />
+                                        </label>
+                                        <label className="field">
+                                            <span>Initial extension</span>
+                                            <input
+                                                type="text"
+                                                value={newLoginExtension}
+                                                placeholder="optional"
+                                                onChange={(event) => {
+                                                    setNewLoginExtension(
+                                                        event.target.value,
+                                                    );
+                                                    setLoginConfigStatus(null);
+                                                }}
+                                                disabled={isSavingLoginConfig}
+                                            />
+                                        </label>
+                                    </div>
+                                    <div className="pipeline-actions">
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                void handleCreateLoginConfig();
+                                            }}
+                                            disabled={isSavingLoginConfig}
+                                        >
+                                            {isSavingLoginConfig
+                                                ? 'Saving...'
+                                                : 'Create login'}
+                                        </button>
+                                    </div>
+                                    <div className="txn-grid">
+                                        <label className="field">
+                                            <span>Selected login</span>
+                                            <select
+                                                value={selectedLoginName}
+                                                onChange={(event) => {
+                                                    setSelectedLoginName(
+                                                        event.target.value,
+                                                    );
+                                                    setLoginConfigStatus(null);
+                                                }}
+                                                disabled={isSavingLoginConfig}
+                                            >
+                                                <option value="">
+                                                    {isLoadingLoginConfigs
+                                                        ? 'Loading logins...'
+                                                        : 'Select login'}
+                                                </option>
+                                                {loginNames.map((loginName) => (
+                                                    <option
+                                                        key={loginName}
+                                                        value={loginName}
+                                                    >
+                                                        {loginName}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </label>
+                                        <label className="field">
+                                            <span>Login extension</span>
+                                            <input
+                                                type="text"
+                                                value={
+                                                    selectedLoginExtensionDraft
+                                                }
+                                                placeholder="optional"
+                                                onChange={(event) => {
+                                                    setSelectedLoginExtensionDraft(
+                                                        event.target.value,
+                                                    );
+                                                    setLoginConfigStatus(null);
+                                                }}
+                                                disabled={
+                                                    selectedLoginName.length ===
+                                                        0 || isSavingLoginConfig
+                                                }
+                                            />
+                                        </label>
+                                    </div>
+                                    <div className="pipeline-actions">
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                void handleSaveSelectedLoginExtension();
+                                            }}
+                                            disabled={
+                                                selectedLoginName.length ===
+                                                    0 || isSavingLoginConfig
+                                            }
+                                        >
+                                            {isSavingLoginConfig
+                                                ? 'Saving...'
+                                                : 'Save login extension'}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                void handleDeleteSelectedLoginConfig();
+                                            }}
+                                            disabled={
+                                                selectedLoginName.length ===
+                                                    0 || isSavingLoginConfig
+                                            }
+                                        >
+                                            {isSavingLoginConfig
+                                                ? 'Saving...'
+                                                : 'Delete login'}
+                                        </button>
+                                    </div>
+                                    {selectedLoginConfig === null ? (
+                                        <p className="hint">
+                                            Select a login to manage its account
+                                            labels.
+                                        </p>
+                                    ) : selectedLoginAccounts.length === 0 ? (
+                                        <p className="hint">
+                                            No labels configured for this login.
+                                        </p>
+                                    ) : (
+                                        <div className="table-wrap">
+                                            <table className="ledger-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Label</th>
+                                                        <th>GL Account</th>
+                                                        <th>Actions</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {selectedLoginAccounts.map(
+                                                        ([label, config]) => (
+                                                            <tr key={label}>
+                                                                <td>
+                                                                    <span className="mono">
+                                                                        {label}
+                                                                    </span>
+                                                                </td>
+                                                                <td>
+                                                                    {config.glAccount ??
+                                                                        '(ignored)'}
+                                                                </td>
+                                                                <td>
+                                                                    <button
+                                                                        type="button"
+                                                                        className="ghost-button"
+                                                                        onClick={() => {
+                                                                            void handleRemoveLoginAccountMapping(
+                                                                                label,
+                                                                            );
+                                                                        }}
+                                                                        disabled={
+                                                                            isSavingLoginConfig
+                                                                        }
+                                                                    >
+                                                                        Remove
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        ),
+                                                    )}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                    <div className="txn-grid">
+                                        <label className="field">
+                                            <span>Label</span>
+                                            <input
+                                                type="text"
+                                                value={loginLabelDraft}
+                                                placeholder="checking"
+                                                onChange={(event) => {
+                                                    setLoginLabelDraft(
+                                                        event.target.value,
+                                                    );
+                                                    setLoginConfigStatus(null);
+                                                }}
+                                                disabled={
+                                                    selectedLoginName.length ===
+                                                        0 || isSavingLoginConfig
+                                                }
+                                            />
+                                        </label>
+                                        <label className="field">
+                                            <span>GL account</span>
+                                            <input
+                                                type="text"
+                                                value={loginGlAccountDraft}
+                                                placeholder="Assets:Bank:Checking (blank = ignored)"
+                                                list="scrape-account-options"
+                                                onChange={(event) => {
+                                                    setLoginGlAccountDraft(
+                                                        event.target.value,
+                                                    );
+                                                    setLoginConfigStatus(null);
+                                                }}
+                                                disabled={
+                                                    selectedLoginName.length ===
+                                                        0 || isSavingLoginConfig
+                                                }
+                                            />
+                                        </label>
+                                    </div>
+                                    <div className="pipeline-actions">
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                void handleSetLoginAccountMapping();
+                                            }}
+                                            disabled={
+                                                selectedLoginName.length ===
+                                                    0 || isSavingLoginConfig
+                                            }
+                                        >
+                                            {isSavingLoginConfig
+                                                ? 'Saving...'
+                                                : 'Set mapping'}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                setLoginLabelDraft('');
+                                                setLoginGlAccountDraft(
+                                                    selectedScrapeAccount,
+                                                );
+                                                setLoginConfigStatus(null);
+                                            }}
+                                            disabled={
+                                                selectedLoginName.length ===
+                                                    0 || isSavingLoginConfig
+                                            }
+                                        >
+                                            Use selected account
+                                        </button>
+                                    </div>
+                                    {loginConfigStatus === null ? null : (
+                                        <p className="status">
+                                            {loginConfigStatus}
+                                        </p>
+                                    )}
+                                </section>
                                 <div className="txn-grid">
                                     <label className="field">
                                         <span>Account</span>
