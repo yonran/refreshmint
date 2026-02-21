@@ -8,6 +8,7 @@ pub mod account_journal;
 pub mod dedup;
 pub mod extract;
 pub mod login_config;
+pub mod migration;
 pub mod operations;
 pub mod reconcile;
 pub mod transfer_detector;
@@ -114,6 +115,7 @@ pub fn run_with_context(
             add_login_secret,
             reenter_login_secret,
             remove_login_secret,
+            migrate_ledger,
         ])
         .setup(|app| {
             binpath::init_from_app(app.handle());
@@ -989,6 +991,13 @@ fn remove_login_secret(login_name: String, domain: String, name: String) -> Resu
     let name = require_non_empty_input("name", name)?;
     let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
     store.delete(&domain, &name).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn migrate_ledger(ledger: String, dry_run: bool) -> Result<migration::MigrationOutcome, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    migration::migrate_ledger(&target_dir, dry_run).map_err(|err| err.to_string())
 }
 
 #[derive(serde::Serialize)]

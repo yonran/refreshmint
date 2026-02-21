@@ -17,6 +17,7 @@ enum Commands {
     Gl(GlArgs),
     Extension(ExtensionArgs),
     Login(LoginArgs),
+    Migrate(MigrateArgs),
     Debug(DebugArgs),
     Secret(SecretArgs),
     Scrape(ScrapeArgs),
@@ -129,6 +130,14 @@ struct LoginRemoveAccountArgs {
     name: String,
     #[arg(long)]
     label: String,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct MigrateArgs {
+    #[arg(long)]
+    dry_run: bool,
     #[arg(long)]
     ledger: Option<PathBuf>,
 }
@@ -411,6 +420,7 @@ pub fn run(context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
         Some(Commands::Gl(args)) => run_gl(args, context),
         Some(Commands::Extension(args)) => run_extension(args, context),
         Some(Commands::Login(args)) => run_login(args, context),
+        Some(Commands::Migrate(args)) => run_migrate(args, context),
         Some(Commands::Debug(args)) => run_debug(args, context),
         Some(Commands::Secret(args)) => run_secret(args),
         Some(Commands::Scrape(args)) => run_scrape(args, context),
@@ -879,6 +889,18 @@ fn run_login_remove_account(
     crate::login_config::remove_login_account(&ledger_dir, &login_name, &label)
         .map_err(std::io::Error::other)?;
     println!("Removed label '{label}' from login '{login_name}'.");
+    Ok(())
+}
+
+fn run_migrate(
+    args: MigrateArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let outcome = crate::migration::migrate_ledger(&ledger_dir, args.dry_run)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    println!("{}", serde_json::to_string_pretty(&outcome)?);
     Ok(())
 }
 

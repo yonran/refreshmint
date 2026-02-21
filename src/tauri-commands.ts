@@ -57,6 +57,19 @@ export interface SecretSyncResult {
     extras: SecretEntry[];
 }
 
+export interface MigratedAccount {
+    accountName: string;
+    loginName: string;
+    label: string;
+}
+
+export interface MigrationOutcome {
+    dryRun: boolean;
+    migrated: MigratedAccount[];
+    skipped: string[];
+    warnings: string[];
+}
+
 export interface DocumentInfo {
     mimeType: string;
     originalUrl?: string;
@@ -504,4 +517,11 @@ export async function runScrapeForLogin(
     extension: string,
 ): Promise<void> {
     await invoke('run_scrape_for_login', { ledger, loginName, extension });
+}
+
+export async function migrateLedger(
+    ledger: string,
+    dryRun: boolean,
+): Promise<MigrationOutcome> {
+    return invoke('migrate_ledger', { ledger, dryRun });
 }
