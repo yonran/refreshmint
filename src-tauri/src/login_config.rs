@@ -715,6 +715,11 @@ pub fn remove_login_account(
     login_name: &str,
     label: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let config_path = login_config_path(ledger_dir, login_name);
+    if !config_path.exists() {
+        return Err(format!("login '{login_name}' does not exist").into());
+    }
+
     let config = read_login_config(ledger_dir, login_name);
     if !config.accounts.contains_key(label) {
         return Err(format!("label '{label}' not found in login '{login_name}'").into());

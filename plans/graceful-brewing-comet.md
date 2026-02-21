@@ -2,7 +2,7 @@
 
 ## Implementation Status (2026-02-21)
 
-Status: complete in `main`, across commits `9fde2bd` through `df1caf1`.
+Status: complete in `main`, across commits `9fde2bd` through `25fdf40`.
 
 Recent completion milestones:
 
@@ -23,6 +23,7 @@ Recent completion milestones:
 - CLI login-based commands now enforce the same login-name validation rules.
 - TypeScript `runScrape` compatibility wrapper now delegates to `runScrapeForLogin`.
 - Tauri and CLI login-account flows now validate labels consistently (including journal/reconcile/document paths).
+- Login mutation commands now require an existing login (no implicit login creation on typo/missing config).
 
 ## Context
 

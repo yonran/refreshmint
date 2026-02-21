@@ -376,6 +376,15 @@ fn require_label_input(value: String) -> Result<String, String> {
     Ok(label)
 }
 
+fn require_existing_login(ledger_dir: &std::path::Path, login_name: &str) -> Result<(), String> {
+    let config_path = login_config::login_config_path(ledger_dir, login_name);
+    if config_path.exists() {
+        Ok(())
+    } else {
+        Err(format!("login '{login_name}' does not exist"))
+    }
+}
+
 #[tauri::command]
 fn start_scrape_debug_session_for_login(
     ledger: String,
@@ -844,6 +853,7 @@ fn set_login_extension(
 ) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
+    require_existing_login(&target_dir, &login_name)?;
     let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
         .map_err(|err| err.to_string())?;
 
@@ -874,6 +884,7 @@ fn set_login_account(
 ) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
+    require_existing_login(&target_dir, &login_name)?;
     let label = require_label_input(label)?;
 
     let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
@@ -899,6 +910,7 @@ fn set_login_account(
 fn remove_login_account(ledger: String, login_name: String, label: String) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
+    require_existing_login(&target_dir, &login_name)?;
     let label = require_label_input(label)?;
 
     let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
@@ -1228,8 +1240,8 @@ fn map_account_journal_entries(
 mod tests {
     use super::{
         classify_secret_entries, delete_login_account, evidence_ref_matches_document,
-        flatten_declared_secret_entries, require_label_input, require_login_name_input,
-        require_non_empty_input, SecretEntry,
+        flatten_declared_secret_entries, require_existing_login, require_label_input,
+        require_login_name_input, require_non_empty_input, SecretEntry,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -1301,6 +1313,33 @@ mod tests {
             Ok(_) => panic!("expected validation error for invalid label"),
             Err(err) => assert!(err.contains("invalid label")),
         }
+    }
+
+    #[test]
+    fn require_existing_login_rejects_missing_login() {
+        let dir = create_temp_dir("require-existing-login-missing");
+        let result = require_existing_login(&dir, "missing-login");
+        match result {
+            Ok(()) => panic!("expected error for missing login"),
+            Err(err) => assert!(err.contains("does not exist")),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn require_existing_login_accepts_existing_login() {
+        let dir = create_temp_dir("require-existing-login-ok");
+        let config = crate::login_config::LoginConfig {
+            extension: Some("chase-driver".to_string()),
+            accounts: BTreeMap::new(),
+        };
+        if let Err(err) = crate::login_config::write_login_config(&dir, "chase", &config) {
+            panic!("failed to write login config: {err}");
+        }
+
+        let result = require_existing_login(&dir, "chase");
+        assert!(result.is_ok(), "expected existing login, got: {result:?}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1454,6 +1493,21 @@ mod tests {
         match result {
             Ok(()) => panic!("expected error for missing label"),
             Err(err) => assert!(err.contains("label 'checking' not found")),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_login_account_errors_when_login_missing() {
+        let dir = create_temp_dir("delete-login-account-missing-login");
+        let result = delete_login_account(
+            dir.to_string_lossy().to_string(),
+            "missing-login".to_string(),
+            "checking".to_string(),
+        );
+        match result {
+            Ok(()) => panic!("expected error for missing login"),
+            Err(err) => assert!(err.contains("login 'missing-login' does not exist")),
         }
         let _ = fs::remove_dir_all(&dir);
     }

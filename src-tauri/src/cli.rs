@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 use std::error::Error;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::Manager;
 
 #[derive(Parser)]
@@ -810,6 +810,7 @@ fn run_login_set_extension(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
     let login_name = require_cli_login_name("name", &args.name)?;
+    require_cli_existing_login(&ledger_dir, &login_name)?;
     let extension = args.extension.trim().to_string();
 
     let _lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
@@ -845,6 +846,7 @@ fn run_login_set_account(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
     let login_name = require_cli_login_name("name", &args.name)?;
+    require_cli_existing_login(&ledger_dir, &login_name)?;
     let label = require_cli_label(&args.label)?;
 
     let gl_account = args
@@ -879,6 +881,7 @@ fn run_login_delete_account(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
     let login_name = require_cli_login_name("name", &args.name)?;
+    require_cli_existing_login(&ledger_dir, &login_name)?;
     let label = require_cli_label(&args.label)?;
     let _lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
         .map_err(std::io::Error::other)?;
@@ -1238,6 +1241,19 @@ fn require_cli_login_name(field_name: &str, value: &str) -> Result<String, Box<d
     Ok(login_name)
 }
 
+fn require_cli_existing_login(ledger_dir: &Path, login_name: &str) -> Result<(), Box<dyn Error>> {
+    let config_path = crate::login_config::login_config_path(ledger_dir, login_name);
+    if config_path.exists() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("login '{login_name}' does not exist"),
+        )
+        .into())
+    }
+}
+
 fn require_cli_label(value: &str) -> Result<String, Box<dyn Error>> {
     let label = require_cli_field("label", value)?;
     crate::login_config::validate_label(&label).map_err(|err| {
@@ -1364,11 +1380,11 @@ fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Bo
 #[cfg(test)]
 mod tests {
     use super::{
-        evidence_ref_matches_document, parse_prompt_overrides, require_cli_label,
-        require_cli_login_name, resolve_extraction_document_names, run_extension_load_with_dir,
-        run_gl_add_with_dir, run_new_with_ledger_path, run_secret, AccountCommand, AddArgs, Cli,
-        Commands, ExtensionLoadArgs, LoginCommand, SecretAddArgs, SecretArgs, SecretCommand,
-        SecretListArgs, SecretRemoveArgs,
+        evidence_ref_matches_document, parse_prompt_overrides, require_cli_existing_login,
+        require_cli_label, require_cli_login_name, resolve_extraction_document_names,
+        run_extension_load_with_dir, run_gl_add_with_dir, run_new_with_ledger_path, run_secret,
+        AccountCommand, AddArgs, Cli, Commands, ExtensionLoadArgs, LoginCommand, SecretAddArgs,
+        SecretArgs, SecretCommand, SecretListArgs, SecretRemoveArgs,
     };
     use crate::ledger::ensure_refreshmint_extension;
     use clap::Parser;
@@ -1959,6 +1975,34 @@ mod tests {
     fn require_cli_label_rejects_path_like_label() {
         let result = require_cli_label("../bad");
         assert!(expect_err(result, "invalid label").contains("invalid label"));
+    }
+
+    #[test]
+    fn require_cli_existing_login_errors_when_missing() {
+        let dir = create_temp_dir();
+        let result = require_cli_existing_login(&dir, "missing-login");
+        assert!(expect_err(result, "missing login").contains("does not exist"));
+        if let Err(err) = fs::remove_dir_all(&dir) {
+            panic!("failed to clean up temp dir: {err}");
+        }
+    }
+
+    #[test]
+    fn require_cli_existing_login_accepts_existing_login() {
+        let dir = create_temp_dir();
+        let config = crate::login_config::LoginConfig {
+            extension: Some("chase-driver".to_string()),
+            accounts: std::collections::BTreeMap::new(),
+        };
+        if let Err(err) = crate::login_config::write_login_config(&dir, "chase", &config) {
+            panic!("failed to write login config: {err}");
+        }
+
+        let result = require_cli_existing_login(&dir, "chase");
+        assert!(result.is_ok(), "expected existing login, got: {result:?}");
+        if let Err(err) = fs::remove_dir_all(&dir) {
+            panic!("failed to clean up temp dir: {err}");
+        }
     }
 
     fn expect_ok<T, E: std::fmt::Display>(result: Result<T, E>, label: &str) -> T {
