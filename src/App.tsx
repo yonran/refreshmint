@@ -294,6 +294,9 @@ function App() {
         selectedLoginMapping === null
             ? null
             : `${selectedLoginMapping.loginName}/${selectedLoginMapping.label}`;
+    const activeSecretsLoginName =
+        selectedLoginMapping?.loginName ?? (selectedLoginName.trim() || null);
+    const hasActiveSecretsLogin = activeSecretsLoginName !== null;
     const selectedLoginConfig: LoginConfig | null =
         selectedLoginName.length === 0
             ? null
@@ -601,7 +604,7 @@ function App() {
             return;
         }
 
-        if (selectedLoginMapping === null) {
+        if (activeSecretsLoginName === null) {
             setAccountSecrets([]);
             setIsLoadingAccountSecrets(false);
             setRequiredSecretsForExtension([]);
@@ -609,11 +612,11 @@ function App() {
             return;
         }
 
-        const mapping = selectedLoginMapping;
+        const loginName = activeSecretsLoginName;
         let cancelled = false;
         const timer = window.setTimeout(() => {
             setIsLoadingAccountSecrets(true);
-            void listLoginSecrets(mapping.loginName)
+            void listLoginSecrets(loginName)
                 .then((entries) => {
                     if (!cancelled) {
                         setAccountSecrets(entries);
@@ -638,7 +641,7 @@ function App() {
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [ledgerPath, selectedLoginMapping]);
+    }, [activeSecretsLoginName, ledgerPath]);
 
     useEffect(() => {
         if (ledgerPath === null) {
@@ -648,21 +651,17 @@ function App() {
         }
 
         const extension = scrapeExtension.trim();
-        if (selectedLoginMapping === null || extension.length === 0) {
+        if (activeSecretsLoginName === null || extension.length === 0) {
             setRequiredSecretsForExtension([]);
             setHasRequiredSecretsSync(false);
             return;
         }
 
-        const mapping = selectedLoginMapping;
+        const loginName = activeSecretsLoginName;
         let cancelled = false;
         const timer = window.setTimeout(() => {
             setIsLoadingAccountSecrets(true);
-            void syncLoginSecretsForExtension(
-                ledgerPath,
-                mapping.loginName,
-                extension,
-            )
+            void syncLoginSecretsForExtension(ledgerPath, loginName, extension)
                 .then((result) => {
                     if (cancelled) {
                         return;
@@ -714,7 +713,7 @@ function App() {
                         );
                     }
 
-                    return listLoginSecrets(mapping.loginName)
+                    return listLoginSecrets(loginName)
                         .then((entries) => {
                             if (!cancelled) {
                                 setAccountSecrets(entries);
@@ -749,7 +748,7 @@ function App() {
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [ledgerPath, selectedLoginMapping, scrapeExtension]);
+    }, [activeSecretsLoginName, ledgerPath, scrapeExtension]);
 
     // Load login config and auto-populate extension when account mapping changes.
     useEffect(() => {
@@ -1450,28 +1449,16 @@ function App() {
         }
     }
 
-    async function refreshAccountSecrets(accountInput: string) {
-        const account = accountInput.trim();
-        if (account.length === 0) {
+    async function refreshLoginSecrets(loginNameInput: string) {
+        const loginName = loginNameInput.trim();
+        if (loginName.length === 0) {
             setAccountSecrets([]);
             setIsLoadingAccountSecrets(false);
             return;
         }
-        const mappings = loginAccountMappings[account] ?? [];
-        if (mappings.length !== 1) {
-            throw new Error(
-                mappings.length === 0
-                    ? `No login mapping found for account '${account}'.`
-                    : `Multiple login mappings found for account '${account}'.`,
-            );
-        }
-        const mapping = mappings[0];
-        if (mapping === undefined) {
-            throw new Error(`No login mapping found for account '${account}'.`);
-        }
         setIsLoadingAccountSecrets(true);
         try {
-            const entries = await listLoginSecrets(mapping.loginName);
+            const entries = await listLoginSecrets(loginName);
             setAccountSecrets(entries);
         } finally {
             setIsLoadingAccountSecrets(false);
@@ -1536,38 +1523,29 @@ function App() {
     }
 
     async function handleRefreshAccountSecrets() {
-        const account = scrapeAccount.trim();
-        if (account.length === 0) {
-            setSecretsStatus('Account is required.');
+        if (activeSecretsLoginName === null) {
+            setSecretsStatus(
+                selectedLoginMappingError ??
+                    'Select a login mapping or login first.',
+            );
             return;
         }
         try {
-            await refreshAccountSecrets(account);
-            setSecretsStatus(`Loaded login secrets for ${account}.`);
+            await refreshLoginSecrets(activeSecretsLoginName);
+            setSecretsStatus(
+                `Loaded login secrets for '${activeSecretsLoginName}'.`,
+            );
         } catch (error) {
             setSecretsStatus(`Failed to load login secrets: ${String(error)}`);
         }
     }
 
     async function handleSaveAccountSecret(mode: 'add' | 'reenter') {
-        const account = scrapeAccount.trim();
-        if (account.length === 0) {
-            setSecretsStatus('Account is required.');
-            return false;
-        }
-        const mappings = loginAccountMappings[account] ?? [];
-        if (mappings.length !== 1) {
+        const loginName = activeSecretsLoginName;
+        if (loginName === null) {
             setSecretsStatus(
-                mappings.length === 0
-                    ? `No login mapping found for account '${account}'.`
-                    : `Multiple login mappings found for account '${account}'.`,
-            );
-            return false;
-        }
-        const mapping = mappings[0];
-        if (mapping === undefined) {
-            setSecretsStatus(
-                `No login mapping found for account '${account}'.`,
+                selectedLoginMappingError ??
+                    'Select a login mapping or login first.',
             );
             return false;
         }
@@ -1605,21 +1583,11 @@ function App() {
         setIsSavingAccountSecret(true);
         try {
             if (mode === 'add') {
-                await addLoginSecret(
-                    mapping.loginName,
-                    domain,
-                    name,
-                    secretValue,
-                );
+                await addLoginSecret(loginName, domain, name, secretValue);
             } else {
-                await reenterLoginSecret(
-                    mapping.loginName,
-                    domain,
-                    name,
-                    secretValue,
-                );
+                await reenterLoginSecret(loginName, domain, name, secretValue);
             }
-            await refreshAccountSecrets(account);
+            await refreshLoginSecrets(loginName);
             setSecretValue('');
             setSecretsStatus(
                 mode === 'add'
@@ -1640,32 +1608,19 @@ function App() {
     }
 
     async function handleRemoveAccountSecret(domain: string, name: string) {
-        const account = scrapeAccount.trim();
-        if (account.length === 0) {
-            setSecretsStatus('Account is required.');
-            return;
-        }
-        const mappings = loginAccountMappings[account] ?? [];
-        if (mappings.length !== 1) {
+        const loginName = activeSecretsLoginName;
+        if (loginName === null) {
             setSecretsStatus(
-                mappings.length === 0
-                    ? `No login mapping found for account '${account}'.`
-                    : `Multiple login mappings found for account '${account}'.`,
-            );
-            return;
-        }
-        const mapping = mappings[0];
-        if (mapping === undefined) {
-            setSecretsStatus(
-                `No login mapping found for account '${account}'.`,
+                selectedLoginMappingError ??
+                    'Select a login mapping or login first.',
             );
             return;
         }
         const key = `${domain}/${name}`;
         setBusySecretKey(key);
         try {
-            await removeLoginSecret(mapping.loginName, domain, name);
-            await refreshAccountSecrets(account);
+            await removeLoginSecret(loginName, domain, name);
+            await refreshLoginSecrets(loginName);
             if (secretDomain === domain && secretName === name) {
                 setSecretValue('');
             }
@@ -3604,8 +3559,8 @@ function App() {
                                             <h3>Login secrets</h3>
                                             <p>
                                                 Manage per-login keychain
-                                                secrets for the selected scrape
-                                                mapping.
+                                                secrets for the active login
+                                                selection.
                                             </p>
                                         </div>
                                         <div className="header-actions">
@@ -3616,7 +3571,7 @@ function App() {
                                                     void handleRefreshAccountSecrets();
                                                 }}
                                                 disabled={
-                                                    !hasResolvedLoginMapping ||
+                                                    !hasActiveSecretsLogin ||
                                                     isLoadingAccountSecrets ||
                                                     isSavingAccountSecret ||
                                                     busySecretKey !== null
@@ -3646,7 +3601,7 @@ function App() {
                                                         setSecretsStatus(null);
                                                     }}
                                                     disabled={
-                                                        !hasResolvedLoginMapping ||
+                                                        !hasActiveSecretsLogin ||
                                                         isSavingAccountSecret ||
                                                         busySecretKey !== null
                                                     }
@@ -3665,7 +3620,7 @@ function App() {
                                                         setSecretsStatus(null);
                                                     }}
                                                     disabled={
-                                                        !hasResolvedLoginMapping ||
+                                                        !hasActiveSecretsLogin ||
                                                         isSavingAccountSecret ||
                                                         busySecretKey !== null
                                                     }
@@ -3687,7 +3642,7 @@ function App() {
                                                         setSecretsStatus(null);
                                                     }}
                                                     disabled={
-                                                        !hasResolvedLoginMapping ||
+                                                        !hasActiveSecretsLogin ||
                                                         isSavingAccountSecret ||
                                                         busySecretKey !== null
                                                     }
@@ -3704,7 +3659,7 @@ function App() {
                                                     );
                                                 }}
                                                 disabled={
-                                                    !hasResolvedLoginMapping ||
+                                                    !hasActiveSecretsLogin ||
                                                     (trimmedSecretDomain.length >
                                                         0 &&
                                                         trimmedSecretName.length >
@@ -3722,7 +3677,7 @@ function App() {
                                                 type="submit"
                                                 className="ghost-button"
                                                 disabled={
-                                                    !hasResolvedLoginMapping ||
+                                                    !hasActiveSecretsLogin ||
                                                     !currentSecretPairExists ||
                                                     isSavingAccountSecret ||
                                                     busySecretKey !== null
@@ -3743,15 +3698,18 @@ function App() {
                                     </form>
                                     {isLoadingAccountSecrets ? (
                                         <p className="status">
-                                            Loading account secrets...
+                                            Loading login secrets...
                                         </p>
                                     ) : accountSecrets.length === 0 ? (
                                         <p className="hint">
-                                            {selectedScrapeAccount.length === 0
-                                                ? 'Choose a GL account to manage login secrets.'
-                                                : !hasResolvedLoginMapping
-                                                  ? 'Resolve login mapping first to manage secrets.'
-                                                  : 'No secrets stored for this login.'}
+                                            {hasActiveSecretsLogin
+                                                ? 'No secrets stored for this login.'
+                                                : selectedScrapeAccount.length >
+                                                        0 &&
+                                                    selectedLoginMappingError !==
+                                                        null
+                                                  ? 'Resolve login mapping first, or select a login in Login mappings.'
+                                                  : 'Select a login mapping or login to manage secrets.'}
                                         </p>
                                     ) : (
                                         <div className="table-wrap">
