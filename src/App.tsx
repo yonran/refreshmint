@@ -307,6 +307,12 @@ function App() {
             : Object.entries(selectedLoginConfig.accounts).sort(([a], [b]) =>
                   a.localeCompare(b),
               );
+    const conflictingGlAccountSet = new Set(
+        ledger?.glAccountConflicts.map((conflict) => conflict.glAccount) ?? [],
+    );
+    const selectedScrapeAccountHasConflict =
+        selectedScrapeAccount.length > 0 &&
+        conflictingGlAccountSet.has(selectedScrapeAccount);
     const requestLoginConfigReload = useCallback(() => {
         setLoginConfigsReloadToken((current) => current + 1);
     }, []);
@@ -1840,6 +1846,20 @@ function App() {
         }
     }
 
+    function handleLoadConflictMapping(
+        loginName: string,
+        label: string,
+        glAccount: string,
+    ) {
+        setActiveTab('scrape');
+        setSelectedLoginName(loginName);
+        setLoginLabelDraft(label);
+        setLoginGlAccountDraft(glAccount);
+        setLoginConfigStatus(
+            `Loaded '${loginName}/${label}' from conflicts. Update GL account or clear it to resolve.`,
+        );
+    }
+
     function handleSubmitSecretForm(
         event: React.SyntheticEvent<HTMLFormElement>,
     ) {
@@ -2486,20 +2506,57 @@ function App() {
                                 {ledger.glAccountConflicts.length} conflicting
                                 GL account mapping(s) detected.
                             </p>
-                            <p className="status mono">
-                                {ledger.glAccountConflicts
-                                    .slice(0, 3)
-                                    .map((conflict) => {
-                                        const mappings = conflict.entries
-                                            .map(
-                                                (entry) =>
-                                                    `${entry.loginName}/${entry.label}`,
-                                            )
-                                            .join(', ');
-                                        return `${conflict.glAccount}: ${mappings}`;
-                                    })
-                                    .join(' | ')}
-                            </p>
+                            <div className="table-wrap">
+                                <table className="ledger-table">
+                                    <thead>
+                                        <tr>
+                                            <th>GL Account</th>
+                                            <th>Login/Label</th>
+                                            <th>Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {ledger.glAccountConflicts.flatMap(
+                                            (conflict) =>
+                                                conflict.entries.map(
+                                                    (entry, index) => (
+                                                        <tr
+                                                            key={`${conflict.glAccount}/${entry.loginName}/${entry.label}`}
+                                                        >
+                                                            <td className="mono">
+                                                                {index === 0
+                                                                    ? conflict.glAccount
+                                                                    : ''}
+                                                            </td>
+                                                            <td className="mono">
+                                                                {
+                                                                    entry.loginName
+                                                                }
+                                                                /{entry.label}
+                                                            </td>
+                                                            <td>
+                                                                <button
+                                                                    type="button"
+                                                                    className="ghost-button"
+                                                                    onClick={() => {
+                                                                        handleLoadConflictMapping(
+                                                                            entry.loginName,
+                                                                            entry.label,
+                                                                            conflict.glAccount,
+                                                                        );
+                                                                    }}
+                                                                >
+                                                                    Load in
+                                                                    mappings
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+                                                    ),
+                                                ),
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
                         </section>
                     )}
                     <div className="tabs">
@@ -3474,7 +3531,9 @@ function App() {
                                     </p>
                                 ) : selectedLoginMappingSummary === null ? (
                                     <p className="status">
-                                        {selectedLoginMappingError}
+                                        {selectedScrapeAccountHasConflict
+                                            ? `Account '${selectedScrapeAccount}' has GL mapping conflicts. Use the conflict panel to load and edit a mapping.`
+                                            : selectedLoginMappingError}
                                     </p>
                                 ) : (
                                     <p className="hint mono">
