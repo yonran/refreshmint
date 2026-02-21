@@ -245,7 +245,7 @@ export async function runScrape(
     account: string,
     extension: string,
 ): Promise<void> {
-    await invoke('run_scrape', { ledger, account, extension });
+    await runScrapeForLogin(ledger, account, extension);
 }
 
 export async function listDocuments(

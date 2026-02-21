@@ -2,7 +2,7 @@
 
 ## Implementation Status (2026-02-21)
 
-Status: complete in `main`, across commits `9fde2bd` through `f1ddb5d`.
+Status: complete in `main`, across commits `9fde2bd` through `0d74968`.
 
 Recent completion milestones:
 
@@ -21,6 +21,7 @@ Recent completion milestones:
 - Tauri/TypeScript debug-session APIs now include login-named command/wrapper aliases for consistency.
 - Tauri login-based commands now validate `login_name` consistently (rejecting path-like values).
 - CLI login-based commands now enforce the same login-name validation rules.
+- TypeScript `runScrape` compatibility wrapper now delegates to `runScrapeForLogin`.
 
 ## Context
 
