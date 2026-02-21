@@ -16,6 +16,7 @@ enum Commands {
     New(NewArgs),
     Gl(GlArgs),
     Extension(ExtensionArgs),
+    Login(LoginArgs),
     Debug(DebugArgs),
     Secret(SecretArgs),
     Scrape(ScrapeArgs),
@@ -61,6 +62,78 @@ struct ExtensionLoadArgs {
 }
 
 #[derive(Args)]
+struct LoginArgs {
+    #[command(subcommand)]
+    command: LoginCommand,
+}
+
+#[derive(Subcommand)]
+enum LoginCommand {
+    List(LoginListArgs),
+    Create(LoginCreateArgs),
+    SetExtension(LoginSetExtensionArgs),
+    Delete(LoginDeleteArgs),
+    SetAccount(LoginSetAccountArgs),
+    RemoveAccount(LoginRemoveAccountArgs),
+}
+
+#[derive(Args)]
+struct LoginListArgs {
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct LoginCreateArgs {
+    #[arg(long, value_name = "NAME")]
+    name: String,
+    #[arg(long)]
+    extension: Option<String>,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct LoginSetExtensionArgs {
+    #[arg(long, value_name = "NAME")]
+    name: String,
+    #[arg(long)]
+    extension: String,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct LoginDeleteArgs {
+    #[arg(long, value_name = "NAME")]
+    name: String,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct LoginSetAccountArgs {
+    #[arg(long, value_name = "NAME")]
+    name: String,
+    #[arg(long)]
+    label: String,
+    #[arg(long = "gl-account", value_name = "ACCOUNT")]
+    gl_account: Option<String>,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct LoginRemoveAccountArgs {
+    #[arg(long, value_name = "NAME")]
+    name: String,
+    #[arg(long)]
+    label: String,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
 struct DebugArgs {
     #[command(subcommand)]
     command: DebugCommand,
@@ -75,8 +148,8 @@ enum DebugCommand {
 
 #[derive(Args)]
 struct DebugStartArgs {
-    #[arg(long)]
-    account: String,
+    #[arg(long, alias = "account")]
+    login: String,
     #[arg(long)]
     extension: String,
     #[arg(long)]
@@ -138,8 +211,8 @@ enum SecretCommand {
 
 #[derive(Args)]
 struct SecretAddArgs {
-    #[arg(long)]
-    account: String,
+    #[arg(long, alias = "account")]
+    login: String,
     #[arg(long)]
     domain: String,
     #[arg(long)]
@@ -150,8 +223,8 @@ struct SecretAddArgs {
 
 #[derive(Args)]
 struct SecretReenterArgs {
-    #[arg(long)]
-    account: String,
+    #[arg(long, alias = "account")]
+    login: String,
     #[arg(long)]
     domain: String,
     #[arg(long)]
@@ -162,8 +235,8 @@ struct SecretReenterArgs {
 
 #[derive(Args)]
 struct SecretRemoveArgs {
-    #[arg(long)]
-    account: String,
+    #[arg(long, alias = "account")]
+    login: String,
     #[arg(long)]
     domain: String,
     #[arg(long)]
@@ -172,14 +245,14 @@ struct SecretRemoveArgs {
 
 #[derive(Args)]
 struct SecretListArgs {
-    #[arg(long)]
-    account: String,
+    #[arg(long, alias = "account")]
+    login: String,
 }
 
 #[derive(Args)]
 struct ScrapeArgs {
-    #[arg(long)]
-    account: String,
+    #[arg(long, alias = "account")]
+    login: String,
     #[arg(long)]
     extension: Option<String>,
     #[arg(long)]
@@ -325,6 +398,7 @@ pub fn run(context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
         Some(Commands::New(args)) => run_new(args, context),
         Some(Commands::Gl(args)) => run_gl(args, context),
         Some(Commands::Extension(args)) => run_extension(args, context),
+        Some(Commands::Login(args)) => run_login(args, context),
         Some(Commands::Debug(args)) => run_debug(args, context),
         Some(Commands::Secret(args)) => run_secret(args),
         Some(Commands::Scrape(args)) => run_scrape(args, context),
@@ -362,6 +436,17 @@ fn run_extension(
 ) -> Result<(), Box<dyn Error>> {
     match args.command {
         ExtensionCommand::Load(load_args) => run_extension_load(load_args, context),
+    }
+}
+
+fn run_login(args: LoginArgs, context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
+    match args.command {
+        LoginCommand::List(list_args) => run_login_list(list_args, context),
+        LoginCommand::Create(create_args) => run_login_create(create_args, context),
+        LoginCommand::SetExtension(set_args) => run_login_set_extension(set_args, context),
+        LoginCommand::Delete(delete_args) => run_login_delete(delete_args, context),
+        LoginCommand::SetAccount(set_args) => run_login_set_account(set_args, context),
+        LoginCommand::RemoveAccount(remove_args) => run_login_remove_account(remove_args, context),
     }
 }
 
@@ -481,42 +566,42 @@ fn parse_posting(input: &str) -> Result<crate::ledger_add::NewPosting, Box<dyn E
 fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
     match args.command {
         SecretCommand::Add(a) => {
-            let account = require_secret_field("account", &a.account)?;
+            let login = require_secret_field("login", &a.login)?;
             let domain = require_secret_field("domain", &a.domain)?;
             let name = require_secret_field("name", &a.name)?;
 
-            let store = crate::secret::SecretStore::new(account);
+            let store = crate::secret::SecretStore::new(format!("login/{login}"));
             store.set(&domain, &name, &a.value)?;
             eprintln!("Secret stored.");
             Ok(())
         }
         SecretCommand::Reenter(a) => {
-            let account = require_secret_field("account", &a.account)?;
+            let login = require_secret_field("login", &a.login)?;
             let domain = require_secret_field("domain", &a.domain)?;
             let name = require_secret_field("name", &a.name)?;
 
-            let store = crate::secret::SecretStore::new(account);
+            let store = crate::secret::SecretStore::new(format!("login/{login}"));
             store.set(&domain, &name, &a.value)?;
             eprintln!("Secret re-entered.");
             Ok(())
         }
         SecretCommand::Remove(a) => {
-            let account = require_secret_field("account", &a.account)?;
+            let login = require_secret_field("login", &a.login)?;
             let domain = require_secret_field("domain", &a.domain)?;
             let name = require_secret_field("name", &a.name)?;
 
-            let store = crate::secret::SecretStore::new(account);
+            let store = crate::secret::SecretStore::new(format!("login/{login}"));
             store.delete(&domain, &name)?;
             eprintln!("Secret removed.");
             Ok(())
         }
         SecretCommand::List(a) => {
-            let account = require_secret_field("account", &a.account)?;
-            let account_name = account.clone();
-            let store = crate::secret::SecretStore::new(account);
+            let login = require_secret_field("login", &a.login)?;
+            let login_name = login.clone();
+            let store = crate::secret::SecretStore::new(format!("login/{login}"));
             let entries = store.list()?;
             if entries.is_empty() {
-                println!("No secrets stored for account '{account_name}'.");
+                println!("No secrets stored for login '{login_name}'.");
             } else {
                 for (domain, name) in &entries {
                     println!("{domain}/{name}");
@@ -562,10 +647,10 @@ fn run_debug_start(
     };
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
 
-    let account = args.account.trim().to_string();
-    if account.is_empty() {
+    let login_name = args.login.trim().to_string();
+    if login_name.is_empty() {
         return Err(
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "account is required").into(),
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "login is required").into(),
         );
     }
     let extension = args.extension.trim().to_string();
@@ -577,10 +662,10 @@ fn run_debug_start(
 
     let socket = match args.socket {
         Some(path) => path,
-        None => crate::scrape::debug::default_debug_socket_path(&account)?,
+        None => crate::scrape::debug::default_debug_socket_path(&login_name)?,
     };
     let config = crate::scrape::debug::DebugStartConfig {
-        login_name: account,
+        login_name,
         extension_name: extension,
         ledger_dir,
         profile_override: args.profile,
@@ -654,15 +739,147 @@ fn run_extension_load_with_dir(
     Ok(loaded)
 }
 
+fn run_login_list(
+    args: LoginListArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    for login in crate::login_config::list_logins(&ledger_dir) {
+        println!("{login}");
+    }
+    Ok(())
+}
+
+fn run_login_create(
+    args: LoginCreateArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let login_name = require_cli_field("name", &args.name)?;
+    crate::login_config::validate_label(&login_name).map_err(std::io::Error::other)?;
+
+    let config_path = crate::login_config::login_config_path(&ledger_dir, &login_name);
+    if config_path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("login '{login_name}' already exists"),
+        )
+        .into());
+    }
+
+    let extension = args
+        .extension
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let config = crate::login_config::LoginConfig {
+        extension: extension.map(ToOwned::to_owned),
+        accounts: std::collections::BTreeMap::new(),
+    };
+    crate::login_config::write_login_config(&ledger_dir, &login_name, &config)
+        .map_err(std::io::Error::other)?;
+    println!("Created login '{login_name}'.");
+    Ok(())
+}
+
+fn run_login_set_extension(
+    args: LoginSetExtensionArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let login_name = require_cli_field("name", &args.name)?;
+    let extension = args.extension.trim().to_string();
+
+    let _lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
+        .map_err(std::io::Error::other)?;
+    let mut config = crate::login_config::read_login_config(&ledger_dir, &login_name);
+    config.extension = if extension.is_empty() {
+        None
+    } else {
+        Some(extension)
+    };
+    crate::login_config::write_login_config(&ledger_dir, &login_name, &config)
+        .map_err(std::io::Error::other)?;
+    println!("Updated extension for login '{login_name}'.");
+    Ok(())
+}
+
+fn run_login_delete(
+    args: LoginDeleteArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let login_name = require_cli_field("name", &args.name)?;
+    crate::login_config::delete_login(&ledger_dir, &login_name).map_err(std::io::Error::other)?;
+    println!("Deleted login '{login_name}'.");
+    Ok(())
+}
+
+fn run_login_set_account(
+    args: LoginSetAccountArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let login_name = require_cli_field("name", &args.name)?;
+    let label = require_cli_field("label", &args.label)?;
+    crate::login_config::validate_label(&label).map_err(std::io::Error::other)?;
+
+    let gl_account = args
+        .gl_account
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned);
+
+    let _lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
+        .map_err(std::io::Error::other)?;
+    if let Some(ref gl) = gl_account {
+        crate::login_config::check_gl_account_uniqueness(&ledger_dir, &login_name, &label, gl)
+            .map_err(std::io::Error::other)?;
+    }
+
+    let mut config = crate::login_config::read_login_config(&ledger_dir, &login_name);
+    config.accounts.insert(
+        label.clone(),
+        crate::login_config::LoginAccountConfig { gl_account },
+    );
+    crate::login_config::write_login_config(&ledger_dir, &login_name, &config)
+        .map_err(std::io::Error::other)?;
+    println!("Updated label '{label}' for login '{login_name}'.");
+    Ok(())
+}
+
+fn run_login_remove_account(
+    args: LoginRemoveAccountArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let login_name = require_cli_field("name", &args.name)?;
+    let label = require_cli_field("label", &args.label)?;
+    let _lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
+        .map_err(std::io::Error::other)?;
+    crate::login_config::remove_login_account(&ledger_dir, &login_name, &label)
+        .map_err(std::io::Error::other)?;
+    println!("Removed label '{label}' from login '{login_name}'.");
+    Ok(())
+}
+
 fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
     let ledger_dir = match args.ledger.as_ref() {
         Some(path) => crate::ledger::ensure_refreshmint_extension(path.clone())?,
         None => default_ledger_dir(context)?,
     };
 
+    let login_name = require_cli_field("login", &args.login)?;
     let extension_name = crate::login_config::resolve_login_extension(
         &ledger_dir,
-        &args.account,
+        &login_name,
         args.extension.as_deref(),
     )
     .map_err(std::io::Error::other)?;
@@ -670,7 +887,7 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
     let prompt_overrides = parse_prompt_overrides(&args.prompt)?;
 
     let config = crate::scrape::ScrapeConfig {
-        login_name: args.account,
+        login_name,
         extension_name,
         ledger_dir,
         profile_override: args.profile,
@@ -1028,8 +1245,8 @@ mod tests {
     use super::{
         evidence_ref_matches_document, parse_prompt_overrides, resolve_extraction_document_names,
         run_extension_load_with_dir, run_gl_add_with_dir, run_new_with_ledger_path, run_secret,
-        AccountCommand, AddArgs, Cli, Commands, ExtensionLoadArgs, SecretAddArgs, SecretArgs,
-        SecretCommand, SecretListArgs, SecretRemoveArgs,
+        AccountCommand, AddArgs, Cli, Commands, ExtensionLoadArgs, LoginCommand, SecretAddArgs,
+        SecretArgs, SecretCommand, SecretListArgs, SecretRemoveArgs,
     };
     use crate::ledger::ensure_refreshmint_extension;
     use clap::Parser;
@@ -1191,6 +1408,58 @@ mod tests {
                 _ => panic!("expected account reconcile command"),
             },
             _ => panic!("expected account command"),
+        }
+    }
+
+    #[test]
+    fn login_set_account_subcommand_parses_gl_account() {
+        let cli = Cli::try_parse_from([
+            "refreshmint",
+            "login",
+            "set-account",
+            "--name",
+            "chase-personal",
+            "--label",
+            "checking",
+            "--gl-account",
+            "Assets:Chase:Checking",
+        ])
+        .unwrap_or_else(|err| panic!("Cli parsing failed: {err}"));
+
+        match cli.command {
+            Some(Commands::Login(args)) => match args.command {
+                LoginCommand::SetAccount(set_account) => {
+                    assert_eq!(set_account.name, "chase-personal");
+                    assert_eq!(set_account.label, "checking");
+                    assert_eq!(
+                        set_account.gl_account,
+                        Some("Assets:Chase:Checking".to_string())
+                    );
+                }
+                _ => panic!("expected login set-account command"),
+            },
+            _ => panic!("expected login command"),
+        }
+    }
+
+    #[test]
+    fn scrape_subcommand_parses_login_flag() {
+        let cli = Cli::try_parse_from([
+            "refreshmint",
+            "scrape",
+            "--login",
+            "chase-personal",
+            "--extension",
+            "chase-driver",
+        ])
+        .unwrap_or_else(|err| panic!("Cli parsing failed: {err}"));
+
+        match cli.command {
+            Some(Commands::Scrape(args)) => {
+                assert_eq!(args.login, "chase-personal");
+                assert_eq!(args.extension, Some("chase-driver".to_string()));
+            }
+            _ => panic!("expected scrape command"),
         }
     }
 
@@ -1426,19 +1695,19 @@ mod tests {
 
     #[test]
     fn secret_add_requires_non_empty_fields() {
-        let missing_account = run_secret(SecretArgs {
+        let missing_login = run_secret(SecretArgs {
             command: SecretCommand::Add(SecretAddArgs {
-                account: " ".to_string(),
+                login: " ".to_string(),
                 domain: "example.com".to_string(),
                 name: "password".to_string(),
                 value: "secret".to_string(),
             }),
         });
-        assert!(expect_err(missing_account, "missing account").contains("account is required"));
+        assert!(expect_err(missing_login, "missing login").contains("login is required"));
 
         let missing_domain = run_secret(SecretArgs {
             command: SecretCommand::Add(SecretAddArgs {
-                account: "Assets:Bank".to_string(),
+                login: "chase-login".to_string(),
                 domain: " ".to_string(),
                 name: "password".to_string(),
                 value: "secret".to_string(),
@@ -1448,7 +1717,7 @@ mod tests {
 
         let missing_name = run_secret(SecretArgs {
             command: SecretCommand::Add(SecretAddArgs {
-                account: "Assets:Bank".to_string(),
+                login: "chase-login".to_string(),
                 domain: "example.com".to_string(),
                 name: " ".to_string(),
                 value: "secret".to_string(),
@@ -1461,7 +1730,7 @@ mod tests {
     fn secret_remove_requires_non_empty_fields() {
         let missing_domain = run_secret(SecretArgs {
             command: SecretCommand::Remove(SecretRemoveArgs {
-                account: "Assets:Bank".to_string(),
+                login: "chase-login".to_string(),
                 domain: " ".to_string(),
                 name: "password".to_string(),
             }),
@@ -1470,13 +1739,13 @@ mod tests {
     }
 
     #[test]
-    fn secret_list_requires_non_empty_account() {
-        let missing_account = run_secret(SecretArgs {
+    fn secret_list_requires_non_empty_login() {
+        let missing_login = run_secret(SecretArgs {
             command: SecretCommand::List(SecretListArgs {
-                account: " ".to_string(),
+                login: " ".to_string(),
             }),
         });
-        assert!(expect_err(missing_account, "missing account").contains("account is required"));
+        assert!(expect_err(missing_login, "missing login").contains("login is required"));
     }
 
     fn expect_ok<T, E: std::fmt::Display>(result: Result<T, E>, label: &str) -> T {
