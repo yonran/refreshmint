@@ -92,12 +92,54 @@ pub struct DedupAction {
 pub fn apply_dedup_actions(
     ledger_dir: &Path,
     account_name: &str,
-    mut entries: Vec<AccountEntry>,
+    entries: Vec<AccountEntry>,
     actions: &[DedupAction],
     default_account: &str,
     unreconciled_equity: &str,
     extracted_by: Option<&str>,
 ) -> Result<Vec<AccountEntry>, Box<dyn std::error::Error + Send + Sync>> {
+    apply_dedup_actions_with_logger(
+        entries,
+        actions,
+        default_account,
+        unreconciled_equity,
+        extracted_by,
+        |op| operations::append_account_operation(ledger_dir, account_name, op),
+    )
+}
+
+/// Apply dedup actions for a login account journal.
+pub fn apply_dedup_actions_for_login_account(
+    ledger_dir: &Path,
+    login_account: (&str, &str),
+    entries: Vec<AccountEntry>,
+    actions: &[DedupAction],
+    default_account: &str,
+    unreconciled_equity: &str,
+    extracted_by: Option<&str>,
+) -> Result<Vec<AccountEntry>, Box<dyn std::error::Error + Send + Sync>> {
+    let (login_name, label) = login_account;
+    apply_dedup_actions_with_logger(
+        entries,
+        actions,
+        default_account,
+        unreconciled_equity,
+        extracted_by,
+        |op| operations::append_login_account_operation(ledger_dir, login_name, label, op),
+    )
+}
+
+fn apply_dedup_actions_with_logger<F>(
+    mut entries: Vec<AccountEntry>,
+    actions: &[DedupAction],
+    default_account: &str,
+    unreconciled_equity: &str,
+    extracted_by: Option<&str>,
+    mut log_operation: F,
+) -> Result<Vec<AccountEntry>, Box<dyn std::error::Error + Send + Sync>>
+where
+    F: FnMut(&operations::AccountOperation) -> std::io::Result<()>,
+{
     for action in actions {
         match &action.result {
             DedupResult::SameEvidence {
@@ -105,21 +147,17 @@ pub fn apply_dedup_actions(
                 updated,
             } => {
                 if *updated {
-                    // Update existing entry with new data
                     update_entry_from_proposed(&mut entries[*existing_index], &action.proposed);
                 }
-                // Even if not updated, ensure evidence is added
                 for ev in action.proposed.evidence_refs() {
                     entries[*existing_index].add_evidence(ev);
                 }
             }
             DedupResult::BankIdMatch { existing_index }
             | DedupResult::FuzzyMatch { existing_index } => {
-                // Add evidence link from the new document
                 for ev in action.proposed.evidence_refs() {
                     entries[*existing_index].add_evidence(ev);
                 }
-                // Update status if more finalized
                 if is_more_finalized(&action.proposed.status(), &entries[*existing_index].status) {
                     entries[*existing_index].status = action.proposed.status();
                 }
@@ -134,9 +172,7 @@ pub fn apply_dedup_actions(
                 }
             }
             DedupResult::PendingToFinalized { existing_index } => {
-                // Update to finalized
                 entries[*existing_index].status = EntryStatus::Cleared;
-                // Update amount if postings have amounts
                 update_entry_from_proposed(&mut entries[*existing_index], &action.proposed);
                 for ev in action.proposed.evidence_refs() {
                     entries[*existing_index].add_evidence(ev);
@@ -150,7 +186,6 @@ pub fn apply_dedup_actions(
                     entry.extracted_by = Some(eb.to_string());
                 }
 
-                // Log entry-created operation
                 let op = operations::AccountOperation::EntryCreated {
                     entry_id: entry.id.clone(),
                     evidence: entry.evidence.clone(),
@@ -164,12 +199,10 @@ pub fn apply_dedup_actions(
                     tags: entry.tags.clone(),
                     timestamp: operations::now_timestamp(),
                 };
-                operations::append_account_operation(ledger_dir, account_name, &op)?;
-
+                log_operation(&op)?;
                 entries.push(entry);
             }
             DedupResult::Ambiguous { .. } => {
-                // Skip ambiguous: needs human review
                 eprintln!(
                     "Ambiguous match for transaction: {} {}",
                     action.proposed.tdate, action.proposed.tdescription

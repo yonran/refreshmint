@@ -57,9 +57,10 @@ pub fn reconcile_entry(
 
     // Generate GL transaction
     let gl_txn_id = uuid::Uuid::new_v4().to_string();
+    let source_locator = format!("accounts/{account_name}");
     let gl_text = format_gl_transaction(
         entry,
-        account_name,
+        &source_locator,
         counterpart_account,
         &gl_txn_id,
         posting_index,
@@ -96,6 +97,94 @@ pub fn reconcile_entry(
     if let Err(err) = operations::append_gl_operation(ledger_dir, &op) {
         let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
         let _ = account_journal::write_journal(ledger_dir, account_name, &original_entries);
+        return Err(err.into());
+    }
+
+    Ok(gl_txn_id)
+}
+
+/// Reconcile a single login account journal entry by assigning a counterpart account.
+pub fn reconcile_login_account_entry(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    entry_id: &str,
+    counterpart_account: &str,
+    posting_index: Option<usize>,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
+    let mut entries = account_journal::read_journal_at_path(&journal_path)?;
+    let original_entries = entries.clone();
+    let entry_idx = entries
+        .iter()
+        .position(|e| e.id == entry_id)
+        .ok_or_else(|| format!("entry not found: {entry_id}"))?;
+
+    let entry = &entries[entry_idx];
+
+    if let Some(posting_idx) = posting_index {
+        if posting_idx >= entry.postings.len() {
+            return Err(format!(
+                "posting index {posting_idx} is out of bounds for entry {entry_id} ({} postings)",
+                entry.postings.len()
+            )
+            .into());
+        }
+    } else if entry.postings.is_empty() {
+        return Err(format!("entry {entry_id} has no postings to reconcile").into());
+    }
+
+    if let Some(posting_idx) = posting_index {
+        if entry
+            .reconciled_postings
+            .iter()
+            .any(|(idx, _)| *idx == posting_idx)
+        {
+            return Err(
+                format!("posting {posting_idx} of entry {entry_id} is already reconciled").into(),
+            );
+        }
+    } else if entry.reconciled.is_some() {
+        return Err(format!("entry {entry_id} is already reconciled").into());
+    }
+
+    let gl_txn_id = uuid::Uuid::new_v4().to_string();
+    let source_locator = format!("logins/{login_name}/accounts/{label}");
+    let gl_text = format_gl_transaction(
+        entry,
+        &source_locator,
+        counterpart_account,
+        &gl_txn_id,
+        posting_index,
+    );
+
+    let gl_ref = format!("general.journal:{gl_txn_id}");
+    if let Some(posting_idx) = posting_index {
+        entries[entry_idx]
+            .reconciled_postings
+            .push((posting_idx, gl_ref));
+    } else {
+        entries[entry_idx].reconciled = Some(gl_ref);
+    }
+
+    account_journal::write_journal_at_path(&journal_path, &entries)?;
+
+    let gl_journal_path = ledger_dir.join("general.journal");
+    if let Err(err) = append_to_journal(&gl_journal_path, &gl_text) {
+        let _ = account_journal::write_journal_at_path(&journal_path, &original_entries);
+        return Err(err.into());
+    }
+
+    let op = operations::GlOperation::Reconcile {
+        account: source_locator,
+        entry_id: entry_id.to_string(),
+        counterpart_account: counterpart_account.to_string(),
+        posting_index,
+        timestamp: operations::now_timestamp(),
+    };
+    if let Err(err) = operations::append_gl_operation(ledger_dir, &op) {
+        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
+        let _ = account_journal::write_journal_at_path(&journal_path, &original_entries);
         return Err(err.into());
     }
 
@@ -180,6 +269,81 @@ pub fn unreconcile_entry(
     Ok(())
 }
 
+/// Undo reconciliation for a login account entry.
+pub fn unreconcile_login_account_entry(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    entry_id: &str,
+    posting_index: Option<usize>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
+    let mut entries = account_journal::read_journal_at_path(&journal_path)?;
+    let original_entries = entries.clone();
+    let entry_idx = entries
+        .iter()
+        .position(|e| e.id == entry_id)
+        .ok_or_else(|| format!("entry not found: {entry_id}"))?;
+
+    let gl_ref = if let Some(posting_idx) = posting_index {
+        let pos = original_entries[entry_idx]
+            .reconciled_postings
+            .iter()
+            .position(|(idx, _)| *idx == posting_idx)
+            .ok_or_else(|| {
+                format!("posting {posting_idx} of entry {entry_id} is not reconciled")
+            })?;
+        let (_, ref_str) = original_entries[entry_idx].reconciled_postings[pos].clone();
+        ref_str
+    } else {
+        original_entries[entry_idx]
+            .reconciled
+            .clone()
+            .ok_or_else(|| format!("entry {entry_id} is not reconciled"))?
+    };
+
+    let gl_txn_id = gl_ref.strip_prefix("general.journal:").unwrap_or(&gl_ref);
+    let removed_gl_txn = remove_gl_transaction(ledger_dir, gl_txn_id)?;
+
+    if let Some(posting_idx) = posting_index {
+        if let Some(pos) = entries[entry_idx]
+            .reconciled_postings
+            .iter()
+            .position(|(idx, _)| *idx == posting_idx)
+        {
+            entries[entry_idx].reconciled_postings.remove(pos);
+        }
+    } else {
+        entries[entry_idx].reconciled = None;
+    }
+
+    if let Err(err) = account_journal::write_journal_at_path(&journal_path, &entries) {
+        if let Some(removed) = removed_gl_txn {
+            let gl_journal_path = ledger_dir.join("general.journal");
+            let _ = append_to_journal(&gl_journal_path, &removed);
+        }
+        return Err(err.into());
+    }
+
+    let source_locator = format!("logins/{login_name}/accounts/{label}");
+    let op = operations::GlOperation::UndoReconcile {
+        account: source_locator,
+        entry_id: entry_id.to_string(),
+        posting_index,
+        timestamp: operations::now_timestamp(),
+    };
+    if let Err(err) = operations::append_gl_operation(ledger_dir, &op) {
+        let _ = account_journal::write_journal_at_path(&journal_path, &original_entries);
+        if let Some(removed) = removed_gl_txn {
+            let gl_journal_path = ledger_dir.join("general.journal");
+            let _ = append_to_journal(&gl_journal_path, &removed);
+        }
+        return Err(err.into());
+    }
+
+    Ok(())
+}
+
 /// Reconcile two entries across accounts as an inter-account transfer.
 pub fn reconcile_transfer(
     ledger_dir: &Path,
@@ -213,11 +377,13 @@ pub fn reconcile_transfer(
 
     // Generate GL transaction for transfer
     let gl_txn_id = uuid::Uuid::new_v4().to_string();
+    let source1 = format!("accounts/{account1}");
+    let source2 = format!("accounts/{account2}");
     let gl_text = format_transfer_gl_transaction(
         &entries1[idx1],
-        account1,
+        &source1,
         &entries2[idx2],
-        account2,
+        &source2,
         &gl_txn_id,
     );
 
@@ -278,6 +444,20 @@ pub fn get_unreconciled(
         .collect())
 }
 
+/// Get unreconciled entries for a login account.
+pub fn get_unreconciled_login_account(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+) -> Result<Vec<AccountEntry>, Box<dyn std::error::Error + Send + Sync>> {
+    let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
+    let entries = account_journal::read_journal_at_path(&journal_path)?;
+    Ok(entries
+        .into_iter()
+        .filter(has_unreconciled_portion)
+        .collect())
+}
+
 fn has_unreconciled_portion(entry: &AccountEntry) -> bool {
     if entry.reconciled.is_some() {
         return false;
@@ -301,18 +481,18 @@ fn has_unreconciled_portion(entry: &AccountEntry) -> bool {
 /// Format a GL transaction for reconciliation.
 fn format_gl_transaction(
     entry: &AccountEntry,
-    account_name: &str,
+    source_locator: &str,
     counterpart_account: &str,
     gl_txn_id: &str,
     posting_index: Option<usize>,
 ) -> String {
     let source_tag = if let Some(posting_idx) = posting_index {
         format!(
-            "; source: accounts/{}:{}:posting:{}",
-            account_name, entry.id, posting_idx
+            "; source: {}:{}:posting:{}",
+            source_locator, entry.id, posting_idx
         )
     } else {
-        format!("; source: accounts/{}:{}", account_name, entry.id)
+        format!("; source: {}:{}", source_locator, entry.id)
     };
 
     // Get the amount from the entry's postings
@@ -343,9 +523,9 @@ fn format_gl_transaction(
 /// Format a GL transaction for a transfer between two accounts.
 fn format_transfer_gl_transaction(
     entry1: &AccountEntry,
-    account1: &str,
+    source1: &str,
     _entry2: &AccountEntry,
-    account2: &str,
+    source2: &str,
     gl_txn_id: &str,
 ) -> String {
     let amount1 = entry1
@@ -368,13 +548,13 @@ fn format_transfer_gl_transaction(
         .unwrap_or_default();
 
     format!(
-        "{}  {}  ; id: {}\n    ; generated-by: refreshmint-reconcile\n    ; source: accounts/{}:{}\n    ; source: accounts/{}:{}\n    {real_account1}  {amount1}\n    {real_account2}\n",
+        "{}  {}  ; id: {}\n    ; generated-by: refreshmint-reconcile\n    ; source: {}:{}\n    ; source: {}:{}\n    {real_account1}  {amount1}\n    {real_account2}\n",
         entry1.date,
         entry1.description,
         gl_txn_id,
-        account1,
+        source1,
         entry1.id,
-        account2,
+        source2,
         _entry2.id,
     )
 }

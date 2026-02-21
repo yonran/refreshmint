@@ -219,6 +219,14 @@ export async function listDocuments(
     return invoke('list_documents', { ledger, accountName });
 }
 
+export async function listLoginAccountDocuments(
+    ledger: string,
+    loginName: string,
+    label: string,
+): Promise<DocumentWithInfo[]> {
+    return invoke('list_login_account_documents', { ledger, loginName, label });
+}
+
 export async function runExtraction(
     ledger: string,
     accountName: string,
@@ -233,6 +241,22 @@ export async function runExtraction(
     });
 }
 
+export async function runLoginAccountExtraction(
+    ledger: string,
+    loginName: string,
+    label: string,
+    extensionName: string,
+    documentNames: string[],
+): Promise<number> {
+    return invoke('run_login_account_extraction', {
+        ledger,
+        loginName,
+        label,
+        extensionName,
+        documentNames,
+    });
+}
+
 export async function getAccountJournal(
     ledger: string,
     accountName: string,
@@ -240,11 +264,31 @@ export async function getAccountJournal(
     return invoke('get_account_journal', { ledger, accountName });
 }
 
+export async function getLoginAccountJournal(
+    ledger: string,
+    loginName: string,
+    label: string,
+): Promise<AccountJournalEntry[]> {
+    return invoke('get_login_account_journal', { ledger, loginName, label });
+}
+
 export async function getUnreconciled(
     ledger: string,
     accountName: string,
 ): Promise<AccountJournalEntry[]> {
     return invoke('get_unreconciled', { ledger, accountName });
+}
+
+export async function getLoginAccountUnreconciled(
+    ledger: string,
+    loginName: string,
+    label: string,
+): Promise<AccountJournalEntry[]> {
+    return invoke('get_login_account_unreconciled', {
+        ledger,
+        loginName,
+        label,
+    });
 }
 
 export async function reconcileEntry(
@@ -263,6 +307,24 @@ export async function reconcileEntry(
     });
 }
 
+export async function reconcileLoginAccountEntry(
+    ledger: string,
+    loginName: string,
+    label: string,
+    entryId: string,
+    counterpartAccount: string,
+    postingIndex: number | null,
+): Promise<string> {
+    return invoke('reconcile_login_account_entry', {
+        ledger,
+        loginName,
+        label,
+        entryId,
+        counterpartAccount,
+        postingIndex,
+    });
+}
+
 export async function unreconcileEntry(
     ledger: string,
     accountName: string,
@@ -272,6 +334,22 @@ export async function unreconcileEntry(
     await invoke('unreconcile_entry', {
         ledger,
         accountName,
+        entryId,
+        postingIndex,
+    });
+}
+
+export async function unreconcileLoginAccountEntry(
+    ledger: string,
+    loginName: string,
+    label: string,
+    entryId: string,
+    postingIndex: number | null,
+): Promise<void> {
+    await invoke('unreconcile_login_account_entry', {
+        ledger,
+        loginName,
+        label,
         entryId,
         postingIndex,
     });

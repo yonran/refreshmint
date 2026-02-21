@@ -113,6 +113,16 @@ pub fn account_operations_path(ledger_dir: &Path, account_name: &str) -> PathBuf
         .join("operations.jsonl")
 }
 
+/// Returns the path to the per-login-account operations log.
+pub fn login_account_operations_path(ledger_dir: &Path, login_name: &str, label: &str) -> PathBuf {
+    ledger_dir
+        .join("logins")
+        .join(login_name)
+        .join("accounts")
+        .join(label)
+        .join("operations.jsonl")
+}
+
 /// Returns the path to the GL-level operations log.
 pub fn gl_operations_path(ledger_dir: &Path) -> PathBuf {
     ledger_dir.join("operations.jsonl")
@@ -128,12 +138,33 @@ pub fn append_account_operation(
     append_jsonl(&path, operation)
 }
 
+/// Append an account-level operation to a login account operations log.
+pub fn append_login_account_operation(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    operation: &AccountOperation,
+) -> io::Result<()> {
+    let path = login_account_operations_path(ledger_dir, login_name, label);
+    append_jsonl(&path, operation)
+}
+
 /// Read all account-level operations from the per-account operations log.
 pub fn read_account_operations(
     ledger_dir: &Path,
     account_name: &str,
 ) -> io::Result<Vec<AccountOperation>> {
     let path = account_operations_path(ledger_dir, account_name);
+    read_jsonl(&path)
+}
+
+/// Read all account-level operations from a login account operations log.
+pub fn read_login_account_operations(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+) -> io::Result<Vec<AccountOperation>> {
+    let path = login_account_operations_path(ledger_dir, login_name, label);
     read_jsonl(&path)
 }
 

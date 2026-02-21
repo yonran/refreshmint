@@ -114,12 +114,22 @@ pub fn account_journal_path(ledger_dir: &Path, account_name: &str) -> PathBuf {
         .join("account.journal")
 }
 
+/// Returns the path to the login account journal file.
+pub fn login_account_journal_path(ledger_dir: &Path, login_name: &str, label: &str) -> PathBuf {
+    crate::login_config::login_account_journal_path(ledger_dir, login_name, label)
+}
+
 /// Returns the path to the account documents directory.
 pub fn account_documents_dir(ledger_dir: &Path, account_name: &str) -> PathBuf {
     ledger_dir
         .join("accounts")
         .join(account_name)
         .join("documents")
+}
+
+/// Returns the path to the login account documents directory.
+pub fn login_account_documents_dir(ledger_dir: &Path, login_name: &str, label: &str) -> PathBuf {
+    crate::login_config::login_account_documents_dir(ledger_dir, login_name, label)
 }
 
 /// Format a single entry as hledger journal text.
@@ -227,23 +237,33 @@ pub fn write_journal(
     entries: &[AccountEntry],
 ) -> io::Result<()> {
     let path = account_journal_path(ledger_dir, account_name);
+    write_journal_at_path(&path, entries)
+}
+
+/// Write all entries to a specific journal path (atomic write via temp file + rename).
+pub fn write_journal_at_path(path: &Path, entries: &[AccountEntry]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     let content = format_journal(entries);
-    atomic_write(&path, content.as_bytes())
+    atomic_write(path, content.as_bytes())
 }
 
 /// Append a single entry to the account journal.
 pub fn append_entry(ledger_dir: &Path, account_name: &str, entry: &AccountEntry) -> io::Result<()> {
     let path = account_journal_path(ledger_dir, account_name);
+    append_entry_at_path(&path, entry)
+}
+
+/// Append a single entry to a specific journal path.
+pub fn append_entry_at_path(path: &Path, entry: &AccountEntry) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     let formatted = format_entry(entry);
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     if file.metadata()?.len() > 0 {
         file.write_all(b"\n")?;
     }
@@ -257,11 +277,16 @@ pub fn append_entry(ledger_dir: &Path, account_name: &str, entry: &AccountEntry)
 /// It parses the hledger-style text back into `AccountEntry` structs.
 pub fn read_journal(ledger_dir: &Path, account_name: &str) -> io::Result<Vec<AccountEntry>> {
     let path = account_journal_path(ledger_dir, account_name);
+    read_journal_at_path(&path)
+}
+
+/// Read all entries from a specific journal path.
+pub fn read_journal_at_path(path: &Path) -> io::Result<Vec<AccountEntry>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
 
-    let content = fs::read_to_string(&path)?;
+    let content = fs::read_to_string(path)?;
     parse_journal(&content)
 }
 

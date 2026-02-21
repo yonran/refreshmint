@@ -298,9 +298,44 @@ pub fn run_extraction(
     extension_name: &str,
     document_names: &[String],
 ) -> Result<ExtractionResult, Box<dyn std::error::Error + Send + Sync>> {
+    let documents_dir = account_journal::account_documents_dir(ledger_dir, account_name);
+    run_extraction_with_documents_dir(
+        ledger_dir,
+        &documents_dir,
+        account_name,
+        extension_name,
+        document_names,
+    )
+}
+
+/// Run extraction for a login account (`logins/<login>/accounts/<label>`).
+pub fn run_extraction_for_login_account(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    account_name: &str,
+    extension_name: &str,
+    document_names: &[String],
+) -> Result<ExtractionResult, Box<dyn std::error::Error + Send + Sync>> {
+    let documents_dir = account_journal::login_account_documents_dir(ledger_dir, login_name, label);
+    run_extraction_with_documents_dir(
+        ledger_dir,
+        &documents_dir,
+        account_name,
+        extension_name,
+        document_names,
+    )
+}
+
+fn run_extraction_with_documents_dir(
+    ledger_dir: &Path,
+    documents_dir: &Path,
+    account_name: &str,
+    extension_name: &str,
+    document_names: &[String],
+) -> Result<ExtractionResult, Box<dyn std::error::Error + Send + Sync>> {
     let extension_dir = crate::account_config::resolve_extension_dir(ledger_dir, extension_name);
     let manifest = crate::scrape::load_manifest(&extension_dir)?;
-    let documents_dir = account_journal::account_documents_dir(ledger_dir, account_name);
     let extraction_mode =
         resolve_extraction_mode(manifest.extract.as_deref(), manifest.rules.as_deref()).map_err(
             |err| {
@@ -328,7 +363,7 @@ pub fn run_extraction(
                     &script_path,
                     &doc_path,
                     doc_name,
-                    &documents_dir,
+                    documents_dir,
                     ledger_dir,
                     account_name,
                     extension_name,
@@ -807,12 +842,26 @@ fn format_decimal_raw(raw: &crate::hledger::DecimalRaw) -> String {
 /// List evidence documents for an account.
 pub fn list_documents(ledger_dir: &Path, account_name: &str) -> io::Result<Vec<DocumentWithInfo>> {
     let documents_dir = account_journal::account_documents_dir(ledger_dir, account_name);
+    list_documents_in_dir(&documents_dir)
+}
+
+/// List evidence documents for a login account.
+pub fn list_documents_for_login_account(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+) -> io::Result<Vec<DocumentWithInfo>> {
+    let documents_dir = account_journal::login_account_documents_dir(ledger_dir, login_name, label);
+    list_documents_in_dir(&documents_dir)
+}
+
+fn list_documents_in_dir(documents_dir: &Path) -> io::Result<Vec<DocumentWithInfo>> {
     if !documents_dir.exists() {
         return Ok(Vec::new());
     }
 
     let mut documents = Vec::new();
-    for entry in std::fs::read_dir(&documents_dir)? {
+    for entry in std::fs::read_dir(documents_dir)? {
         let entry = entry?;
         let file_name = entry.file_name().to_string_lossy().to_string();
         if file_name.ends_with("-info.json") {

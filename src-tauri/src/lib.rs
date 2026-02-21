@@ -88,11 +88,17 @@ pub fn run_with_context(
             run_scrape_for_login,
             run_scrape,
             list_documents,
+            list_login_account_documents,
             run_extraction,
+            run_login_account_extraction,
             get_account_journal,
+            get_login_account_journal,
             get_unreconciled,
+            get_login_account_unreconciled,
             reconcile_entry,
+            reconcile_login_account_entry,
             unreconcile_entry,
+            unreconcile_login_account_entry,
             reconcile_transfer,
             get_account_config,
             set_account_extension,
@@ -505,6 +511,20 @@ fn list_documents(
 }
 
 #[tauri::command]
+fn list_login_account_documents(
+    ledger: String,
+    login_name: String,
+    label: String,
+) -> Result<Vec<extract::DocumentWithInfo>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let label = require_non_empty_input("label", label)?;
+    login_config::validate_label(&label)?;
+    extract::list_documents_for_login_account(&target_dir, &login_name, &label)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn run_extraction(
     ledger: String,
     account_name: String,
@@ -580,6 +600,90 @@ fn run_extraction(
 }
 
 #[tauri::command]
+fn run_login_account_extraction(
+    ledger: String,
+    login_name: String,
+    label: String,
+    extension_name: String,
+    document_names: Vec<String>,
+) -> Result<usize, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let label = require_non_empty_input("label", label)?;
+    login_config::validate_label(&label)?;
+
+    let extension_name =
+        login_config::resolve_login_extension(&target_dir, &login_name, Some(&extension_name))
+            .map_err(|err| err.to_string())?;
+    let gl_account = resolve_login_account_gl_account(&target_dir, &login_name, &label)?;
+
+    let result = extract::run_extraction_for_login_account(
+        &target_dir,
+        &login_name,
+        &label,
+        &gl_account,
+        &extension_name,
+        &document_names,
+    )
+    .map_err(|err| err.to_string())?;
+
+    let journal_path =
+        account_journal::login_account_journal_path(&target_dir, &login_name, &label);
+    let existing_entries =
+        account_journal::read_journal_at_path(&journal_path).map_err(|err| err.to_string())?;
+
+    let config = dedup::DedupConfig::default();
+    let mut all_updated = existing_entries;
+    let mut new_count = 0usize;
+
+    for doc_name in &result.document_names {
+        let doc_txns: Vec<_> = result
+            .proposed_transactions
+            .iter()
+            .filter(|t| {
+                t.evidence_refs()
+                    .iter()
+                    .any(|e| evidence_ref_matches_document(e, doc_name))
+            })
+            .cloned()
+            .collect();
+
+        if doc_txns.is_empty() {
+            continue;
+        }
+
+        let actions = dedup::run_dedup(&all_updated, &doc_txns, doc_name, &config);
+        new_count += actions
+            .iter()
+            .filter(|a| matches!(a.result, dedup::DedupResult::New))
+            .count();
+
+        let default_account = all_updated
+            .first()
+            .and_then(|e| e.postings.first())
+            .map(|p| p.account.clone())
+            .unwrap_or_else(|| gl_account.clone());
+        let unreconciled_equity = format!("Equity:Unreconciled:{login_name}:{label}");
+
+        all_updated = dedup::apply_dedup_actions_for_login_account(
+            &target_dir,
+            (&login_name, &label),
+            all_updated,
+            &actions,
+            &default_account,
+            &unreconciled_equity,
+            Some(&format!("{extension_name}:latest")),
+        )
+        .map_err(|err| err.to_string())?;
+    }
+
+    account_journal::write_journal_at_path(&journal_path, &all_updated)
+        .map_err(|err| err.to_string())?;
+
+    Ok(new_count)
+}
+
+#[tauri::command]
 fn get_account_config(
     ledger: String,
     account_name: String,
@@ -619,6 +723,48 @@ fn evidence_ref_matches_document(evidence_ref: &str, document_name: &str) -> boo
             .get(document_name.len()..)
             .map(|rest| rest.starts_with(':') || rest.starts_with('#'))
             .unwrap_or(false)
+}
+
+fn resolve_login_account_gl_account(
+    ledger_dir: &std::path::Path,
+    login_name: &str,
+    label: &str,
+) -> Result<String, String> {
+    let config = login_config::read_login_config(ledger_dir, login_name);
+    let account_cfg = config
+        .accounts
+        .get(label)
+        .ok_or_else(|| format!("label '{label}' not found in login '{login_name}'"))?;
+
+    let gl_account = account_cfg
+        .gl_account
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "login '{login_name}' label '{label}' is ignored (gl_account is null); set a GL account first"
+            )
+        })?
+        .to_string();
+
+    if let Some(conflict) = login_config::find_gl_account_conflicts(ledger_dir)
+        .into_iter()
+        .find(|conflict| conflict.gl_account == gl_account)
+    {
+        let entries = conflict
+            .entries
+            .iter()
+            .map(|entry| format!("{}/{}", entry.login_name, entry.label))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "GL account '{}' has conflicting login mappings: {}; resolve conflicts first",
+            conflict.gl_account, entries
+        ));
+    }
+
+    Ok(gl_account)
 }
 
 // --- Login CRUD commands ---
@@ -867,28 +1013,23 @@ fn get_account_journal(
     let account_name = require_non_empty_input("account_name", account_name)?;
     let entries =
         account_journal::read_journal(&target_dir, &account_name).map_err(|err| err.to_string())?;
+    Ok(map_account_journal_entries(entries))
+}
 
-    Ok(entries
-        .into_iter()
-        .map(|e| {
-            let is_transfer = transfer_detector::is_probable_transfer(&e.description);
-            let status = match e.status {
-                account_journal::EntryStatus::Cleared => "cleared",
-                account_journal::EntryStatus::Pending => "pending",
-                account_journal::EntryStatus::Unmarked => "unmarked",
-            };
-            AccountJournalEntry {
-                id: e.id,
-                date: e.date,
-                status: status.to_string(),
-                description: e.description,
-                comment: e.comment,
-                evidence: e.evidence,
-                reconciled: e.reconciled,
-                is_transfer,
-            }
-        })
-        .collect())
+#[tauri::command]
+fn get_login_account_journal(
+    ledger: String,
+    login_name: String,
+    label: String,
+) -> Result<Vec<AccountJournalEntry>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let label = require_non_empty_input("label", label)?;
+    let journal_path =
+        account_journal::login_account_journal_path(&target_dir, &login_name, &label);
+    let entries =
+        account_journal::read_journal_at_path(&journal_path).map_err(|err| err.to_string())?;
+    Ok(map_account_journal_entries(entries))
 }
 
 #[tauri::command]
@@ -900,28 +1041,21 @@ fn get_unreconciled(
     let account_name = require_non_empty_input("account_name", account_name)?;
     let entries =
         reconcile::get_unreconciled(&target_dir, &account_name).map_err(|err| err.to_string())?;
+    Ok(map_account_journal_entries(entries))
+}
 
-    Ok(entries
-        .into_iter()
-        .map(|e| {
-            let is_transfer = transfer_detector::is_probable_transfer(&e.description);
-            let status = match e.status {
-                account_journal::EntryStatus::Cleared => "cleared",
-                account_journal::EntryStatus::Pending => "pending",
-                account_journal::EntryStatus::Unmarked => "unmarked",
-            };
-            AccountJournalEntry {
-                id: e.id,
-                date: e.date,
-                status: status.to_string(),
-                description: e.description,
-                comment: e.comment,
-                evidence: e.evidence,
-                reconciled: e.reconciled,
-                is_transfer,
-            }
-        })
-        .collect())
+#[tauri::command]
+fn get_login_account_unreconciled(
+    ledger: String,
+    login_name: String,
+    label: String,
+) -> Result<Vec<AccountJournalEntry>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let label = require_non_empty_input("label", label)?;
+    let entries = reconcile::get_unreconciled_login_account(&target_dir, &login_name, &label)
+        .map_err(|err| err.to_string())?;
+    Ok(map_account_journal_entries(entries))
 }
 
 #[tauri::command]
@@ -948,6 +1082,35 @@ fn reconcile_entry(
 }
 
 #[tauri::command]
+fn reconcile_login_account_entry(
+    ledger: String,
+    login_name: String,
+    label: String,
+    entry_id: String,
+    counterpart_account: String,
+    posting_index: Option<usize>,
+) -> Result<String, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let label = require_non_empty_input("label", label)?;
+    let entry_id = require_non_empty_input("entry_id", entry_id)?;
+    let counterpart_account = require_non_empty_input("counterpart_account", counterpart_account)?;
+
+    // Reject reconciliation when this login label's GL mapping is unset or conflicting.
+    let _ = resolve_login_account_gl_account(&target_dir, &login_name, &label)?;
+
+    reconcile::reconcile_login_account_entry(
+        &target_dir,
+        &login_name,
+        &label,
+        &entry_id,
+        &counterpart_account,
+        posting_index,
+    )
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn unreconcile_entry(
     ledger: String,
     account_name: String,
@@ -960,6 +1123,29 @@ fn unreconcile_entry(
 
     reconcile::unreconcile_entry(&target_dir, &account_name, &entry_id, posting_index)
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn unreconcile_login_account_entry(
+    ledger: String,
+    login_name: String,
+    label: String,
+    entry_id: String,
+    posting_index: Option<usize>,
+) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_non_empty_input("login_name", login_name)?;
+    let label = require_non_empty_input("label", label)?;
+    let entry_id = require_non_empty_input("entry_id", entry_id)?;
+
+    reconcile::unreconcile_login_account_entry(
+        &target_dir,
+        &login_name,
+        &label,
+        &entry_id,
+        posting_index,
+    )
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -978,6 +1164,32 @@ fn reconcile_transfer(
 
     reconcile::reconcile_transfer(&target_dir, &account1, &entry_id1, &account2, &entry_id2)
         .map_err(|err| err.to_string())
+}
+
+fn map_account_journal_entries(
+    entries: Vec<account_journal::AccountEntry>,
+) -> Vec<AccountJournalEntry> {
+    entries
+        .into_iter()
+        .map(|e| {
+            let is_transfer = transfer_detector::is_probable_transfer(&e.description);
+            let status = match e.status {
+                account_journal::EntryStatus::Cleared => "cleared",
+                account_journal::EntryStatus::Pending => "pending",
+                account_journal::EntryStatus::Unmarked => "unmarked",
+            };
+            AccountJournalEntry {
+                id: e.id,
+                date: e.date,
+                status: status.to_string(),
+                description: e.description,
+                comment: e.comment,
+                evidence: e.evidence,
+                reconciled: e.reconciled,
+                is_transfer,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
