@@ -1906,7 +1906,7 @@ function App() {
         );
     }
 
-    async function handleIgnoreConflictMapping(
+    async function handleIgnoreLoginAccountMapping(
         loginName: string,
         label: string,
         glAccount: string,
@@ -1935,7 +1935,7 @@ function App() {
             setLoginLabelDraft(label);
             setLoginGlAccountDraft('');
             setLoginConfigStatus(
-                `Set '${loginName}/${label}' to ignored to resolve conflict on '${glAccount}'.`,
+                `Set '${loginName}/${label}' to ignored (removed GL account '${glAccount}').`,
             );
             requestLoginConfigReload();
         } catch (error) {
@@ -2630,7 +2630,7 @@ function App() {
                                                                         isSavingLoginConfig
                                                                     }
                                                                     onClick={() => {
-                                                                        void handleIgnoreConflictMapping(
+                                                                        void handleIgnoreLoginAccountMapping(
                                                                             entry.loginName,
                                                                             entry.label,
                                                                             conflict.glAccount,
@@ -3493,6 +3493,25 @@ function App() {
                                                                         >
                                                                             Edit
                                                                         </button>
+                                                                        {glAccount.length >
+                                                                        0 ? (
+                                                                            <button
+                                                                                type="button"
+                                                                                className="ghost-button"
+                                                                                onClick={() => {
+                                                                                    void handleIgnoreLoginAccountMapping(
+                                                                                        selectedLoginName,
+                                                                                        label,
+                                                                                        glAccount,
+                                                                                    );
+                                                                                }}
+                                                                                disabled={
+                                                                                    isSavingLoginConfig
+                                                                                }
+                                                                            >
+                                                                                Ignore
+                                                                            </button>
+                                                                        ) : null}
                                                                         <button
                                                                             type="button"
                                                                             className="ghost-button"
