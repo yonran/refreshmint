@@ -172,6 +172,7 @@ function App() {
     );
     const [isLoadingLoginConfigs, setIsLoadingLoginConfigs] = useState(false);
     const [isSavingLoginConfig, setIsSavingLoginConfig] = useState(false);
+    const [hasLoadedLoginConfigs, setHasLoadedLoginConfigs] = useState(false);
     const [loginConfigsReloadToken, setLoginConfigsReloadToken] = useState(0);
     const [loginAccountMappings, setLoginAccountMappings] = useState<
         Record<string, LoginAccountMapping[]>
@@ -309,8 +310,39 @@ function App() {
             : Object.entries(selectedLoginConfig.accounts).sort(([a], [b]) =>
                   a.localeCompare(b),
               );
+    const computedGlAccountConflicts = Object.entries(loginConfigsByName)
+        .flatMap(([loginName, config]) =>
+            Object.entries(config.accounts)
+                .map(([label, accountConfig]) => ({
+                    loginName,
+                    label,
+                    glAccount: accountConfig.glAccount?.trim() ?? '',
+                }))
+                .filter((entry) => entry.glAccount.length > 0),
+        )
+        .reduce((map, entry) => {
+            const current = map.get(entry.glAccount) ?? [];
+            map.set(entry.glAccount, [
+                ...current,
+                { loginName: entry.loginName, label: entry.label },
+            ]);
+            return map;
+        }, new Map<string, Array<{ loginName: string; label: string }>>());
+    const glAccountConflicts = hasLoadedLoginConfigs
+        ? Array.from(computedGlAccountConflicts.entries())
+              .filter(([, entries]) => entries.length > 1)
+              .map(([glAccount, entries]) => ({
+                  glAccount,
+                  entries: [...entries].sort((a, b) =>
+                      a.loginName === b.loginName
+                          ? a.label.localeCompare(b.label)
+                          : a.loginName.localeCompare(b.loginName),
+                  ),
+              }))
+              .sort((a, b) => a.glAccount.localeCompare(b.glAccount))
+        : (ledger?.glAccountConflicts ?? []);
     const conflictingGlAccountSet = new Set(
-        ledger?.glAccountConflicts.map((conflict) => conflict.glAccount) ?? [],
+        glAccountConflicts.map((conflict) => conflict.glAccount),
     );
     const selectedScrapeAccountHasConflict =
         selectedScrapeAccount.length > 0 &&
@@ -377,6 +409,7 @@ function App() {
             setLoginConfigStatus(null);
             setIsLoadingLoginConfigs(false);
             setIsSavingLoginConfig(false);
+            setHasLoadedLoginConfigs(false);
             setLoginConfigsReloadToken(0);
             setLoginAccountMappings({});
             setAccountSecrets([]);
@@ -504,6 +537,7 @@ function App() {
             setSelectedLoginName('');
             setLoginAccountMappings({});
             setIsLoadingLoginConfigs(false);
+            setHasLoadedLoginConfigs(false);
             return;
         }
 
@@ -551,6 +585,7 @@ function App() {
                     return logins[0] ?? '';
                 });
                 setLoginAccountMappings(mappings);
+                setHasLoadedLoginConfigs(true);
             })
             .catch((error: unknown) => {
                 if (!cancelled) {
@@ -558,6 +593,7 @@ function App() {
                     setLoginConfigsByName({});
                     setSelectedLoginName('');
                     setLoginAccountMappings({});
+                    setHasLoadedLoginConfigs(false);
                     setLoginConfigStatus(
                         `Failed to load login configs: ${String(error)}`,
                     );
@@ -1860,6 +1896,45 @@ function App() {
         );
     }
 
+    async function handleIgnoreConflictMapping(
+        loginName: string,
+        label: string,
+        glAccount: string,
+    ) {
+        if (!ledger) {
+            return;
+        }
+        const shouldIgnore = await confirmDialog(
+            `Set '${loginName}/${label}' to ignored for '${glAccount}'?`,
+            {
+                title: 'Ignore mapping?',
+                kind: 'warning',
+                okLabel: 'Ignore',
+                cancelLabel: 'Cancel',
+            },
+        );
+        if (!shouldIgnore) {
+            return;
+        }
+
+        setIsSavingLoginConfig(true);
+        try {
+            await setLoginAccount(ledger.path, loginName, label, null);
+            setActiveTab('scrape');
+            setSelectedLoginName(loginName);
+            setLoginLabelDraft(label);
+            setLoginGlAccountDraft('');
+            setLoginConfigStatus(
+                `Set '${loginName}/${label}' to ignored to resolve conflict on '${glAccount}'.`,
+            );
+            requestLoginConfigReload();
+        } catch (error) {
+            setLoginConfigStatus(`Failed to ignore mapping: ${String(error)}`);
+        } finally {
+            setIsSavingLoginConfig(false);
+        }
+    }
+
     function handleSubmitSecretForm(
         event: React.SyntheticEvent<HTMLFormElement>,
     ) {
@@ -2479,7 +2554,7 @@ function App() {
                 </div>
             ) : (
                 <section className="ledger">
-                    {ledger.glAccountConflicts.length === 0 ? null : (
+                    {glAccountConflicts.length === 0 ? null : (
                         <section className="txn-form">
                             <div className="txn-form-header">
                                 <div>
@@ -2492,8 +2567,8 @@ function App() {
                                 </div>
                             </div>
                             <p className="status">
-                                {ledger.glAccountConflicts.length} conflicting
-                                GL account mapping(s) detected.
+                                {glAccountConflicts.length} conflicting GL
+                                account mapping(s) detected.
                             </p>
                             <div className="table-wrap">
                                 <table className="ledger-table">
@@ -2501,11 +2576,11 @@ function App() {
                                         <tr>
                                             <th>GL Account</th>
                                             <th>Login/Label</th>
-                                            <th>Action</th>
+                                            <th>Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {ledger.glAccountConflicts.flatMap(
+                                        {glAccountConflicts.flatMap(
                                             (conflict) =>
                                                 conflict.entries.map(
                                                     (entry, index) => (
@@ -2537,6 +2612,23 @@ function App() {
                                                                 >
                                                                     Load in
                                                                     mappings
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    className="ghost-button"
+                                                                    disabled={
+                                                                        isSavingLoginConfig
+                                                                    }
+                                                                    onClick={() => {
+                                                                        void handleIgnoreConflictMapping(
+                                                                            entry.loginName,
+                                                                            entry.label,
+                                                                            conflict.glAccount,
+                                                                        );
+                                                                    }}
+                                                                >
+                                                                    Ignore
+                                                                    mapping
                                                                 </button>
                                                             </td>
                                                         </tr>
