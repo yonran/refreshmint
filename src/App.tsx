@@ -26,6 +26,7 @@ import {
     addTransaction,
     addTransactionText,
     createLogin,
+    deleteLoginAccount,
     deleteLogin,
     getLoginAccountJournal,
     getLoginConfig,
@@ -48,7 +49,6 @@ import {
     reconcileLoginAccountEntry,
     reconcileTransfer,
     reenterLoginSecret,
-    removeLoginAccount,
     removeLoginSecret,
     runLoginAccountExtraction,
     runScrapeForLogin,
@@ -1836,7 +1836,7 @@ function App() {
 
         setIsSavingLoginConfig(true);
         try {
-            await removeLoginAccount(ledger.path, loginName, label);
+            await deleteLoginAccount(ledger.path, loginName, label);
             setLoginConfigStatus(`Removed '${loginName}/${label}'.`);
             requestLoginConfigReload();
         } catch (error) {

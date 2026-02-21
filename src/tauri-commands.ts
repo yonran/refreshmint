@@ -478,6 +478,14 @@ export async function removeLoginAccount(
     await invoke('remove_login_account', { ledger, loginName, label });
 }
 
+export async function deleteLoginAccount(
+    ledger: string,
+    loginName: string,
+    label: string,
+): Promise<void> {
+    await invoke('delete_login_account', { ledger, loginName, label });
+}
+
 export async function listLoginSecrets(
     loginName: string,
 ): Promise<AccountSecretEntry[]> {

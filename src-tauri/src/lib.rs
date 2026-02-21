@@ -110,6 +110,7 @@ pub fn run_with_context(
             delete_login,
             set_login_account,
             remove_login_account,
+            delete_login_account,
             list_login_secrets,
             sync_login_secrets_for_extension,
             add_login_secret,
@@ -888,6 +889,11 @@ fn remove_login_account(ledger: String, login_name: String, label: String) -> Re
 
     login_config::remove_login_account(&target_dir, &login_name, &label)
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn delete_login_account(ledger: String, login_name: String, label: String) -> Result<(), String> {
+    remove_login_account(ledger, login_name, label)
 }
 
 // --- Login-keyed secret commands ---
