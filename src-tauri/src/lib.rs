@@ -370,6 +370,12 @@ fn require_login_name_input(value: String) -> Result<String, String> {
     Ok(login_name)
 }
 
+fn require_label_input(value: String) -> Result<String, String> {
+    let label = require_non_empty_input("label", value)?;
+    login_config::validate_label(&label).map_err(|err| format!("invalid label: {err}"))?;
+    Ok(label)
+}
+
 #[tauri::command]
 fn start_scrape_debug_session_for_login(
     ledger: String,
@@ -537,8 +543,7 @@ fn list_login_account_documents(
 ) -> Result<Vec<extract::DocumentWithInfo>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
-    let label = require_non_empty_input("label", label)?;
-    login_config::validate_label(&label)?;
+    let label = require_label_input(label)?;
     extract::list_documents_for_login_account(&target_dir, &login_name, &label)
         .map_err(|err| err.to_string())
 }
@@ -628,8 +633,7 @@ fn run_login_account_extraction(
 ) -> Result<usize, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
-    let label = require_non_empty_input("label", label)?;
-    login_config::validate_label(&label)?;
+    let label = require_label_input(label)?;
 
     let extension_name =
         login_config::resolve_login_extension(&target_dir, &login_name, Some(&extension_name))
@@ -870,8 +874,7 @@ fn set_login_account(
 ) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
-    let label = require_non_empty_input("label", label)?;
-    login_config::validate_label(&label)?;
+    let label = require_label_input(label)?;
 
     let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
         .map_err(|err| err.to_string())?;
@@ -896,7 +899,7 @@ fn set_login_account(
 fn remove_login_account(ledger: String, login_name: String, label: String) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
-    let label = require_non_empty_input("label", label)?;
+    let label = require_label_input(label)?;
 
     let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
         .map_err(|err| err.to_string())?;
@@ -1053,7 +1056,7 @@ fn get_login_account_journal(
 ) -> Result<Vec<AccountJournalEntry>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
-    let label = require_non_empty_input("label", label)?;
+    let label = require_label_input(label)?;
     let journal_path =
         account_journal::login_account_journal_path(&target_dir, &login_name, &label);
     let entries =
@@ -1081,7 +1084,7 @@ fn get_login_account_unreconciled(
 ) -> Result<Vec<AccountJournalEntry>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
-    let label = require_non_empty_input("label", label)?;
+    let label = require_label_input(label)?;
     let entries = reconcile::get_unreconciled_login_account(&target_dir, &login_name, &label)
         .map_err(|err| err.to_string())?;
     Ok(map_account_journal_entries(entries))
@@ -1121,7 +1124,7 @@ fn reconcile_login_account_entry(
 ) -> Result<String, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
-    let label = require_non_empty_input("label", label)?;
+    let label = require_label_input(label)?;
     let entry_id = require_non_empty_input("entry_id", entry_id)?;
     let counterpart_account = require_non_empty_input("counterpart_account", counterpart_account)?;
 
@@ -1164,7 +1167,7 @@ fn unreconcile_login_account_entry(
 ) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
-    let label = require_non_empty_input("label", label)?;
+    let label = require_label_input(label)?;
     let entry_id = require_non_empty_input("entry_id", entry_id)?;
 
     reconcile::unreconcile_login_account_entry(
@@ -1225,8 +1228,8 @@ fn map_account_journal_entries(
 mod tests {
     use super::{
         classify_secret_entries, delete_login_account, evidence_ref_matches_document,
-        flatten_declared_secret_entries, require_login_name_input, require_non_empty_input,
-        SecretEntry,
+        flatten_declared_secret_entries, require_label_input, require_login_name_input,
+        require_non_empty_input, SecretEntry,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -1279,6 +1282,24 @@ mod tests {
         match value {
             Ok(_) => panic!("expected validation error for invalid login name"),
             Err(err) => assert!(err.contains("invalid login_name")),
+        }
+    }
+
+    #[test]
+    fn require_label_input_accepts_valid_label() {
+        let value = require_label_input("checking.main".to_string());
+        match value {
+            Ok(label) => assert_eq!(label, "checking.main"),
+            Err(err) => panic!("expected valid label, got error: {err}"),
+        }
+    }
+
+    #[test]
+    fn require_label_input_rejects_path_like_label() {
+        let value = require_label_input("bad/label".to_string());
+        match value {
+            Ok(_) => panic!("expected validation error for invalid label"),
+            Err(err) => assert!(err.contains("invalid label")),
         }
     }
 

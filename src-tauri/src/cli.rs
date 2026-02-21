@@ -845,8 +845,7 @@ fn run_login_set_account(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
     let login_name = require_cli_login_name("name", &args.name)?;
-    let label = require_cli_field("label", &args.label)?;
-    crate::login_config::validate_label(&label).map_err(std::io::Error::other)?;
+    let label = require_cli_label(&args.label)?;
 
     let gl_account = args
         .gl_account
@@ -880,7 +879,7 @@ fn run_login_delete_account(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
     let login_name = require_cli_login_name("name", &args.name)?;
-    let label = require_cli_field("label", &args.label)?;
+    let label = require_cli_label(&args.label)?;
     let _lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
         .map_err(std::io::Error::other)?;
     crate::login_config::remove_login_account(&ledger_dir, &login_name, &label)
@@ -968,8 +967,7 @@ fn run_account_documents(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
     let login_name = require_cli_login_name("login", &args.login)?;
-    let label = require_cli_field("label", &args.label)?;
-    crate::login_config::validate_label(&label).map_err(std::io::Error::other)?;
+    let label = require_cli_label(&args.label)?;
     let documents =
         crate::extract::list_documents_for_login_account(&ledger_dir, &login_name, &label)?;
     println!("{}", serde_json::to_string_pretty(&documents)?);
@@ -984,8 +982,7 @@ fn run_account_extract(
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
 
     let login_name = require_cli_login_name("login", &args.login)?;
-    let label = require_cli_field("label", &args.label)?;
-    crate::login_config::validate_label(&label).map_err(std::io::Error::other)?;
+    let label = require_cli_label(&args.label)?;
     let extension_name = crate::login_config::resolve_login_extension(
         &ledger_dir,
         &login_name,
@@ -1078,7 +1075,7 @@ fn run_account_journal(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
     let login_name = require_cli_login_name("login", &args.login)?;
-    let label = require_cli_field("label", &args.label)?;
+    let label = require_cli_label(&args.label)?;
     let journal_path =
         crate::account_journal::login_account_journal_path(&ledger_dir, &login_name, &label);
     let entries = crate::account_journal::read_journal_at_path(&journal_path)?;
@@ -1096,7 +1093,7 @@ fn run_account_unreconciled(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
     let login_name = require_cli_login_name("login", &args.login)?;
-    let label = require_cli_field("label", &args.label)?;
+    let label = require_cli_label(&args.label)?;
     let entries =
         crate::reconcile::get_unreconciled_login_account(&ledger_dir, &login_name, &label)
             .map_err(|err| std::io::Error::other(err.to_string()))?;
@@ -1114,7 +1111,7 @@ fn run_account_reconcile(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
     let login_name = require_cli_login_name("login", &args.login)?;
-    let label = require_cli_field("label", &args.label)?;
+    let label = require_cli_label(&args.label)?;
     let entry_id = require_cli_field("entry_id", &args.entry_id)?;
     let counterpart_account = require_cli_field("counterpart_account", &args.counterpart_account)?;
     let _ = resolve_login_account_gl_account_cli(&ledger_dir, &login_name, &label)?;
@@ -1138,7 +1135,7 @@ fn run_account_unreconcile(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
     let login_name = require_cli_login_name("login", &args.login)?;
-    let label = require_cli_field("label", &args.label)?;
+    let label = require_cli_label(&args.label)?;
     let entry_id = require_cli_field("entry_id", &args.entry_id)?;
     crate::reconcile::unreconcile_login_account_entry(
         &ledger_dir,
@@ -1239,6 +1236,17 @@ fn require_cli_login_name(field_name: &str, value: &str) -> Result<String, Box<d
         )
     })?;
     Ok(login_name)
+}
+
+fn require_cli_label(value: &str) -> Result<String, Box<dyn Error>> {
+    let label = require_cli_field("label", value)?;
+    crate::login_config::validate_label(&label).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid label: {err}"),
+        )
+    })?;
+    Ok(label)
 }
 
 fn resolve_login_account_gl_account_cli(
@@ -1356,10 +1364,11 @@ fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Bo
 #[cfg(test)]
 mod tests {
     use super::{
-        evidence_ref_matches_document, parse_prompt_overrides, resolve_extraction_document_names,
-        run_extension_load_with_dir, run_gl_add_with_dir, run_new_with_ledger_path, run_secret,
-        AccountCommand, AddArgs, Cli, Commands, ExtensionLoadArgs, LoginCommand, SecretAddArgs,
-        SecretArgs, SecretCommand, SecretListArgs, SecretRemoveArgs,
+        evidence_ref_matches_document, parse_prompt_overrides, require_cli_label,
+        require_cli_login_name, resolve_extraction_document_names, run_extension_load_with_dir,
+        run_gl_add_with_dir, run_new_with_ledger_path, run_secret, AccountCommand, AddArgs, Cli,
+        Commands, ExtensionLoadArgs, LoginCommand, SecretAddArgs, SecretArgs, SecretCommand,
+        SecretListArgs, SecretRemoveArgs,
     };
     use crate::ledger::ensure_refreshmint_extension;
     use clap::Parser;
@@ -1938,6 +1947,18 @@ mod tests {
             }),
         });
         assert!(expect_err(invalid_login, "invalid login").contains("invalid login"));
+    }
+
+    #[test]
+    fn require_cli_login_name_rejects_path_like_name() {
+        let result = require_cli_login_name("login", "../bad");
+        assert!(expect_err(result, "invalid login").contains("invalid login"));
+    }
+
+    #[test]
+    fn require_cli_label_rejects_path_like_label() {
+        let result = require_cli_label("../bad");
+        assert!(expect_err(result, "invalid label").contains("invalid label"));
     }
 
     fn expect_ok<T, E: std::fmt::Display>(result: Result<T, E>, label: &str) -> T {
