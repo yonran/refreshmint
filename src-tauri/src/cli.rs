@@ -287,16 +287,20 @@ enum AccountCommand {
 
 #[derive(Args)]
 struct AccountDocumentsArgs {
+    #[arg(long, alias = "account")]
+    login: String,
     #[arg(long)]
-    account: String,
+    label: String,
     #[arg(long)]
     ledger: Option<PathBuf>,
 }
 
 #[derive(Args)]
 struct AccountExtractArgs {
+    #[arg(long, alias = "account")]
+    login: String,
     #[arg(long)]
-    account: String,
+    label: String,
     #[arg(long)]
     extension: Option<String>,
     #[arg(long)]
@@ -312,24 +316,30 @@ struct AccountExtractArgs {
 
 #[derive(Args)]
 struct AccountJournalArgs {
+    #[arg(long, alias = "account")]
+    login: String,
     #[arg(long)]
-    account: String,
+    label: String,
     #[arg(long)]
     ledger: Option<PathBuf>,
 }
 
 #[derive(Args)]
 struct AccountUnreconciledArgs {
+    #[arg(long, alias = "account")]
+    login: String,
     #[arg(long)]
-    account: String,
+    label: String,
     #[arg(long)]
     ledger: Option<PathBuf>,
 }
 
 #[derive(Args)]
 struct AccountReconcileArgs {
+    #[arg(long, alias = "account")]
+    login: String,
     #[arg(long)]
-    account: String,
+    label: String,
     #[arg(long, value_name = "ENTRY_ID")]
     entry_id: String,
     #[arg(long, value_name = "ACCOUNT")]
@@ -342,8 +352,10 @@ struct AccountReconcileArgs {
 
 #[derive(Args)]
 struct AccountUnreconcileArgs {
+    #[arg(long, alias = "account")]
+    login: String,
     #[arg(long)]
-    account: String,
+    label: String,
     #[arg(long, value_name = "ENTRY_ID")]
     entry_id: String,
     #[arg(long, value_name = "INDEX")]
@@ -936,8 +948,11 @@ fn run_account_documents(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let account_name = require_cli_field("account", &args.account)?;
-    let documents = crate::extract::list_documents(&ledger_dir, &account_name)?;
+    let login_name = require_cli_field("login", &args.login)?;
+    let label = require_cli_field("label", &args.label)?;
+    crate::login_config::validate_label(&label).map_err(std::io::Error::other)?;
+    let documents =
+        crate::extract::list_documents_for_login_account(&ledger_dir, &login_name, &label)?;
     println!("{}", serde_json::to_string_pretty(&documents)?);
     Ok(())
 }
@@ -949,15 +964,19 @@ fn run_account_extract(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
 
-    let account_name = require_cli_field("account", &args.account)?;
-    let extension_name = crate::account_config::resolve_extension(
+    let login_name = require_cli_field("login", &args.login)?;
+    let label = require_cli_field("label", &args.label)?;
+    crate::login_config::validate_label(&label).map_err(std::io::Error::other)?;
+    let extension_name = crate::login_config::resolve_login_extension(
         &ledger_dir,
-        &account_name,
+        &login_name,
         args.extension.as_deref(),
     )
     .map_err(std::io::Error::other)?;
+    let gl_account = resolve_login_account_gl_account_cli(&ledger_dir, &login_name, &label)?;
+
     let listed_documents = if args.document.is_empty() {
-        crate::extract::list_documents(&ledger_dir, &account_name)?
+        crate::extract::list_documents_for_login_account(&ledger_dir, &login_name, &label)?
             .into_iter()
             .map(|d| d.filename)
             .collect::<Vec<_>>()
@@ -967,18 +986,22 @@ fn run_account_extract(
     let document_names = resolve_extraction_document_names(&args.document, listed_documents)?;
 
     if document_names.is_empty() {
-        println!("No documents found for account '{account_name}'.");
+        println!("No documents found for login '{login_name}' label '{label}'.");
         return Ok(());
     }
 
-    let extraction = crate::extract::run_extraction(
+    let extraction = crate::extract::run_extraction_for_login_account(
         &ledger_dir,
-        &account_name,
+        &login_name,
+        &label,
+        &gl_account,
         &extension_name,
         &document_names,
     )
     .map_err(|err| std::io::Error::other(err.to_string()))?;
-    let existing_entries = crate::account_journal::read_journal(&ledger_dir, &account_name)?;
+    let journal_path =
+        crate::account_journal::login_account_journal_path(&ledger_dir, &login_name, &label);
+    let existing_entries = crate::account_journal::read_journal_at_path(&journal_path)?;
 
     let config = crate::dedup::DedupConfig::default();
     let mut all_updated = existing_entries;
@@ -1009,12 +1032,12 @@ fn run_account_extract(
             .first()
             .and_then(|e| e.postings.first())
             .map(|p| p.account.clone())
-            .unwrap_or_else(|| format!("Assets:{account_name}"));
-        let unreconciled_equity = format!("Equity:Unreconciled:{account_name}");
+            .unwrap_or_else(|| gl_account.clone());
+        let unreconciled_equity = format!("Equity:Unreconciled:{login_name}:{label}");
 
-        all_updated = crate::dedup::apply_dedup_actions(
+        all_updated = crate::dedup::apply_dedup_actions_for_login_account(
             &ledger_dir,
-            &account_name,
+            (&login_name, &label),
             all_updated,
             &actions,
             &default_account,
@@ -1024,7 +1047,7 @@ fn run_account_extract(
         .map_err(|err| std::io::Error::other(err.to_string()))?;
     }
 
-    crate::account_journal::write_journal(&ledger_dir, &account_name, &all_updated)?;
+    crate::account_journal::write_journal_at_path(&journal_path, &all_updated)?;
     println!("Extraction complete. Added {new_count} new transaction(s).");
     Ok(())
 }
@@ -1035,8 +1058,11 @@ fn run_account_journal(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let account_name = require_cli_field("account", &args.account)?;
-    let entries = crate::account_journal::read_journal(&ledger_dir, &account_name)?;
+    let login_name = require_cli_field("login", &args.login)?;
+    let label = require_cli_field("label", &args.label)?;
+    let journal_path =
+        crate::account_journal::login_account_journal_path(&ledger_dir, &login_name, &label);
+    let entries = crate::account_journal::read_journal_at_path(&journal_path)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&map_entries_for_cli(entries))?
@@ -1050,9 +1076,11 @@ fn run_account_unreconciled(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let account_name = require_cli_field("account", &args.account)?;
-    let entries = crate::reconcile::get_unreconciled(&ledger_dir, &account_name)
-        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let login_name = require_cli_field("login", &args.login)?;
+    let label = require_cli_field("label", &args.label)?;
+    let entries =
+        crate::reconcile::get_unreconciled_login_account(&ledger_dir, &login_name, &label)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
     println!(
         "{}",
         serde_json::to_string_pretty(&map_entries_for_cli(entries))?
@@ -1066,12 +1094,15 @@ fn run_account_reconcile(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let account_name = require_cli_field("account", &args.account)?;
+    let login_name = require_cli_field("login", &args.login)?;
+    let label = require_cli_field("label", &args.label)?;
     let entry_id = require_cli_field("entry_id", &args.entry_id)?;
     let counterpart_account = require_cli_field("counterpart_account", &args.counterpart_account)?;
-    let gl_txn_id = crate::reconcile::reconcile_entry(
+    let _ = resolve_login_account_gl_account_cli(&ledger_dir, &login_name, &label)?;
+    let gl_txn_id = crate::reconcile::reconcile_login_account_entry(
         &ledger_dir,
-        &account_name,
+        &login_name,
+        &label,
         &entry_id,
         &counterpart_account,
         args.posting_index,
@@ -1087,10 +1118,17 @@ fn run_account_unreconcile(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let account_name = require_cli_field("account", &args.account)?;
+    let login_name = require_cli_field("login", &args.login)?;
+    let label = require_cli_field("label", &args.label)?;
     let entry_id = require_cli_field("entry_id", &args.entry_id)?;
-    crate::reconcile::unreconcile_entry(&ledger_dir, &account_name, &entry_id, args.posting_index)
-        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    crate::reconcile::unreconcile_login_account_entry(
+        &ledger_dir,
+        &login_name,
+        &label,
+        &entry_id,
+        args.posting_index,
+    )
+    .map_err(|err| std::io::Error::other(err.to_string()))?;
     println!("ok");
     Ok(())
 }
@@ -1171,6 +1209,51 @@ fn require_cli_field(field_name: &str, value: &str) -> Result<String, Box<dyn Er
         .into());
     }
     Ok(trimmed.to_string())
+}
+
+fn resolve_login_account_gl_account_cli(
+    ledger_dir: &std::path::Path,
+    login_name: &str,
+    label: &str,
+) -> Result<String, Box<dyn Error>> {
+    let config = crate::login_config::read_login_config(ledger_dir, login_name);
+    let account_cfg = config.accounts.get(label).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("label '{label}' not found in login '{login_name}'"),
+        )
+    })?;
+
+    let gl_account = account_cfg
+        .gl_account
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            std::io::Error::other(format!(
+                "login '{login_name}' label '{label}' is ignored (gl_account is null); set a GL account first"
+            ))
+        })?
+        .to_string();
+
+    if let Some(conflict) = crate::login_config::find_gl_account_conflicts(ledger_dir)
+        .into_iter()
+        .find(|conflict| conflict.gl_account == gl_account)
+    {
+        let entries = conflict
+            .entries
+            .iter()
+            .map(|entry| format!("{}/{}", entry.login_name, entry.label))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(std::io::Error::other(format!(
+            "GL account '{}' has conflicting login mappings: {}; resolve conflicts first",
+            conflict.gl_account, entries
+        ))
+        .into());
+    }
+
+    Ok(gl_account)
 }
 
 fn resolve_extraction_document_names(
@@ -1353,8 +1436,10 @@ mod tests {
             "refreshmint",
             "account",
             "extract",
-            "--account",
-            "chase",
+            "--login",
+            "chase-personal",
+            "--label",
+            "checking",
             "--extension",
             "chase-driver",
             "--document",
@@ -1367,7 +1452,8 @@ mod tests {
         match cli.command {
             Some(Commands::Account(args)) => match args.command {
                 AccountCommand::Extract(extract) => {
-                    assert_eq!(extract.account, "chase");
+                    assert_eq!(extract.login, "chase-personal");
+                    assert_eq!(extract.label, "checking");
                     assert_eq!(extract.extension, Some("chase-driver".to_string()));
                     assert_eq!(
                         extract.document,
@@ -1386,8 +1472,10 @@ mod tests {
             "refreshmint",
             "account",
             "reconcile",
-            "--account",
-            "chase",
+            "--login",
+            "chase-personal",
+            "--label",
+            "checking",
             "--entry-id",
             "txn-1",
             "--counterpart-account",
@@ -1400,7 +1488,8 @@ mod tests {
         match cli.command {
             Some(Commands::Account(args)) => match args.command {
                 AccountCommand::Reconcile(reconcile) => {
-                    assert_eq!(reconcile.account, "chase");
+                    assert_eq!(reconcile.login, "chase-personal");
+                    assert_eq!(reconcile.label, "checking");
                     assert_eq!(reconcile.entry_id, "txn-1");
                     assert_eq!(reconcile.counterpart_account, "Expenses:Food");
                     assert_eq!(reconcile.posting_index, Some(1));
