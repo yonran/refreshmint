@@ -2,7 +2,7 @@
 
 ## Implementation Status (2026-02-21)
 
-Status: complete in `main`, across commits `9fde2bd` through `b60a420`.
+Status: complete in `main`, across commits `9fde2bd` through `f1ddb5d`.
 
 Recent completion milestones:
 
@@ -19,6 +19,8 @@ Recent completion milestones:
 - Login mapping editor now highlights conflicts inline and supports one-click edit/ignore flows.
 - Scraping tab now requires explicit login selection when no prior selection remains valid.
 - Tauri/TypeScript debug-session APIs now include login-named command/wrapper aliases for consistency.
+- Tauri login-based commands now validate `login_name` consistently (rejecting path-like values).
+- CLI login-based commands now enforce the same login-name validation rules.
 
 ## Context
 

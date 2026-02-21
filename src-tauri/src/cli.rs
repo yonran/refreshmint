@@ -591,7 +591,7 @@ fn parse_posting(input: &str) -> Result<crate::ledger_add::NewPosting, Box<dyn E
 fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
     match args.command {
         SecretCommand::Add(a) => {
-            let login = require_secret_field("login", &a.login)?;
+            let login = require_cli_login_name("login", &a.login)?;
             let domain = require_secret_field("domain", &a.domain)?;
             let name = require_secret_field("name", &a.name)?;
 
@@ -601,7 +601,7 @@ fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         SecretCommand::Reenter(a) => {
-            let login = require_secret_field("login", &a.login)?;
+            let login = require_cli_login_name("login", &a.login)?;
             let domain = require_secret_field("domain", &a.domain)?;
             let name = require_secret_field("name", &a.name)?;
 
@@ -611,7 +611,7 @@ fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         SecretCommand::Remove(a) => {
-            let login = require_secret_field("login", &a.login)?;
+            let login = require_cli_login_name("login", &a.login)?;
             let domain = require_secret_field("domain", &a.domain)?;
             let name = require_secret_field("name", &a.name)?;
 
@@ -621,7 +621,7 @@ fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         SecretCommand::List(a) => {
-            let login = require_secret_field("login", &a.login)?;
+            let login = require_cli_login_name("login", &a.login)?;
             let login_name = login.clone();
             let store = crate::secret::SecretStore::new(format!("login/{login}"));
             let entries = store.list()?;
@@ -672,12 +672,7 @@ fn run_debug_start(
     };
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
 
-    let login_name = args.login.trim().to_string();
-    if login_name.is_empty() {
-        return Err(
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "login is required").into(),
-        );
-    }
+    let login_name = require_cli_login_name("login", &args.login)?;
     let extension = args.extension.trim().to_string();
     if extension.is_empty() {
         return Err(
@@ -782,8 +777,7 @@ fn run_login_create(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let login_name = require_cli_field("name", &args.name)?;
-    crate::login_config::validate_label(&login_name).map_err(std::io::Error::other)?;
+    let login_name = require_cli_login_name("name", &args.name)?;
 
     let config_path = crate::login_config::login_config_path(&ledger_dir, &login_name);
     if config_path.exists() {
@@ -815,7 +809,7 @@ fn run_login_set_extension(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let login_name = require_cli_field("name", &args.name)?;
+    let login_name = require_cli_login_name("name", &args.name)?;
     let extension = args.extension.trim().to_string();
 
     let _lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
@@ -838,7 +832,7 @@ fn run_login_delete(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let login_name = require_cli_field("name", &args.name)?;
+    let login_name = require_cli_login_name("name", &args.name)?;
     crate::login_config::delete_login(&ledger_dir, &login_name).map_err(std::io::Error::other)?;
     println!("Deleted login '{login_name}'.");
     Ok(())
@@ -850,7 +844,7 @@ fn run_login_set_account(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let login_name = require_cli_field("name", &args.name)?;
+    let login_name = require_cli_login_name("name", &args.name)?;
     let label = require_cli_field("label", &args.label)?;
     crate::login_config::validate_label(&label).map_err(std::io::Error::other)?;
 
@@ -885,7 +879,7 @@ fn run_login_delete_account(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let login_name = require_cli_field("name", &args.name)?;
+    let login_name = require_cli_login_name("name", &args.name)?;
     let label = require_cli_field("label", &args.label)?;
     let _lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
         .map_err(std::io::Error::other)?;
@@ -913,7 +907,7 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
         None => default_ledger_dir(context)?,
     };
 
-    let login_name = require_cli_field("login", &args.login)?;
+    let login_name = require_cli_login_name("login", &args.login)?;
     let extension_name = crate::login_config::resolve_login_extension(
         &ledger_dir,
         &login_name,
@@ -973,7 +967,7 @@ fn run_account_documents(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let login_name = require_cli_field("login", &args.login)?;
+    let login_name = require_cli_login_name("login", &args.login)?;
     let label = require_cli_field("label", &args.label)?;
     crate::login_config::validate_label(&label).map_err(std::io::Error::other)?;
     let documents =
@@ -989,7 +983,7 @@ fn run_account_extract(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
 
-    let login_name = require_cli_field("login", &args.login)?;
+    let login_name = require_cli_login_name("login", &args.login)?;
     let label = require_cli_field("label", &args.label)?;
     crate::login_config::validate_label(&label).map_err(std::io::Error::other)?;
     let extension_name = crate::login_config::resolve_login_extension(
@@ -1083,7 +1077,7 @@ fn run_account_journal(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let login_name = require_cli_field("login", &args.login)?;
+    let login_name = require_cli_login_name("login", &args.login)?;
     let label = require_cli_field("label", &args.label)?;
     let journal_path =
         crate::account_journal::login_account_journal_path(&ledger_dir, &login_name, &label);
@@ -1101,7 +1095,7 @@ fn run_account_unreconciled(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let login_name = require_cli_field("login", &args.login)?;
+    let login_name = require_cli_login_name("login", &args.login)?;
     let label = require_cli_field("label", &args.label)?;
     let entries =
         crate::reconcile::get_unreconciled_login_account(&ledger_dir, &login_name, &label)
@@ -1119,7 +1113,7 @@ fn run_account_reconcile(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let login_name = require_cli_field("login", &args.login)?;
+    let login_name = require_cli_login_name("login", &args.login)?;
     let label = require_cli_field("label", &args.label)?;
     let entry_id = require_cli_field("entry_id", &args.entry_id)?;
     let counterpart_account = require_cli_field("counterpart_account", &args.counterpart_account)?;
@@ -1143,7 +1137,7 @@ fn run_account_unreconcile(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let login_name = require_cli_field("login", &args.login)?;
+    let login_name = require_cli_login_name("login", &args.login)?;
     let label = require_cli_field("label", &args.label)?;
     let entry_id = require_cli_field("entry_id", &args.entry_id)?;
     crate::reconcile::unreconcile_login_account_entry(
@@ -1234,6 +1228,17 @@ fn require_cli_field(field_name: &str, value: &str) -> Result<String, Box<dyn Er
         .into());
     }
     Ok(trimmed.to_string())
+}
+
+fn require_cli_login_name(field_name: &str, value: &str) -> Result<String, Box<dyn Error>> {
+    let login_name = require_cli_field(field_name, value)?;
+    crate::login_config::validate_label(&login_name).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid {field_name}: {err}"),
+        )
+    })?;
+    Ok(login_name)
 }
 
 fn resolve_login_account_gl_account_cli(
@@ -1891,6 +1896,19 @@ mod tests {
     }
 
     #[test]
+    fn secret_add_rejects_invalid_login_name() {
+        let invalid_login = run_secret(SecretArgs {
+            command: SecretCommand::Add(SecretAddArgs {
+                login: "../bad".to_string(),
+                domain: "example.com".to_string(),
+                name: "password".to_string(),
+                value: "secret".to_string(),
+            }),
+        });
+        assert!(expect_err(invalid_login, "invalid login").contains("invalid login"));
+    }
+
+    #[test]
     fn secret_remove_requires_non_empty_fields() {
         let missing_domain = run_secret(SecretArgs {
             command: SecretCommand::Remove(SecretRemoveArgs {
@@ -1910,6 +1928,16 @@ mod tests {
             }),
         });
         assert!(expect_err(missing_login, "missing login").contains("login is required"));
+    }
+
+    #[test]
+    fn secret_list_rejects_invalid_login_name() {
+        let invalid_login = run_secret(SecretArgs {
+            command: SecretCommand::List(SecretListArgs {
+                login: "../bad".to_string(),
+            }),
+        });
+        assert!(expect_err(invalid_login, "invalid login").contains("invalid login"));
     }
 
     fn expect_ok<T, E: std::fmt::Display>(result: Result<T, E>, label: &str) -> T {
