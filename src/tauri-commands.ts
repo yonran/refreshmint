@@ -217,7 +217,19 @@ export async function startScrapeDebugSession(
     account: string,
     extension: string,
 ): Promise<string> {
-    return invoke('start_scrape_debug_session', { ledger, account, extension });
+    return startScrapeDebugSessionForLogin(ledger, account, extension);
+}
+
+export async function startScrapeDebugSessionForLogin(
+    ledger: string,
+    loginName: string,
+    extension: string,
+): Promise<string> {
+    return invoke('start_scrape_debug_session_for_login', {
+        ledger,
+        loginName,
+        extension,
+    });
 }
 
 export async function stopScrapeDebugSession(): Promise<void> {

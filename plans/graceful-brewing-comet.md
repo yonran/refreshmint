@@ -2,7 +2,7 @@
 
 ## Implementation Status (2026-02-21)
 
-Status: complete in `main`, across commits `9fde2bd` through `5cd097e`.
+Status: complete in `main`, across commits `9fde2bd` through `b60a420`.
 
 Recent completion milestones:
 
@@ -17,6 +17,8 @@ Recent completion milestones:
 - CLI supports `login delete-account` with `remove-account` as a compatibility alias.
 - Tauri/TypeScript command aliases include `delete_login_account` for naming consistency.
 - Login mapping editor now highlights conflicts inline and supports one-click edit/ignore flows.
+- Scraping tab now requires explicit login selection when no prior selection remains valid.
+- Tauri/TypeScript debug-session APIs now include login-named command/wrapper aliases for consistency.
 
 ## Context
 

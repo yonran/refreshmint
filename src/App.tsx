@@ -54,7 +54,7 @@ import {
     runScrapeForLogin,
     setLoginAccount,
     setLoginExtension,
-    startScrapeDebugSession,
+    startScrapeDebugSessionForLogin,
     stopScrapeDebugSession,
     type SecretEntry,
     syncLoginSecretsForExtension,
@@ -1462,7 +1462,7 @@ function App() {
         setIsStartingScrapeDebug(true);
         setScrapeStatus(`Starting debug session for ${extension}...`);
         try {
-            const socket = await startScrapeDebugSession(
+            const socket = await startScrapeDebugSessionForLogin(
                 ledger.path,
                 loginName,
                 extension,

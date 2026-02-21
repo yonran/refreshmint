@@ -83,6 +83,7 @@ pub fn run_with_context(
             add_account_secret,
             reenter_account_secret,
             remove_account_secret,
+            start_scrape_debug_session_for_login,
             start_scrape_debug_session,
             stop_scrape_debug_session,
             get_scrape_debug_session_socket,
@@ -363,15 +364,12 @@ fn require_non_empty_input(field_name: &str, value: String) -> Result<String, St
 }
 
 #[tauri::command]
-fn start_scrape_debug_session(
+fn start_scrape_debug_session_for_login(
     ledger: String,
-    account: String,
+    login_name: String,
     extension: String,
 ) -> Result<String, String> {
-    let account = account.trim().to_string();
-    if account.is_empty() {
-        return Err("account is required".to_string());
-    }
+    let login_name = require_non_empty_input("login_name", login_name)?;
     let extension = extension.trim().to_string();
     if extension.is_empty() {
         return Err("extension is required".to_string());
@@ -379,8 +377,8 @@ fn start_scrape_debug_session(
 
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
-    let socket_path =
-        crate::scrape::debug::default_debug_socket_path(&account).map_err(|err| err.to_string())?;
+    let socket_path = crate::scrape::debug::default_debug_socket_path(&login_name)
+        .map_err(|err| err.to_string())?;
 
     let state = ui_debug_session_state();
     let mut guard = state
@@ -401,7 +399,7 @@ fn start_scrape_debug_session(
     }
 
     let config = crate::scrape::debug::DebugStartConfig {
-        login_name: account,
+        login_name,
         extension_name: extension,
         ledger_dir: target_dir,
         profile_override: None,
@@ -421,6 +419,17 @@ fn start_scrape_debug_session(
     });
 
     Ok(socket_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn start_scrape_debug_session(
+    ledger: String,
+    account: String,
+    extension: String,
+) -> Result<String, String> {
+    // Compatibility alias for legacy account-keyed callers.
+    let login_name = require_non_empty_input("account", account)?;
+    start_scrape_debug_session_for_login(ledger, login_name, extension)
 }
 
 #[tauri::command]
