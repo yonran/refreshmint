@@ -33,10 +33,12 @@ import {
     listAccountSecrets,
     listScrapeExtensions,
     loadScrapeExtension,
+    migrateLedger,
     openLedger,
     type AccountRow,
     type DocumentWithInfo,
     type LedgerView,
+    type MigrationOutcome,
     type NewTransactionInput,
     type PostingRow,
     reconcileEntry,
@@ -136,6 +138,12 @@ function App() {
     const [scrapeDebugSocket, setScrapeDebugSocket] = useState<string | null>(
         null,
     );
+    const [legacyMigrationPreview, setLegacyMigrationPreview] =
+        useState<MigrationOutcome | null>(null);
+    const [isCheckingLegacyMigration, setIsCheckingLegacyMigration] =
+        useState(false);
+    const [isMigratingLegacyLedger, setIsMigratingLegacyLedger] =
+        useState(false);
     const [accountSecrets, setAccountSecrets] = useState<AccountSecretEntry[]>(
         [],
     );
@@ -353,6 +361,45 @@ function App() {
             .finally(() => {
                 if (!cancelled) {
                     setIsLoadingScrapeExtensions(false);
+                }
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [ledgerPath]);
+
+    useEffect(() => {
+        if (ledgerPath === null) {
+            setLegacyMigrationPreview(null);
+            setIsCheckingLegacyMigration(false);
+            return;
+        }
+
+        let cancelled = false;
+        setIsCheckingLegacyMigration(true);
+        void migrateLedger(ledgerPath, true)
+            .then((outcome) => {
+                if (cancelled) {
+                    return;
+                }
+                if (
+                    outcome.migrated.length === 0 &&
+                    outcome.skipped.length === 0
+                ) {
+                    setLegacyMigrationPreview(null);
+                } else {
+                    setLegacyMigrationPreview(outcome);
+                }
+            })
+            .catch(() => {
+                if (!cancelled) {
+                    setLegacyMigrationPreview(null);
+                }
+            })
+            .finally(() => {
+                if (!cancelled) {
+                    setIsCheckingLegacyMigration(false);
                 }
             });
 
@@ -1749,6 +1796,27 @@ function App() {
         }
     }
 
+    async function handleMigrateLegacyLedger() {
+        if (!ledger) {
+            return;
+        }
+        setIsMigratingLegacyLedger(true);
+        setScrapeStatus('Migrating legacy accounts layout...');
+        try {
+            const outcome = await migrateLedger(ledger.path, false);
+            const reopened = await openLedger(ledger.path);
+            setLedger(reopened);
+            setLegacyMigrationPreview(null);
+            setScrapeStatus(
+                `Migration complete. Migrated ${outcome.migrated.length} account(s).`,
+            );
+        } catch (error) {
+            setScrapeStatus(`Migration failed: ${String(error)}`);
+        } finally {
+            setIsMigratingLegacyLedger(false);
+        }
+    }
+
     async function handleRunScrape() {
         if (!ledger) {
             return;
@@ -2524,6 +2592,66 @@ function App() {
                                         </button>
                                     </div>
                                 </div>
+                                {isCheckingLegacyMigration ? (
+                                    <p className="status">
+                                        Checking for legacy account layout...
+                                    </p>
+                                ) : null}
+                                {legacyMigrationPreview === null ? null : (
+                                    <section className="pipeline-panel">
+                                        <div className="txn-form-header">
+                                            <div>
+                                                <h3>Migration available</h3>
+                                                <p>
+                                                    Legacy `accounts/` data is
+                                                    present. Migrate to
+                                                    login-scoped storage before
+                                                    continuing.
+                                                </p>
+                                            </div>
+                                            <div className="header-actions">
+                                                <button
+                                                    className="ghost-button"
+                                                    type="button"
+                                                    disabled={
+                                                        isMigratingLegacyLedger
+                                                    }
+                                                    onClick={() => {
+                                                        void handleMigrateLegacyLedger();
+                                                    }}
+                                                >
+                                                    {isMigratingLegacyLedger
+                                                        ? 'Migrating...'
+                                                        : 'Run migration'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <p className="status">
+                                            {
+                                                legacyMigrationPreview.migrated
+                                                    .length
+                                            }{' '}
+                                            account(s) ready to migrate.{' '}
+                                            {
+                                                legacyMigrationPreview.skipped
+                                                    .length
+                                            }{' '}
+                                            account(s) will be skipped.
+                                        </p>
+                                        {legacyMigrationPreview.warnings
+                                            .length > 0 ? (
+                                            <p className="status">
+                                                Warnings:{' '}
+                                                {
+                                                    legacyMigrationPreview
+                                                        .warnings.length
+                                                }
+                                                . Run CLI `refreshmint migrate
+                                                --dry-run` for details.
+                                            </p>
+                                        ) : null}
+                                    </section>
+                                )}
                                 <div className="txn-grid">
                                     <label className="field">
                                         <span>Account</span>
@@ -2594,6 +2722,7 @@ function App() {
                                             isRunningScrape ||
                                             isLoadingScrapeExtensions ||
                                             isImportingScrapeExtension ||
+                                            isMigratingLegacyLedger ||
                                             isStartingScrapeDebug ||
                                             isStoppingScrapeDebug
                                         }
