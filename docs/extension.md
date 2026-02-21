@@ -103,3 +103,17 @@ Account config example:
 ```
 
 `extension` may also be a path to an unpacked extension directory.
+
+## Type checking and linting
+
+Builtin extension scripts are plain `driver.mjs` files, but they can still be
+checked with TypeScript and ESLint using project-provided globals declarations.
+
+Run:
+
+```bash
+npm run typecheck:extensions
+npm run lint:extensions
+```
+
+`npm run typecheck` also includes extension type checks.

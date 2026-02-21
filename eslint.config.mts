@@ -113,6 +113,25 @@ export default defineConfig(
         ...tseslint.configs.disableTypeChecked,
     },
     {
+        files: ['builtin-extensions/**/*.mjs'],
+        languageOptions: {
+            globals: {
+                page: 'readonly',
+                refreshmint: 'readonly',
+            },
+        },
+    },
+    {
+        files: ['builtin-extensions/**/*.d.ts'],
+        rules: {
+            '@typescript-eslint/no-explicit-any': 'off',
+            '@typescript-eslint/no-unnecessary-boolean-literal-compare': 'off',
+            '@typescript-eslint/no-unnecessary-condition': 'off',
+            '@typescript-eslint/no-useless-default-assignment': 'off',
+            '@typescript-eslint/strict-boolean-expressions': 'off',
+        },
+    },
+    {
         ignores: ['dist/**'],
     },
 );

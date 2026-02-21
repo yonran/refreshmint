@@ -7,13 +7,15 @@
     "scripts": {
         "build": "npm run typecheck && vite build",
         "dev": "vite",
+        "lint:extensions": "eslint \"builtin-extensions/**/*.mjs\"",
         "prettier": "prettier --ignore-path .prettierignore --ignore-path .gitignore --ignore-path \"$(scripts/get-git-user-ignore-file.mts)\"",
         "prettier-check": "npm run prettier -- --check .",
         "prettier-write": "npm run prettier -- --write .",
         "lint": "eslint && npm run prettier-check",
         "prepare": "husky",
         "preview": "vite preview",
-        "typecheck": "tsc --build"
+        "typecheck:extensions": "tsc -p builtin-extensions/tsconfig.json",
+        "typecheck": "tsc --build && npm run typecheck:extensions"
     },
     "dependencies": {
         "@tauri-apps/api": "^2.10.1",
