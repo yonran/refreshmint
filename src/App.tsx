@@ -32,6 +32,7 @@ import {
     getLoginConfig,
     getLoginAccountUnreconciled,
     getScrapeDebugSessionSocket,
+    type LoginAccountConfig,
     type LoginConfig,
     listLoginAccountDocuments,
     listLoginSecrets,
@@ -103,6 +104,42 @@ type LoginAccountMapping = {
     label: string;
     extension: string;
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeLoginAccountConfig(value: unknown): LoginAccountConfig {
+    if (!isRecord(value)) {
+        return {};
+    }
+    const glAccount = value['glAccount'];
+    if (typeof glAccount === 'string' || glAccount === null) {
+        return { glAccount };
+    }
+    return {};
+}
+
+function normalizeLoginConfig(
+    value: LoginConfig | null | undefined,
+): LoginConfig {
+    if (!isRecord(value)) {
+        return { accounts: {} };
+    }
+    const extension = value['extension'];
+    const accounts: Record<string, LoginAccountConfig> = {};
+    const rawAccounts = value['accounts'];
+    if (isRecord(rawAccounts)) {
+        for (const [label, accountConfig] of Object.entries(rawAccounts)) {
+            accounts[label] = normalizeLoginAccountConfig(accountConfig);
+        }
+    }
+    const normalized: LoginConfig = { accounts };
+    if (typeof extension === 'string') {
+        normalized.extension = extension;
+    }
+    return normalized;
+}
 
 function secretPairKey(domain: string, name: string): string {
     return `${domain}/${name}`;
@@ -307,12 +344,12 @@ function App() {
     const selectedLoginAccounts =
         selectedLoginConfig === null
             ? []
-            : Object.entries(selectedLoginConfig.accounts).sort(([a], [b]) =>
-                  a.localeCompare(b),
-              );
+            : Object.entries(
+                  normalizeLoginConfig(selectedLoginConfig).accounts,
+              ).sort(([a], [b]) => a.localeCompare(b));
     const computedGlAccountConflicts = Object.entries(loginConfigsByName)
         .flatMap(([loginName, config]) =>
-            Object.entries(config.accounts)
+            Object.entries(normalizeLoginConfig(config).accounts)
                 .map(([label, accountConfig]) => ({
                     loginName,
                     label,
@@ -568,10 +605,11 @@ function App() {
                 const configMap: Record<string, LoginConfig> = {};
                 const mappings: Record<string, LoginAccountMapping[]> = {};
                 for (const { loginName, config } of configs) {
-                    configMap[loginName] = config;
-                    const extension = config.extension?.trim() ?? '';
+                    const normalizedConfig = normalizeLoginConfig(config);
+                    configMap[loginName] = normalizedConfig;
+                    const extension = normalizedConfig.extension?.trim() ?? '';
                     for (const [label, mapping] of Object.entries(
-                        config.accounts,
+                        normalizedConfig.accounts,
                     )) {
                         const glAccount = mapping.glAccount?.trim() ?? '';
                         if (glAccount.length === 0) {
@@ -827,7 +865,10 @@ function App() {
                     if (cancelled) {
                         return;
                     }
-                    setScrapeExtension(config.extension?.trim() ?? '');
+                    const normalizedConfig = normalizeLoginConfig(config);
+                    setScrapeExtension(
+                        normalizedConfig.extension?.trim() ?? '',
+                    );
                 })
                 .catch(() => {
                     if (!cancelled) {
