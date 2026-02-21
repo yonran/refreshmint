@@ -347,6 +347,16 @@ function App() {
     const selectedScrapeAccountHasConflict =
         selectedScrapeAccount.length > 0 &&
         conflictingGlAccountSet.has(selectedScrapeAccount);
+    const selectedLoginConflictCount = selectedLoginAccounts.reduce(
+        (count, [, config]) => {
+            const glAccount = config.glAccount?.trim() ?? '';
+            return glAccount.length > 0 &&
+                conflictingGlAccountSet.has(glAccount)
+                ? count + 1
+                : count;
+        },
+        0,
+    );
     const requestLoginConfigReload = useCallback(() => {
         setLoginConfigsReloadToken((current) => current + 1);
     }, []);
@@ -3433,40 +3443,69 @@ function App() {
                                                 </thead>
                                                 <tbody>
                                                     {selectedLoginAccounts.map(
-                                                        ([label, config]) => (
-                                                            <tr key={label}>
-                                                                <td>
-                                                                    <span className="mono">
-                                                                        {label}
-                                                                    </span>
-                                                                </td>
-                                                                <td>
-                                                                    {config.glAccount ??
-                                                                        '(ignored)'}
-                                                                </td>
-                                                                <td>
-                                                                    <button
-                                                                        type="button"
-                                                                        className="ghost-button"
-                                                                        onClick={() => {
-                                                                            void handleRemoveLoginAccountMapping(
-                                                                                label,
-                                                                            );
-                                                                        }}
-                                                                        disabled={
-                                                                            isSavingLoginConfig
-                                                                        }
-                                                                    >
-                                                                        Remove
-                                                                    </button>
-                                                                </td>
-                                                            </tr>
-                                                        ),
+                                                        ([label, config]) => {
+                                                            const glAccount =
+                                                                config.glAccount?.trim() ??
+                                                                '';
+                                                            const hasConflict =
+                                                                glAccount.length >
+                                                                    0 &&
+                                                                conflictingGlAccountSet.has(
+                                                                    glAccount,
+                                                                );
+                                                            return (
+                                                                <tr key={label}>
+                                                                    <td>
+                                                                        <span className="mono">
+                                                                            {
+                                                                                label
+                                                                            }
+                                                                        </span>
+                                                                    </td>
+                                                                    <td>
+                                                                        {config.glAccount ??
+                                                                            '(ignored)'}
+                                                                        {hasConflict ? (
+                                                                            <span className="secret-chip">
+                                                                                conflict
+                                                                            </span>
+                                                                        ) : null}
+                                                                    </td>
+                                                                    <td>
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            onClick={() => {
+                                                                                void handleRemoveLoginAccountMapping(
+                                                                                    label,
+                                                                                );
+                                                                            }}
+                                                                            disabled={
+                                                                                isSavingLoginConfig
+                                                                            }
+                                                                        >
+                                                                            Remove
+                                                                        </button>
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        },
                                                     )}
                                                 </tbody>
                                             </table>
                                         </div>
                                     )}
+                                    {selectedLoginConflictCount > 0 ? (
+                                        <p className="status">
+                                            {selectedLoginConflictCount} mapping
+                                            conflict
+                                            {selectedLoginConflictCount === 1
+                                                ? ''
+                                                : 's'}{' '}
+                                            for this login. Resolve by editing
+                                            or ignoring a conflicting mapping.
+                                        </p>
+                                    ) : null}
                                     <div className="txn-grid">
                                         <label className="field">
                                             <span>Label</span>
