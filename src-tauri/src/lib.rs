@@ -399,6 +399,7 @@ fn start_scrape_debug_session_for_login(
 
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    require_existing_login(&target_dir, &login_name)?;
     let socket_path = crate::scrape::debug::default_debug_socket_path(&login_name)
         .map_err(|err| err.to_string())?;
 
@@ -508,6 +509,7 @@ async fn run_scrape_for_login(
 
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    require_existing_login(&target_dir, &login_name)?;
 
     let extension =
         login_config::resolve_login_extension(&target_dir, &login_name, Some(&extension))
@@ -954,6 +956,7 @@ fn sync_login_secrets_for_extension(
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
     let login_name = require_login_name_input(login_name)?;
+    require_existing_login(&target_dir, &login_name)?;
     let extension =
         login_config::resolve_login_extension(&target_dir, &login_name, Some(&extension))
             .map_err(|err| err.to_string())?;

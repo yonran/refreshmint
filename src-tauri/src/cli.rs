@@ -673,6 +673,7 @@ fn run_debug_start(
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
 
     let login_name = require_cli_login_name("login", &args.login)?;
+    require_cli_existing_login(&ledger_dir, &login_name)?;
     let extension = args.extension.trim().to_string();
     if extension.is_empty() {
         return Err(
@@ -910,6 +911,7 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
     };
 
     let login_name = require_cli_login_name("login", &args.login)?;
+    require_cli_existing_login(&ledger_dir, &login_name)?;
     let extension_name = crate::login_config::resolve_login_extension(
         &ledger_dir,
         &login_name,

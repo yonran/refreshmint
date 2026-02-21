@@ -2,7 +2,7 @@
 
 ## Implementation Status (2026-02-21)
 
-Status: complete in `main`, across commits `9fde2bd` through `25fdf40`.
+Status: complete in `main`, across commits `9fde2bd` through `b7f2fc6`.
 
 Recent completion milestones:
 
@@ -24,6 +24,7 @@ Recent completion milestones:
 - TypeScript `runScrape` compatibility wrapper now delegates to `runScrapeForLogin`.
 - Tauri and CLI login-account flows now validate labels consistently (including journal/reconcile/document paths).
 - Login mutation commands now require an existing login (no implicit login creation on typo/missing config).
+- Scrape/debug start and login secret-sync flows now also require existing logins.
 
 ## Context
 
