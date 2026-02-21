@@ -475,7 +475,7 @@ export async function removeLoginAccount(
     loginName: string,
     label: string,
 ): Promise<void> {
-    await invoke('remove_login_account', { ledger, loginName, label });
+    await deleteLoginAccount(ledger, loginName, label);
 }
 
 export async function deleteLoginAccount(
