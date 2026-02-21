@@ -6,10 +6,12 @@ use std::path::Path;
 use std::process::Command;
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LedgerView {
     pub path: String,
     pub accounts: Vec<AccountRow>,
     pub transactions: Vec<TransactionRow>,
+    pub gl_account_conflicts: Vec<crate::login_config::GlAccountConflict>,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,11 +91,13 @@ pub fn open_ledger_dir(path: &Path) -> Result<LedgerView, Box<dyn std::error::Er
     let transactions = run_hledger_print(&journal_path)?;
     let accounts = build_account_rows(&transactions);
     let transaction_rows = build_transaction_rows(&transactions);
+    let gl_account_conflicts = crate::login_config::find_gl_account_conflicts(path);
 
     Ok(LedgerView {
         path: path.display().to_string(),
         accounts,
         transactions: transaction_rows,
+        gl_account_conflicts,
     })
 }
 

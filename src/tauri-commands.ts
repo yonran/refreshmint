@@ -4,6 +4,17 @@ export interface LedgerView {
     path: string;
     accounts: AccountRow[];
     transactions: TransactionRow[];
+    glAccountConflicts: GlAccountConflict[];
+}
+
+export interface GlAccountConflict {
+    glAccount: string;
+    entries: GlAccountConflictEntry[];
+}
+
+export interface GlAccountConflictEntry {
+    loginName: string;
+    label: string;
 }
 
 export interface AccountRow {

@@ -166,14 +166,16 @@ pub fn list_logins(ledger_dir: &Path) -> Vec<String> {
 }
 
 /// A conflict entry for GL account uniqueness violations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GlAccountConflictEntry {
     pub login_name: String,
     pub label: String,
 }
 
 /// A GL account conflict: multiple login accounts map to the same GL account.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GlAccountConflict {
     pub gl_account: String,
     pub entries: Vec<GlAccountConflictEntry>,

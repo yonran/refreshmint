@@ -2036,6 +2036,38 @@ function App() {
                 </div>
             ) : (
                 <section className="ledger">
+                    {ledger.glAccountConflicts.length === 0 ? null : (
+                        <section className="txn-form">
+                            <div className="txn-form-header">
+                                <div>
+                                    <h2>GL mapping conflicts</h2>
+                                    <p>
+                                        Multiple login labels map to the same GL
+                                        account. Resolve these before extraction
+                                        or reconciliation.
+                                    </p>
+                                </div>
+                            </div>
+                            <p className="status">
+                                {ledger.glAccountConflicts.length} conflicting
+                                GL account mapping(s) detected.
+                            </p>
+                            <p className="status mono">
+                                {ledger.glAccountConflicts
+                                    .slice(0, 3)
+                                    .map((conflict) => {
+                                        const mappings = conflict.entries
+                                            .map(
+                                                (entry) =>
+                                                    `${entry.loginName}/${entry.label}`,
+                                            )
+                                            .join(', ');
+                                        return `${conflict.glAccount}: ${mappings}`;
+                                    })
+                                    .join(' | ')}
+                            </p>
+                        </section>
+                    )}
                     <div className="tabs">
                         <button
                             className={
