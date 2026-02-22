@@ -116,6 +116,7 @@ export default defineConfig(
         files: ['builtin-extensions/**/*.mjs'],
         languageOptions: {
             globals: {
+                browser: 'readonly',
                 page: 'readonly',
                 refreshmint: 'readonly',
             },
