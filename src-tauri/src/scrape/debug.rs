@@ -795,6 +795,7 @@ mod tests {
                 original_url: Some("https://example.com/export".to_string()),
                 mime_type: Some("application/octet-stream".to_string()),
                 label: Some("checking".to_string()),
+                metadata: std::collections::BTreeMap::new(),
             }],
             scrape_session_id: "debug-session".to_string(),
             extension_name: "smoke-ext".to_string(),

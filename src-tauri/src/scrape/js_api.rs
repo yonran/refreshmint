@@ -2134,6 +2134,7 @@ pub struct StagedResource {
     pub original_url: Option<String>,
     pub mime_type: Option<String>,
     pub label: Option<String>,
+    pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// Shared state backing the `refreshmint` JS namespace.
@@ -2175,14 +2176,7 @@ impl RefreshmintApi {
 #[serde(rename_all = "camelCase")]
 struct AccountDocumentSummary {
     filename: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    coverage_end_date: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mime_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    extension_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scraped_at: Option<String>,
+    metadata: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 fn missing_prompt_override_error(message: &str) -> String {
@@ -2191,11 +2185,77 @@ fn missing_prompt_override_error(message: &str) -> String {
     )
 }
 
+fn parse_document_filter(
+    filter: Option<rquickjs::Value<'_>>,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut metadata = BTreeMap::new();
+
+    if let Some(val) = filter {
+        if let Some(s) = val.as_string() {
+            if let Ok(label) = s.to_string() {
+                metadata.insert("label".to_string(), serde_json::Value::String(label));
+            }
+        } else if let Some(obj) = val.as_object() {
+            for (key, v) in obj.props::<String, rquickjs::Value>().flatten() {
+                let json_val = if v.is_null() || v.is_undefined() {
+                    serde_json::Value::Null
+                } else if let Some(b) = v.as_bool() {
+                    serde_json::Value::Bool(b)
+                } else if let Some(s) = v.as_string() {
+                    serde_json::Value::String(s.to_string().unwrap_or_default())
+                } else if let Some(i) = v.as_int() {
+                    serde_json::Value::Number(i.into())
+                } else if let Some(f) = v.as_float() {
+                    if let Some(n) = serde_json::Number::from_f64(f) {
+                        serde_json::Value::Number(n)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                };
+                metadata.insert(key, json_val);
+            }
+        }
+    }
+    metadata
+}
+
+fn matches_filter(
+    info: &crate::scrape::DocumentInfo,
+    filter: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> bool {
+    for (key, expected_val) in filter {
+        let actual_val = match key.as_str() {
+            "mimeType" => Some(serde_json::Value::String(info.mime_type.clone())),
+            "coverageEndDate" => Some(serde_json::Value::String(info.coverage_end_date.clone())),
+            "label" => Some(serde_json::Value::String(info.label.clone())),
+            "originalUrl" => info
+                .original_url
+                .as_ref()
+                .map(|s| serde_json::Value::String(s.clone())),
+            "extensionName" => Some(serde_json::Value::String(info.extension_name.clone())),
+            "scrapedAt" => Some(serde_json::Value::String(info.scraped_at.clone())),
+            _ => info.metadata.get(key).cloned(),
+        };
+
+        if let Some(actual) = actual_val {
+            if actual != *expected_val {
+                return false;
+            }
+        } else if !expected_val.is_null() {
+            return false;
+        }
+    }
+    true
+}
+
 struct SaveResourceOptions {
     coverage_end_date: Option<String>,
     original_url: Option<String>,
     mime_type: Option<String>,
     label: Option<String>,
+    metadata: BTreeMap<String, serde_json::Value>,
 }
 
 fn parse_save_resource_options(options: Option<rquickjs::Value<'_>>) -> SaveResourceOptions {
@@ -2204,20 +2264,45 @@ fn parse_save_resource_options(options: Option<rquickjs::Value<'_>>) -> SaveReso
         original_url: None,
         mime_type: None,
         label: None,
+        metadata: BTreeMap::new(),
     };
     if let Some(opts) = options {
         if let Some(obj) = opts.as_object() {
-            if let Ok(val) = obj.get::<_, Option<String>>("coverageEndDate") {
-                result.coverage_end_date = val;
-            }
-            if let Ok(val) = obj.get::<_, Option<String>>("originalUrl") {
-                result.original_url = val;
-            }
-            if let Ok(val) = obj.get::<_, Option<String>>("mimeType") {
-                result.mime_type = val;
-            }
-            if let Ok(val) = obj.get::<_, Option<String>>("label") {
-                result.label = val;
+            for (key, v) in obj.props::<String, rquickjs::Value>().flatten() {
+                match key.as_str() {
+                    "coverageEndDate" => {
+                        result.coverage_end_date = v.as_string().and_then(|s| s.to_string().ok());
+                    }
+                    "originalUrl" => {
+                        result.original_url = v.as_string().and_then(|s| s.to_string().ok());
+                    }
+                    "mimeType" => {
+                        result.mime_type = v.as_string().and_then(|s| s.to_string().ok());
+                    }
+                    "label" => {
+                        result.label = v.as_string().and_then(|s| s.to_string().ok());
+                    }
+                    _ => {
+                        let json_val = if v.is_null() || v.is_undefined() {
+                            serde_json::Value::Null
+                        } else if let Some(b) = v.as_bool() {
+                            serde_json::Value::Bool(b)
+                        } else if let Some(s) = v.as_string() {
+                            serde_json::Value::String(s.to_string().unwrap_or_default())
+                        } else if let Some(i) = v.as_int() {
+                            serde_json::Value::Number(i.into())
+                        } else if let Some(f) = v.as_float() {
+                            if let Some(n) = serde_json::Number::from_f64(f) {
+                                serde_json::Value::Number(n)
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        };
+                        result.metadata.insert(key, json_val);
+                    }
+                }
             }
         }
     }
@@ -2345,48 +2430,130 @@ fn unique_output_path(output_dir: &Path, filename: &str) -> PathBuf {
 #[rquickjs::methods]
 impl RefreshmintApi {
     /// List existing account documents as JSON for "since last scrape" logic.
+    ///
+    /// If `filter` is a string, it is treated as the account label.
+    /// If `filter` is an object, it is used to match metadata fields.
     #[qjs(rename = "listAccountDocuments")]
-    pub async fn js_list_account_documents(&self) -> JsResult<String> {
+    pub async fn js_list_account_documents(
+        &self,
+        filter_val: Opt<rquickjs::Value<'_>>,
+    ) -> JsResult<String> {
         let (ledger_dir, login_name) = {
             let inner = self.inner.lock().await;
             (inner.ledger_dir.clone(), inner.login_name.clone())
         };
 
-        // listAccountDocuments currently returns the default label's document history.
-        let documents_dir =
-            crate::login_config::login_account_documents_dir(&ledger_dir, &login_name, "_default");
-        let mut docs = Vec::new();
-        if documents_dir.exists() {
-            for entry in std::fs::read_dir(&documents_dir)
-                .map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?
-            {
-                let entry =
-                    entry.map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?;
-                let file_name = entry.file_name().to_string_lossy().to_string();
-                if file_name.ends_with("-info.json") || !entry.path().is_file() {
-                    continue;
-                }
+        let filter = parse_document_filter(filter_val.0);
+        let label_filter = filter
+            .get("label")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
-                let sidecar_path = documents_dir.join(format!("{file_name}-info.json"));
-                let info = if sidecar_path.exists() {
-                    std::fs::read_to_string(&sidecar_path)
-                        .ok()
-                        .and_then(|content| {
-                            serde_json::from_str::<crate::scrape::DocumentInfo>(&content).ok()
-                        })
-                } else {
-                    None
-                };
-                docs.push(AccountDocumentSummary {
-                    filename: file_name,
-                    coverage_end_date: info.as_ref().map(|v| v.coverage_end_date.clone()),
-                    mime_type: info.as_ref().map(|v| v.mime_type.clone()),
-                    extension_name: info.as_ref().map(|v| v.extension_name.clone()),
-                    scraped_at: info.as_ref().map(|v| v.scraped_at.clone()),
-                });
+        let mut docs = Vec::new();
+        let target_labels = if let Some(l) = label_filter {
+            vec![l]
+        } else {
+            // List all accounts in logins/<login>/accounts/
+            let accounts_dir = ledger_dir.join("logins").join(&login_name).join("accounts");
+            let mut labels = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&accounts_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        labels.push(entry.file_name().to_string_lossy().to_string());
+                    }
+                }
             }
-            docs.sort_by(|a, b| a.filename.cmp(&b.filename));
+            if labels.is_empty() {
+                // Fallback to _default if no accounts dir (backward compat)
+                vec!["_default".to_string()]
+            } else {
+                labels
+            }
+        };
+
+        for acct_label in target_labels {
+            let documents_dir = crate::login_config::login_account_documents_dir(
+                &ledger_dir,
+                &login_name,
+                &acct_label,
+            );
+
+            if documents_dir.exists() {
+                for entry in std::fs::read_dir(&documents_dir)
+                    .map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?
+                {
+                    let entry =
+                        entry.map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?;
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    if file_name.ends_with("-info.json") || !entry.path().is_file() {
+                        continue;
+                    }
+
+                    let sidecar_path = documents_dir.join(format!("{file_name}-info.json"));
+                    let info = if sidecar_path.exists() {
+                        std::fs::read_to_string(&sidecar_path)
+                            .ok()
+                            .and_then(|content| {
+                                serde_json::from_str::<crate::scrape::DocumentInfo>(&content).ok()
+                            })
+                    } else {
+                        None
+                    };
+
+                    if let Some(info) = info {
+                        if matches_filter(&info, &filter) {
+                            let mut metadata = info.metadata;
+                            metadata.insert(
+                                "label".to_string(),
+                                serde_json::Value::String(acct_label.clone()),
+                            );
+                            metadata.insert(
+                                "mimeType".to_string(),
+                                serde_json::Value::String(info.mime_type),
+                            );
+                            metadata.insert(
+                                "coverageEndDate".to_string(),
+                                serde_json::Value::String(info.coverage_end_date),
+                            );
+                            metadata.insert(
+                                "extensionName".to_string(),
+                                serde_json::Value::String(info.extension_name),
+                            );
+                            metadata.insert(
+                                "scrapedAt".to_string(),
+                                serde_json::Value::String(info.scraped_at),
+                            );
+                            if let Some(url) = info.original_url {
+                                metadata.insert(
+                                    "originalUrl".to_string(),
+                                    serde_json::Value::String(url),
+                                );
+                            }
+                            docs.push(AccountDocumentSummary {
+                                filename: file_name,
+                                metadata,
+                            });
+                        }
+                    } else if filter.is_empty() {
+                        // Include docs without sidecars only if no filter is requested
+                        let mut metadata = BTreeMap::new();
+                        metadata.insert(
+                            "label".to_string(),
+                            serde_json::Value::String(acct_label.clone()),
+                        );
+                        docs.push(AccountDocumentSummary {
+                            filename: file_name,
+                            metadata,
+                        });
+                    }
+                }
+            }
         }
+        docs.sort_by(|a, b| {
+            let a_date = a.metadata.get("coverageEndDate").and_then(|v| v.as_str());
+            let b_date = b.metadata.get("coverageEndDate").and_then(|v| v.as_str());
+            b_date.cmp(&a_date)
+        });
         serde_json::to_string(&docs)
             .map_err(|e| js_err(format!("listAccountDocuments serialization failed: {e}")))
     }
@@ -2411,6 +2578,7 @@ impl RefreshmintApi {
             original_url,
             mime_type,
             label,
+            metadata,
         } = parse_save_resource_options(options.0);
 
         // Always save to the legacy output dir for backward compatibility
@@ -2430,6 +2598,7 @@ impl RefreshmintApi {
             original_url,
             mime_type,
             label,
+            metadata,
         });
 
         Ok(())
@@ -2795,6 +2964,84 @@ mod tests {
             aria_described_by: None,
             selector_hint: "button".to_string(),
         }
+    }
+
+    #[test]
+    fn test_matches_filter_metadata() {
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert(
+            "format".to_string(),
+            serde_json::Value::String("qfx".to_string()),
+        );
+        metadata.insert("version".to_string(), serde_json::Value::Number(1.into()));
+
+        let info = crate::scrape::DocumentInfo {
+            mime_type: "application/x-ofx".to_string(),
+            original_url: None,
+            scraped_at: "2026-02-21T16:00:00Z".to_string(),
+            extension_name: "test-ext".to_string(),
+            login_name: "test-login".to_string(),
+            label: "checking".to_string(),
+            scrape_session_id: "session-1".to_string(),
+            coverage_end_date: "2026-01-31".to_string(),
+            date_range_start: None,
+            date_range_end: None,
+            metadata,
+        };
+
+        // Exact match
+        let mut filter = std::collections::BTreeMap::new();
+        filter.insert(
+            "format".to_string(),
+            serde_json::Value::String("qfx".to_string()),
+        );
+        assert!(matches_filter(&info, &filter));
+
+        // Intrinsic field match
+        let mut filter = std::collections::BTreeMap::new();
+        filter.insert(
+            "label".to_string(),
+            serde_json::Value::String("checking".to_string()),
+        );
+        assert!(matches_filter(&info, &filter));
+
+        // Multiple fields
+        let mut filter = std::collections::BTreeMap::new();
+        filter.insert(
+            "format".to_string(),
+            serde_json::Value::String("qfx".to_string()),
+        );
+        filter.insert("version".to_string(), serde_json::Value::Number(1.into()));
+        assert!(matches_filter(&info, &filter));
+
+        // Mismatch in metadata
+        let mut filter = std::collections::BTreeMap::new();
+        filter.insert(
+            "format".to_string(),
+            serde_json::Value::String("csv".to_string()),
+        );
+        assert!(!matches_filter(&info, &filter));
+
+        // Mismatch in intrinsic
+        let mut filter = std::collections::BTreeMap::new();
+        filter.insert(
+            "label".to_string(),
+            serde_json::Value::String("savings".to_string()),
+        );
+        assert!(!matches_filter(&info, &filter));
+
+        // Key missing in info
+        let mut filter = std::collections::BTreeMap::new();
+        filter.insert(
+            "missing".to_string(),
+            serde_json::Value::String("val".to_string()),
+        );
+        assert!(!matches_filter(&info, &filter));
+
+        // Key missing in info but filter expects null
+        let mut filter = std::collections::BTreeMap::new();
+        filter.insert("missing".to_string(), serde_json::Value::Null);
+        assert!(matches_filter(&info, &filter));
     }
 
     #[test]

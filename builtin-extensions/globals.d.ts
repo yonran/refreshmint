@@ -64,12 +64,13 @@ interface SaveResourceOptions {
     coverageEndDate?: string | undefined;
     originalUrl?: string;
     mimeType?: string;
+    label?: string;
+    [key: string]: string | number | boolean | null | undefined;
 }
 
 interface SessionMetadata {
     dateRangeStart?: string;
     dateRangeEnd?: string;
-    [key: string]: unknown;
 }
 
 interface RefreshmintApi {
@@ -83,7 +84,14 @@ interface RefreshmintApi {
         filename?: string,
         options?: SaveResourceOptions,
     ): Promise<void>;
-    listAccountDocuments(): Promise<string>;
+    listAccountDocuments(
+        filter?:
+            | string
+            | {
+                  label?: string;
+                  [key: string]: string | number | boolean | null | undefined;
+              },
+    ): Promise<string>;
     setSessionMetadata(metadata: SessionMetadata): Promise<void>;
     reportValue(key: string, value: string): void;
     log(message: string): void;

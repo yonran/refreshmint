@@ -127,6 +127,8 @@ pub struct DocumentInfo {
     pub date_range_start: Option<String>,
     #[serde(rename = "dateRangeEnd", skip_serializing_if = "Option::is_none")]
     pub date_range_end: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 fn default_document_label() -> String {
@@ -223,6 +225,7 @@ pub fn finalize_staged_resources(
             coverage_end_date: coverage_date.to_string(),
             date_range_start: inner.session_metadata.date_range_start.clone(),
             date_range_end: inner.session_metadata.date_range_end.clone(),
+            metadata: resource.metadata.clone(),
         };
 
         let sidecar_path = documents_dir.join(format!("{final_filename}-info.json"));
@@ -641,6 +644,7 @@ mod tests {
                 original_url: Some("https://example.com/export".to_string()),
                 mime_type: Some("application/pdf".to_string()),
                 label: Some("checking".to_string()),
+                metadata: std::collections::BTreeMap::new(),
             }],
             scrape_session_id: "nested-test".to_string(),
             extension_name: "nested-ext".to_string(),
@@ -697,6 +701,7 @@ mod tests {
                 original_url: None,
                 mime_type: Some("application/pdf".to_string()),
                 label: Some("bad/label".to_string()),
+                metadata: std::collections::BTreeMap::new(),
             }],
             scrape_session_id: "invalid-label-test".to_string(),
             extension_name: "nested-ext".to_string(),
