@@ -18,6 +18,8 @@ pub struct LedgerView {
 pub struct AccountRow {
     pub name: String,
     pub totals: Option<Vec<AmountTotal>>,
+    #[serde(rename = "unreconciledCount")]
+    pub unreconciled_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,7 +91,7 @@ pub fn open_ledger_dir(path: &Path) -> Result<LedgerView, Box<dyn std::error::Er
     }
 
     let transactions = run_hledger_print(&journal_path)?;
-    let accounts = build_account_rows(&transactions);
+    let accounts = build_account_rows(path, &transactions);
     let transaction_rows = build_transaction_rows(&transactions);
     let gl_account_conflicts = crate::login_config::find_gl_account_conflicts(path);
 
@@ -122,7 +124,7 @@ fn run_hledger_print(journal_path: &Path) -> io::Result<Vec<Transaction>> {
     }
 }
 
-fn build_account_rows(transactions: &[Transaction]) -> Vec<AccountRow> {
+fn build_account_rows(path: &Path, transactions: &[Transaction]) -> Vec<AccountRow> {
     let mut accounts: BTreeMap<String, Option<BTreeMap<String, CommodityTotal>>> = BTreeMap::new();
 
     for txn in transactions {
@@ -142,11 +144,40 @@ fn build_account_rows(transactions: &[Transaction]) -> Vec<AccountRow> {
         }
     }
 
+    // Build GL account -> (login, label) map for unreconciled counts
+    let mut gl_to_login: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    let logins = crate::login_config::list_logins(path);
+    for login in &logins {
+        let config = crate::login_config::read_login_config(path, login);
+        for (label, account_config) in &config.accounts {
+            if let Some(gl_account) = &account_config.gl_account {
+                gl_to_login
+                    .entry(gl_account.clone())
+                    .or_default()
+                    .push((login.clone(), label.clone()));
+            }
+        }
+    }
+
     accounts
         .into_iter()
-        .map(|(name, totals)| AccountRow {
-            name,
-            totals: totals.and_then(|totals| totals_to_rows(&totals)),
+        .map(|(name, totals)| {
+            let mut unreconciled_count = 0;
+            if let Some(mappings) = gl_to_login.get(&name) {
+                for (login, label) in mappings {
+                    if let Ok(unreconciled) =
+                        crate::reconcile::get_unreconciled_login_account(path, login, label)
+                    {
+                        unreconciled_count += unreconciled.len();
+                    }
+                }
+            }
+
+            AccountRow {
+                name,
+                totals: totals.and_then(|totals| totals_to_rows(&totals)),
+                unreconciled_count,
+            }
         })
         .collect()
 }

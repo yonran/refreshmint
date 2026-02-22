@@ -20,6 +20,7 @@ export interface GlAccountConflictEntry {
 export interface AccountRow {
     name: string;
     totals: AmountTotal[] | null;
+    unreconciledCount: number;
 }
 
 export interface TransactionRow {
@@ -261,6 +262,20 @@ export async function listLoginAccountDocuments(
     label: string,
 ): Promise<DocumentWithInfo[]> {
     return invoke('list_login_account_documents', { ledger, loginName, label });
+}
+
+export async function readLoginAccountDocumentRows(
+    ledger: string,
+    loginName: string,
+    label: string,
+    documentName: string,
+): Promise<string[][]> {
+    return invoke('read_login_account_document_rows', {
+        ledger,
+        loginName,
+        label,
+        documentName,
+    });
 }
 
 export async function runExtraction(

@@ -105,6 +105,11 @@ type LoginAccountMapping = {
     extension: string;
 };
 
+type LoginAccountRef = {
+    loginName: string;
+    label: string;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -170,6 +175,19 @@ function App() {
     const [isOpening, setIsOpening] = useState(false);
     const [ledger, setLedger] = useState<LedgerView | null>(null);
     const [activeTab, setActiveTab] = useState<ActiveTab>('accounts');
+    const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
+    const [unreconciledOnly, setUnreconciledOnly] = useState(false);
+    const [selectedLoginAccount, setSelectedLoginAccount] =
+        useState<LoginAccountRef | null>(null);
+    const [loginAccounts, setLoginAccounts] = useState<LoginAccountRef[]>([]);
+
+    function handleSelectAccount(accountName: string) {
+        setSelectedAccount((current) =>
+            current === accountName ? null : accountName,
+        );
+        setScrapeAccount(accountName);
+        setActiveTab('transactions');
+    }
     const [recentLedgers, setRecentLedgersState] = useState<string[]>([]);
     const [transactionDraft, setTransactionDraft] = useState<TransactionDraft>(
         createTransactionDraft,
@@ -316,6 +334,35 @@ function App() {
               )
         : [];
     const selectedScrapeAccount = scrapeAccount.trim();
+
+    const filteredTransactions = ledger
+        ? ledger.transactions.filter((txn) => {
+              if (
+                  selectedAccount !== null &&
+                  !txn.postings.some((p) => p.account === selectedAccount)
+              ) {
+                  return false;
+              }
+              if (unreconciledOnly) {
+                  // This is a bit tricky because "unreconciled" in the main ledger isn't directly tracked the same way.
+                  // But we can filter for transactions that have an "Equity:Unreconciled" account.
+                  if (
+                      !txn.postings.some((p) =>
+                          p.account.startsWith('Equity:Unreconciled'),
+                      )
+                  ) {
+                      return false;
+                  }
+              }
+              return true;
+          })
+        : [];
+
+    const selectedAccountRow =
+        selectedAccount !== null
+            ? ledger?.accounts.find((a) => a.name === selectedAccount)
+            : null;
+
     const selectedAccountMappings =
         selectedScrapeAccount.length === 0
             ? []
@@ -607,6 +654,7 @@ function App() {
 
                 const configMap: Record<string, LoginConfig> = {};
                 const mappings: Record<string, LoginAccountMapping[]> = {};
+                const accounts: LoginAccountRef[] = [];
                 for (const { loginName, config } of configs) {
                     const normalizedConfig = normalizeLoginConfig(config);
                     configMap[loginName] = normalizedConfig;
@@ -614,6 +662,7 @@ function App() {
                     for (const [label, mapping] of Object.entries(
                         normalizedConfig.accounts,
                     )) {
+                        accounts.push({ loginName, label });
                         const glAccount = mapping.glAccount?.trim() ?? '';
                         if (glAccount.length === 0) {
                             continue;
@@ -629,6 +678,13 @@ function App() {
                 }
                 setLoginNames(logins);
                 setLoginConfigsByName(configMap);
+                setLoginAccounts(
+                    accounts.sort((a, b) =>
+                        a.loginName === b.loginName
+                            ? a.label.localeCompare(b.label)
+                            : a.loginName.localeCompare(b.loginName),
+                    ),
+                );
                 setSelectedLoginName((current) => {
                     if (current.length > 0 && logins.includes(current)) {
                         return current;
@@ -1057,6 +1113,68 @@ function App() {
     }, [pruneRecentLedger, recordRecentLedger]);
 
     useEffect(() => {
+        if (ledgerPath === null || selectedLoginAccount === null) {
+            return;
+        }
+
+        const { loginName, label } = selectedLoginAccount;
+        let cancelled = false;
+        const timer = window.setTimeout(() => {
+            setIsLoadingDocuments(true);
+            setIsLoadingAccountJournal(true);
+            setIsLoadingUnreconciled(true);
+            void Promise.all([
+                listLoginAccountDocuments(ledgerPath, loginName, label),
+                getLoginAccountJournal(ledgerPath, loginName, label),
+                getLoginAccountUnreconciled(ledgerPath, loginName, label),
+            ])
+                .then(
+                    ([
+                        fetchedDocuments,
+                        fetchedJournal,
+                        fetchedUnreconciled,
+                    ]) => {
+                        if (cancelled) {
+                            return;
+                        }
+                        setDocuments(fetchedDocuments);
+                        setAccountJournalEntries(fetchedJournal);
+                        setUnreconciledEntries(fetchedUnreconciled);
+                        setReconcileDrafts((current) => {
+                            const next: Record<string, ReconcileDraft> = {};
+                            for (const entry of fetchedUnreconciled) {
+                                next[entry.id] = current[entry.id] ?? {
+                                    counterpartAccount: '',
+                                    postingIndex: '',
+                                };
+                            }
+                            return next;
+                        });
+                    },
+                )
+                .catch((error: unknown) => {
+                    if (!cancelled) {
+                        setPipelineStatus(
+                            `Failed to load login account journal: ${String(error)}`,
+                        );
+                    }
+                })
+                .finally(() => {
+                    if (!cancelled) {
+                        setIsLoadingDocuments(false);
+                        setIsLoadingAccountJournal(false);
+                        setIsLoadingUnreconciled(false);
+                    }
+                });
+        }, 200);
+
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timer);
+        };
+    }, [ledgerPath, selectedLoginAccount]);
+
+    useEffect(() => {
         if (!ledger) {
             return;
         }
@@ -1446,10 +1564,14 @@ function App() {
                 }
             }
             setScrapeStatus(`Loaded extension '${loadedExtensionName}'.`);
-            setExtensionLoadStatus(`Loaded extension '${loadedExtensionName}'.`);
+            setExtensionLoadStatus(
+                `Loaded extension '${loadedExtensionName}'.`,
+            );
         } catch (error) {
             setScrapeStatus(`Failed to load extension: ${String(error)}`);
-            setExtensionLoadStatus(`Failed to load extension: ${String(error)}`);
+            setExtensionLoadStatus(
+                `Failed to load extension: ${String(error)}`,
+            );
         } finally {
             setIsImportingScrapeExtension(false);
         }
@@ -2731,6 +2853,19 @@ function App() {
                         </button>
                         <button
                             className={
+                                activeTab === 'account-journals'
+                                    ? 'tab active'
+                                    : 'tab'
+                            }
+                            onClick={() => {
+                                setActiveTab('account-journals');
+                            }}
+                            type="button"
+                        >
+                            Source Journals
+                        </button>
+                        <button
+                            className={
                                 activeTab === 'scrape' ? 'tab active' : 'tab'
                             }
                             onClick={() => {
@@ -2744,10 +2879,58 @@ function App() {
 
                     {activeTab === 'accounts' ? (
                         <div className="table-wrap">
-                            <AccountsTable accounts={ledger.accounts} />
+                            <AccountsTable
+                                accounts={ledger.accounts}
+                                onSelectAccount={handleSelectAccount}
+                            />
                         </div>
                     ) : activeTab === 'transactions' ? (
                         <div className="transactions-panel">
+                            {selectedAccount !== null ? (
+                                <div className="filter-header">
+                                    <div className="filter-info">
+                                        <span className="filter-label">
+                                            Filtered by account:
+                                        </span>
+                                        <span className="filter-value mono">
+                                            {selectedAccount}
+                                        </span>
+                                        {selectedAccountRow &&
+                                        selectedAccountRow.unreconciledCount >
+                                            0 ? (
+                                            <span className="secret-chip warning">
+                                                {
+                                                    selectedAccountRow.unreconciledCount
+                                                }{' '}
+                                                unreconciled
+                                            </span>
+                                        ) : null}
+                                    </div>
+                                    <div className="filter-actions">
+                                        <label className="checkbox-field">
+                                            <input
+                                                type="checkbox"
+                                                checked={unreconciledOnly}
+                                                onChange={(e) => {
+                                                    setUnreconciledOnly(
+                                                        e.target.checked,
+                                                    );
+                                                }}
+                                            />
+                                            <span>Unreconciled only</span>
+                                        </label>
+                                        <button
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                setSelectedAccount(null);
+                                                setUnreconciledOnly(false);
+                                            }}
+                                        >
+                                            Clear filter
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : null}
                             <section className="txn-form">
                                 <div className="txn-form-header">
                                     <div>
@@ -3201,9 +3384,123 @@ function App() {
                             </section>
                             <div className="table-wrap">
                                 <TransactionsTable
-                                    transactions={ledger.transactions}
+                                    transactions={filteredTransactions}
                                 />
                             </div>
+                        </div>
+                    ) : activeTab === 'account-journals' ? (
+                        <div className="transactions-panel">
+                            <section className="txn-form">
+                                <div className="txn-form-header">
+                                    <div>
+                                        <h2>Source journals</h2>
+                                        <p>
+                                            View extracted transactions and
+                                            reconciliation status for each bank
+                                            account label.
+                                        </p>
+                                    </div>
+                                </div>
+                                <div className="txn-grid">
+                                    <label className="field">
+                                        <span>Selected bank account</span>
+                                        <select
+                                            value={
+                                                selectedLoginAccount !== null
+                                                    ? `${selectedLoginAccount.loginName}/${selectedLoginAccount.label}`
+                                                    : ''
+                                            }
+                                            onChange={(event) => {
+                                                const value =
+                                                    event.target.value;
+                                                if (!value) {
+                                                    setSelectedLoginAccount(
+                                                        null,
+                                                    );
+                                                    return;
+                                                }
+                                                const [loginName, label] =
+                                                    value.split('/', 2);
+                                                if (
+                                                    loginName !== undefined &&
+                                                    label !== undefined &&
+                                                    loginName.length > 0 &&
+                                                    label.length > 0
+                                                ) {
+                                                    setSelectedLoginAccount({
+                                                        loginName,
+                                                        label,
+                                                    });
+                                                }
+                                            }}
+                                        >
+                                            <option value="">
+                                                Select a source...
+                                            </option>
+                                            {loginAccounts.map((account) => {
+                                                const key = `${account.loginName}/${account.label}`;
+                                                return (
+                                                    <option
+                                                        key={key}
+                                                        value={key}
+                                                    >
+                                                        {key}
+                                                    </option>
+                                                );
+                                            })}
+                                        </select>
+                                    </label>
+                                </div>
+                                {selectedLoginAccount === null ? (
+                                    <p className="hint">
+                                        Select a login and label to view its
+                                        extracted transactions.
+                                    </p>
+                                ) : (
+                                    <>
+                                        <div className="txn-form-header">
+                                            <div>
+                                                <h3>Journal entries</h3>
+                                                <p>
+                                                    Transactions extracted for{' '}
+                                                    <span className="mono">
+                                                        {
+                                                            selectedLoginAccount.loginName
+                                                        }
+                                                        /
+                                                        {
+                                                            selectedLoginAccount.label
+                                                        }
+                                                    </span>
+                                                    .
+                                                </p>
+                                            </div>
+                                        </div>
+                                        {isLoadingAccountJournal ? (
+                                            <p className="status">
+                                                Loading source journal...
+                                            </p>
+                                        ) : accountJournalEntries.length ===
+                                          0 ? (
+                                            <p className="hint">
+                                                No transactions extracted for
+                                                this account yet.
+                                            </p>
+                                        ) : (
+                                            <div className="table-wrap">
+                                                <AccountJournalTable
+                                                    entries={
+                                                        accountJournalEntries
+                                                    }
+                                                />
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+                                {pipelineStatus === null ? null : (
+                                    <p className="status">{pipelineStatus}</p>
+                                )}
+                            </section>
                         </div>
                     ) : (
                         <div className="transactions-panel">
@@ -4823,28 +5120,55 @@ function App() {
     );
 }
 
-function AccountsTable({ accounts }: { accounts: AccountRow[] }) {
+function AccountsTable({
+    accounts,
+    onSelectAccount,
+}: {
+    accounts: AccountRow[];
+    onSelectAccount: (name: string) => void;
+}) {
     return (
         <table className="ledger-table">
             <thead>
                 <tr>
                     <th>Account</th>
                     <th>Balance</th>
+                    <th>Extraction</th>
                 </tr>
             </thead>
             <tbody>
                 {accounts.length === 0 ? (
                     <tr>
-                        <td colSpan={2} className="table-empty">
+                        <td colSpan={3} className="table-empty">
                             No accounts found.
                         </td>
                     </tr>
                 ) : (
                     accounts.map((account) => (
                         <tr key={account.name}>
-                            <td>{account.name}</td>
+                            <td>
+                                <button
+                                    className="link-button mono"
+                                    onClick={() => {
+                                        onSelectAccount(account.name);
+                                    }}
+                                >
+                                    {account.name}
+                                </button>
+                            </td>
                             <td className="amount">
                                 {formatTotals(account.totals)}
+                            </td>
+                            <td>
+                                {account.unreconciledCount > 0 ? (
+                                    <span className="secret-chip warning">
+                                        {account.unreconciledCount} unreconciled
+                                    </span>
+                                ) : (
+                                    <span className="status-dim">
+                                        up to date
+                                    </span>
+                                )}
                             </td>
                         </tr>
                     ))
@@ -4950,6 +5274,52 @@ function PostingsList({ postings }: { postings: PostingRow[] }) {
                 </div>
             ))}
         </div>
+    );
+}
+
+function AccountJournalTable({ entries }: { entries: AccountJournalEntry[] }) {
+    return (
+        <table className="ledger-table">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Status</th>
+                    <th>Description</th>
+                    <th>Evidence</th>
+                    <th>Reconciled</th>
+                </tr>
+            </thead>
+            <tbody>
+                {entries.length === 0 ? (
+                    <tr>
+                        <td colSpan={5} className="table-empty">
+                            No entries found.
+                        </td>
+                    </tr>
+                ) : (
+                    entries.map((entry) => (
+                        <tr key={entry.id}>
+                            <td className="mono">{entry.date}</td>
+                            <td className="mono">{entry.status}</td>
+                            <td>{entry.description}</td>
+                            <td>
+                                <div className="evidence-list">
+                                    {entry.evidence.map((ev) => (
+                                        <span
+                                            key={ev}
+                                            className="evidence-chip"
+                                        >
+                                            {ev}
+                                        </span>
+                                    ))}
+                                </div>
+                            </td>
+                            <td className="mono">{entry.reconciled ?? '-'}</td>
+                        </tr>
+                    ))
+                )}
+            </tbody>
+        </table>
     );
 }
 
