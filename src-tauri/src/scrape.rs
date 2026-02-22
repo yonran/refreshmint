@@ -408,7 +408,12 @@ pub async fn run_scrape_async(
     eprintln!("Page opened.");
 
     // 7. Set up shared state
-    let output_dir = extension_dir.join("output");
+    let output_dir = config
+        .ledger_dir
+        .join("cache")
+        .join("extensions")
+        .join(&config.extension_name)
+        .join("output");
     std::fs::create_dir_all(&output_dir)?;
 
     let page_inner = Arc::new(Mutex::new(js_api::PageInner {

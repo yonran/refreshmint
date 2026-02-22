@@ -205,6 +205,7 @@ fn scrape_smoke_driver_writes_output() -> Result<(), Box<dyn Error>> {
     scrape::run_scrape(config)?;
 
     let output_file = ledger_dir
+        .join("cache")
         .join("extensions")
         .join(EXTENSION_NAME)
         .join("output")
@@ -253,6 +254,7 @@ fn scrape_popup_wait_for_event_switches_tab() -> Result<(), Box<dyn Error>> {
     scrape::run_scrape(config)?;
 
     let output_file = ledger_dir
+        .join("cache")
         .join("extensions")
         .join(EXTENSION_NAME)
         .join("output")
@@ -301,6 +303,7 @@ fn scrape_click_reports_overlay_interception() -> Result<(), Box<dyn Error>> {
     scrape::run_scrape(config)?;
 
     let output_file = ledger_dir
+        .join("cache")
         .join("extensions")
         .join(EXTENSION_NAME)
         .join("output")
@@ -349,6 +352,7 @@ fn scrape_goto_handles_same_url_and_hash_navigation() -> Result<(), Box<dyn Erro
     scrape::run_scrape(config)?;
 
     let output_file = ledger_dir
+        .join("cache")
         .join("extensions")
         .join(EXTENSION_NAME)
         .join("output")
