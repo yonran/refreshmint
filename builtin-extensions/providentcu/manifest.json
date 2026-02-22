@@ -1,0 +1,9 @@
+{
+    "name": "providentcu",
+    "secrets": {
+        "accountmanager.providentcu.org": [
+            "providentcu_username",
+            "providentcu_password"
+        ]
+    }
+}
