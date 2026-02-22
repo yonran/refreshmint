@@ -59,6 +59,45 @@ Errors thrown from your script fail the scrape run.
 - Add comments for non-obvious actions describing what outcome each action is trying to accomplish (not just what selector is clicked).
 - Pace automation actions (especially login, navigation, and repeated downloads) with short delays so behavior is less bot-like and less likely to trigger anti-automation defenses.
 - Add a reusable snapshot logger for state loops. Prefer `await page.snapshot({ incremental: true, track: 'state-loop' })` so logs show only page changes from the previous checkpoint.
+- **Provide all arguments to JS APIs:** The QuickJS runtime requires every non-optional argument to be explicitly passed. If a method like `waitForLoadState(state, timeoutMs)` is called, even if you want the default timeout, pass `undefined`: `await page.waitForLoadState('networkidle', undefined)`.
+- **Use standard CSS selectors:** Underlying engine does not support Playwright-specific selectors like `:has-text()`. Use standard CSS or `page.evaluate()` to find elements by text.
+- **Handle "Busy" states:** Banking sites often use global loading overlays (e.g. `div#busy-div`). Implement a `waitForBusy` helper to ensure the page is interactive before clicking.
+- **Prefer `evaluate` for tricky clicks:** If `page.click()` fails due to visibility or pointer-event interception, use `page.evaluate('document.querySelector(selector).click()')`.
+- **Robust account discovery:** Search for account patterns (e.g., `x\d{4}`) across all relevant tags (`button`, `a`, `span`) to build a pending account list.
+
+## State management and optimization
+
+Avoid downloading everything every time by tracking progress and checking existing files.
+
+- **Deduplicate downloads:** Use `await refreshmint.listAccountDocuments()` to get a list of already saved files. Compare filenames before initiating a download.
+- **Filter by date:** Implement a "since" date check (e.g., `skip before 2026-01-01`).
+- **Debugging limits:** Use a `DOWNLOAD_LIMIT` variable during development to only fetch 1-2 items per run.
+
+Example of optimized loop:
+
+```js
+const DOWNLOAD_LIMIT = 2; // Set to 0 for no limit
+const SKIP_BEFORE_DATE = '2026-01-01';
+
+async function handleStatements(context) {
+    // ... discovery ...
+    const existing = new Set(
+        JSON.parse(await refreshmint.listAccountDocuments()).map(
+            (d) => d.filename,
+        ),
+    );
+    let downloaded = 0;
+
+    for (const row of rows) {
+        if (DOWNLOAD_LIMIT > 0 && downloaded >= DOWNLOAD_LIMIT) break;
+        if (row.date < SKIP_BEFORE_DATE) continue;
+        if (existing.has(row.filename)) continue;
+
+        // ... download ...
+        downloaded++;
+    }
+}
+```
 
 Template for new scrapers:
 
