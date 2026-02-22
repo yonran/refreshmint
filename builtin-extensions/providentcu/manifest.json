@@ -1,5 +1,6 @@
 {
     "name": "providentcu",
+    "extract": "extract.mjs",
     "secrets": {
         "accountmanager.providentcu.org": [
             "providentcu_username",

@@ -224,6 +224,15 @@ async function handleAccountSummary(context) {
     return { progressName: 'all tasks complete', done: true };
 }
 
+function getLabel(accountMatch) {
+    // e.g. "Super Reward Checking x6590" -> "super_reward_checking_6590"
+    return accountMatch
+        .toLowerCase()
+        .replace(/x(\d{4})/, '$1')
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+}
+
 /**
  * @param {ScrapeContext} context
  * @returns {Promise<StepReturn>}
@@ -231,7 +240,10 @@ async function handleAccountSummary(context) {
 async function handleAccountActivity(context) {
     const page = context.mainPage;
     const accountMatch = context.pendingAccounts[0];
-    refreshmint.log(`State: Account Activity for ${accountMatch}`);
+    const label = getLabel(accountMatch);
+    refreshmint.log(
+        `State: Account Activity for ${accountMatch} (label: ${label})`,
+    );
 
     await waitForBusy(page);
     await page.waitForSelector('button.icon-download', undefined);
@@ -262,9 +274,12 @@ async function handleAccountActivity(context) {
                 'transactions/' + filename,
                 {
                     mimeType: 'text/csv',
+                    label,
                 },
             );
-            refreshmint.log(`  Downloaded and saved: ${filename}`);
+            refreshmint.log(
+                `  Downloaded and saved: ${filename} to label ${label}`,
+            );
         } catch (e) {
             refreshmint.log(
                 `  Failed to download CSV for ${accountMatch}: ${String(e)}`,
@@ -328,8 +343,11 @@ async function handleStatements(context) {
     let totalDownloaded = 0;
 
     for (const section of sections) {
+        const label = getLabel(
+            `${section.name} x${section.accountNumber.slice(-4)}`,
+        );
         refreshmint.log(
-            `Processing section: ${section.name} ${section.accountNumber}`,
+            `Processing section: ${section.name} ${section.accountNumber} (label: ${label})`,
         );
 
         await page.evaluate(`(function(dialogId) {
@@ -418,9 +436,12 @@ async function handleStatements(context) {
                         {
                             coverageEndDate,
                             mimeType: 'application/pdf',
+                            label,
                         },
                     );
-                    refreshmint.log(`  Downloaded and saved: ${filename}`);
+                    refreshmint.log(
+                        `  Downloaded and saved: ${filename} to label ${label}`,
+                    );
                     totalDownloaded++;
                 } catch (e) {
                     refreshmint.log(
