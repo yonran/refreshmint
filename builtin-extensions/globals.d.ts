@@ -24,10 +24,12 @@ interface PageApi {
     networkRequests(): Promise<string>;
     responsesReceived(): Promise<string>;
     clearNetworkRequests(): Promise<void>;
-    tabs(): Promise<string>;
-    selectTab(index: number): Promise<string>;
-    waitForPopup(timeoutMs?: number): Promise<string>;
-    waitForEvent(event: 'popup', timeoutMs?: number): Promise<string>;
+    waitForPopup(timeoutMs?: number): Promise<PageApi>;
+    waitForEvent(event: 'popup', timeoutMs?: number): Promise<PageApi>;
+    /** @deprecated Removed. Use browser.pages(). */
+    tabs(): Promise<never>;
+    /** @deprecated Removed. Use browser.pages() and direct Page handles. */
+    selectTab(index: number): Promise<never>;
     click(selector: string): Promise<void>;
     type(selector: string, text: string): Promise<void>;
     fill(selector: string, value: string): Promise<void>;
@@ -51,6 +53,11 @@ interface PageApi {
     popupEvents(): Promise<string>;
     screenshot(): Promise<string>;
     waitForDownload(timeoutMs?: number): Promise<PageDownload>;
+}
+
+interface BrowserApi {
+    pages(): Promise<PageApi[]>;
+    waitForEvent(event: 'page', timeoutMs?: number): Promise<PageApi>;
 }
 
 interface SaveResourceOptions {
@@ -84,4 +91,5 @@ interface RefreshmintApi {
 }
 
 declare const page: PageApi;
+declare const browser: BrowserApi;
 declare const refreshmint: RefreshmintApi;

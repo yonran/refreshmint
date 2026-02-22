@@ -42,6 +42,7 @@ Errors thrown from your script fail the scrape run.
 
 ## Best practices
 
+- Whenever you scrape a new page, try doing it once, with plenty of incremental snapshot observations, before you are confident that you can script it in the general case.
 - Scrapers will fail often. Make them fast to debug and retry
     - The script should have a state machine that keeps working (for loop) until an error or the end state is achieved
     - Scrapers should define a function for each state (e.g. URL or page) and then the main code should switch on the URL or other identifying information on the page. This allows us to edit the script and re-run it without starting from the original logged out state.
@@ -49,6 +50,7 @@ Errors thrown from your script fail the scrape run.
     - Log what state you are in.
     - Add checks to make sure you are on the page that you expect to be.
     - When there is an exception or something unexpected, log context before re-throwing so that we can see what went wrong quickly.
+    - Before doing something slow (sleeping, or navigating), log what you are about to do.
 - Domain checks must compare the URL prefix to the full origin (for example `https://secure.bankofamerica.com/`), not a substring match.
 - Prefer `const url = await page.url(); if (!url.startsWith("https://example.com/")) { ... }` over checks like `url.includes("example.com")`.
 - When adding a new code path/branch, add a brief `UNTESTED` comment until that exact branch is exercised in a real run; remove or update the comment after verification.
@@ -58,6 +60,94 @@ Errors thrown from your script fail the scrape run.
 - Pace automation actions (especially login, navigation, and repeated downloads) with short delays so behavior is less bot-like and less likely to trigger anti-automation defenses.
 - Add a reusable snapshot logger for state loops. Prefer `await page.snapshot({ incremental: true, track: 'state-loop' })` so logs show only page changes from the previous checkpoint.
 
+Template for new scrapers:
+
+```js
+/**
+ * @typedef {object} ScrapeContext
+ * @property {PageApi} mainPage
+ * @property {number} currentStep
+ * @property {string[]} progressNames
+ * @property {Set<string>} progressNamesSet
+ * @property {number} lastProgressStep
+ *
+ * @typedef {object} StepReturn
+ * @property {string} progressName
+ * @property {boolean} [done]
+ */
+
+/**
+ * @param {ScrapeContext} context
+ * @returns {Promise<StepReturn>}
+ */
+async function navigateToLogin(context) {
+    const url =
+        'https://accountmanager.providentcu.org/ProvidentOnlineBanking/SignIn.aspx';
+    refreshmint.log(`navigating to ${url}`);
+    await context.mainPage.goto(url);
+    return { progressName: `navigate to ${url}` };
+}
+
+/**
+ * @param {ScrapeContext} context
+ * @returns {Promise<StepReturn>}
+ */
+async function scrapeLoginPage(context) {
+    refreshmint.log(`login snapshot: ${await context.mainPage.snapshot()}`);
+    return {
+        progressName: 'snapshot login page',
+        done: true,
+    };
+}
+
+async function main() {
+    const pages = await browser.pages();
+    const mainPage = pages[0];
+    if (mainPage == null) {
+        throw new Error('expected at least one page');
+    }
+    /** @type {ScrapeContext} */
+    const context = {
+        mainPage,
+        currentStep: 0,
+        progressNames: [],
+        progressNamesSet: new Set(),
+        lastProgressStep: 0,
+    };
+    while (true) {
+        context.currentStep++;
+        const url = await context.mainPage.url();
+        const urlWithoutFragment = url.split('#', 2)[0];
+        /** @type {StepReturn} */
+        let stepReturn;
+        if (
+            urlWithoutFragment ===
+            'https://accountmanager.providentcu.org/ProvidentOnlineBanking/SignIn.aspx'
+        ) {
+            stepReturn = await scrapeLoginPage(context);
+        } else {
+            stepReturn = await navigateToLogin(context);
+        }
+
+        const progressName = stepReturn.progressName;
+        context.progressNames.push(progressName);
+        if (!context.progressNamesSet.has(progressName)) {
+            context.progressNamesSet.add(progressName);
+            context.lastProgressStep = context.currentStep;
+        }
+        if (context.currentStep - context.lastProgressStep > 3) {
+            throw new Error('no progress in last 3 steps');
+        }
+        if (stepReturn.done) {
+            break;
+        }
+    }
+}
+main().catch((e) => {
+    refreshmint.log(e);
+});
+```
+
 ## Recommended debug-first flow
 
 Start a debug session:
@@ -66,8 +156,9 @@ Start a debug session:
 cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   debug start \
   --ledger /path/to/ledger.refreshmint \
-  --account Assets:Checking \
-  --extension my-extension
+  --login my-bankofamerica \
+  --extension bankofamerica \
+  --socket ~/Library/Caches/refreshmint/debug/debug.sock
 ```
 
 Execute scripts against the live session:
@@ -75,7 +166,7 @@ Execute scripts against the live session:
 ```bash
 cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   debug exec \
-  --socket /path/to/debug.sock \
+  --socket ~/Library/Caches/refreshmint/debug/debug.sock \
   --script script.mjs \
   --prompt "OTP=123456"
 ```
@@ -115,10 +206,8 @@ All methods are async and should be awaited.
 | `await page.networkRequests()`                       | Return captured network responses as JSON.                                                                                                                       |
 | `await page.responsesReceived()`                     | Alias of `networkRequests()` (Playwright-style naming).                                                                                                          |
 | `await page.clearNetworkRequests()`                  | Clear captured network responses.                                                                                                                                |
-| `await page.tabs()`                                  | Return open tabs as JSON (`index`, `targetId`, `url`, `current`).                                                                                                |
-| `await page.selectTab(index)`                        | Switch the active `page` handle to a tab index and return its URL.                                                                                               |
-| `await page.waitForPopup(timeoutMs?)`                | Wait for popup tab (prefers `window.open`/opener match), switch `page`, and return popup summary JSON.                                                           |
-| `await page.waitForEvent('popup', timeoutMs?)`       | Playwright-style alias for `waitForPopup` that returns popup summary JSON.                                                                                       |
+| `await page.waitForPopup(timeoutMs?)`                | Wait for a popup opened by this page and return the popup `Page` handle.                                                                                         |
+| `await page.waitForEvent('popup', timeoutMs?)`       | Playwright-style alias for `waitForPopup` that returns a popup `Page` handle.                                                                                    |
 | `await page.click(selector)`                         | Click first element matching selector.                                                                                                                           |
 | `await page.type(selector, text)`                    | Click and type text into element.                                                                                                                                |
 | `await page.fill(selector, value)`                   | Set input value and dispatch `input`/`change` events.                                                                                                            |
@@ -142,15 +231,22 @@ All methods are async and should be awaited.
 
 For frame APIs, `frameRef` can be frame id, frame name, or frame URL (full match or substring).
 
-`waitForPopup` / `waitForEvent('popup')` return a JSON string, not a page handle.
+`page` is target-stable: one `Page` handle maps to one tab/window for the full run.
+
+### `browser`
+
+| Method                                    | Description                                                  |
+| ----------------------------------------- | ------------------------------------------------------------ |
+| `await browser.pages()`                   | Return all open pages as `Page[]`.                           |
+| `await browser.waitForEvent('page', ms?)` | Wait for any newly opened page and return its `Page` handle. |
 
 Use the race-safe pattern (start waiting before triggering the popup):
 
 ```js
 const popupPromise = page.waitForEvent('popup', 10000);
 await page.click('#open-popup');
-const popup = JSON.parse(await popupPromise);
-// popup: { index, targetId, url, current }
+const popup = await popupPromise;
+await popup.waitForLoadState('domcontentloaded');
 ```
 
 Suggested debug helper for state machines:
