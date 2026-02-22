@@ -402,8 +402,6 @@ pub async fn run_scrape_async(
         let mut guard = browser.lock().await;
         browser::open_start_page(&mut guard).await?
     };
-    let mut known_tab_ids = BTreeSet::new();
-    known_tab_ids.insert(page.target_id().as_ref().to_string());
     eprintln!("Page opened.");
 
     // 7. Set up shared state
@@ -413,9 +411,8 @@ pub async fn run_scrape_async(
     let page_inner = Arc::new(Mutex::new(js_api::PageInner {
         page,
         browser: browser.clone(),
-        known_tab_ids,
-        secret_store,
-        declared_secrets,
+        secret_store: Arc::new(secret_store),
+        declared_secrets: Arc::new(declared_secrets),
         download_dir,
     }));
 

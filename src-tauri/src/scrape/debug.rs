@@ -324,15 +324,12 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                     .await
                     .map_err(|err| err.to_string())?
             };
-            let mut known_tab_ids = std::collections::BTreeSet::new();
-            known_tab_ids.insert(page.target_id().as_ref().to_string());
 
             let page_inner = Arc::new(Mutex::new(super::js_api::PageInner {
                 page,
                 browser: browser.clone(),
-                known_tab_ids,
-                secret_store,
-                declared_secrets,
+                secret_store: Arc::new(secret_store),
+                declared_secrets: Arc::new(declared_secrets),
                 download_dir,
             }));
             let refreshmint_inner = Arc::new(Mutex::new(super::js_api::RefreshmintInner {
@@ -463,7 +460,7 @@ async fn handle_exec_request_async(
 ) -> std::io::Result<()> {
     if let Some(declared) = declared_secrets {
         let mut page_inner = page_inner.lock().await;
-        page_inner.declared_secrets = declared;
+        page_inner.declared_secrets = std::sync::Arc::new(declared);
     }
 
     let (output_sender, mut output_receiver) =

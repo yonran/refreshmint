@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rquickjs::class::Trace;
-use rquickjs::{Ctx, JsLifetime, Result as JsResult};
+use rquickjs::{function::Opt, Ctx, JsLifetime, Result as JsResult};
 use tokio::sync::Mutex;
 
 use crate::secret::SecretStore;
@@ -12,8 +12,30 @@ fn js_err(msg: String) -> rquickjs::Error {
     rquickjs::Error::new_from_js_message("Error", "Error", msg)
 }
 
+const BROWSER_DISCONNECTED_ERROR: &str =
+    "BrowserDisconnectedError: debug browser channel closed; restart debug session";
+
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const POLL_INTERVAL_MS: u64 = 100;
+const TAB_QUERY_TIMEOUT_MS: u64 = 5_000;
+
+fn is_transport_disconnected_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("receiver is gone")
+        || lower.contains("send failed")
+        || lower.contains("channel closed")
+        || lower.contains("connection closed")
+        || lower.contains("broken pipe")
+        || lower.contains("not connected")
+        || (lower.contains("websocket") && lower.contains("closed"))
+}
+
+fn format_browser_error(context: &str, err: &str) -> String {
+    if is_transport_disconnected_error(err) {
+        return format!("{BROWSER_DISCONNECTED_ERROR} ({context}: {err})");
+    }
+    format!("{context}: {err}")
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct NetworkRequest {
@@ -34,15 +56,6 @@ struct NetworkRequest {
 struct ResponseCaptureState {
     entries: Arc<Mutex<Vec<NetworkRequest>>>,
     task: tokio::task::JoinHandle<()>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TabSummary {
-    index: usize,
-    target_id: String,
-    url: String,
-    current: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -123,13 +136,6 @@ struct OpenTab {
     page: chromiumoxide::Page,
     target_id: String,
     opener_target_id: Option<String>,
-    url: String,
-}
-
-#[derive(Debug, Clone)]
-struct TabMetadata {
-    target_id: String,
-    opener_target_id: Option<String>,
 }
 
 pub type SecretDeclarations = BTreeMap<String, BTreeSet<String>>;
@@ -151,9 +157,8 @@ pub struct DebugOutputEvent {
 pub struct PageInner {
     pub page: chromiumoxide::Page,
     pub browser: Arc<Mutex<chromiumoxide::browser::Browser>>,
-    pub known_tab_ids: BTreeSet<String>,
-    pub secret_store: SecretStore,
-    pub declared_secrets: SecretDeclarations,
+    pub secret_store: Arc<SecretStore>,
+    pub declared_secrets: Arc<SecretDeclarations>,
     pub download_dir: PathBuf,
 }
 
@@ -177,6 +182,19 @@ unsafe impl<'js> JsLifetime<'js> for PageApi {
     type Changed<'to> = PageApi;
 }
 
+/// JS-visible `browser` object for page discovery/waiting.
+#[rquickjs::class(rename = "Browser")]
+#[derive(Trace)]
+pub struct BrowserApi {
+    #[qjs(skip_trace)]
+    page_inner: Arc<Mutex<PageInner>>,
+}
+
+#[allow(unsafe_code)]
+unsafe impl<'js> JsLifetime<'js> for BrowserApi {
+    type Changed<'to> = BrowserApi;
+}
+
 impl PageApi {
     pub fn new(inner: Arc<Mutex<PageInner>>) -> Self {
         Self {
@@ -184,6 +202,12 @@ impl PageApi {
             response_capture: Arc::new(Mutex::new(None)),
             snapshot_tracks: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+}
+
+impl BrowserApi {
+    pub fn new(page_inner: Arc<Mutex<PageInner>>) -> Self {
+        Self { page_inner }
     }
 }
 
@@ -244,13 +268,19 @@ impl PageApi {
 
     /// Get the current page URL.
     pub async fn url(&self) -> JsResult<String> {
+        eprintln!("[js_api] page.url enter");
         let inner = self.inner.lock().await;
         let url = inner
             .page
             .url()
             .await
-            .map_err(|e| js_err(format!("url() failed: {e}")))?
+            .map_err(|e| {
+                let err_text = e.to_string();
+                eprintln!("[js_api] page.url error: {err_text}");
+                js_err(format_browser_error("url() failed", &err_text))
+            })?
             .unwrap_or_default();
+        eprintln!("[js_api] page.url ok");
         Ok(url.to_string())
     }
 
@@ -632,85 +662,28 @@ impl PageApi {
         }
     }
 
-    /// List open tabs as JSON.
+    /// Deprecated legacy API. Use `browser.pages()` instead.
     #[qjs(rename = "tabs")]
     pub async fn js_tabs(&self) -> JsResult<String> {
-        let current_target = {
-            let inner = self.inner.lock().await;
-            inner.page.target_id().as_ref().to_string()
-        };
-        let tabs = self.fetch_open_tabs().await?;
-        let mut summaries = Vec::new();
-        let mut tab_ids = BTreeSet::new();
-
-        for (index, tab) in tabs.iter().enumerate() {
-            let target_id = tab.target_id.clone();
-            tab_ids.insert(target_id.clone());
-            summaries.push(TabSummary {
-                index,
-                target_id: target_id.clone(),
-                url: tab.url.clone(),
-                current: target_id == current_target,
-            });
-        }
-
-        {
-            let mut inner = self.inner.lock().await;
-            inner.known_tab_ids = tab_ids;
-            if !summaries.iter().any(|s| s.current) {
-                if let Some(first_tab) = tabs.first() {
-                    inner.page = first_tab.page.clone();
-                }
-            }
-        }
-
-        serde_json::to_string(&summaries)
-            .map_err(|e| js_err(format!("tabs serialization failed: {e}")))
+        Err(js_err(
+            "tabs() was removed. Use browser.pages() and work with Page handles directly."
+                .to_string(),
+        ))
     }
 
-    /// Select the active tab by index and return its URL.
+    /// Deprecated legacy API. Use `browser.pages()` and explicit Page handles.
     #[qjs(rename = "selectTab")]
     pub async fn js_select_tab(&self, index: i32) -> JsResult<String> {
-        if index < 0 {
-            return Err(js_err(format!(
-                "selectTab index must be >= 0 (got {index})"
-            )));
-        }
-        let tabs = self.fetch_open_tabs().await?;
-        let idx = index as usize;
-        let Some(tab) = tabs.get(idx).cloned() else {
-            return Err(js_err(format!(
-                "selectTab index out of range: {idx} (open tabs: {})",
-                tabs.len()
-            )));
-        };
-
-        tab.page
-            .bring_to_front()
-            .await
-            .map_err(|e| js_err(format!("selectTab bring_to_front failed: {e}")))?;
-
-        let tab_ids = tabs
-            .iter()
-            .map(|t| t.target_id.clone())
-            .collect::<BTreeSet<_>>();
-
-        let mut inner = self.inner.lock().await;
-        inner.page = tab.page;
-        inner.known_tab_ids = tab_ids;
-        Ok(tab.url)
+        Err(js_err(format!(
+            "selectTab({index}) was removed. Use browser.pages() and call methods on the selected Page handle."
+        )))
     }
 
-    /// Wait for a newly opened tab (popup-like page) and switch to it.
-    ///
-    /// Returns the new tab as JSON: `{ index, targetId, url, current }`.
+    /// Wait for a popup opened by this page and return it as a Page handle.
     #[qjs(rename = "waitForPopup")]
-    pub async fn js_wait_for_popup(&self, timeout_ms: Option<u64>) -> JsResult<String> {
-        let summary = self
-            .wait_for_popup_summary(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS))
-            .await?;
-        serde_json::to_string(&summary)
-            .map_err(|e| js_err(format!("waitForPopup serialization failed: {e}")))
+    pub async fn js_wait_for_popup(&self, timeout_ms: Option<u64>) -> JsResult<PageApi> {
+        self.wait_for_popup_page(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS))
+            .await
     }
 
     /// Playwright-style event waiter.
@@ -721,18 +694,15 @@ impl PageApi {
         &self,
         event: String,
         timeout_ms: Option<u64>,
-    ) -> JsResult<String> {
+    ) -> JsResult<PageApi> {
         let normalized = event.trim().to_ascii_lowercase();
         if normalized != "popup" {
             return Err(js_err(format!(
                 "waitForEvent currently supports only \"popup\" (got {event})"
             )));
         }
-        let summary = self
-            .wait_for_popup_summary(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS))
-            .await?;
-        serde_json::to_string(&summary)
-            .map_err(|e| js_err(format!("waitForEvent serialization failed: {e}")))
+        self.wait_for_popup_page(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS))
+            .await
     }
 
     /// Click an element matching the CSS selector.
@@ -1023,8 +993,8 @@ impl PageApi {
     /// Accepts optional options object:
     /// - `incremental: boolean` to return only changed nodes vs the previous snapshot in the same track
     /// - `track: string` to isolate snapshot history (default: `"default"`)
-    pub async fn snapshot(&self, options: Option<rquickjs::Value<'_>>) -> JsResult<String> {
-        let options = parse_snapshot_options(options)?;
+    pub async fn snapshot(&self, options: Opt<rquickjs::Value<'_>>) -> JsResult<String> {
+        let options = parse_snapshot_options(options.0)?;
         let inner = self.inner.lock().await;
         let result = inner
             .page
@@ -1315,28 +1285,176 @@ impl PageApi {
     }
 }
 
+#[rquickjs::methods]
+impl BrowserApi {
+    /// Return all currently open pages in this browser context.
+    pub async fn pages(&self) -> JsResult<Vec<PageApi>> {
+        eprintln!("[js_api] browser.pages enter");
+        let page = PageApi::new(self.page_inner.clone());
+        let tabs = page.fetch_open_tabs().await?;
+        eprintln!("[js_api] browser.pages tabs={}", tabs.len());
+        let mut out = Vec::with_capacity(tabs.len());
+        for tab in tabs {
+            out.push(build_page_api_from_template(&self.page_inner, tab.page).await);
+        }
+        eprintln!("[js_api] browser.pages return={}", out.len());
+        Ok(out)
+    }
+
+    #[qjs(rename = "__debugPing")]
+    pub async fn debug_ping(&self) -> JsResult<i32> {
+        eprintln!("[js_api] browser.__debugPing");
+        Ok(42)
+    }
+
+    #[qjs(rename = "__debugVec")]
+    pub async fn debug_vec(&self) -> JsResult<Vec<i32>> {
+        eprintln!("[js_api] browser.__debugVec");
+        Ok(vec![1, 2, 3])
+    }
+
+    #[qjs(rename = "__debugPage")]
+    pub async fn debug_page(&self) -> JsResult<PageApi> {
+        eprintln!("[js_api] browser.__debugPage");
+        Ok(PageApi::new(self.page_inner.clone()))
+    }
+
+    #[qjs(rename = "__debugPages")]
+    pub async fn debug_pages(&self) -> JsResult<Vec<PageApi>> {
+        eprintln!("[js_api] browser.__debugPages");
+        Ok(vec![PageApi::new(self.page_inner.clone())])
+    }
+
+    #[qjs(rename = "__debugTabsCount")]
+    pub async fn debug_tabs_count(&self) -> JsResult<i32> {
+        eprintln!("[js_api] browser.__debugTabsCount enter");
+        let page = PageApi::new(self.page_inner.clone());
+        let tabs = page.fetch_open_tabs().await?;
+        eprintln!("[js_api] browser.__debugTabsCount tabs={}", tabs.len());
+        Ok(tabs.len() as i32)
+    }
+
+    /// Playwright-style event waiter for Browser.
+    ///
+    /// Currently supports only `page`.
+    #[qjs(rename = "waitForEvent")]
+    pub async fn js_wait_for_event(
+        &self,
+        event: String,
+        timeout_ms: Option<u64>,
+    ) -> JsResult<PageApi> {
+        let normalized = event.trim().to_ascii_lowercase();
+        if normalized != "page" {
+            return Err(js_err(format!(
+                "browser.waitForEvent currently supports only \"page\" (got {event})"
+            )));
+        }
+        self.wait_for_page(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS))
+            .await
+    }
+}
+
 impl PageApi {
     async fn fetch_open_tabs(&self) -> JsResult<Vec<OpenTab>> {
-        let browser = {
+        eprintln!("[js_api] fetch_open_tabs enter");
+        let (browser, current_page) = {
             let inner = self.inner.lock().await;
-            inner.browser.clone()
+            (inner.browser.clone(), inner.page.clone())
         };
 
-        let target_infos = {
-            let mut guard = browser.lock().await;
-            guard
-                .fetch_targets()
-                .await
-                .map_err(|e| js_err(format!("tab sync failed to fetch targets: {e}")))?
+        let target_infos = match tokio::time::timeout(
+            std::time::Duration::from_millis(TAB_QUERY_TIMEOUT_MS),
+            async {
+                let mut guard = browser.lock().await;
+                guard.fetch_targets().await
+            },
+        )
+        .await
+        {
+            Ok(Ok(infos)) => Some(infos),
+            Ok(Err(err)) => {
+                let err_text = err.to_string();
+                if is_transport_disconnected_error(&err_text) {
+                    eprintln!("[js_api] fetch_open_tabs disconnect on fetch_targets: {err_text}");
+                    return Err(js_err(format_browser_error(
+                        "browser.pages() fetch_targets failed",
+                        &err_text,
+                    )));
+                }
+                eprintln!(
+                    "tab sync failed to fetch targets: {err}; falling back to current page handle"
+                );
+                return Ok(vec![OpenTab {
+                    target_id: current_page.target_id().as_ref().to_string(),
+                    opener_target_id: current_page
+                        .opener_id()
+                        .as_ref()
+                        .map(|id| id.as_ref().to_string()),
+                    page: current_page,
+                }]);
+            }
+            Err(_) => {
+                eprintln!(
+                    "tab sync timed out fetching targets after {}ms; falling back to current page handle",
+                    TAB_QUERY_TIMEOUT_MS
+                );
+                return Ok(vec![OpenTab {
+                    target_id: current_page.target_id().as_ref().to_string(),
+                    opener_target_id: current_page
+                        .opener_id()
+                        .as_ref()
+                        .map(|id| id.as_ref().to_string()),
+                    page: current_page,
+                }]);
+            }
         };
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let pages = {
-            let guard = browser.lock().await;
-            guard
-                .pages()
-                .await
-                .map_err(|e| js_err(format!("tab sync failed to list pages: {e}")))?
+        let pages = match tokio::time::timeout(
+            std::time::Duration::from_millis(TAB_QUERY_TIMEOUT_MS),
+            async {
+                let guard = browser.lock().await;
+                guard.pages().await
+            },
+        )
+        .await
+        {
+            Ok(Ok(pages)) => pages,
+            Ok(Err(err)) => {
+                let err_text = err.to_string();
+                if is_transport_disconnected_error(&err_text) {
+                    eprintln!("[js_api] fetch_open_tabs disconnect on pages listing: {err_text}");
+                    return Err(js_err(format_browser_error(
+                        "browser.pages() pages listing failed",
+                        &err_text,
+                    )));
+                }
+                eprintln!(
+                    "tab sync failed to list pages: {err}; falling back to current page handle"
+                );
+                return Ok(vec![OpenTab {
+                    target_id: current_page.target_id().as_ref().to_string(),
+                    opener_target_id: current_page
+                        .opener_id()
+                        .as_ref()
+                        .map(|id| id.as_ref().to_string()),
+                    page: current_page,
+                }]);
+            }
+            Err(_) => {
+                eprintln!(
+                    "tab sync timed out listing pages after {}ms; falling back to current page handle",
+                    TAB_QUERY_TIMEOUT_MS
+                );
+                return Ok(vec![OpenTab {
+                    target_id: current_page.target_id().as_ref().to_string(),
+                    opener_target_id: current_page
+                        .opener_id()
+                        .as_ref()
+                        .map(|id| id.as_ref().to_string()),
+                    page: current_page,
+                }]);
+            }
         };
         let mut page_by_target = pages
             .into_iter()
@@ -1344,116 +1462,70 @@ impl PageApi {
             .collect::<BTreeMap<_, _>>();
 
         let mut tabs = Vec::new();
-        for info in target_infos {
-            if info.r#type != "page" {
-                continue;
+        if let Some(target_infos) = target_infos {
+            for info in target_infos {
+                if info.r#type != "page" {
+                    continue;
+                }
+                let target_id = info.target_id.as_ref().to_string();
+                let Some(page) = page_by_target.remove(&target_id) else {
+                    continue;
+                };
+                tabs.push(OpenTab {
+                    page,
+                    target_id,
+                    opener_target_id: info.opener_id.as_ref().map(|id| id.as_ref().to_string()),
+                });
             }
-            let target_id = info.target_id.as_ref().to_string();
-            let Some(page) = page_by_target.remove(&target_id) else {
-                continue;
-            };
-            tabs.push(OpenTab {
-                page,
-                target_id,
-                opener_target_id: info.opener_id.as_ref().map(|id| id.as_ref().to_string()),
-                url: info.url,
-            });
         }
 
         // Keep any pages that were not part of the current target snapshot.
         for (target_id, page) in page_by_target {
-            let url = page
-                .url()
-                .await
-                .map_err(|e| js_err(format!("tab sync failed to read URL: {e}")))?
-                .unwrap_or_default()
-                .to_string();
             tabs.push(OpenTab {
                 opener_target_id: page.opener_id().as_ref().map(|id| id.as_ref().to_string()),
                 page,
                 target_id,
-                url,
+            });
+        }
+
+        if tabs.is_empty() {
+            tabs.push(OpenTab {
+                target_id: current_page.target_id().as_ref().to_string(),
+                opener_target_id: current_page
+                    .opener_id()
+                    .as_ref()
+                    .map(|id| id.as_ref().to_string()),
+                page: current_page,
             });
         }
 
         Ok(tabs)
     }
 
-    async fn wait_for_popup_summary(&self, timeout_ms: u64) -> JsResult<TabSummary> {
+    async fn wait_for_popup_page(&self, timeout_ms: u64) -> JsResult<PageApi> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         let opener_target = {
             let inner = self.inner.lock().await;
             inner.page.target_id().as_ref().to_string()
         };
         let baseline_tabs = self.fetch_open_tabs().await?;
-        {
-            let mut inner = self.inner.lock().await;
-            inner.known_tab_ids = baseline_tabs
-                .iter()
-                .map(|tab| tab.target_id.clone())
-                .collect::<BTreeSet<_>>();
-        };
+        let baseline_ids = baseline_tabs
+            .into_iter()
+            .map(|tab| tab.target_id)
+            .collect::<BTreeSet<_>>();
 
         loop {
             let tabs = self.fetch_open_tabs().await?;
-            let metadata = tabs
-                .iter()
-                .map(|tab| TabMetadata {
-                    target_id: tab.target_id.clone(),
-                    opener_target_id: tab.opener_target_id.clone(),
-                })
-                .collect::<Vec<_>>();
-            let tab_ids = metadata
-                .iter()
-                .map(|tab| tab.target_id.clone())
-                .collect::<BTreeSet<_>>();
-
-            let maybe_new_target = {
-                let mut inner = self.inner.lock().await;
-                let discovered = pick_popup_target(&inner.known_tab_ids, &metadata, &opener_target);
-                inner.known_tab_ids = tab_ids;
-                discovered
-            };
-
-            if let Some(new_target_id) = maybe_new_target {
-                let Some((index, popup_tab)) = tabs
-                    .iter()
-                    .enumerate()
-                    .find(|(_, tab)| tab.target_id == new_target_id)
-                    .map(|(index, tab)| (index, tab.clone()))
-                else {
-                    return Err(js_err(format!(
-                        "waitForPopup failed: discovered target {new_target_id} but could not resolve page handle"
-                    )));
-                };
-
-                popup_tab
-                    .page
-                    .bring_to_front()
-                    .await
-                    .map_err(|e| js_err(format!("waitForPopup bring_to_front failed: {e}")))?;
-                let url = popup_tab
-                    .page
-                    .url()
-                    .await
-                    .map_err(|e| js_err(format!("waitForPopup failed to read URL: {e}")))?
-                    .unwrap_or_default()
-                    .to_string();
-                {
-                    let mut inner = self.inner.lock().await;
-                    inner.page = popup_tab.page;
-                }
-                return Ok(TabSummary {
-                    index,
-                    target_id: new_target_id,
-                    url,
-                    current: true,
-                });
+            if let Some(popup_tab) = tabs.into_iter().find(|tab| {
+                !baseline_ids.contains(&tab.target_id)
+                    && tab.opener_target_id.as_deref() == Some(opener_target.as_str())
+            }) {
+                return Ok(build_page_api_from_template(&self.inner, popup_tab.page).await);
             }
 
             if tokio::time::Instant::now() >= deadline {
                 return Err(js_err(format!(
-                    "TimeoutError: waitForPopup timed out after {timeout_ms}ms"
+                    "TimeoutError: waitForPopup timed out after {timeout_ms}ms (no popup opened by current page)"
                 )));
             }
             tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
@@ -1461,14 +1533,37 @@ impl PageApi {
     }
 
     async fn current_url(&self) -> JsResult<String> {
-        let inner = self.inner.lock().await;
-        let url = inner
-            .page
-            .url()
+        let page = {
+            let inner = self.inner.lock().await;
+            inner.page.clone()
+        };
+
+        let (cdp_url, cdp_error) = match page.url().await {
+            Ok(url) => (url.map(|value| value.to_string()), None),
+            Err(error) => (None, Some(format!("{error}"))),
+        };
+
+        let runtime_url = match page
+            .evaluate(
+                "(() => { try { return String(window.location.href || ''); } catch (_) { return ''; } })()",
+            )
             .await
-            .map_err(|e| js_err(format!("url() failed: {e}")))?
-            .unwrap_or_default();
-        Ok(url.to_string())
+        {
+            Ok(result) => parse_runtime_location_href(result.value()),
+            Err(_) => None,
+        };
+
+        if let Some(runtime_url) = runtime_url {
+            return Ok(runtime_url);
+        }
+        if let Some(cdp_url) = cdp_url {
+            return Ok(cdp_url);
+        }
+        if let Some(cdp_error) = cdp_error {
+            return Err(js_err(format_browser_error("url() failed", &cdp_error)));
+        }
+
+        Ok(String::new())
     }
 
     async fn eval_string(&self, expression: String, method_name: &str) -> JsResult<String> {
@@ -1578,6 +1673,49 @@ impl PageApi {
     }
 }
 
+impl BrowserApi {
+    async fn wait_for_page(&self, timeout_ms: u64) -> JsResult<PageApi> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let watcher = PageApi::new(self.page_inner.clone());
+        let baseline_tabs = watcher.fetch_open_tabs().await?;
+        let baseline_ids = baseline_tabs
+            .into_iter()
+            .map(|tab| tab.target_id)
+            .collect::<BTreeSet<_>>();
+
+        loop {
+            let tabs = watcher.fetch_open_tabs().await?;
+            if let Some(new_tab) = tabs
+                .into_iter()
+                .find(|tab| !baseline_ids.contains(&tab.target_id))
+            {
+                return Ok(build_page_api_from_template(&self.page_inner, new_tab.page).await);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(js_err(format!(
+                    "TimeoutError: browser.waitForEvent(\"page\") timed out after {timeout_ms}ms"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+        }
+    }
+}
+
+async fn build_page_api_from_template(
+    template: &Arc<Mutex<PageInner>>,
+    page: chromiumoxide::Page,
+) -> PageApi {
+    let template = template.lock().await;
+    let page_inner = PageInner {
+        page,
+        browser: template.browser.clone(),
+        secret_store: template.secret_store.clone(),
+        declared_secrets: template.declared_secrets.clone(),
+        download_dir: template.download_dir.clone(),
+    };
+    PageApi::new(Arc::new(Mutex::new(page_inner)))
+}
+
 fn stringify_evaluation_result(
     value: Option<&serde_json::Value>,
     description: Option<&str>,
@@ -1613,6 +1751,14 @@ fn is_partial_download_file(path: &std::path::Path) -> bool {
         .and_then(std::ffi::OsStr::to_str)
         .map(|ext| ext.eq_ignore_ascii_case("crdownload"))
         .unwrap_or(false)
+}
+
+fn parse_runtime_location_href(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|href| !href.is_empty())
+        .map(str::to_string)
 }
 
 fn url_matches_pattern(url: &str, pattern: &str) -> bool {
@@ -1677,31 +1823,6 @@ fn split_url_fragment(url: &str) -> (&str, Option<&str>) {
         Some((base, fragment)) => (base, Some(fragment)),
         None => (url, None),
     }
-}
-
-fn pick_popup_target(
-    known_tab_ids: &BTreeSet<String>,
-    tabs: &[TabMetadata],
-    opener_target: &str,
-) -> Option<String> {
-    let mut only_new_without_opener = None;
-    let mut new_without_opener_count = 0usize;
-
-    for tab in tabs {
-        if known_tab_ids.contains(&tab.target_id) {
-            continue;
-        }
-        if tab.opener_target_id.as_deref() == Some(opener_target) {
-            return Some(tab.target_id.clone());
-        }
-        only_new_without_opener = Some(tab.target_id.clone());
-        new_without_opener_count += 1;
-    }
-
-    if new_without_opener_count == 1 {
-        return only_new_without_opener;
-    }
-    None
 }
 
 fn network_method_from_headers(
@@ -2280,7 +2401,7 @@ impl RefreshmintApi {
         &self,
         filename: String,
         data: Vec<u8>,
-        options: Option<rquickjs::Value<'_>>,
+        options: Opt<rquickjs::Value<'_>>,
     ) -> JsResult<()> {
         let mut inner = self.inner.lock().await;
 
@@ -2290,7 +2411,7 @@ impl RefreshmintApi {
             original_url,
             mime_type,
             label,
-        } = parse_save_resource_options(options);
+        } = parse_save_resource_options(options.0);
 
         // Always save to the legacy output dir for backward compatibility
         let path = unique_output_path(&inner.output_dir, &filename);
@@ -2323,7 +2444,7 @@ impl RefreshmintApi {
         &self,
         download_path: String,
         filename: Option<String>,
-        options: Option<rquickjs::Value<'_>>,
+        options: Opt<rquickjs::Value<'_>>,
     ) -> JsResult<()> {
         let input_path = PathBuf::from(download_path.clone());
         let data = std::fs::read(&input_path).map_err(|e| {
@@ -2428,7 +2549,7 @@ impl RefreshmintApi {
     }
 }
 
-/// Register the `page` and `refreshmint` globals on a QuickJS context.
+/// Register the `page`, `browser`, and `refreshmint` globals on a QuickJS context.
 pub fn register_globals(
     ctx: &Ctx<'_>,
     page_inner: Arc<Mutex<PageInner>>,
@@ -2436,8 +2557,11 @@ pub fn register_globals(
 ) -> JsResult<()> {
     let globals = ctx.globals();
 
-    let page = PageApi::new(page_inner);
+    let page = PageApi::new(page_inner.clone());
     globals.set("page", page)?;
+
+    let browser = BrowserApi::new(page_inner);
+    globals.set("browser", browser)?;
 
     let rm = RefreshmintApi::new(refreshmint_inner);
     globals.set("refreshmint", rm)?;
@@ -2519,6 +2643,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_runtime_location_href_trims_and_returns_string_values() {
+        let value = serde_json::json!(" https://example.com/path ");
+        assert_eq!(
+            parse_runtime_location_href(Some(&value)),
+            Some("https://example.com/path".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_runtime_location_href_ignores_empty_and_non_string_values() {
+        let empty = serde_json::json!("   ");
+        let object = serde_json::json!({ "href": "https://example.com/path" });
+        assert_eq!(parse_runtime_location_href(Some(&empty)), None);
+        assert_eq!(parse_runtime_location_href(Some(&object)), None);
+        assert_eq!(parse_runtime_location_href(None), None);
+    }
+
+    #[test]
     fn url_matches_pattern_exact() {
         assert!(url_matches_pattern(
             "https://example.com/login",
@@ -2568,62 +2710,6 @@ mod tests {
             "https://example.com/path#foo",
             "https://example.com/other#foo"
         ));
-    }
-
-    #[test]
-    fn pick_popup_target_prefers_matching_opener() {
-        let known = ["a".to_string()].into_iter().collect::<BTreeSet<_>>();
-        let tabs = vec![
-            TabMetadata {
-                target_id: "a".to_string(),
-                opener_target_id: None,
-            },
-            TabMetadata {
-                target_id: "b".to_string(),
-                opener_target_id: None,
-            },
-            TabMetadata {
-                target_id: "c".to_string(),
-                opener_target_id: Some("a".to_string()),
-            },
-        ];
-        assert_eq!(pick_popup_target(&known, &tabs, "a"), Some("c".to_string()));
-    }
-
-    #[test]
-    fn pick_popup_target_falls_back_to_single_new_tab() {
-        let known = ["a".to_string()].into_iter().collect::<BTreeSet<_>>();
-        let tabs = vec![
-            TabMetadata {
-                target_id: "a".to_string(),
-                opener_target_id: None,
-            },
-            TabMetadata {
-                target_id: "b".to_string(),
-                opener_target_id: None,
-            },
-        ];
-        assert_eq!(pick_popup_target(&known, &tabs, "a"), Some("b".to_string()));
-    }
-
-    #[test]
-    fn pick_popup_target_returns_none_for_ambiguous_new_tabs() {
-        let known = ["a".to_string()].into_iter().collect::<BTreeSet<_>>();
-        let tabs = vec![
-            TabMetadata {
-                target_id: "a".to_string(),
-                opener_target_id: None,
-            },
-            TabMetadata {
-                target_id: "b".to_string(),
-                opener_target_id: None,
-            },
-            TabMetadata {
-                target_id: "c".to_string(),
-                opener_target_id: None,
-            },
-        ];
-        assert_eq!(pick_popup_target(&known, &tabs, "a"), None);
     }
 
     #[test]
