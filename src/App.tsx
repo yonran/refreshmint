@@ -229,6 +229,9 @@ function App() {
         useState(false);
     const [isImportingScrapeExtension, setIsImportingScrapeExtension] =
         useState(false);
+    const [extensionLoadStatus, setExtensionLoadStatus] = useState<
+        string | null
+    >(null);
     const [isStartingScrapeDebug, setIsStartingScrapeDebug] = useState(false);
     const [isStoppingScrapeDebug, setIsStoppingScrapeDebug] = useState(false);
     const [isLoadingAccountSecrets, setIsLoadingAccountSecrets] =
@@ -1385,11 +1388,13 @@ function App() {
         const source = Array.isArray(selection) ? selection[0] : selection;
         if (typeof source !== 'string' || source.length === 0) {
             setScrapeStatus('Extension load canceled.');
+            setExtensionLoadStatus('Extension load canceled.');
             return;
         }
 
         setIsImportingScrapeExtension(true);
         setScrapeStatus('Loading extension...');
+        setExtensionLoadStatus('Loading extension...');
         try {
             let loadedExtensionName: string;
             try {
@@ -1415,6 +1420,7 @@ function App() {
                 );
                 if (!shouldReplace) {
                     setScrapeStatus('Extension load canceled.');
+                    setExtensionLoadStatus('Extension load canceled.');
                     return;
                 }
 
@@ -1440,8 +1446,10 @@ function App() {
                 }
             }
             setScrapeStatus(`Loaded extension '${loadedExtensionName}'.`);
+            setExtensionLoadStatus(`Loaded extension '${loadedExtensionName}'.`);
         } catch (error) {
             setScrapeStatus(`Failed to load extension: ${String(error)}`);
+            setExtensionLoadStatus(`Failed to load extension: ${String(error)}`);
         } finally {
             setIsImportingScrapeExtension(false);
         }
@@ -1463,14 +1471,15 @@ function App() {
         const source = Array.isArray(selection) ? selection[0] : selection;
         if (typeof source !== 'string' || source.length === 0) {
             setScrapeStatus('Extension load canceled.');
+            setExtensionLoadStatus('Extension load canceled.');
             return;
         }
 
         const loginName = activeScrapeLoginName;
         if (loginName === null) {
-            setScrapeStatus(
-                selectedLoginMappingError ?? 'Select a login first.',
-            );
+            const msg = selectedLoginMappingError ?? 'Select a login first.';
+            setScrapeStatus(msg);
+            setExtensionLoadStatus(msg);
             return;
         }
 
@@ -1478,8 +1487,12 @@ function App() {
             await setLoginExtension(ledger.path, loginName, source);
             setScrapeExtension(source);
             setScrapeStatus(`Set unpacked extension: ${source}`);
+            setExtensionLoadStatus(`Set unpacked extension: ${source}`);
         } catch (error) {
             setScrapeStatus(
+                `Failed to set unpacked extension: ${String(error)}`,
+            );
+            setExtensionLoadStatus(
                 `Failed to set unpacked extension: ${String(error)}`,
             );
         }
@@ -3206,48 +3219,73 @@ function App() {
                                         </p>
                                     </div>
                                     <div className="header-actions">
-                                        <button
-                                            className="ghost-button"
-                                            type="button"
-                                            disabled={
-                                                isImportingScrapeExtension
-                                            }
-                                            onClick={() => {
-                                                void handleLoadScrapeExtension(
-                                                    'zip',
-                                                );
-                                            }}
-                                        >
-                                            Load .zip...
-                                        </button>
-                                        <button
-                                            className="ghost-button"
-                                            type="button"
-                                            disabled={
-                                                isImportingScrapeExtension
-                                            }
-                                            onClick={() => {
-                                                void handleLoadScrapeExtension(
-                                                    'directory',
-                                                );
-                                            }}
-                                        >
-                                            Load directory...
-                                        </button>
-                                        <button
-                                            className="ghost-button"
-                                            type="button"
-                                            disabled={
-                                                isImportingScrapeExtension
-                                            }
-                                            onClick={() => {
-                                                void handleLoadUnpackedExtension();
-                                            }}
-                                        >
-                                            Load unpacked...
-                                        </button>
+                                        <details className="add-extension-disclosure">
+                                            <summary
+                                                className="ghost-button"
+                                                style={
+                                                    isImportingScrapeExtension
+                                                        ? {
+                                                              pointerEvents:
+                                                                  'none',
+                                                              opacity: 0.5,
+                                                          }
+                                                        : undefined
+                                                }
+                                            >
+                                                {isImportingScrapeExtension
+                                                    ? 'Loading...'
+                                                    : 'Add extension...'}
+                                            </summary>
+                                            <div className="add-extension-menu">
+                                                <button
+                                                    className="ghost-button"
+                                                    type="button"
+                                                    disabled={
+                                                        isImportingScrapeExtension
+                                                    }
+                                                    onClick={() => {
+                                                        void handleLoadScrapeExtension(
+                                                            'zip',
+                                                        );
+                                                    }}
+                                                >
+                                                    Load .zip...
+                                                </button>
+                                                <button
+                                                    className="ghost-button"
+                                                    type="button"
+                                                    disabled={
+                                                        isImportingScrapeExtension
+                                                    }
+                                                    onClick={() => {
+                                                        void handleLoadScrapeExtension(
+                                                            'directory',
+                                                        );
+                                                    }}
+                                                >
+                                                    Load directory...
+                                                </button>
+                                                <button
+                                                    className="ghost-button"
+                                                    type="button"
+                                                    disabled={
+                                                        isImportingScrapeExtension
+                                                    }
+                                                    onClick={() => {
+                                                        void handleLoadUnpackedExtension();
+                                                    }}
+                                                >
+                                                    Load unpacked...
+                                                </button>
+                                            </div>
+                                        </details>
                                     </div>
                                 </div>
+                                {extensionLoadStatus === null ? null : (
+                                    <p className="status">
+                                        {extensionLoadStatus}
+                                    </p>
+                                )}
                                 {isCheckingLegacyMigration ? (
                                     <p className="status">
                                         Checking for legacy account layout...
@@ -3336,52 +3374,80 @@ function App() {
                                             </button>
                                         </div>
                                     </div>
-                                    <div className="txn-grid">
-                                        <label className="field">
-                                            <span>Create login name</span>
-                                            <input
-                                                type="text"
-                                                value={newLoginName}
-                                                placeholder="chase-personal"
-                                                onChange={(event) => {
-                                                    setNewLoginName(
-                                                        event.target.value,
-                                                    );
-                                                    setLoginConfigStatus(null);
-                                                }}
-                                                disabled={isSavingLoginConfig}
-                                            />
-                                        </label>
-                                        <label className="field">
-                                            <span>Initial extension</span>
-                                            <input
-                                                type="text"
-                                                value={newLoginExtension}
-                                                placeholder="optional"
-                                                onChange={(event) => {
-                                                    setNewLoginExtension(
-                                                        event.target.value,
-                                                    );
-                                                    setLoginConfigStatus(null);
-                                                }}
-                                                disabled={isSavingLoginConfig}
-                                            />
-                                        </label>
-                                    </div>
-                                    <div className="pipeline-actions">
-                                        <button
-                                            type="button"
-                                            className="ghost-button"
-                                            onClick={() => {
-                                                void handleCreateLoginConfig();
-                                            }}
-                                            disabled={isSavingLoginConfig}
-                                        >
-                                            {isSavingLoginConfig
-                                                ? 'Saving...'
-                                                : 'Create login'}
-                                        </button>
-                                    </div>
+                                    <details
+                                        className="login-create-disclosure"
+                                        open={loginNames.length === 0}
+                                    >
+                                        <summary className="disclosure-summary">
+                                            Create login
+                                        </summary>
+                                        <div className="login-create-body">
+                                            <div className="txn-grid">
+                                                <label className="field">
+                                                    <span>
+                                                        Create login name
+                                                    </span>
+                                                    <input
+                                                        type="text"
+                                                        value={newLoginName}
+                                                        placeholder="chase-personal"
+                                                        onChange={(event) => {
+                                                            setNewLoginName(
+                                                                event.target
+                                                                    .value,
+                                                            );
+                                                            setLoginConfigStatus(
+                                                                null,
+                                                            );
+                                                        }}
+                                                        disabled={
+                                                            isSavingLoginConfig
+                                                        }
+                                                    />
+                                                </label>
+                                                <label className="field">
+                                                    <span>
+                                                        Initial extension
+                                                    </span>
+                                                    <input
+                                                        type="text"
+                                                        value={
+                                                            newLoginExtension
+                                                        }
+                                                        placeholder="optional"
+                                                        onChange={(event) => {
+                                                            setNewLoginExtension(
+                                                                event.target
+                                                                    .value,
+                                                            );
+                                                            setLoginConfigStatus(
+                                                                null,
+                                                            );
+                                                        }}
+                                                        disabled={
+                                                            isSavingLoginConfig
+                                                        }
+                                                    />
+                                                </label>
+                                            </div>
+                                            <div className="pipeline-actions">
+                                                <button
+                                                    type="button"
+                                                    className="ghost-button"
+                                                    onClick={() => {
+                                                        void handleCreateLoginConfig();
+                                                    }}
+                                                    disabled={
+                                                        isSavingLoginConfig
+                                                    }
+                                                >
+                                                    {isSavingLoginConfig
+                                                        ? 'Saving...'
+                                                        : 'Create login'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </details>
                                     <div className="txn-grid">
                                         <label className="field">
                                             <span>Selected login</span>
@@ -3771,55 +3837,70 @@ function App() {
                                             : 'Run scrape'}
                                     </button>
                                 </div>
-                                <div className="txn-actions">
-                                    <button
-                                        type="button"
-                                        className="ghost-button"
-                                        onClick={() => {
-                                            void handleStartScrapeDebug();
-                                        }}
-                                        disabled={
-                                            !hasActiveScrapeLogin ||
-                                            scrapeDebugSocket !== null ||
-                                            isStartingScrapeDebug ||
-                                            isStoppingScrapeDebug
-                                        }
-                                    >
-                                        {isStartingScrapeDebug
-                                            ? 'Starting debug...'
-                                            : 'Start debug session'}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="ghost-button"
-                                        onClick={() => {
-                                            void handleStopScrapeDebug();
-                                        }}
-                                        disabled={
-                                            scrapeDebugSocket === null ||
-                                            isStoppingScrapeDebug
-                                        }
-                                    >
-                                        {isStoppingScrapeDebug
-                                            ? 'Stopping debug...'
-                                            : 'Stop debug session'}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="ghost-button"
-                                        onClick={() => {
-                                            void handleCopyDebugSocket();
-                                        }}
-                                        disabled={scrapeDebugSocket === null}
-                                    >
-                                        Copy socket
-                                    </button>
-                                </div>
-                                {scrapeDebugSocket === null ? null : (
-                                    <p className="hint mono">
-                                        Debug socket: {scrapeDebugSocket}
-                                    </p>
-                                )}
+                                <details className="dev-tools-disclosure">
+                                    <summary className="disclosure-summary">
+                                        Developer tools
+                                        {scrapeDebugSocket !== null
+                                            ? ' (session active)'
+                                            : ''}
+                                    </summary>
+                                    <div className="dev-tools-body">
+                                        <div className="txn-actions">
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                onClick={() => {
+                                                    void handleStartScrapeDebug();
+                                                }}
+                                                disabled={
+                                                    !hasActiveScrapeLogin ||
+                                                    scrapeDebugSocket !==
+                                                        null ||
+                                                    isStartingScrapeDebug ||
+                                                    isStoppingScrapeDebug
+                                                }
+                                            >
+                                                {isStartingScrapeDebug
+                                                    ? 'Starting debug...'
+                                                    : 'Start debug session'}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                onClick={() => {
+                                                    void handleStopScrapeDebug();
+                                                }}
+                                                disabled={
+                                                    scrapeDebugSocket ===
+                                                        null ||
+                                                    isStoppingScrapeDebug
+                                                }
+                                            >
+                                                {isStoppingScrapeDebug
+                                                    ? 'Stopping debug...'
+                                                    : 'Stop debug session'}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                onClick={() => {
+                                                    void handleCopyDebugSocket();
+                                                }}
+                                                disabled={
+                                                    scrapeDebugSocket === null
+                                                }
+                                            >
+                                                Copy socket
+                                            </button>
+                                        </div>
+                                        {scrapeDebugSocket === null ? null : (
+                                            <p className="hint mono">
+                                                Debug socket:{' '}
+                                                {scrapeDebugSocket}
+                                            </p>
+                                        )}
+                                    </div>
+                                </details>
                                 <section className="secrets-panel">
                                     <div className="txn-form-header">
                                         <div>
