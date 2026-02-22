@@ -35,16 +35,23 @@ try {
     </script>
   `);
   await page.goto(`data:text/html,${openerHtml}`);
-  const popupPromise = page.waitForEvent("popup", 10000);
+  const opener = page;
+  const openerBefore = await opener.url();
+  const popupPromise = opener.waitForEvent("popup", 10000);
   await page.click("#open");
-  const popup = JSON.parse(await popupPromise);
-  if (!popup || popup.current !== true || typeof popup.targetId !== "string" || popup.targetId.length === 0) {
-    throw new Error("invalid popup summary");
-  }
-  await page.waitForLoadState("domcontentloaded", 10000);
-  const marker = await page.evaluate("document.getElementById('popup-marker') ? 'yes' : 'no'");
+  const popup = await popupPromise;
+  await popup.waitForLoadState("domcontentloaded", 10000);
+  const marker = await popup.evaluate("document.getElementById('popup-marker') ? 'yes' : 'no'");
   if (marker !== "yes") {
-    throw new Error("did not switch to popup tab");
+    throw new Error("popup page did not contain expected marker");
+  }
+  const openerAfter = await opener.url();
+  if (openerAfter !== openerBefore) {
+    throw new Error(`opener page changed unexpectedly: ${openerAfter}`);
+  }
+  const pages = await browser.pages();
+  if (!Array.isArray(pages) || pages.length < 2) {
+    throw new Error(`expected at least 2 pages, got ${Array.isArray(pages) ? pages.length : 'non-array'}`);
   }
   await refreshmint.saveResource("popup.bin", [111, 107]);
   refreshmint.log("integration popup done");
