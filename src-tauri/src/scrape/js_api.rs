@@ -6,9 +6,10 @@ use rquickjs::class::Trace;
 use rquickjs::{function::Opt, Ctx, JsLifetime, Result as JsResult};
 use tokio::sync::Mutex;
 
+use super::locator::Locator;
 use crate::secret::SecretStore;
 
-fn js_err(msg: String) -> rquickjs::Error {
+pub(crate) fn js_err(msg: String) -> rquickjs::Error {
     rquickjs::Error::new_from_js_message("Error", "Error", msg)
 }
 
@@ -214,6 +215,11 @@ impl BrowserApi {
 
 #[rquickjs::methods]
 impl PageApi {
+    /// Create a locator for the given selector.
+    pub fn locator(&self, selector: String) -> Locator {
+        Locator::new(self.inner.clone(), selector)
+    }
+
     /// Navigate to a URL.
     #[qjs(rename = "goto")]
     pub async fn js_goto(&self, url: String) -> JsResult<()> {
@@ -259,11 +265,77 @@ impl PageApi {
         }
 
         let inner = self.inner.lock().await;
-        inner
-            .page
-            .goto(&url)
-            .await
-            .map_err(|e| js_err(format!("goto failed: {e}")))?;
+        if url.starts_with("data:") {
+            // Robustly navigate to about:blank first
+            let current_href = match inner.page.evaluate("window.location.href").await {
+                Ok(res) => res
+                    .value()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                Err(_) => String::new(),
+            };
+
+            if current_href != "about:blank" {
+                use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
+                // Use Page.navigate via execute() to force navigation without waiting for CDP events
+                let params = NavigateParams::builder()
+                    .url("about:blank")
+                    .build()
+                    .map_err(|e| js_err(format!("goto(data) prelude build failed: {e}")))?;
+                inner.page.execute(params).await.ok();
+
+                for _ in 0..50 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    if let Ok(res) = inner.page.evaluate("window.location.href").await {
+                        let h = res.value().and_then(|v| v.as_str()).unwrap_or("");
+                        if h == "about:blank" {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let url_json = serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".to_string());
+            let expression = format!(
+                r#"(() => {{
+                    const data = {url_json};
+                    const comma = data.indexOf(',');
+                    if (comma === -1) return;
+                    const html = decodeURIComponent(data.substring(comma + 1));
+                    try {{
+                        document.open();
+                        document.write(html);
+                        document.close();
+                    }} catch (e) {{
+                        console.warn('document.write failed, falling back to innerHTML', e);
+                        document.body.innerHTML = html;
+                    }}
+                }})()"#
+            );
+
+            use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+            let eval = EvaluateParams::builder()
+                .expression(expression)
+                .await_promise(false)
+                .return_by_value(false)
+                .build()
+                .map_err(|e| js_err(format!("goto(data) build failed: {e}")))?;
+            inner
+                .page
+                .evaluate_expression(eval)
+                .await
+                .map_err(|e| js_err(format!("goto(data) failed: {e}")))?;
+
+            // Brief wait for rendering
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        } else {
+            inner
+                .page
+                .goto(&url)
+                .await
+                .map_err(|e| js_err(format!("goto failed: {e}")))?;
+        }
         Ok(())
     }
 
@@ -2861,6 +2933,396 @@ pub fn register_globals(
     Ok(())
 }
 
+<<<<<<< HEAD
+=======
+pub(crate) fn stringify_evaluation_result(
+    value: Option<&serde_json::Value>,
+    description: Option<&str>,
+) -> String {
+    match value {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+        None => description.unwrap_or("undefined").to_string(),
+    }
+}
+
+pub(crate) fn scrub_known_secrets(secret_store: &SecretStore, text: &mut String) {
+    if let Ok(secrets) = secret_store.all_values() {
+        for secret in &secrets {
+            if !secret.is_empty() {
+                *text = text.replace(secret, "[REDACTED]");
+            }
+        }
+    }
+}
+
+fn list_download_paths(dir: &PathBuf) -> Result<BTreeSet<PathBuf>, std::io::Error> {
+    let mut paths = BTreeSet::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        paths.insert(entry.path());
+    }
+    Ok(paths)
+}
+
+fn is_partial_download_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(|ext| ext.eq_ignore_ascii_case("crdownload"))
+        .unwrap_or(false)
+}
+
+fn parse_runtime_location_href(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|href| !href.is_empty())
+        .map(str::to_string)
+}
+
+fn url_matches_pattern(url: &str, pattern: &str) -> bool {
+    if pattern == "*" || pattern == "**" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return url == pattern;
+    }
+
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut cursor = 0usize;
+    let mut start_index = 0usize;
+
+    if !pattern.starts_with('*') {
+        let Some(first) = parts.first() else {
+            return false;
+        };
+        if !url.starts_with(first) {
+            return false;
+        }
+        cursor = first.len();
+        start_index = 1;
+    }
+
+    let mut end_index = parts.len();
+    if !pattern.ends_with('*') && end_index > 0 {
+        end_index -= 1;
+    }
+
+    for part in &parts[start_index..end_index] {
+        if part.is_empty() {
+            continue;
+        }
+        let Some(found_at) = url[cursor..].find(part) else {
+            return false;
+        };
+        cursor += found_at + part.len();
+    }
+
+    if !pattern.ends_with('*') {
+        let Some(last) = parts.last() else {
+            return false;
+        };
+        return url[cursor..].ends_with(last);
+    }
+
+    true
+}
+
+fn urls_differ_only_by_fragment(current_url: &str, target_url: &str) -> bool {
+    if current_url == target_url {
+        return false;
+    }
+    let (current_base, current_fragment) = split_url_fragment(current_url);
+    let (target_base, target_fragment) = split_url_fragment(target_url);
+    current_base == target_base && current_fragment != target_fragment
+}
+
+fn split_url_fragment(url: &str) -> (&str, Option<&str>) {
+    match url.split_once('#') {
+        Some((base, fragment)) => (base, Some(fragment)),
+        None => (url, None),
+    }
+}
+
+fn network_method_from_headers(
+    headers: Option<&chromiumoxide::cdp::browser_protocol::network::Headers>,
+) -> String {
+    let Some(headers) = headers else {
+        return "GET".to_string();
+    };
+    let Some(map) = headers.inner().as_object() else {
+        return "GET".to_string();
+    };
+
+    for key in [":method", "method", "Method"] {
+        if let Some(value) = map.get(key).and_then(serde_json::Value::as_str) {
+            let method = value.trim();
+            if !method.is_empty() {
+                return method.to_string();
+            }
+        }
+    }
+
+    "GET".to_string()
+}
+
+pub(crate) async fn resolve_frame_id(
+    page: &chromiumoxide::Page,
+    frame_ref: &str,
+) -> Result<chromiumoxide::cdp::browser_protocol::page::FrameId, String> {
+    let trimmed = frame_ref.trim();
+
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("main") {
+        let main = page
+            .mainframe()
+            .await
+            .map_err(|e| format!("failed to resolve main frame: {e}"))?;
+        return main.ok_or_else(|| "main frame not available".to_string());
+    }
+
+    let frames = page
+        .frames()
+        .await
+        .map_err(|e| format!("failed to list frames: {e}"))?;
+
+    if let Some(found) = frames.iter().find(|frame_id| frame_id.as_ref() == trimmed) {
+        return Ok(found.clone());
+    }
+
+    for frame_id in &frames {
+        let name = page
+            .frame_name(frame_id.clone())
+            .await
+            .map_err(|e| format!("failed to query frame name: {e}"))?;
+        if name.as_deref() == Some(trimmed) {
+            return Ok(frame_id.clone());
+        }
+    }
+
+    for frame_id in &frames {
+        let url = page
+            .frame_url(frame_id.clone())
+            .await
+            .map_err(|e| format!("failed to query frame URL: {e}"))?
+            .unwrap_or_default();
+        if url == trimmed || url.contains(trimmed) {
+            return Ok(frame_id.clone());
+        }
+    }
+
+    let mut known_frames = Vec::new();
+    for frame_id in &frames {
+        let name = page
+            .frame_name(frame_id.clone())
+            .await
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let url = page
+            .frame_url(frame_id.clone())
+            .await
+            .unwrap_or(None)
+            .unwrap_or_default();
+        known_frames.push(format!(
+            "id={} name={} url={}",
+            frame_id.as_ref(),
+            name,
+            url
+        ));
+    }
+
+    Err(format!(
+        "frame not found for reference '{trimmed}'. Available frames: {}",
+        known_frames.join(" | ")
+    ))
+}
+
+pub(crate) async fn wait_for_frame_execution_context(
+    page: &chromiumoxide::Page,
+    frame_id: chromiumoxide::cdp::browser_protocol::page::FrameId,
+) -> Result<chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId, String> {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    loop {
+        let context = page
+            .frame_execution_context(frame_id.clone())
+            .await
+            .map_err(|e| format!("failed to query frame execution context: {e}"))?;
+        if let Some(context_id) = context {
+            return Ok(context_id);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "timeout waiting for frame execution context (frame id {})",
+                frame_id.as_ref()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+    }
+}
+
+#[allow(dead_code)]
+async fn ensure_element_receives_pointer_events(
+    element: &chromiumoxide::Element,
+) -> Result<(), String> {
+    let check = element
+        .call_js_fn(
+            r#"function() {
+                if (!this.isConnected) return 'Node is detached from document';
+                if (this.nodeType !== Node.ELEMENT_NODE) return 'Node is not of type HTMLElement';
+                this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+                const rect = this.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return 'Element is not visible';
+                const x = rect.left + rect.width / 2;
+                const y = rect.top + rect.height / 2;
+                if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) {
+                    return 'Element is outside of the viewport';
+                }
+                const hit = document.elementFromPoint(x, y);
+                if (!hit) return 'Element is outside of the viewport';
+                const containsComposed = (root, node) => {
+                    let current = node;
+                    while (current) {
+                        if (current === root) return true;
+                        current = current.parentNode || (current instanceof ShadowRoot ? current.host : null);
+                    }
+                    return false;
+                };
+                if (containsComposed(this, hit)) return '';
+                const describe = el => {
+                    if (!(el instanceof Element)) return 'Another node';
+                    let out = el.tagName.toLowerCase();
+                    if (el.id) out += '#' + el.id;
+                    if (el.classList && el.classList.length) {
+                        out += '.' + Array.from(el.classList).slice(0, 3).join('.');
+                    }
+                    return out;
+                };
+                return describe(hit) + ' intercepts pointer events';
+            }"#,
+            false,
+        )
+        .await
+        .map_err(|e| format!("pointer actionability check failed: {e}"))?;
+
+    let message = check
+        .result
+        .value
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if message.is_empty() {
+        Ok(())
+    } else {
+        Err(message.to_string())
+    }
+}
+
+async fn build_page_api_from_template(
+    template: &Arc<Mutex<PageInner>>,
+    page: chromiumoxide::Page,
+) -> PageApi {
+    let template = template.lock().await;
+    let page_inner = PageInner {
+        page,
+        browser: template.browser.clone(),
+        secret_store: template.secret_store.clone(),
+        declared_secrets: template.declared_secrets.clone(),
+        download_dir: template.download_dir.clone(),
+        target_frame_id: None,
+    };
+    PageApi::new(Arc::new(Mutex::new(page_inner)))
+}
+
+pub(crate) async fn resolve_secret_if_applicable(
+    inner: &PageInner,
+    value: &str,
+) -> JsResult<String> {
+    let all_known = inner
+        .secret_store
+        .list()
+        .map_err(|e| js_err(format!("secret lookup failed: {e}")))?;
+    let referenced_name = value.trim();
+    if referenced_name.is_empty() {
+        return Ok(value.to_string());
+    }
+
+    let declared_domains = declared_domains_for_secret(&inner.declared_secrets, referenced_name);
+    let configured_in_store = all_known.iter().any(|(_, name)| name == referenced_name);
+    if declared_domains.is_empty() && !configured_in_store {
+        return Ok(value.to_string());
+    }
+
+    let current_url = inner.page.url().await.ok().flatten().unwrap_or_default();
+    let top_level_domain = normalize_domain_like_input(&current_url.to_string());
+    if top_level_domain.is_empty() {
+        return Err(js_err(format!(
+            "Secret '{referenced_name}' referenced before top-level navigation; call page.goto(...) first"
+        )));
+    }
+
+    if !declared_domains.contains(&top_level_domain) {
+        if declared_domains.is_empty() {
+            return Err(js_err(format!(
+                "Secret '{referenced_name}' is configured in keychain but not declared in manifest for domain '{top_level_domain}'"
+            )));
+        }
+        return Err(js_err(format!(
+            "Secret '{referenced_name}' was declared for domain(s) {} but current top-level domain is '{top_level_domain}'",
+            declared_domains.join(", ")
+        )));
+    }
+
+    for (domain, name) in &all_known {
+        if name == referenced_name && domain.eq_ignore_ascii_case(&top_level_domain) {
+            return inner.secret_store.get(domain, name).map_err(|e| {
+                js_err(format!(
+                    "failed to read secret '{name}' for domain '{domain}': {e}"
+                ))
+            });
+        }
+    }
+
+    Err(js_err(format!(
+        "Secret '{referenced_name}' was declared for '{top_level_domain}' but is not stored for that domain"
+    )))
+}
+
+fn declared_domains_for_secret(declared: &SecretDeclarations, secret_name: &str) -> Vec<String> {
+    let mut domains = declared
+        .iter()
+        .filter_map(|(domain, names)| {
+            if names.contains(secret_name) {
+                Some(domain.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    domains.sort();
+    domains
+}
+
+fn normalize_domain_like_input(input: &str) -> String {
+    extract_domain(input.trim()).to_ascii_lowercase()
+}
+
+fn extract_domain(url: &str) -> String {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    without_scheme
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+>>>>>>> 0562779 (feat(api): implement Playwright Locators API with strictness checks and chaining)
 #[cfg(test)]
 mod tests {
     use super::*;
