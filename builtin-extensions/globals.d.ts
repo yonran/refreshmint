@@ -30,6 +30,9 @@ interface PageApi {
     tabs(): Promise<never>;
     /** @deprecated Removed. Use browser.pages() and direct Page handles. */
     selectTab(index: number): Promise<never>;
+    frames(): Promise<string>;
+    switchToFrame(frameRef: string): Promise<void>;
+    switchToMainFrame(): Promise<void>;
     click(selector: string): Promise<void>;
     type(selector: string, text: string): Promise<void>;
     fill(selector: string, value: string): Promise<void>;

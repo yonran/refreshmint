@@ -422,6 +422,7 @@ pub async fn run_scrape_async(
         secret_store: Arc::new(secret_store),
         declared_secrets: Arc::new(declared_secrets),
         download_dir,
+        target_frame_id: None,
     }));
 
     let refreshmint_inner = Arc::new(Mutex::new(js_api::RefreshmintInner {

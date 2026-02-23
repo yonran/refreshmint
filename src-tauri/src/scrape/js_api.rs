@@ -160,6 +160,7 @@ pub struct PageInner {
     pub secret_store: Arc<SecretStore>,
     pub declared_secrets: Arc<SecretDeclarations>,
     pub download_dir: PathBuf,
+    pub target_frame_id: Option<chromiumoxide::cdp::browser_protocol::page::FrameId>,
 }
 
 /// JS-visible `page` object with Playwright-like API.
@@ -296,6 +297,66 @@ impl PageApi {
         Ok(())
     }
 
+    /// List all frames in the page as a JSON string.
+    ///
+    /// Each element has `{ id, name, url, parentId }`.
+    pub async fn frames(&self) -> JsResult<String> {
+        let inner = self.inner.lock().await;
+        use chromiumoxide::cdp::browser_protocol::page::GetFrameTreeParams;
+        let tree = inner
+            .page
+            .execute(GetFrameTreeParams::default())
+            .await
+            .map_err(|e| js_err(format!("frames failed: {e}")))?;
+
+        #[derive(serde::Serialize)]
+        struct FrameInfo {
+            id: String,
+            name: String,
+            url: String,
+            #[serde(rename = "parentId")]
+            parent_id: Option<String>,
+        }
+
+        let mut out = Vec::new();
+        let mut stack = vec![tree.result.frame_tree];
+        while let Some(node) = stack.pop() {
+            out.push(FrameInfo {
+                id: node.frame.id.as_ref().to_string(),
+                name: node.frame.name.unwrap_or_default(),
+                url: node.frame.url,
+                parent_id: node.frame.parent_id.map(|p| p.as_ref().to_string()),
+            });
+            if let Some(children) = node.child_frames {
+                for child in children {
+                    stack.push(child);
+                }
+            }
+        }
+        serde_json::to_string(&out).map_err(|e| js_err(format!("frames serialization failed: {e}")))
+    }
+
+    /// Switch subsequent element interactions to the given frame.
+    ///
+    /// `frame_ref` may be a frame id, frame name, or frame URL substring.
+    #[qjs(rename = "switchToFrame")]
+    pub async fn js_switch_to_frame(&self, frame_ref: String) -> JsResult<()> {
+        let mut inner = self.inner.lock().await;
+        let frame_id = resolve_frame_id(&inner.page, &frame_ref)
+            .await
+            .map_err(|e| js_err(format!("switchToFrame failed: {e}")))?;
+        inner.target_frame_id = Some(frame_id);
+        Ok(())
+    }
+
+    /// Reset subsequent element interactions to the main frame.
+    #[qjs(rename = "switchToMainFrame")]
+    pub async fn js_switch_to_main_frame(&self) -> JsResult<()> {
+        let mut inner = self.inner.lock().await;
+        inner.target_frame_id = None;
+        Ok(())
+    }
+
     /// Wait for a CSS selector to appear in the DOM.
     #[qjs(rename = "waitForSelector")]
     pub async fn js_wait_for_selector(
@@ -317,30 +378,23 @@ impl PageApi {
         );
 
         loop {
-            let maybe_error = {
-                let inner = self.inner.lock().await;
-                let result = inner
-                    .page
-                    .evaluate(probe.as_str())
-                    .await
-                    .map_err(|e| js_err(format!("waitForSelector failed: {e}")))?;
-                if let Some(value) = result.value() {
-                    if value.as_bool() == Some(true) {
-                        return Ok(());
-                    }
-                    value
-                        .get("__refreshmintSelectorError")
-                        .and_then(serde_json::Value::as_str)
-                        .map(|selector_error| selector_error.to_string())
-                } else {
-                    None
+            let res = self
+                .evaluate_in_active_context(probe.clone())
+                .await
+                .map_err(|e| js_err(format!("waitForSelector failed: {e}")))?;
+            if res == "true" {
+                return Ok(());
+            }
+            if res.contains("__refreshmintSelectorError") {
+                let val: serde_json::Value = serde_json::from_str(&res).unwrap_or_default();
+                if let Some(selector_error) = val
+                    .get("__refreshmintSelectorError")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    return Err(js_err(format!(
+                        "waitForSelector(\"{selector}\") failed: {selector_error}"
+                    )));
                 }
-            };
-
-            if let Some(selector_error) = maybe_error {
-                return Err(js_err(format!(
-                    "waitForSelector(\"{selector}\") failed: {selector_error}"
-                )));
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(js_err(format!(
@@ -708,18 +762,49 @@ impl PageApi {
     /// Click an element matching the CSS selector.
     pub async fn click(&self, selector: String) -> JsResult<()> {
         let inner = self.inner.lock().await;
-        let element = inner
-            .page
-            .find_element(selector)
-            .await
-            .map_err(|e| js_err(format!("click find failed: {e}")))?;
-        ensure_element_receives_pointer_events(&element)
-            .await
-            .map_err(|e| js_err(format!("click failed: {e}")))?;
-        element
-            .click()
-            .await
-            .map_err(|e| js_err(format!("click failed: {e}")))?;
+        if let Some(frame_id) = &inner.target_frame_id {
+            // Frame context: evaluate JS click inside the frame's execution context.
+            let context_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
+                .await
+                .map_err(|e| js_err(format!("click failed to get frame context: {e}")))?;
+            let selector_json = serde_json::to_string(&selector).unwrap_or_default();
+            let js = format!(
+                r#"(() => {{
+                    const el = document.querySelector({selector_json});
+                    if (!el) throw new Error('click: element not found: ' + {selector_json});
+                    if (!el.isConnected) throw new Error('click: element is detached');
+                    el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
+                    el.click();
+                }})()"#
+            );
+            use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+            let eval = EvaluateParams::builder()
+                .expression(js)
+                .context_id(context_id)
+                .await_promise(true)
+                .return_by_value(true)
+                .build()
+                .map_err(|e| js_err(format!("click invalid params: {e}")))?;
+            inner
+                .page
+                .evaluate_expression(eval)
+                .await
+                .map_err(|e| js_err(format!("click failed: {e}")))?;
+        } else {
+            // Main frame: use CDP element interaction for reliable pointer events.
+            let element = inner
+                .page
+                .find_element(selector)
+                .await
+                .map_err(|e| js_err(format!("click find failed: {e}")))?;
+            ensure_element_receives_pointer_events(&element)
+                .await
+                .map_err(|e| js_err(format!("click failed: {e}")))?;
+            element
+                .click()
+                .await
+                .map_err(|e| js_err(format!("click failed: {e}")))?;
+        }
         Ok(())
     }
 
@@ -727,22 +812,58 @@ impl PageApi {
     #[qjs(rename = "type")]
     pub async fn js_type(&self, selector: String, text: String) -> JsResult<()> {
         let inner = self.inner.lock().await;
-        let element = inner
-            .page
-            .find_element(selector)
-            .await
-            .map_err(|e| js_err(format!("type find failed: {e}")))?;
-        ensure_element_receives_pointer_events(&element)
-            .await
-            .map_err(|e| js_err(format!("type click failed: {e}")))?;
-        element
-            .click()
-            .await
-            .map_err(|e| js_err(format!("type click failed: {e}")))?;
-        element
-            .type_str(&text)
-            .await
-            .map_err(|e| js_err(format!("type failed: {e}")))?;
+        if let Some(frame_id) = &inner.target_frame_id {
+            // Frame context: focus element via JS, then dispatch CDP key events
+            // (Input.dispatchKeyEvent is global and targets the focused element).
+            let context_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
+                .await
+                .map_err(|e| js_err(format!("type failed to get frame context: {e}")))?;
+            let selector_json = serde_json::to_string(&selector).unwrap_or_default();
+            let js = format!(
+                r#"(() => {{
+                    const el = document.querySelector({selector_json});
+                    if (!el) throw new Error('type: element not found: ' + {selector_json});
+                    el.focus();
+                    el.click();
+                }})()"#
+            );
+            use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+            let eval = EvaluateParams::builder()
+                .expression(js)
+                .context_id(context_id)
+                .await_promise(true)
+                .return_by_value(true)
+                .build()
+                .map_err(|e| js_err(format!("type invalid params: {e}")))?;
+            inner
+                .page
+                .evaluate_expression(eval)
+                .await
+                .map_err(|e| js_err(format!("type failed: {e}")))?;
+            inner
+                .page
+                .type_str(&text)
+                .await
+                .map_err(|e| js_err(format!("type failed: {e}")))?;
+        } else {
+            // Main frame: use CDP element interaction for reliable key events.
+            let element = inner
+                .page
+                .find_element(selector)
+                .await
+                .map_err(|e| js_err(format!("type find failed: {e}")))?;
+            ensure_element_receives_pointer_events(&element)
+                .await
+                .map_err(|e| js_err(format!("type click failed: {e}")))?;
+            element
+                .click()
+                .await
+                .map_err(|e| js_err(format!("type click failed: {e}")))?;
+            element
+                .type_str(&text)
+                .await
+                .map_err(|e| js_err(format!("type failed: {e}")))?;
+        }
         Ok(())
     }
 
@@ -752,13 +873,10 @@ impl PageApi {
     /// top-level domain, the real secret is resolved from keychain and injected via CDP.
     /// The JS sandbox only ever sees the placeholder name.
     pub async fn fill(&self, selector: String, value: String) -> JsResult<()> {
-        let inner = self.inner.lock().await;
-
-        // Determine the actual value to fill
-        let actual_value = resolve_secret_if_applicable(&inner, &value).await?;
-
-        // Use CDP to set the value and dispatch events so the JS sandbox
-        // never receives the real secret.
+        let actual_value = {
+            let inner = self.inner.lock().await;
+            resolve_secret_if_applicable(&inner, &value).await?
+        };
         let selector_json = serde_json::to_string(&selector).unwrap_or_default();
         let value_json = serde_json::to_string(&actual_value).unwrap_or_default();
         let js = format!(
@@ -771,10 +889,7 @@ impl PageApi {
                 el.dispatchEvent(new Event('change', {{ bubbles: true }}));
             }})()"#,
         );
-
-        inner
-            .page
-            .evaluate(js)
+        self.evaluate_in_active_context(js)
             .await
             .map_err(|e| js_err(format!("fill failed: {e}")))?;
         Ok(())
@@ -1184,18 +1299,7 @@ impl PageApi {
     /// The return value is scrubbed: all known secret values are replaced
     /// with `[REDACTED]`.
     pub async fn evaluate(&self, expression: String) -> JsResult<String> {
-        let inner = self.inner.lock().await;
-        let result = inner
-            .page
-            .evaluate(expression)
-            .await
-            .map_err(|e| js_err(format!("evaluate failed: {e}")))?;
-
-        let mut text =
-            stringify_evaluation_result(result.value(), result.object().description.as_deref());
-        scrub_known_secrets(&inner.secret_store, &mut text);
-
-        Ok(text)
+        self.evaluate_in_active_context(expression).await
     }
 
     /// Take a screenshot and return the PNG bytes as a base64 string.
@@ -1355,6 +1459,43 @@ impl BrowserApi {
 }
 
 impl PageApi {
+    /// Evaluate `expression` in the active frame context (or the main frame if none is set).
+    /// Secret values in the result are scrubbed.
+    async fn evaluate_in_active_context(&self, expression: String) -> JsResult<String> {
+        let inner = self.inner.lock().await;
+        if let Some(frame_id) = &inner.target_frame_id {
+            let context_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
+                .await
+                .map_err(|e| js_err(format!("failed to get frame context: {e}")))?;
+            use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+            let eval = EvaluateParams::builder()
+                .expression(expression)
+                .context_id(context_id)
+                .await_promise(true)
+                .return_by_value(true)
+                .build()
+                .map_err(|e| js_err(format!("evaluate invalid params: {e}")))?;
+            let result = inner
+                .page
+                .evaluate_expression(eval)
+                .await
+                .map_err(|e| js_err(format!("evaluate failed: {e}")))?;
+            let mut text =
+                stringify_evaluation_result(result.value(), result.object().description.as_deref());
+            scrub_known_secrets(&inner.secret_store, &mut text);
+            Ok(text)
+        } else {
+            let result = inner
+                .page
+                .evaluate(expression)
+                .await
+                .map_err(|e| js_err(format!("evaluate failed: {e}")))?;
+            let text =
+                stringify_evaluation_result(result.value(), result.object().description.as_deref());
+            Ok(text)
+        }
+    }
+
     async fn fetch_open_tabs(&self) -> JsResult<Vec<OpenTab>> {
         eprintln!("[js_api] fetch_open_tabs enter");
         let (browser, current_page) = {
@@ -1566,32 +1707,13 @@ impl PageApi {
         Ok(String::new())
     }
 
-    async fn eval_string(&self, expression: String, method_name: &str) -> JsResult<String> {
-        let inner = self.inner.lock().await;
-        let result = inner
-            .page
-            .evaluate(expression)
-            .await
-            .map_err(|e| js_err(format!("{method_name} failed: {e}")))?;
-        let value = result
-            .value()
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        Ok(value)
+    async fn eval_string(&self, expression: String, _method_name: &str) -> JsResult<String> {
+        self.evaluate_in_active_context(expression).await
     }
 
-    async fn eval_bool(&self, expression: String, method_name: &str) -> JsResult<bool> {
-        let inner = self.inner.lock().await;
-        let result = inner
-            .page
-            .evaluate(expression)
-            .await
-            .map_err(|e| js_err(format!("{method_name} failed: {e}")))?;
-        Ok(result
-            .value()
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false))
+    async fn eval_bool(&self, expression: String, _method_name: &str) -> JsResult<bool> {
+        let text = self.evaluate_in_active_context(expression).await?;
+        Ok(text == "true")
     }
 
     async fn ready_state_is_complete(&self) -> JsResult<bool> {
@@ -1712,6 +1834,7 @@ async fn build_page_api_from_template(
         secret_store: template.secret_store.clone(),
         declared_secrets: template.declared_secrets.clone(),
         download_dir: template.download_dir.clone(),
+        target_frame_id: None,
     };
     PageApi::new(Arc::new(Mutex::new(page_inner)))
 }

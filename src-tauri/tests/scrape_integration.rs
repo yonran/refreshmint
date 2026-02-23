@@ -105,6 +105,82 @@ try {
 }
 "##;
 
+const FRAME_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("frame test start");
+
+  // Build a page with a named srcdoc iframe.
+  const pageHtml = "<html><body><div id=main>Main</div>"
+    + "<iframe name=logonbox srcdoc='<input id=user><input id=pass><button id=submit>OK</button>'>"
+    + "</iframe></body></html>";
+  await page.goto("data:text/html," + encodeURIComponent(pageHtml));
+  await page.waitForLoadState("domcontentloaded");
+
+  // 1. frames() should return the main frame and the iframe.
+  const framesJson = await page.frames();
+  const frames = JSON.parse(framesJson);
+  refreshmint.reportValue("frame_count", String(frames.length));
+  if (frames.length < 2) {
+    throw new Error("Expected at least 2 frames, got " + frames.length + ": " + framesJson);
+  }
+  const iframeFrame = frames.find(f => f.name === "logonbox");
+  if (!iframeFrame) {
+    throw new Error("Could not find logonbox frame. Frames: " + framesJson);
+  }
+
+  // 2. isVisible in main frame should NOT see #user (it lives in the iframe).
+  const visibleInMain = await page.isVisible("#user");
+  refreshmint.reportValue("visible_in_main", String(visibleInMain));
+  if (visibleInMain) {
+    throw new Error("isVisible('#user') should be false in main frame");
+  }
+
+  // 3. Switch to frame by name and verify element methods see iframe content.
+  await page.switchToFrame("logonbox");
+
+  const visibleInFrame = await page.isVisible("#user");
+  refreshmint.reportValue("visible_in_frame", String(visibleInFrame));
+  if (!visibleInFrame) {
+    throw new Error("isVisible('#user') should be true in logonbox frame");
+  }
+
+  const evalInFrame = await page.evaluate("document.getElementById('user') ? 'found' : 'missing'");
+  refreshmint.reportValue("eval_in_frame", evalInFrame);
+  if (evalInFrame !== "found") {
+    throw new Error("evaluate in frame returned: " + evalInFrame);
+  }
+
+  await page.fill("#user", "testuser");
+  const filledValue = await page.evaluate("document.getElementById('user').value");
+  refreshmint.reportValue("filled_value", filledValue);
+  if (filledValue !== "testuser") {
+    throw new Error("fill in frame failed: value is " + filledValue);
+  }
+
+  // 4. switchToMainFrame restores the main-frame context.
+  await page.switchToMainFrame();
+
+  const visibleAfter = await page.isVisible("#user");
+  refreshmint.reportValue("visible_after_switch", String(visibleAfter));
+  if (visibleAfter) {
+    throw new Error("isVisible('#user') should be false after switchToMainFrame");
+  }
+
+  const mainVisible = await page.isVisible("#main");
+  refreshmint.reportValue("main_visible", String(mainVisible));
+  if (!mainVisible) {
+    throw new Error("isVisible('#main') should be true in main frame");
+  }
+
+  await refreshmint.saveResource("frame_test.bin", [111, 107]);
+  refreshmint.log("frame test done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("frame test error: " + msg);
+  throw e;
+}
+"##;
+
 const GOTO_DRIVER_SOURCE: &str = r##"
 try {
   refreshmint.log("integration goto start");
@@ -357,6 +433,55 @@ fn scrape_goto_handles_same_url_and_hash_navigation() -> Result<(), Box<dyn Erro
         .join(EXTENSION_NAME)
         .join("output")
         .join("goto.bin");
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn scrape_frame_methods_switch_context() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping frame scrape test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let sandbox = TestSandbox::new("scrape-frame")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
+    fs::write(&driver_path, FRAME_DRIVER_SOURCE)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        login_name: LOGIN_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    scrape::run_scrape(config)?;
+
+    let output_file = ledger_dir
+        .join("cache")
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("frame_test.bin");
     let bytes = fs::read(&output_file)?;
     assert_eq!(bytes, b"ok");
 
