@@ -33,9 +33,6 @@ interface PageApi {
     click(selector: string): Promise<void>;
     type(selector: string, text: string): Promise<void>;
     fill(selector: string, value: string): Promise<void>;
-    frames(): Promise<string>;
-    switchToFrame(frameRef: string): Promise<void>;
-    switchToMainFrame(): Promise<void>;
     innerHTML(selector: string): Promise<string>;
     innerText(selector: string): Promise<string>;
     textContent(selector: string): Promise<string>;

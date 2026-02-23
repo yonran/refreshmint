@@ -336,7 +336,6 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                 secret_store: Arc::new(secret_store),
                 declared_secrets: Arc::new(declared_secrets),
                 download_dir,
-                target_frame_id: None,
             }));
             let refreshmint_inner = Arc::new(Mutex::new(super::js_api::RefreshmintInner {
                 output_dir,
