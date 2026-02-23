@@ -49,6 +49,7 @@ Errors thrown from your script fail the scrape run.
     - Add checks to make sure you are on the page that you expect to be.
     - When there is an exception or something unexpected, log context before re-throwing so that we can see what went wrong quickly.
     - Before doing something slow (sleeping, or navigating), log what you are about to do.
+- **Be careful and observant during development to avoid state machine thrashing.** Don't blindly add catch-alls or overly broad fallbacks when something fails. If a selector isn't found, it's better to log a snapshot and explicitly throw/exit early during development so you can inspect the exact page state, rather than letting the script guess and click the wrong things in an infinite loop.
 - Domain checks must compare the URL prefix to the full origin (for example `https://secure.bankofamerica.com/`), not a substring match.
 - Prefer `const url = await page.url(); if (!url.startsWith("https://example.com/")) { ... }` over checks like `url.includes("example.com")`.
 - When adding a new code path/branch, add a brief `UNTESTED` comment until that exact branch is exercised in a real run; remove or update the comment after verification.
