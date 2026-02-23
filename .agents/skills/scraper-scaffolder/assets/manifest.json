@@ -1,0 +1,6 @@
+{
+    "name": "{{name}}",
+    "secrets": {
+        "{{domain}}": ["{{username_secret}}", "{{password_secret}}"]
+    }
+}

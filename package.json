@@ -7,14 +7,14 @@
     "scripts": {
         "build": "npm run typecheck && vite build",
         "dev": "vite",
-        "lint:extensions": "eslint \"builtin-extensions/**/*.mjs\"",
+        "lint:extensions": "eslint \"{builtin-extensions,.agents/skills}/**/*.mjs\"",
         "prettier": "prettier --ignore-path .prettierignore --ignore-path .gitignore --ignore-path \"$(scripts/get-git-user-ignore-file.mts)\"",
         "prettier-check": "npm run prettier -- --check .",
         "prettier-write": "npm run prettier -- --write .",
         "lint": "eslint && npm run prettier-check",
         "prepare": "husky",
         "preview": "vite preview",
-        "typecheck:extensions": "tsc -p builtin-extensions/tsconfig.json",
+        "typecheck:extensions": "tsc -p builtin-extensions/tsconfig.json && tsc -p .agents/tsconfig.json",
         "typecheck": "tsc --build && npm run typecheck:extensions"
     },
     "dependencies": {

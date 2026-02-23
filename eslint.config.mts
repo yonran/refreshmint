@@ -113,7 +113,7 @@ export default defineConfig(
         ...tseslint.configs.disableTypeChecked,
     },
     {
-        files: ['builtin-extensions/**/*.mjs'],
+        files: ['builtin-extensions/**/*.mjs', '.agents/skills/**/*.mjs'],
         languageOptions: {
             globals: {
                 browser: 'readonly',

@@ -1,0 +1,10 @@
+{
+    "extends": ["../builtin-extensions/tsconfig.json"],
+    "compilerOptions": {
+        "baseUrl": "..",
+        "paths": {
+            "*": ["builtin-extensions/*"]
+        }
+    },
+    "include": ["./skills/**/*.mjs", "../builtin-extensions/globals.d.ts"]
+}
