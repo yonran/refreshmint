@@ -45,7 +45,7 @@ Errors thrown from your script fail the scrape run.
 - Whenever you scrape a new page, try doing it once, with plenty of incremental snapshot observations, before you are confident that you can script it in the general case.
 - Scrapers will fail often. Make them fast to debug and retry
     - The script should have a state machine that keeps working (for loop) until an error or the end state is achieved
-    - Scrapers should define a function for each state (e.g. URL or page) and then the main code should switch on the URL or other identifying information on the page. This allows us to edit the script and re-run it without starting from the original logged out state.
+    - Scrapers should define functions named after the _intent_ or _outcome_ of a state (e.g., `discoverAccountsFromDashboard` or `initiateActivityDownload`), rather than generic names like `handleDashboard`. The main loop should switch on the URL or page content and call these intent-based functions. This makes the scraper's behavior self-documenting.
     - The state machine should also keep track of progress being made (e.g. a set of distinct pages viewed or output identifiers such as last month downloaded) and iterations since last progress. If there are too many steps with no real progress, then throw an error.
     - Log what state you are in.
     - Add checks to make sure you are on the page that you expect to be.

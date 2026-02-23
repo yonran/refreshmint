@@ -38,67 +38,67 @@ fn format_browser_error(context: &str, err: &str) -> String {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct NetworkRequest {
+pub struct NetworkRequest {
     #[serde(default)]
-    url: String,
+    pub url: String,
     #[serde(default)]
-    status: i64,
+    pub status: i64,
     #[serde(default)]
-    ok: bool,
+    pub ok: bool,
     #[serde(default)]
-    method: String,
+    pub method: String,
     #[serde(default)]
-    ts: i64,
+    pub ts: i64,
     #[serde(default)]
-    error: Option<String>,
+    pub error: Option<String>,
 }
 
-struct ResponseCaptureState {
-    entries: Arc<Mutex<Vec<NetworkRequest>>>,
-    task: tokio::task::JoinHandle<()>,
+pub struct ResponseCaptureState {
+    pub entries: Arc<Mutex<Vec<NetworkRequest>>>,
+    pub task: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-struct SnapshotNode {
+pub struct SnapshotNode {
     #[serde(default)]
-    r#ref: String,
+    pub r#ref: String,
     #[serde(default)]
-    parent_ref: Option<String>,
+    pub parent_ref: Option<String>,
     #[serde(default)]
-    role: String,
+    pub role: String,
     #[serde(default)]
-    label: String,
+    pub label: String,
     #[serde(default)]
-    tag: String,
+    pub tag: String,
     #[serde(default)]
-    text: String,
+    pub text: String,
     #[serde(default)]
-    value: String,
+    pub value: String,
     #[serde(default)]
-    visible: bool,
+    pub visible: bool,
     #[serde(default)]
-    disabled: bool,
+    pub disabled: bool,
     #[serde(default)]
-    expanded: Option<bool>,
+    pub expanded: Option<bool>,
     #[serde(default)]
-    selected: Option<bool>,
+    pub selected: Option<bool>,
     #[serde(default)]
-    checked: Option<String>,
+    pub checked: Option<String>,
     #[serde(default)]
-    level: Option<u32>,
+    pub level: Option<u32>,
     #[serde(default)]
-    aria_labelled_by: Option<String>,
+    pub aria_labelled_by: Option<String>,
     #[serde(default)]
-    aria_described_by: Option<String>,
+    pub aria_described_by: Option<String>,
     #[serde(default)]
-    selector_hint: String,
+    pub selector_hint: String,
 }
 
 #[derive(Debug, Clone)]
-struct SnapshotOptions {
-    incremental: bool,
-    track: String,
+pub struct SnapshotOptions {
+    pub incremental: bool,
+    pub track: String,
 }
 
 impl Default for SnapshotOptions {
@@ -112,30 +112,30 @@ impl Default for SnapshotOptions {
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SnapshotDiffEntry {
-    change: String,
-    node: SnapshotNode,
+pub struct SnapshotDiffEntry {
+    pub change: String,
+    pub node: SnapshotNode,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SnapshotDiff {
-    mode: String,
-    track: String,
-    base_node_count: usize,
-    node_count: usize,
-    changed_count: usize,
-    removed_count: usize,
-    unchanged_count: usize,
-    changed: Vec<SnapshotDiffEntry>,
-    removed_refs: Vec<String>,
+pub struct SnapshotDiff {
+    pub mode: String,
+    pub track: String,
+    pub base_node_count: usize,
+    pub node_count: usize,
+    pub changed_count: usize,
+    pub removed_count: usize,
+    pub unchanged_count: usize,
+    pub changed: Vec<SnapshotDiffEntry>,
+    pub removed_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
-struct OpenTab {
-    page: chromiumoxide::Page,
-    target_id: String,
-    opener_target_id: Option<String>,
+pub struct OpenTab {
+    pub page: chromiumoxide::Page,
+    pub target_id: String,
+    pub opener_target_id: Option<String>,
 }
 
 pub type SecretDeclarations = BTreeMap<String, BTreeSet<String>>;
@@ -160,23 +160,21 @@ pub struct PageInner {
     pub secret_store: Arc<SecretStore>,
     pub declared_secrets: Arc<SecretDeclarations>,
     pub download_dir: PathBuf,
+    pub target_frame_id: Option<chromiumoxide::cdp::browser_protocol::page::FrameId>,
 }
 
 /// JS-visible `page` object with Playwright-like API.
-///
-/// All methods are async and return Promises in JS.
 #[rquickjs::class(rename = "Page")]
 #[derive(Trace)]
 pub struct PageApi {
     #[qjs(skip_trace)]
-    inner: Arc<Mutex<PageInner>>,
+    pub inner: Arc<Mutex<PageInner>>,
     #[qjs(skip_trace)]
-    response_capture: Arc<Mutex<Option<ResponseCaptureState>>>,
+    pub response_capture: Arc<Mutex<Option<ResponseCaptureState>>>,
     #[qjs(skip_trace)]
-    snapshot_tracks: Arc<Mutex<BTreeMap<String, Vec<SnapshotNode>>>>,
+    pub snapshot_tracks: Arc<Mutex<BTreeMap<String, Vec<SnapshotNode>>>>,
 }
 
-// Safety: PageApi only contains Arc<Mutex<...>> which is 'static and has no JS lifetimes.
 #[allow(unsafe_code)]
 unsafe impl<'js> JsLifetime<'js> for PageApi {
     type Changed<'to> = PageApi;
@@ -187,12 +185,363 @@ unsafe impl<'js> JsLifetime<'js> for PageApi {
 #[derive(Trace)]
 pub struct BrowserApi {
     #[qjs(skip_trace)]
-    page_inner: Arc<Mutex<PageInner>>,
+    pub page_inner: Arc<Mutex<PageInner>>,
 }
 
 #[allow(unsafe_code)]
 unsafe impl<'js> JsLifetime<'js> for BrowserApi {
     type Changed<'to> = BrowserApi;
+}
+
+/// JS-visible download info object.
+#[rquickjs::class(rename = "Download")]
+#[derive(Trace, Clone)]
+pub struct DownloadInfo {
+    #[qjs(skip_trace)]
+    pub path: String,
+    #[qjs(skip_trace)]
+    pub suggested_filename: String,
+}
+
+#[allow(unsafe_code)]
+unsafe impl<'js> JsLifetime<'js> for DownloadInfo {
+    type Changed<'to> = DownloadInfo;
+}
+
+#[rquickjs::methods]
+impl DownloadInfo {
+    #[qjs(get)]
+    pub fn path(&self) -> String {
+        self.path.clone()
+    }
+
+    #[qjs(get, rename = "suggestedFilename")]
+    pub fn suggested_filename(&self) -> String {
+        self.suggested_filename.clone()
+    }
+}
+
+/// Metadata about the current scrape session, set by the driver via `setSessionMetadata`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SessionMetadata {
+    #[serde(rename = "dateRangeStart", skip_serializing_if = "Option::is_none")]
+    pub date_range_start: Option<String>,
+    #[serde(rename = "dateRangeEnd", skip_serializing_if = "Option::is_none")]
+    pub date_range_end: Option<String>,
+}
+
+/// A staged resource from `saveResource`, pending finalization.
+#[derive(Debug, Clone)]
+pub struct StagedResource {
+    pub filename: String,
+    pub staging_path: PathBuf,
+    pub coverage_end_date: Option<String>,
+    pub original_url: Option<String>,
+    pub mime_type: Option<String>,
+    pub label: Option<String>,
+    pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Shared state backing the `refreshmint` JS namespace.
+pub struct RefreshmintInner {
+    pub output_dir: PathBuf,
+    pub prompt_overrides: PromptOverrides,
+    pub prompt_requires_override: bool,
+    pub debug_output_sink: Option<tokio::sync::mpsc::UnboundedSender<DebugOutputEvent>>,
+    pub session_metadata: SessionMetadata,
+    pub staged_resources: Vec<StagedResource>,
+    pub scrape_session_id: String,
+    pub extension_name: String,
+    pub account_name: String,
+    pub login_name: String,
+    pub ledger_dir: PathBuf,
+}
+
+/// JS-visible `refreshmint` namespace object.
+#[rquickjs::class(rename = "Refreshmint")]
+#[derive(Trace)]
+pub struct RefreshmintApi {
+    #[qjs(skip_trace)]
+    pub inner: Arc<Mutex<RefreshmintInner>>,
+}
+
+#[allow(unsafe_code)]
+unsafe impl<'js> JsLifetime<'js> for RefreshmintApi {
+    type Changed<'to> = RefreshmintApi;
+}
+
+impl RefreshmintApi {
+    pub fn new(inner: Arc<Mutex<RefreshmintInner>>) -> Self {
+        Self { inner }
+    }
+
+    fn emit_debug_output(&self, stream: DebugOutputStream, line: String) -> bool {
+        let sender = match self.inner.try_lock() {
+            Ok(inner) => inner.debug_output_sink.clone(),
+            Err(_) => None,
+        };
+
+        if let Some(sender) = sender {
+            return sender.send(DebugOutputEvent { stream, line }).is_ok();
+        }
+
+        false
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountDocumentSummary {
+    filename: String,
+    metadata: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+fn missing_prompt_override_error(message: &str) -> String {
+    format!(
+        "missing prompt value for refreshmint.prompt(\"{message}\"); supply --prompt \"{message}=VALUE\""
+    )
+}
+
+fn parse_document_filter(
+    filter: Option<rquickjs::Value<'_>>,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut metadata = BTreeMap::new();
+
+    if let Some(val) = filter {
+        if let Some(s) = val.as_string() {
+            if let Ok(label) = s.to_string() {
+                metadata.insert("label".to_string(), serde_json::Value::String(label));
+            }
+        } else if let Some(obj) = val.as_object() {
+            for (key, v) in obj.props::<String, rquickjs::Value>().flatten() {
+                let json_val = if v.is_null() || v.is_undefined() {
+                    serde_json::Value::Null
+                } else if let Some(b) = v.as_bool() {
+                    serde_json::Value::Bool(b)
+                } else if let Some(s) = v.as_string() {
+                    serde_json::Value::String(s.to_string().unwrap_or_default())
+                } else if let Some(i) = v.as_int() {
+                    serde_json::Value::Number(i.into())
+                } else if let Some(f) = v.as_float() {
+                    if let Some(n) = serde_json::Number::from_f64(f) {
+                        serde_json::Value::Number(n)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                };
+                metadata.insert(key, json_val);
+            }
+        }
+    }
+    metadata
+}
+
+fn matches_filter(
+    info: &crate::scrape::DocumentInfo,
+    filter: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> bool {
+    for (key, expected_val) in filter {
+        let actual_val = match key.as_str() {
+            "mimeType" => Some(serde_json::Value::String(info.mime_type.clone())),
+            "coverageEndDate" => Some(serde_json::Value::String(info.coverage_end_date.clone())),
+            "label" => Some(serde_json::Value::String(info.label.clone())),
+            "originalUrl" => info
+                .original_url
+                .as_ref()
+                .map(|s| serde_json::Value::String(s.clone())),
+            "extensionName" => Some(serde_json::Value::String(info.extension_name.clone())),
+            "scrapedAt" => Some(serde_json::Value::String(info.scraped_at.clone())),
+            _ => info.metadata.get(key).cloned(),
+        };
+
+        if let Some(actual) = actual_val {
+            if actual != *expected_val {
+                return false;
+            }
+        } else if !expected_val.is_null() {
+            return false;
+        }
+    }
+    true
+}
+
+struct SaveResourceOptions {
+    coverage_end_date: Option<String>,
+    original_url: Option<String>,
+    mime_type: Option<String>,
+    label: Option<String>,
+    metadata: BTreeMap<String, serde_json::Value>,
+}
+
+fn parse_save_resource_options(options: Option<rquickjs::Value<'_>>) -> SaveResourceOptions {
+    let mut result = SaveResourceOptions {
+        coverage_end_date: None,
+        original_url: None,
+        mime_type: None,
+        label: None,
+        metadata: BTreeMap::new(),
+    };
+    if let Some(opts) = options {
+        if let Some(obj) = opts.as_object() {
+            for (key, v) in obj.props::<String, rquickjs::Value>().flatten() {
+                match key.as_str() {
+                    "coverageEndDate" => {
+                        result.coverage_end_date = v.as_string().and_then(|s| s.to_string().ok());
+                    }
+                    "originalUrl" => {
+                        result.original_url = v.as_string().and_then(|s| s.to_string().ok());
+                    }
+                    "mimeType" => {
+                        result.mime_type = v.as_string().and_then(|s| s.to_string().ok());
+                    }
+                    "label" => {
+                        result.label = v.as_string().and_then(|s| s.to_string().ok());
+                    }
+                    _ => {
+                        let json_val = if v.is_null() || v.is_undefined() {
+                            serde_json::Value::Null
+                        } else if let Some(b) = v.as_bool() {
+                            serde_json::Value::Bool(b)
+                        } else if let Some(s) = v.as_string() {
+                            serde_json::Value::String(s.to_string().unwrap_or_default())
+                        } else if let Some(i) = v.as_int() {
+                            serde_json::Value::Number(i.into())
+                        } else if let Some(f) = v.as_float() {
+                            if let Some(n) = serde_json::Number::from_f64(f) {
+                                serde_json::Value::Number(n)
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        };
+                        result.metadata.insert(key, json_val);
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+fn parse_snapshot_options(options: Option<rquickjs::Value<'_>>) -> JsResult<SnapshotOptions> {
+    let mut result = SnapshotOptions::default();
+    if let Some(opts) = options {
+        let Some(obj) = opts.as_object() else {
+            return Err(js_err(
+                "snapshot options must be an object when provided".to_string(),
+            ));
+        };
+        if let Ok(val) = obj.get::<_, Option<bool>>("incremental") {
+            result.incremental = val.unwrap_or(false);
+        }
+        if let Ok(Some(track)) = obj.get::<_, Option<String>>("track") {
+            let trimmed = track.trim();
+            if !trimmed.is_empty() {
+                result.track = trimmed.to_string();
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn snapshot_nodes_by_ref(nodes: &[SnapshotNode]) -> BTreeMap<String, SnapshotNode> {
+    let mut map = BTreeMap::new();
+    for (index, node) in nodes.iter().enumerate() {
+        let key = if node.r#ref.trim().is_empty() {
+            format!("index:{index}")
+        } else {
+            node.r#ref.clone()
+        };
+        map.insert(key, node.clone());
+    }
+    map
+}
+
+fn build_snapshot_diff(
+    previous: &[SnapshotNode],
+    current: &[SnapshotNode],
+    track: &str,
+) -> SnapshotDiff {
+    let previous_by_ref = snapshot_nodes_by_ref(previous);
+    let current_by_ref = snapshot_nodes_by_ref(current);
+
+    let mut changed = Vec::new();
+    let mut unchanged_count = 0usize;
+    for (ref_id, node) in &current_by_ref {
+        match previous_by_ref.get(ref_id) {
+            None => changed.push(SnapshotDiffEntry {
+                change: "added".to_string(),
+                node: node.clone(),
+            }),
+            Some(previous_node) if previous_node != node => changed.push(SnapshotDiffEntry {
+                change: "updated".to_string(),
+                node: node.clone(),
+            }),
+            Some(_) => unchanged_count += 1,
+        }
+    }
+
+    let removed_refs = previous_by_ref
+        .keys()
+        .filter(|ref_id| !current_by_ref.contains_key(*ref_id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    SnapshotDiff {
+        mode: "incremental".to_string(),
+        track: track.to_string(),
+        base_node_count: previous.len(),
+        node_count: current.len(),
+        changed_count: changed.len(),
+        removed_count: removed_refs.len(),
+        unchanged_count,
+        changed,
+        removed_refs,
+    }
+}
+
+fn unique_output_path(output_dir: &Path, filename: &str) -> PathBuf {
+    let candidate = output_dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let original = Path::new(filename);
+    let stem = original
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("resource");
+    let ext = original.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let parent = original.parent().unwrap_or_else(|| Path::new(""));
+    let suffix = if ext.is_empty() {
+        String::new()
+    } else {
+        format!(".{ext}")
+    };
+
+    for i in 2..1000 {
+        let candidate_name = format!("{stem}-{i}{suffix}");
+        let rel = if parent.as_os_str().is_empty() {
+            PathBuf::from(&candidate_name)
+        } else {
+            parent.join(&candidate_name)
+        };
+        let candidate = output_dir.join(&rel);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    let fallback_name = format!("{stem}-{}{}", std::process::id(), suffix);
+    if parent.as_os_str().is_empty() {
+        output_dir.join(fallback_name)
+    } else {
+        output_dir.join(parent).join(fallback_name)
+    }
 }
 
 impl PageApi {
@@ -203,11 +552,351 @@ impl PageApi {
             snapshot_tracks: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
+
+    pub async fn get_active_context_id(
+        &self,
+        inner: &PageInner,
+    ) -> JsResult<Option<chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId>> {
+        if let Some(frame_id) = &inner.target_frame_id {
+            let context_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
+                .await
+                .map_err(|e| js_err(format!("failed to get frame context: {e}")))?;
+            Ok(Some(context_id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn evaluate_in_active_context(&self, expression: String) -> JsResult<String> {
+        let inner = self.inner.lock().await;
+        let context_id = self.get_active_context_id(&inner).await?;
+
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+        let mut builder = EvaluateParams::builder()
+            .expression(expression)
+            .await_promise(true)
+            .return_by_value(true);
+
+        if let Some(cid) = context_id {
+            builder = builder.context_id(cid);
+        }
+
+        let eval = builder
+            .build()
+            .map_err(|e| js_err(format!("evaluate invalid params: {e}")))?;
+
+        let result = inner
+            .page
+            .evaluate_expression(eval)
+            .await
+            .map_err(|e| js_err(format!("evaluate failed: {e}")))?;
+
+        let mut text =
+            stringify_evaluation_result(result.value(), result.object().description.as_deref());
+        scrub_known_secrets(&inner.secret_store, &mut text);
+        Ok(text)
+    }
+
+    pub async fn ready_state_is_complete(&self) -> JsResult<bool> {
+        let res = self
+            .evaluate_in_active_context("(() => document.readyState === 'complete')()".to_string())
+            .await?;
+        Ok(res == "true")
+    }
+
+    pub async fn ready_state_is_interactive_or_complete(&self) -> JsResult<bool> {
+        let res = self.evaluate_in_active_context(
+            "(() => document.readyState === 'interactive' || document.readyState === 'complete')()"
+                .to_string())
+            .await?;
+        Ok(res == "true")
+    }
+
+    pub async fn ensure_response_capture(&self) -> JsResult<Arc<Mutex<Vec<NetworkRequest>>>> {
+        let mut guard = self.response_capture.lock().await;
+        if let Some(state) = guard.as_ref() {
+            if !state.task.is_finished() {
+                return Ok(state.entries.clone());
+            }
+        }
+
+        if let Some(previous) = guard.take() {
+            previous.task.abort();
+        }
+
+        let page = {
+            let inner = self.inner.lock().await;
+            inner.page.clone()
+        };
+
+        use chromiumoxide::cdp::browser_protocol::network::{EnableParams, EventResponseReceived};
+        page.execute(EnableParams::default())
+            .await
+            .map_err(|e| js_err(format!("failed to enable Network domain: {e}")))?;
+
+        let mut events = page
+            .event_listener::<EventResponseReceived>()
+            .await
+            .map_err(|e| js_err(format!("failed to attach response listener: {e}")))?;
+
+        let entries = Arc::new(Mutex::new(Vec::new()));
+        let entries_for_task = entries.clone();
+        let task = tokio::spawn(async move {
+            use futures::StreamExt;
+
+            while let Some(ev) = events.next().await {
+                let status = ev.response.status;
+                let method = network_method_from_headers(ev.response.request_headers.as_ref());
+                let ts = (*ev.timestamp.inner() * 1000.0) as i64;
+                let item = NetworkRequest {
+                    url: ev.response.url.clone(),
+                    status,
+                    ok: (200..400).contains(&status),
+                    method,
+                    ts,
+                    error: None,
+                };
+
+                let mut guard = entries_for_task.lock().await;
+                guard.push(item);
+                if guard.len() > 5_000 {
+                    let drop_count = guard.len() - 5_000;
+                    guard.drain(0..drop_count);
+                }
+            }
+        });
+
+        *guard = Some(ResponseCaptureState {
+            entries: entries.clone(),
+            task,
+        });
+        Ok(entries)
+    }
+
+    pub async fn fetch_open_tabs(&self) -> JsResult<Vec<OpenTab>> {
+        let (browser, current_page) = {
+            let inner = self.inner.lock().await;
+            (inner.browser.clone(), inner.page.clone())
+        };
+
+        let target_infos = match tokio::time::timeout(
+            std::time::Duration::from_millis(TAB_QUERY_TIMEOUT_MS),
+            async {
+                let mut guard = browser.lock().await;
+                guard.fetch_targets().await
+            },
+        )
+        .await
+        {
+            Ok(Ok(infos)) => Some(infos),
+            Ok(Err(err)) => {
+                let err_text = err.to_string();
+                if is_transport_disconnected_error(&err_text) {
+                    return Err(js_err(format_browser_error(
+                        "browser.pages() fetch_targets failed",
+                        &err_text,
+                    )));
+                }
+                return Ok(vec![OpenTab {
+                    target_id: current_page.target_id().as_ref().to_string(),
+                    opener_target_id: current_page
+                        .opener_id()
+                        .as_ref()
+                        .map(|id| id.as_ref().to_string()),
+                    page: current_page,
+                }]);
+            }
+            Err(_) => {
+                return Ok(vec![OpenTab {
+                    target_id: current_page.target_id().as_ref().to_string(),
+                    opener_target_id: current_page
+                        .opener_id()
+                        .as_ref()
+                        .map(|id| id.as_ref().to_string()),
+                    page: current_page,
+                }]);
+            }
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let pages = match tokio::time::timeout(
+            std::time::Duration::from_millis(TAB_QUERY_TIMEOUT_MS),
+            async {
+                let guard = browser.lock().await;
+                guard.pages().await
+            },
+        )
+        .await
+        {
+            Ok(Ok(pages)) => pages,
+            Ok(Err(err)) => {
+                let err_text = err.to_string();
+                if is_transport_disconnected_error(&err_text) {
+                    return Err(js_err(format_browser_error(
+                        "browser.pages() pages listing failed",
+                        &err_text,
+                    )));
+                }
+                return Ok(vec![OpenTab {
+                    target_id: current_page.target_id().as_ref().to_string(),
+                    opener_target_id: current_page
+                        .opener_id()
+                        .as_ref()
+                        .map(|id| id.as_ref().to_string()),
+                    page: current_page,
+                }]);
+            }
+            Err(_) => {
+                return Ok(vec![OpenTab {
+                    target_id: current_page.target_id().as_ref().to_string(),
+                    opener_target_id: current_page
+                        .opener_id()
+                        .as_ref()
+                        .map(|id| id.as_ref().to_string()),
+                    page: current_page,
+                }]);
+            }
+        };
+        let mut page_by_target = pages
+            .into_iter()
+            .map(|page| (page.target_id().as_ref().to_string(), page))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut tabs = Vec::new();
+        if let Some(target_infos) = target_infos {
+            for info in target_infos {
+                if info.r#type != "page" {
+                    continue;
+                }
+                let target_id = info.target_id.as_ref().to_string();
+                let Some(page) = page_by_target.remove(&target_id) else {
+                    continue;
+                };
+                tabs.push(OpenTab {
+                    page,
+                    target_id,
+                    opener_target_id: info.opener_id.as_ref().map(|id| id.as_ref().to_string()),
+                });
+            }
+        }
+
+        // Keep any pages that were not part of the current target snapshot.
+        for (target_id, page) in page_by_target {
+            tabs.push(OpenTab {
+                opener_target_id: page.opener_id().as_ref().map(|id| id.as_ref().to_string()),
+                page,
+                target_id,
+            });
+        }
+
+        if tabs.is_empty() {
+            tabs.push(OpenTab {
+                target_id: current_page.target_id().as_ref().to_string(),
+                opener_target_id: current_page
+                    .opener_id()
+                    .as_ref()
+                    .map(|id| id.as_ref().to_string()),
+                page: current_page,
+            });
+        }
+
+        Ok(tabs)
+    }
+
+    pub async fn wait_for_popup_page(&self, timeout_ms: u64) -> JsResult<PageApi> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let opener_target = {
+            let inner = self.inner.lock().await;
+            inner.page.target_id().as_ref().to_string()
+        };
+        let baseline_tabs = self.fetch_open_tabs().await?;
+        let baseline_ids = baseline_tabs
+            .into_iter()
+            .map(|tab| tab.target_id)
+            .collect::<BTreeSet<_>>();
+
+        loop {
+            let tabs = self.fetch_open_tabs().await?;
+            if let Some(popup_tab) = tabs.into_iter().find(|tab| {
+                !baseline_ids.contains(&tab.target_id)
+                    && tab.opener_target_id.as_deref() == Some(opener_target.as_str())
+            }) {
+                return Ok(build_page_api_from_template(&self.inner, popup_tab.page).await);
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(js_err(format!(
+                    "TimeoutError: waitForPopup timed out after {timeout_ms}ms (no popup opened by current page)"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+        }
+    }
+
+    pub async fn current_url(&self) -> JsResult<String> {
+        let page = {
+            let inner = self.inner.lock().await;
+            inner.page.clone()
+        };
+
+        let (cdp_url, cdp_error) = match page.url().await {
+            Ok(url) => (url.map(|value| value.to_string()), None),
+            Err(error) => (None, Some(format!("{error}"))),
+        };
+
+        let runtime_url = match page
+            .evaluate(
+                "(() => { try { return String(window.location.href || ''); } catch (_) { return ''; } })()",
+            )
+            .await
+            {
+                Ok(result) => parse_runtime_location_href(result.value()),
+                Err(_) => None,
+            };
+
+        if let Some(runtime_url) = runtime_url {
+            return Ok(runtime_url);
+        }
+        if let Some(cdp_url) = cdp_url {
+            return Ok(cdp_url);
+        }
+        if let Some(cdp_error) = cdp_error {
+            return Err(js_err(format_browser_error("url() failed", &cdp_error)));
+        }
+
+        Ok(String::new())
+    }
 }
 
 impl BrowserApi {
     pub fn new(page_inner: Arc<Mutex<PageInner>>) -> Self {
         Self { page_inner }
+    }
+
+    pub async fn wait_for_page(&self, timeout_ms: u64) -> JsResult<PageApi> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let watcher = PageApi::new(self.page_inner.clone());
+        let baseline_tabs = watcher.fetch_open_tabs().await?;
+        let baseline_ids = baseline_tabs
+            .into_iter()
+            .map(|tab| tab.target_id)
+            .collect::<BTreeSet<_>>();
+
+        loop {
+            let tabs = watcher.fetch_open_tabs().await?;
+            if let Some(new_tab) = tabs
+                .into_iter()
+                .find(|tab| !baseline_ids.contains(&tab.target_id))
+            {
+                return Ok(build_page_api_from_template(&self.page_inner, new_tab.page).await);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(js_err(format!(
+                    "TimeoutError: browser.waitForEvent(\"page\") timed out after {timeout_ms}ms"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+        }
     }
 }
 
@@ -268,20 +957,67 @@ impl PageApi {
 
     /// Get the current page URL.
     pub async fn url(&self) -> JsResult<String> {
-        eprintln!("[js_api] page.url enter");
+        let url = self.current_url().await?;
+        Ok(url)
+    }
+
+    /// List all frames in the page.
+    pub async fn frames(&self) -> JsResult<String> {
         let inner = self.inner.lock().await;
-        let url = inner
+        use chromiumoxide::cdp::browser_protocol::page::GetFrameTreeParams;
+        let tree = inner
             .page
-            .url()
+            .execute(GetFrameTreeParams::default())
             .await
-            .map_err(|e| {
-                let err_text = e.to_string();
-                eprintln!("[js_api] page.url error: {err_text}");
-                js_err(format_browser_error("url() failed", &err_text))
-            })?
-            .unwrap_or_default();
-        eprintln!("[js_api] page.url ok");
-        Ok(url.to_string())
+            .map_err(|e| js_err(format!("frames failed: {e}")))?;
+
+        #[derive(serde::Serialize)]
+        struct FrameInfo {
+            id: String,
+            name: String,
+            url: String,
+            #[serde(rename = "parentId")]
+            parent_id: Option<String>,
+        }
+
+        let mut frames = Vec::new();
+        let mut stack = vec![tree.result.frame_tree];
+        while let Some(node) = stack.pop() {
+            frames.push(FrameInfo {
+                id: node.frame.id.as_ref().to_string(),
+                name: node.frame.name.unwrap_or_default(),
+                url: node.frame.url,
+                parent_id: node.frame.parent_id.map(|p| p.as_ref().to_string()),
+            });
+            if let Some(children) = node.child_frames {
+                for child in children {
+                    stack.push(child);
+                }
+            }
+        }
+
+        serde_json::to_string(&frames)
+            .map_err(|e| js_err(format!("frames serialization failed: {e}")))
+    }
+
+    /// Switch the active target to a specific frame.
+    /// Subsequent actions (click, fill, evaluate) will target this frame.
+    #[qjs(rename = "switchToFrame")]
+    pub async fn js_switch_to_frame(&self, frame_ref: String) -> JsResult<()> {
+        let mut inner = self.inner.lock().await;
+        let frame_id = resolve_frame_id(&inner.page, &frame_ref)
+            .await
+            .map_err(|e| js_err(format!("switchToFrame failed: {e}")))?;
+        inner.target_frame_id = Some(frame_id);
+        Ok(())
+    }
+
+    /// Reset the active target to the main frame.
+    #[qjs(rename = "switchToMainFrame")]
+    pub async fn js_switch_to_main_frame(&self) -> JsResult<()> {
+        let mut inner = self.inner.lock().await;
+        inner.target_frame_id = None;
+        Ok(())
     }
 
     /// Reload the current page.
@@ -318,20 +1054,15 @@ impl PageApi {
 
         loop {
             let maybe_error = {
-                let inner = self.inner.lock().await;
-                let result = inner
-                    .page
-                    .evaluate(probe.as_str())
-                    .await
-                    .map_err(|e| js_err(format!("waitForSelector failed: {e}")))?;
-                if let Some(value) = result.value() {
-                    if value.as_bool() == Some(true) {
-                        return Ok(());
-                    }
-                    value
-                        .get("__refreshmintSelectorError")
+                let res = self.evaluate_in_active_context(probe.clone()).await?;
+                if res == "true" {
+                    return Ok(());
+                }
+                if res.contains("__refreshmintSelectorError") {
+                    let val: serde_json::Value = serde_json::from_str(&res).unwrap_or_default();
+                    val.get("__refreshmintSelectorError")
                         .and_then(serde_json::Value::as_str)
-                        .map(|selector_error| selector_error.to_string())
+                        .map(|s| s.to_string())
                 } else {
                     None
                 }
@@ -671,14 +1402,6 @@ impl PageApi {
         ))
     }
 
-    /// Deprecated legacy API. Use `browser.pages()` and explicit Page handles.
-    #[qjs(rename = "selectTab")]
-    pub async fn js_select_tab(&self, index: i32) -> JsResult<String> {
-        Err(js_err(format!(
-            "selectTab({index}) was removed. Use browser.pages() and call methods on the selected Page handle."
-        )))
-    }
-
     /// Wait for a popup opened by this page and return it as a Page handle.
     #[qjs(rename = "waitForPopup")]
     pub async fn js_wait_for_popup(&self, timeout_ms: Option<u64>) -> JsResult<PageApi> {
@@ -705,60 +1428,127 @@ impl PageApi {
             .await
     }
 
-    /// Click an element matching the CSS selector.
+    /// Click an element matching the CSS selector in the current context.
     pub async fn click(&self, selector: String) -> JsResult<()> {
         let inner = self.inner.lock().await;
-        let element = inner
+        let context_id = self.get_active_context_id(&inner).await?;
+
+        // 1. Find element and check actionability in-context
+        let selector_json = serde_json::to_string(&selector).unwrap_or_default();
+        let js = format!(
+            r#"(async (sel) => {{
+                const el = document.querySelector(sel);
+                if (!el) return 'Element not found';
+                if (!el.isConnected) return 'Node is detached from document';
+                el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
+                const rect = el.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return 'Element is not visible';
+                // Note: simple click() is often more reliable than complex pointer math in sandboxed contexts
+                el.click();
+                return '';
+            }})({selector_json})"#
+        );
+
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+        let mut builder = EvaluateParams::builder()
+            .expression(js)
+            .await_promise(true)
+            .return_by_value(true);
+
+        if let Some(cid) = context_id {
+            builder = builder.context_id(cid);
+        }
+
+        let eval = builder
+            .build()
+            .map_err(|e| js_err(format!("click invalid params: {e}")))?;
+
+        let result = inner
             .page
-            .find_element(selector)
-            .await
-            .map_err(|e| js_err(format!("click find failed: {e}")))?;
-        ensure_element_receives_pointer_events(&element)
+            .evaluate_expression(eval)
             .await
             .map_err(|e| js_err(format!("click failed: {e}")))?;
-        element
-            .click()
-            .await
-            .map_err(|e| js_err(format!("click failed: {e}")))?;
+
+        let message = result.value().and_then(|v| v.as_str()).unwrap_or_default();
+        if !message.is_empty() {
+            return Err(js_err(format!(
+                "click failed for \"{selector}\": {message}"
+            )));
+        }
+
         Ok(())
     }
 
-    /// Type text into an element, character by character.
+    /// Type text into an element, character by character, in the current context.
     #[qjs(rename = "type")]
     pub async fn js_type(&self, selector: String, text: String) -> JsResult<()> {
         let inner = self.inner.lock().await;
-        let element = inner
+        let context_id = self.get_active_context_id(&inner).await?;
+
+        let selector_json = serde_json::to_string(&selector).unwrap_or_default();
+        let text_json = serde_json::to_string(&text).unwrap_or_default();
+        let js = format!(
+            r#"(async (sel, val) => {{
+                const el = document.querySelector(sel);
+                if (!el) return 'Element not found';
+                el.focus();
+                el.click();
+                // Character-by-character typing is best done via CDP for reliability,
+                // but for simple cases we can do it via value assignment if needed.
+                // However, since we are already context-aware, let's just focus and then
+                // we would ideally use CDP input. Since we want character events,
+                // we'll use a simple loop.
+                for (const char of val) {{
+                    const opts = {{ key: char, keyCode: char.charCodeAt(0), bubbles: true }};
+                    el.dispatchEvent(new KeyboardEvent('keydown', opts));
+                    el.dispatchEvent(new KeyboardEvent('keypress', opts));
+                    el.value += char;
+                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    el.dispatchEvent(new KeyboardEvent('keyup', opts));
+                }}
+                return '';
+            }})({selector_json}, {text_json})"#
+        );
+
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+        let mut builder = EvaluateParams::builder()
+            .expression(js)
+            .await_promise(true)
+            .return_by_value(true);
+
+        if let Some(cid) = context_id {
+            builder = builder.context_id(cid);
+        }
+
+        let eval = builder
+            .build()
+            .map_err(|e| js_err(format!("type invalid params: {e}")))?;
+
+        let result = inner
             .page
-            .find_element(selector)
-            .await
-            .map_err(|e| js_err(format!("type find failed: {e}")))?;
-        ensure_element_receives_pointer_events(&element)
-            .await
-            .map_err(|e| js_err(format!("type click failed: {e}")))?;
-        element
-            .click()
-            .await
-            .map_err(|e| js_err(format!("type click failed: {e}")))?;
-        element
-            .type_str(&text)
+            .evaluate_expression(eval)
             .await
             .map_err(|e| js_err(format!("type failed: {e}")))?;
+
+        let message = result.value().and_then(|v| v.as_str()).unwrap_or_default();
+        if !message.is_empty() {
+            return Err(js_err(format!("type failed for \"{selector}\": {message}")));
+        }
+
         Ok(())
     }
 
-    /// Fill an input element's value.
+    /// Fill an input element's value in the current context.
     ///
     /// If `value` matches a manifest-declared secret name for the current
     /// top-level domain, the real secret is resolved from keychain and injected via CDP.
     /// The JS sandbox only ever sees the placeholder name.
     pub async fn fill(&self, selector: String, value: String) -> JsResult<()> {
         let inner = self.inner.lock().await;
-
-        // Determine the actual value to fill
         let actual_value = resolve_secret_if_applicable(&inner, &value).await?;
+        let context_id = self.get_active_context_id(&inner).await?;
 
-        // Use CDP to set the value and dispatch events so the JS sandbox
-        // never receives the real secret.
         let selector_json = serde_json::to_string(&selector).unwrap_or_default();
         let value_json = serde_json::to_string(&actual_value).unwrap_or_default();
         let js = format!(
@@ -772,137 +1562,133 @@ impl PageApi {
             }})()"#,
         );
 
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+        let mut builder = EvaluateParams::builder()
+            .expression(js)
+            .await_promise(true)
+            .return_by_value(true);
+
+        if let Some(cid) = context_id {
+            builder = builder.context_id(cid);
+        }
+
+        let eval = builder
+            .build()
+            .map_err(|e| js_err(format!("fill invalid params: {e}")))?;
+
         inner
             .page
-            .evaluate(js)
+            .evaluate_expression(eval)
             .await
             .map_err(|e| js_err(format!("fill failed: {e}")))?;
         Ok(())
     }
 
-    /// Get an element's innerHTML.
+    /// Get an element's innerHTML in the current context.
     #[qjs(rename = "innerHTML")]
     pub async fn js_inner_html(&self, selector: String) -> JsResult<String> {
         let selector_json = serde_json::to_string(&selector).unwrap_or_else(|_| "\"\"".to_string());
-        self.eval_string(
-            format!(
-                r#"(() => {{
-                    const el = document.querySelector({selector_json});
-                    if (!el) throw new Error('innerHTML: element not found: ' + {selector_json});
-                    return el.innerHTML;
-                }})()"#
-            ),
-            "innerHTML",
-        )
+        self.evaluate_in_active_context(format!(
+            r#"(() => {{
+                const el = document.querySelector({selector_json});
+                if (!el) throw new Error('innerHTML: element not found: ' + {selector_json});
+                return el.innerHTML;
+            }})()"#
+        ))
         .await
     }
 
-    /// Get an element's visible text.
+    /// Get an element's visible text in the current context.
     #[qjs(rename = "innerText")]
     pub async fn js_inner_text(&self, selector: String) -> JsResult<String> {
         let selector_json = serde_json::to_string(&selector).unwrap_or_else(|_| "\"\"".to_string());
-        self.eval_string(
-            format!(
-                r#"(() => {{
-                    const el = document.querySelector({selector_json});
-                    if (!el) throw new Error('innerText: element not found: ' + {selector_json});
-                    return el.innerText;
-                }})()"#
-            ),
-            "innerText",
-        )
+        self.evaluate_in_active_context(format!(
+            r#"(() => {{
+                const el = document.querySelector({selector_json});
+                if (!el) throw new Error('innerText: element not found: ' + {selector_json});
+                return el.innerText;
+            }})()"#
+        ))
         .await
     }
 
-    /// Get an element's text content.
+    /// Get an element's text content in the current context.
     #[qjs(rename = "textContent")]
     pub async fn js_text_content(&self, selector: String) -> JsResult<String> {
         let selector_json = serde_json::to_string(&selector).unwrap_or_else(|_| "\"\"".to_string());
-        self.eval_string(
-            format!(
-                r#"(() => {{
-                    const el = document.querySelector({selector_json});
-                    if (!el) throw new Error('textContent: element not found: ' + {selector_json});
-                    return el.textContent ?? '';
-                }})()"#
-            ),
-            "textContent",
-        )
+        self.evaluate_in_active_context(format!(
+            r#"(() => {{
+                const el = document.querySelector({selector_json});
+                if (!el) throw new Error('textContent: element not found: ' + {selector_json});
+                return el.textContent ?? '';
+            }})()"#
+        ))
         .await
     }
 
-    /// Get an element attribute. Returns empty string if attribute is missing.
+    /// Get an element attribute in the current context. Returns empty string if attribute is missing.
     #[qjs(rename = "getAttribute")]
     pub async fn js_get_attribute(&self, selector: String, name: String) -> JsResult<String> {
         let selector_json = serde_json::to_string(&selector).unwrap_or_else(|_| "\"\"".to_string());
         let name_json = serde_json::to_string(&name).unwrap_or_else(|_| "\"\"".to_string());
-        self.eval_string(
-            format!(
-                r#"(() => {{
-                    const el = document.querySelector({selector_json});
-                    if (!el) throw new Error('getAttribute: element not found: ' + {selector_json});
-                    return el.getAttribute({name_json}) ?? '';
-                }})()"#
-            ),
-            "getAttribute",
-        )
+        self.evaluate_in_active_context(format!(
+            r#"(() => {{
+                const el = document.querySelector({selector_json});
+                if (!el) throw new Error('getAttribute: element not found: ' + {selector_json});
+                return el.getAttribute({name_json}) ?? '';
+            }})()"#
+        ))
         .await
     }
 
-    /// Get the current value of an input-like element.
+    /// Get the current value of an input-like element in the current context.
     #[qjs(rename = "inputValue")]
     pub async fn js_input_value(&self, selector: String) -> JsResult<String> {
         let selector_json = serde_json::to_string(&selector).unwrap_or_else(|_| "\"\"".to_string());
-        self.eval_string(
-            format!(
-                r#"(() => {{
-                    const el = document.querySelector({selector_json});
-                    if (!el) throw new Error('inputValue: element not found: ' + {selector_json});
-                    if (!('value' in el)) throw new Error('inputValue: element has no value property: ' + {selector_json});
-                    return String(el.value ?? '');
-                }})()"#
-            ),
-            "inputValue",
-        )
+        self.evaluate_in_active_context(format!(
+            r#"(() => {{
+                const el = document.querySelector({selector_json});
+                if (!el) throw new Error('inputValue: element not found: ' + {selector_json});
+                if (!('value' in el)) throw new Error('inputValue: element has no value property: ' + {selector_json});
+                return String(el.value ?? '');
+            }})()"#
+        ))
         .await
     }
 
-    /// Return true if an element is visible.
+    /// Return true if an element is visible in the current context.
     #[qjs(rename = "isVisible")]
     pub async fn js_is_visible(&self, selector: String) -> JsResult<bool> {
         let selector_json = serde_json::to_string(&selector).unwrap_or_else(|_| "\"\"".to_string());
-        self.eval_bool(
-            format!(
-                r#"(() => {{
-                    const el = document.querySelector({selector_json});
-                    if (!el) return false;
-                    const style = window.getComputedStyle(el);
-                    if (!style) return false;
-                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-                    const rect = el.getBoundingClientRect();
-                    return rect.width > 0 && rect.height > 0;
-                }})()"#
-            ),
-            "isVisible",
-        )
-        .await
+        let res = self.evaluate_in_active_context(format!(
+            r#"(() => {{
+                const el = document.querySelector({selector_json});
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style) return false;
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            }})()"#
+        ))
+        .await?;
+        Ok(res == "true")
     }
 
-    /// Return true if an element is enabled.
+    /// Return true if an element is enabled in the current context.
     #[qjs(rename = "isEnabled")]
     pub async fn js_is_enabled(&self, selector: String) -> JsResult<bool> {
         let selector_json = serde_json::to_string(&selector).unwrap_or_else(|_| "\"\"".to_string());
-        self.eval_bool(
-            format!(
+        let res = self
+            .evaluate_in_active_context(format!(
                 r#"(() => {{
-                    const el = document.querySelector({selector_json});
-                    if (!el) return false;
-                    return !el.disabled;
-                }})()"#
-            ),
-            "isEnabled",
-        )
-        .await
+                const el = document.querySelector({selector_json});
+                if (!el) return false;
+                return !el.disabled;
+            }})()"#
+            ))
+            .await?;
+        Ok(res == "true")
     }
 
     /// Evaluate a JS expression inside a frame execution context.
@@ -996,9 +1782,11 @@ impl PageApi {
     pub async fn snapshot(&self, options: Opt<rquickjs::Value<'_>>) -> JsResult<String> {
         let options = parse_snapshot_options(options.0)?;
         let inner = self.inner.lock().await;
-        let result = inner
-            .page
-            .evaluate(
+        let context_id = self.get_active_context_id(&inner).await?;
+
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+        let mut builder = EvaluateParams::builder()
+            .expression(
                 r#"(() => {
                     const nodes = [];
                     const interactiveTags = new Set(['a', 'button', 'input', 'select', 'textarea', 'summary', 'details', 'option']);
@@ -1153,6 +1941,20 @@ impl PageApi {
                     return nodes;
                 })()"#,
             )
+            .await_promise(true)
+            .return_by_value(true);
+
+        if let Some(cid) = context_id {
+            builder = builder.context_id(cid);
+        }
+
+        let eval = builder
+            .build()
+            .map_err(|e| js_err(format!("snapshot invalid params: {e}")))?;
+
+        let result = inner
+            .page
+            .evaluate_expression(eval)
             .await
             .map_err(|e| js_err(format!("snapshot failed: {e}")))?;
         drop(inner);
@@ -1179,23 +1981,12 @@ impl PageApi {
         }
     }
 
-    /// Evaluate a JavaScript expression in the browser context.
+    /// Evaluate a JavaScript expression in the current context (main frame or active frame).
     ///
     /// The return value is scrubbed: all known secret values are replaced
     /// with `[REDACTED]`.
     pub async fn evaluate(&self, expression: String) -> JsResult<String> {
-        let inner = self.inner.lock().await;
-        let result = inner
-            .page
-            .evaluate(expression)
-            .await
-            .map_err(|e| js_err(format!("evaluate failed: {e}")))?;
-
-        let mut text =
-            stringify_evaluation_result(result.value(), result.object().description.as_deref());
-        scrub_known_secrets(&inner.secret_store, &mut text);
-
-        Ok(text)
+        self.evaluate_in_active_context(expression).await
     }
 
     /// Take a screenshot and return the PNG bytes as a base64 string.
@@ -1351,1079 +2142,6 @@ impl BrowserApi {
         }
         self.wait_for_page(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS))
             .await
-    }
-}
-
-impl PageApi {
-    async fn fetch_open_tabs(&self) -> JsResult<Vec<OpenTab>> {
-        eprintln!("[js_api] fetch_open_tabs enter");
-        let (browser, current_page) = {
-            let inner = self.inner.lock().await;
-            (inner.browser.clone(), inner.page.clone())
-        };
-
-        let target_infos = match tokio::time::timeout(
-            std::time::Duration::from_millis(TAB_QUERY_TIMEOUT_MS),
-            async {
-                let mut guard = browser.lock().await;
-                guard.fetch_targets().await
-            },
-        )
-        .await
-        {
-            Ok(Ok(infos)) => Some(infos),
-            Ok(Err(err)) => {
-                let err_text = err.to_string();
-                if is_transport_disconnected_error(&err_text) {
-                    eprintln!("[js_api] fetch_open_tabs disconnect on fetch_targets: {err_text}");
-                    return Err(js_err(format_browser_error(
-                        "browser.pages() fetch_targets failed",
-                        &err_text,
-                    )));
-                }
-                eprintln!(
-                    "tab sync failed to fetch targets: {err}; falling back to current page handle"
-                );
-                return Ok(vec![OpenTab {
-                    target_id: current_page.target_id().as_ref().to_string(),
-                    opener_target_id: current_page
-                        .opener_id()
-                        .as_ref()
-                        .map(|id| id.as_ref().to_string()),
-                    page: current_page,
-                }]);
-            }
-            Err(_) => {
-                eprintln!(
-                    "tab sync timed out fetching targets after {}ms; falling back to current page handle",
-                    TAB_QUERY_TIMEOUT_MS
-                );
-                return Ok(vec![OpenTab {
-                    target_id: current_page.target_id().as_ref().to_string(),
-                    opener_target_id: current_page
-                        .opener_id()
-                        .as_ref()
-                        .map(|id| id.as_ref().to_string()),
-                    page: current_page,
-                }]);
-            }
-        };
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let pages = match tokio::time::timeout(
-            std::time::Duration::from_millis(TAB_QUERY_TIMEOUT_MS),
-            async {
-                let guard = browser.lock().await;
-                guard.pages().await
-            },
-        )
-        .await
-        {
-            Ok(Ok(pages)) => pages,
-            Ok(Err(err)) => {
-                let err_text = err.to_string();
-                if is_transport_disconnected_error(&err_text) {
-                    eprintln!("[js_api] fetch_open_tabs disconnect on pages listing: {err_text}");
-                    return Err(js_err(format_browser_error(
-                        "browser.pages() pages listing failed",
-                        &err_text,
-                    )));
-                }
-                eprintln!(
-                    "tab sync failed to list pages: {err}; falling back to current page handle"
-                );
-                return Ok(vec![OpenTab {
-                    target_id: current_page.target_id().as_ref().to_string(),
-                    opener_target_id: current_page
-                        .opener_id()
-                        .as_ref()
-                        .map(|id| id.as_ref().to_string()),
-                    page: current_page,
-                }]);
-            }
-            Err(_) => {
-                eprintln!(
-                    "tab sync timed out listing pages after {}ms; falling back to current page handle",
-                    TAB_QUERY_TIMEOUT_MS
-                );
-                return Ok(vec![OpenTab {
-                    target_id: current_page.target_id().as_ref().to_string(),
-                    opener_target_id: current_page
-                        .opener_id()
-                        .as_ref()
-                        .map(|id| id.as_ref().to_string()),
-                    page: current_page,
-                }]);
-            }
-        };
-        let mut page_by_target = pages
-            .into_iter()
-            .map(|page| (page.target_id().as_ref().to_string(), page))
-            .collect::<BTreeMap<_, _>>();
-
-        let mut tabs = Vec::new();
-        if let Some(target_infos) = target_infos {
-            for info in target_infos {
-                if info.r#type != "page" {
-                    continue;
-                }
-                let target_id = info.target_id.as_ref().to_string();
-                let Some(page) = page_by_target.remove(&target_id) else {
-                    continue;
-                };
-                tabs.push(OpenTab {
-                    page,
-                    target_id,
-                    opener_target_id: info.opener_id.as_ref().map(|id| id.as_ref().to_string()),
-                });
-            }
-        }
-
-        // Keep any pages that were not part of the current target snapshot.
-        for (target_id, page) in page_by_target {
-            tabs.push(OpenTab {
-                opener_target_id: page.opener_id().as_ref().map(|id| id.as_ref().to_string()),
-                page,
-                target_id,
-            });
-        }
-
-        if tabs.is_empty() {
-            tabs.push(OpenTab {
-                target_id: current_page.target_id().as_ref().to_string(),
-                opener_target_id: current_page
-                    .opener_id()
-                    .as_ref()
-                    .map(|id| id.as_ref().to_string()),
-                page: current_page,
-            });
-        }
-
-        Ok(tabs)
-    }
-
-    async fn wait_for_popup_page(&self, timeout_ms: u64) -> JsResult<PageApi> {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-        let opener_target = {
-            let inner = self.inner.lock().await;
-            inner.page.target_id().as_ref().to_string()
-        };
-        let baseline_tabs = self.fetch_open_tabs().await?;
-        let baseline_ids = baseline_tabs
-            .into_iter()
-            .map(|tab| tab.target_id)
-            .collect::<BTreeSet<_>>();
-
-        loop {
-            let tabs = self.fetch_open_tabs().await?;
-            if let Some(popup_tab) = tabs.into_iter().find(|tab| {
-                !baseline_ids.contains(&tab.target_id)
-                    && tab.opener_target_id.as_deref() == Some(opener_target.as_str())
-            }) {
-                return Ok(build_page_api_from_template(&self.inner, popup_tab.page).await);
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                return Err(js_err(format!(
-                    "TimeoutError: waitForPopup timed out after {timeout_ms}ms (no popup opened by current page)"
-                )));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
-        }
-    }
-
-    async fn current_url(&self) -> JsResult<String> {
-        let page = {
-            let inner = self.inner.lock().await;
-            inner.page.clone()
-        };
-
-        let (cdp_url, cdp_error) = match page.url().await {
-            Ok(url) => (url.map(|value| value.to_string()), None),
-            Err(error) => (None, Some(format!("{error}"))),
-        };
-
-        let runtime_url = match page
-            .evaluate(
-                "(() => { try { return String(window.location.href || ''); } catch (_) { return ''; } })()",
-            )
-            .await
-        {
-            Ok(result) => parse_runtime_location_href(result.value()),
-            Err(_) => None,
-        };
-
-        if let Some(runtime_url) = runtime_url {
-            return Ok(runtime_url);
-        }
-        if let Some(cdp_url) = cdp_url {
-            return Ok(cdp_url);
-        }
-        if let Some(cdp_error) = cdp_error {
-            return Err(js_err(format_browser_error("url() failed", &cdp_error)));
-        }
-
-        Ok(String::new())
-    }
-
-    async fn eval_string(&self, expression: String, method_name: &str) -> JsResult<String> {
-        let inner = self.inner.lock().await;
-        let result = inner
-            .page
-            .evaluate(expression)
-            .await
-            .map_err(|e| js_err(format!("{method_name} failed: {e}")))?;
-        let value = result
-            .value()
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        Ok(value)
-    }
-
-    async fn eval_bool(&self, expression: String, method_name: &str) -> JsResult<bool> {
-        let inner = self.inner.lock().await;
-        let result = inner
-            .page
-            .evaluate(expression)
-            .await
-            .map_err(|e| js_err(format!("{method_name} failed: {e}")))?;
-        Ok(result
-            .value()
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false))
-    }
-
-    async fn ready_state_is_complete(&self) -> JsResult<bool> {
-        self.eval_bool(
-            "(() => document.readyState === 'complete')()".to_string(),
-            "waitForLoadState",
-        )
-        .await
-    }
-
-    async fn ready_state_is_interactive_or_complete(&self) -> JsResult<bool> {
-        self.eval_bool(
-            "(() => document.readyState === 'interactive' || document.readyState === 'complete')()"
-                .to_string(),
-            "waitForLoadState",
-        )
-        .await
-    }
-
-    async fn ensure_response_capture(&self) -> JsResult<Arc<Mutex<Vec<NetworkRequest>>>> {
-        let mut guard = self.response_capture.lock().await;
-        if let Some(state) = guard.as_ref() {
-            if !state.task.is_finished() {
-                return Ok(state.entries.clone());
-            }
-        }
-
-        if let Some(previous) = guard.take() {
-            previous.task.abort();
-        }
-
-        let page = {
-            let inner = self.inner.lock().await;
-            inner.page.clone()
-        };
-
-        use chromiumoxide::cdp::browser_protocol::network::{EnableParams, EventResponseReceived};
-        page.execute(EnableParams::default())
-            .await
-            .map_err(|e| js_err(format!("failed to enable Network domain: {e}")))?;
-
-        let mut events = page
-            .event_listener::<EventResponseReceived>()
-            .await
-            .map_err(|e| js_err(format!("failed to attach response listener: {e}")))?;
-
-        let entries = Arc::new(Mutex::new(Vec::new()));
-        let entries_for_task = entries.clone();
-        let task = tokio::spawn(async move {
-            use futures::StreamExt;
-
-            while let Some(ev) = events.next().await {
-                let status = ev.response.status;
-                let method = network_method_from_headers(ev.response.request_headers.as_ref());
-                let ts = (*ev.timestamp.inner() * 1000.0) as i64;
-                let item = NetworkRequest {
-                    url: ev.response.url.clone(),
-                    status,
-                    ok: (200..400).contains(&status),
-                    method,
-                    ts,
-                    error: None,
-                };
-
-                let mut guard = entries_for_task.lock().await;
-                guard.push(item);
-                if guard.len() > 5_000 {
-                    let drop_count = guard.len() - 5_000;
-                    guard.drain(0..drop_count);
-                }
-            }
-        });
-
-        *guard = Some(ResponseCaptureState {
-            entries: entries.clone(),
-            task,
-        });
-        Ok(entries)
-    }
-}
-
-impl BrowserApi {
-    async fn wait_for_page(&self, timeout_ms: u64) -> JsResult<PageApi> {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-        let watcher = PageApi::new(self.page_inner.clone());
-        let baseline_tabs = watcher.fetch_open_tabs().await?;
-        let baseline_ids = baseline_tabs
-            .into_iter()
-            .map(|tab| tab.target_id)
-            .collect::<BTreeSet<_>>();
-
-        loop {
-            let tabs = watcher.fetch_open_tabs().await?;
-            if let Some(new_tab) = tabs
-                .into_iter()
-                .find(|tab| !baseline_ids.contains(&tab.target_id))
-            {
-                return Ok(build_page_api_from_template(&self.page_inner, new_tab.page).await);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(js_err(format!(
-                    "TimeoutError: browser.waitForEvent(\"page\") timed out after {timeout_ms}ms"
-                )));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
-        }
-    }
-}
-
-async fn build_page_api_from_template(
-    template: &Arc<Mutex<PageInner>>,
-    page: chromiumoxide::Page,
-) -> PageApi {
-    let template = template.lock().await;
-    let page_inner = PageInner {
-        page,
-        browser: template.browser.clone(),
-        secret_store: template.secret_store.clone(),
-        declared_secrets: template.declared_secrets.clone(),
-        download_dir: template.download_dir.clone(),
-    };
-    PageApi::new(Arc::new(Mutex::new(page_inner)))
-}
-
-fn stringify_evaluation_result(
-    value: Option<&serde_json::Value>,
-    description: Option<&str>,
-) -> String {
-    match value {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(other) => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
-        None => description.unwrap_or("undefined").to_string(),
-    }
-}
-
-fn scrub_known_secrets(secret_store: &SecretStore, text: &mut String) {
-    if let Ok(secrets) = secret_store.all_values() {
-        for secret in &secrets {
-            if !secret.is_empty() {
-                *text = text.replace(secret, "[REDACTED]");
-            }
-        }
-    }
-}
-
-fn list_download_paths(dir: &PathBuf) -> Result<BTreeSet<PathBuf>, std::io::Error> {
-    let mut paths = BTreeSet::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        paths.insert(entry.path());
-    }
-    Ok(paths)
-}
-
-fn is_partial_download_file(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .map(|ext| ext.eq_ignore_ascii_case("crdownload"))
-        .unwrap_or(false)
-}
-
-fn parse_runtime_location_href(value: Option<&serde_json::Value>) -> Option<String> {
-    value
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|href| !href.is_empty())
-        .map(str::to_string)
-}
-
-fn url_matches_pattern(url: &str, pattern: &str) -> bool {
-    if pattern == "*" || pattern == "**" {
-        return true;
-    }
-    if !pattern.contains('*') {
-        return url == pattern;
-    }
-
-    let parts: Vec<&str> = pattern.split('*').collect();
-    let mut cursor = 0usize;
-    let mut start_index = 0usize;
-
-    if !pattern.starts_with('*') {
-        let Some(first) = parts.first() else {
-            return false;
-        };
-        if !url.starts_with(first) {
-            return false;
-        }
-        cursor = first.len();
-        start_index = 1;
-    }
-
-    let mut end_index = parts.len();
-    if !pattern.ends_with('*') && end_index > 0 {
-        end_index -= 1;
-    }
-
-    for part in &parts[start_index..end_index] {
-        if part.is_empty() {
-            continue;
-        }
-        let Some(found_at) = url[cursor..].find(part) else {
-            return false;
-        };
-        cursor += found_at + part.len();
-    }
-
-    if !pattern.ends_with('*') {
-        let Some(last) = parts.last() else {
-            return false;
-        };
-        return url[cursor..].ends_with(last);
-    }
-
-    true
-}
-
-fn urls_differ_only_by_fragment(current_url: &str, target_url: &str) -> bool {
-    if current_url == target_url {
-        return false;
-    }
-    let (current_base, current_fragment) = split_url_fragment(current_url);
-    let (target_base, target_fragment) = split_url_fragment(target_url);
-    current_base == target_base && current_fragment != target_fragment
-}
-
-fn split_url_fragment(url: &str) -> (&str, Option<&str>) {
-    match url.split_once('#') {
-        Some((base, fragment)) => (base, Some(fragment)),
-        None => (url, None),
-    }
-}
-
-fn network_method_from_headers(
-    headers: Option<&chromiumoxide::cdp::browser_protocol::network::Headers>,
-) -> String {
-    let Some(headers) = headers else {
-        return "GET".to_string();
-    };
-    let Some(map) = headers.inner().as_object() else {
-        return "GET".to_string();
-    };
-
-    for key in [":method", "method", "Method"] {
-        if let Some(value) = map.get(key).and_then(serde_json::Value::as_str) {
-            let method = value.trim();
-            if !method.is_empty() {
-                return method.to_string();
-            }
-        }
-    }
-
-    "GET".to_string()
-}
-
-async fn resolve_frame_id(
-    page: &chromiumoxide::Page,
-    frame_ref: &str,
-) -> Result<chromiumoxide::cdp::browser_protocol::page::FrameId, String> {
-    let trimmed = frame_ref.trim();
-
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("main") {
-        let main = page
-            .mainframe()
-            .await
-            .map_err(|e| format!("failed to resolve main frame: {e}"))?;
-        return main.ok_or_else(|| "main frame not available".to_string());
-    }
-
-    let frames = page
-        .frames()
-        .await
-        .map_err(|e| format!("failed to list frames: {e}"))?;
-
-    if let Some(found) = frames.iter().find(|frame_id| frame_id.as_ref() == trimmed) {
-        return Ok(found.clone());
-    }
-
-    for frame_id in &frames {
-        let name = page
-            .frame_name(frame_id.clone())
-            .await
-            .map_err(|e| format!("failed to query frame name: {e}"))?;
-        if name.as_deref() == Some(trimmed) {
-            return Ok(frame_id.clone());
-        }
-    }
-
-    for frame_id in &frames {
-        let url = page
-            .frame_url(frame_id.clone())
-            .await
-            .map_err(|e| format!("failed to query frame URL: {e}"))?
-            .unwrap_or_default();
-        if url == trimmed || url.contains(trimmed) {
-            return Ok(frame_id.clone());
-        }
-    }
-
-    let mut known_frames = Vec::new();
-    for frame_id in &frames {
-        let name = page
-            .frame_name(frame_id.clone())
-            .await
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let url = page
-            .frame_url(frame_id.clone())
-            .await
-            .unwrap_or(None)
-            .unwrap_or_default();
-        known_frames.push(format!(
-            "id={} name={} url={}",
-            frame_id.as_ref(),
-            name,
-            url
-        ));
-    }
-
-    Err(format!(
-        "frame not found for reference '{trimmed}'. Available frames: {}",
-        known_frames.join(" | ")
-    ))
-}
-
-async fn wait_for_frame_execution_context(
-    page: &chromiumoxide::Page,
-    frame_id: chromiumoxide::cdp::browser_protocol::page::FrameId,
-) -> Result<chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId, String> {
-    let deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS);
-
-    loop {
-        let context = page
-            .frame_execution_context(frame_id.clone())
-            .await
-            .map_err(|e| format!("failed to query frame execution context: {e}"))?;
-        if let Some(context_id) = context {
-            return Ok(context_id);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(format!(
-                "timeout waiting for frame execution context (frame id {})",
-                frame_id.as_ref()
-            ));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
-    }
-}
-
-async fn ensure_element_receives_pointer_events(
-    element: &chromiumoxide::Element,
-) -> Result<(), String> {
-    let check = element
-        .call_js_fn(
-            r#"function() {
-                if (!this.isConnected) return 'Node is detached from document';
-                if (this.nodeType !== Node.ELEMENT_NODE) return 'Node is not of type HTMLElement';
-                this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-                const rect = this.getBoundingClientRect();
-                if (rect.width <= 0 || rect.height <= 0) return 'Element is not visible';
-                const x = rect.left + rect.width / 2;
-                const y = rect.top + rect.height / 2;
-                if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) {
-                    return 'Element is outside of the viewport';
-                }
-                const hit = document.elementFromPoint(x, y);
-                if (!hit) return 'Element is outside of the viewport';
-                const containsComposed = (root, node) => {
-                    let current = node;
-                    while (current) {
-                        if (current === root) return true;
-                        current = current.parentNode || (current instanceof ShadowRoot ? current.host : null);
-                    }
-                    return false;
-                };
-                if (containsComposed(this, hit)) return '';
-                const describe = el => {
-                    if (!(el instanceof Element)) return 'Another node';
-                    let out = el.tagName.toLowerCase();
-                    if (el.id) out += '#' + el.id;
-                    if (el.classList && el.classList.length) {
-                        out += '.' + Array.from(el.classList).slice(0, 3).join('.');
-                    }
-                    return out;
-                };
-                return describe(hit) + ' intercepts pointer events';
-            }"#,
-            false,
-        )
-        .await
-        .map_err(|e| format!("pointer actionability check failed: {e}"))?;
-
-    let message = check
-        .result
-        .value
-        .as_ref()
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    if message.is_empty() {
-        Ok(())
-    } else {
-        Err(message.to_string())
-    }
-}
-
-/// Resolve a secret value if `value` is a known secret name.
-///
-/// A secret name can only be used when it is declared in the extension
-/// manifest for the current top-level navigation domain.
-async fn resolve_secret_if_applicable(inner: &PageInner, value: &str) -> JsResult<String> {
-    let all_known = inner
-        .secret_store
-        .list()
-        .map_err(|e| js_err(format!("secret lookup failed: {e}")))?;
-    let referenced_name = value.trim();
-    if referenced_name.is_empty() {
-        return Ok(value.to_string());
-    }
-
-    let declared_domains = declared_domains_for_secret(&inner.declared_secrets, referenced_name);
-    let configured_in_store = all_known.iter().any(|(_, name)| name == referenced_name);
-    if declared_domains.is_empty() && !configured_in_store {
-        return Ok(value.to_string());
-    }
-
-    let current_url = inner.page.url().await.ok().flatten().unwrap_or_default();
-    let top_level_domain = normalize_domain_like_input(&current_url.to_string());
-    if top_level_domain.is_empty() {
-        return Err(js_err(format!(
-            "Secret '{referenced_name}' referenced before top-level navigation; call page.goto(...) first"
-        )));
-    }
-
-    if !declared_domains.contains(&top_level_domain) {
-        if declared_domains.is_empty() {
-            return Err(js_err(format!(
-                "Secret '{referenced_name}' is configured in keychain but not declared in manifest for domain '{top_level_domain}'"
-            )));
-        }
-        return Err(js_err(format!(
-            "Secret '{referenced_name}' was declared for domain(s) {} but current top-level domain is '{top_level_domain}'",
-            declared_domains.join(", ")
-        )));
-    }
-
-    for (domain, name) in &all_known {
-        if name == referenced_name && domain.eq_ignore_ascii_case(&top_level_domain) {
-            return inner.secret_store.get(domain, name).map_err(|e| {
-                js_err(format!(
-                    "failed to read secret '{name}' for domain '{domain}': {e}"
-                ))
-            });
-        }
-    }
-
-    Err(js_err(format!(
-        "Secret '{referenced_name}' was declared for '{top_level_domain}' but is not stored for that domain"
-    )))
-}
-
-fn declared_domains_for_secret(declared: &SecretDeclarations, secret_name: &str) -> Vec<String> {
-    let mut domains = declared
-        .iter()
-        .filter_map(|(domain, names)| {
-            if names.contains(secret_name) {
-                Some(domain.clone())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    domains.sort();
-    domains
-}
-
-fn normalize_domain_like_input(input: &str) -> String {
-    extract_domain(input.trim()).to_ascii_lowercase()
-}
-
-fn extract_domain(url: &str) -> String {
-    let without_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    without_scheme
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_string()
-}
-
-/// JS-visible download info object.
-#[rquickjs::class(rename = "Download")]
-#[derive(Trace, Clone)]
-pub struct DownloadInfo {
-    #[qjs(skip_trace)]
-    path: String,
-    #[qjs(skip_trace)]
-    suggested_filename: String,
-}
-
-// Safety: DownloadInfo only contains String which is 'static.
-#[allow(unsafe_code)]
-unsafe impl<'js> JsLifetime<'js> for DownloadInfo {
-    type Changed<'to> = DownloadInfo;
-}
-
-#[rquickjs::methods]
-impl DownloadInfo {
-    #[qjs(get)]
-    pub fn path(&self) -> String {
-        self.path.clone()
-    }
-
-    #[qjs(get, rename = "suggestedFilename")]
-    pub fn suggested_filename(&self) -> String {
-        self.suggested_filename.clone()
-    }
-}
-
-/// Metadata about the current scrape session, set by the driver via `setSessionMetadata`.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct SessionMetadata {
-    #[serde(rename = "dateRangeStart", skip_serializing_if = "Option::is_none")]
-    pub date_range_start: Option<String>,
-    #[serde(rename = "dateRangeEnd", skip_serializing_if = "Option::is_none")]
-    pub date_range_end: Option<String>,
-}
-
-/// A staged resource from `saveResource`, pending finalization.
-#[derive(Debug, Clone)]
-pub struct StagedResource {
-    pub filename: String,
-    pub staging_path: PathBuf,
-    pub coverage_end_date: Option<String>,
-    pub original_url: Option<String>,
-    pub mime_type: Option<String>,
-    pub label: Option<String>,
-    pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
-}
-
-/// Shared state backing the `refreshmint` JS namespace.
-pub struct RefreshmintInner {
-    pub output_dir: PathBuf,
-    pub prompt_overrides: PromptOverrides,
-    pub prompt_requires_override: bool,
-    pub debug_output_sink: Option<tokio::sync::mpsc::UnboundedSender<DebugOutputEvent>>,
-    pub session_metadata: SessionMetadata,
-    pub staged_resources: Vec<StagedResource>,
-    pub scrape_session_id: String,
-    pub extension_name: String,
-    pub account_name: String,
-    pub login_name: String,
-    pub ledger_dir: PathBuf,
-}
-
-/// JS-visible `refreshmint` namespace object.
-#[rquickjs::class(rename = "Refreshmint")]
-#[derive(Trace)]
-pub struct RefreshmintApi {
-    #[qjs(skip_trace)]
-    inner: Arc<Mutex<RefreshmintInner>>,
-}
-
-// Safety: RefreshmintApi only contains Arc<Mutex<...>> which is 'static.
-#[allow(unsafe_code)]
-unsafe impl<'js> JsLifetime<'js> for RefreshmintApi {
-    type Changed<'to> = RefreshmintApi;
-}
-
-impl RefreshmintApi {
-    pub fn new(inner: Arc<Mutex<RefreshmintInner>>) -> Self {
-        Self { inner }
-    }
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AccountDocumentSummary {
-    filename: String,
-    metadata: std::collections::BTreeMap<String, serde_json::Value>,
-}
-
-fn missing_prompt_override_error(message: &str) -> String {
-    format!(
-        "missing prompt value for refreshmint.prompt(\"{message}\"); supply --prompt \"{message}=VALUE\""
-    )
-}
-
-fn parse_document_filter(
-    filter: Option<rquickjs::Value<'_>>,
-) -> std::collections::BTreeMap<String, serde_json::Value> {
-    let mut metadata = BTreeMap::new();
-
-    if let Some(val) = filter {
-        if let Some(s) = val.as_string() {
-            if let Ok(label) = s.to_string() {
-                metadata.insert("label".to_string(), serde_json::Value::String(label));
-            }
-        } else if let Some(obj) = val.as_object() {
-            for (key, v) in obj.props::<String, rquickjs::Value>().flatten() {
-                let json_val = if v.is_null() || v.is_undefined() {
-                    serde_json::Value::Null
-                } else if let Some(b) = v.as_bool() {
-                    serde_json::Value::Bool(b)
-                } else if let Some(s) = v.as_string() {
-                    serde_json::Value::String(s.to_string().unwrap_or_default())
-                } else if let Some(i) = v.as_int() {
-                    serde_json::Value::Number(i.into())
-                } else if let Some(f) = v.as_float() {
-                    if let Some(n) = serde_json::Number::from_f64(f) {
-                        serde_json::Value::Number(n)
-                    } else {
-                        continue;
-                    }
-                } else {
-                    continue;
-                };
-                metadata.insert(key, json_val);
-            }
-        }
-    }
-    metadata
-}
-
-fn matches_filter(
-    info: &crate::scrape::DocumentInfo,
-    filter: &std::collections::BTreeMap<String, serde_json::Value>,
-) -> bool {
-    for (key, expected_val) in filter {
-        let actual_val = match key.as_str() {
-            "mimeType" => Some(serde_json::Value::String(info.mime_type.clone())),
-            "coverageEndDate" => Some(serde_json::Value::String(info.coverage_end_date.clone())),
-            "label" => Some(serde_json::Value::String(info.label.clone())),
-            "originalUrl" => info
-                .original_url
-                .as_ref()
-                .map(|s| serde_json::Value::String(s.clone())),
-            "extensionName" => Some(serde_json::Value::String(info.extension_name.clone())),
-            "scrapedAt" => Some(serde_json::Value::String(info.scraped_at.clone())),
-            _ => info.metadata.get(key).cloned(),
-        };
-
-        if let Some(actual) = actual_val {
-            if actual != *expected_val {
-                return false;
-            }
-        } else if !expected_val.is_null() {
-            return false;
-        }
-    }
-    true
-}
-
-struct SaveResourceOptions {
-    coverage_end_date: Option<String>,
-    original_url: Option<String>,
-    mime_type: Option<String>,
-    label: Option<String>,
-    metadata: BTreeMap<String, serde_json::Value>,
-}
-
-fn parse_save_resource_options(options: Option<rquickjs::Value<'_>>) -> SaveResourceOptions {
-    let mut result = SaveResourceOptions {
-        coverage_end_date: None,
-        original_url: None,
-        mime_type: None,
-        label: None,
-        metadata: BTreeMap::new(),
-    };
-    if let Some(opts) = options {
-        if let Some(obj) = opts.as_object() {
-            for (key, v) in obj.props::<String, rquickjs::Value>().flatten() {
-                match key.as_str() {
-                    "coverageEndDate" => {
-                        result.coverage_end_date = v.as_string().and_then(|s| s.to_string().ok());
-                    }
-                    "originalUrl" => {
-                        result.original_url = v.as_string().and_then(|s| s.to_string().ok());
-                    }
-                    "mimeType" => {
-                        result.mime_type = v.as_string().and_then(|s| s.to_string().ok());
-                    }
-                    "label" => {
-                        result.label = v.as_string().and_then(|s| s.to_string().ok());
-                    }
-                    _ => {
-                        let json_val = if v.is_null() || v.is_undefined() {
-                            serde_json::Value::Null
-                        } else if let Some(b) = v.as_bool() {
-                            serde_json::Value::Bool(b)
-                        } else if let Some(s) = v.as_string() {
-                            serde_json::Value::String(s.to_string().unwrap_or_default())
-                        } else if let Some(i) = v.as_int() {
-                            serde_json::Value::Number(i.into())
-                        } else if let Some(f) = v.as_float() {
-                            if let Some(n) = serde_json::Number::from_f64(f) {
-                                serde_json::Value::Number(n)
-                            } else {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        };
-                        result.metadata.insert(key, json_val);
-                    }
-                }
-            }
-        }
-    }
-    result
-}
-
-fn parse_snapshot_options(options: Option<rquickjs::Value<'_>>) -> JsResult<SnapshotOptions> {
-    let mut result = SnapshotOptions::default();
-    if let Some(opts) = options {
-        let Some(obj) = opts.as_object() else {
-            return Err(js_err(
-                "snapshot options must be an object when provided".to_string(),
-            ));
-        };
-        if let Ok(val) = obj.get::<_, Option<bool>>("incremental") {
-            result.incremental = val.unwrap_or(false);
-        }
-        if let Ok(Some(track)) = obj.get::<_, Option<String>>("track") {
-            let trimmed = track.trim();
-            if !trimmed.is_empty() {
-                result.track = trimmed.to_string();
-            }
-        }
-    }
-    Ok(result)
-}
-
-fn snapshot_nodes_by_ref(nodes: &[SnapshotNode]) -> BTreeMap<String, SnapshotNode> {
-    let mut map = BTreeMap::new();
-    for (index, node) in nodes.iter().enumerate() {
-        let key = if node.r#ref.trim().is_empty() {
-            format!("index:{index}")
-        } else {
-            node.r#ref.clone()
-        };
-        map.insert(key, node.clone());
-    }
-    map
-}
-
-fn build_snapshot_diff(
-    previous: &[SnapshotNode],
-    current: &[SnapshotNode],
-    track: &str,
-) -> SnapshotDiff {
-    let previous_by_ref = snapshot_nodes_by_ref(previous);
-    let current_by_ref = snapshot_nodes_by_ref(current);
-
-    let mut changed = Vec::new();
-    let mut unchanged_count = 0usize;
-    for (ref_id, node) in &current_by_ref {
-        match previous_by_ref.get(ref_id) {
-            None => changed.push(SnapshotDiffEntry {
-                change: "added".to_string(),
-                node: node.clone(),
-            }),
-            Some(previous_node) if previous_node != node => changed.push(SnapshotDiffEntry {
-                change: "updated".to_string(),
-                node: node.clone(),
-            }),
-            Some(_) => unchanged_count += 1,
-        }
-    }
-
-    let removed_refs = previous_by_ref
-        .keys()
-        .filter(|ref_id| !current_by_ref.contains_key(*ref_id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    SnapshotDiff {
-        mode: "incremental".to_string(),
-        track: track.to_string(),
-        base_node_count: previous.len(),
-        node_count: current.len(),
-        changed_count: changed.len(),
-        removed_count: removed_refs.len(),
-        unchanged_count,
-        changed,
-        removed_refs,
-    }
-}
-
-fn unique_output_path(output_dir: &Path, filename: &str) -> PathBuf {
-    let candidate = output_dir.join(filename);
-    if !candidate.exists() {
-        return candidate;
-    }
-
-    let original = Path::new(filename);
-    let stem = original
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("resource");
-    let ext = original.extension().and_then(|s| s.to_str()).unwrap_or("");
-    let parent = original.parent().unwrap_or_else(|| Path::new(""));
-    let suffix = if ext.is_empty() {
-        String::new()
-    } else {
-        format!(".{ext}")
-    };
-
-    for i in 2..1000 {
-        let candidate_name = format!("{stem}-{i}{suffix}");
-        let rel = if parent.as_os_str().is_empty() {
-            PathBuf::from(&candidate_name)
-        } else {
-            parent.join(&candidate_name)
-        };
-        let candidate = output_dir.join(&rel);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-
-    let fallback_name = format!("{stem}-{}{}", std::process::id(), suffix);
-    if parent.as_os_str().is_empty() {
-        output_dir.join(fallback_name)
-    } else {
-        output_dir.join(parent).join(fallback_name)
     }
 }
 
@@ -2703,21 +2421,6 @@ impl RefreshmintApi {
     }
 }
 
-impl RefreshmintApi {
-    fn emit_debug_output(&self, stream: DebugOutputStream, line: String) -> bool {
-        let sender = match self.inner.try_lock() {
-            Ok(inner) => inner.debug_output_sink.clone(),
-            Err(_) => None,
-        };
-
-        if let Some(sender) = sender {
-            return sender.send(DebugOutputEvent { stream, line }).is_ok();
-        }
-
-        false
-    }
-}
-
 /// Register the `page`, `browser`, and `refreshmint` globals on a QuickJS context.
 pub fn register_globals(
     ctx: &Ctx<'_>,
@@ -2736,6 +2439,390 @@ pub fn register_globals(
     globals.set("refreshmint", rm)?;
 
     Ok(())
+}
+
+fn stringify_evaluation_result(
+    value: Option<&serde_json::Value>,
+    description: Option<&str>,
+) -> String {
+    match value {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+        None => description.unwrap_or("undefined").to_string(),
+    }
+}
+
+fn scrub_known_secrets(secret_store: &SecretStore, text: &mut String) {
+    if let Ok(secrets) = secret_store.all_values() {
+        for secret in &secrets {
+            if !secret.is_empty() {
+                *text = text.replace(secret, "[REDACTED]");
+            }
+        }
+    }
+}
+
+fn list_download_paths(dir: &PathBuf) -> Result<BTreeSet<PathBuf>, std::io::Error> {
+    let mut paths = BTreeSet::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        paths.insert(entry.path());
+    }
+    Ok(paths)
+}
+
+fn is_partial_download_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(|ext| ext.eq_ignore_ascii_case("crdownload"))
+        .unwrap_or(false)
+}
+
+fn parse_runtime_location_href(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|href| !href.is_empty())
+        .map(str::to_string)
+}
+
+fn url_matches_pattern(url: &str, pattern: &str) -> bool {
+    if pattern == "*" || pattern == "**" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return url == pattern;
+    }
+
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut cursor = 0usize;
+    let mut start_index = 0usize;
+
+    if !pattern.starts_with('*') {
+        let Some(first) = parts.first() else {
+            return false;
+        };
+        if !url.starts_with(first) {
+            return false;
+        }
+        cursor = first.len();
+        start_index = 1;
+    }
+
+    let mut end_index = parts.len();
+    if !pattern.ends_with('*') && end_index > 0 {
+        end_index -= 1;
+    }
+
+    for part in &parts[start_index..end_index] {
+        if part.is_empty() {
+            continue;
+        }
+        let Some(found_at) = url[cursor..].find(part) else {
+            return false;
+        };
+        cursor += found_at + part.len();
+    }
+
+    if !pattern.ends_with('*') {
+        let Some(last) = parts.last() else {
+            return false;
+        };
+        return url[cursor..].ends_with(last);
+    }
+
+    true
+}
+
+fn urls_differ_only_by_fragment(current_url: &str, target_url: &str) -> bool {
+    if current_url == target_url {
+        return false;
+    }
+    let (current_base, current_fragment) = split_url_fragment(current_url);
+    let (target_base, target_fragment) = split_url_fragment(target_url);
+    current_base == target_base && current_fragment != target_fragment
+}
+
+fn split_url_fragment(url: &str) -> (&str, Option<&str>) {
+    match url.split_once('#') {
+        Some((base, fragment)) => (base, Some(fragment)),
+        None => (url, None),
+    }
+}
+
+fn network_method_from_headers(
+    headers: Option<&chromiumoxide::cdp::browser_protocol::network::Headers>,
+) -> String {
+    let Some(headers) = headers else {
+        return "GET".to_string();
+    };
+    let Some(map) = headers.inner().as_object() else {
+        return "GET".to_string();
+    };
+
+    for key in [":method", "method", "Method"] {
+        if let Some(value) = map.get(key).and_then(serde_json::Value::as_str) {
+            let method = value.trim();
+            if !method.is_empty() {
+                return method.to_string();
+            }
+        }
+    }
+
+    "GET".to_string()
+}
+
+async fn resolve_frame_id(
+    page: &chromiumoxide::Page,
+    frame_ref: &str,
+) -> Result<chromiumoxide::cdp::browser_protocol::page::FrameId, String> {
+    let trimmed = frame_ref.trim();
+
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("main") {
+        let main = page
+            .mainframe()
+            .await
+            .map_err(|e| format!("failed to resolve main frame: {e}"))?;
+        return main.ok_or_else(|| "main frame not available".to_string());
+    }
+
+    let frames = page
+        .frames()
+        .await
+        .map_err(|e| format!("failed to list frames: {e}"))?;
+
+    if let Some(found) = frames.iter().find(|frame_id| frame_id.as_ref() == trimmed) {
+        return Ok(found.clone());
+    }
+
+    for frame_id in &frames {
+        let name = page
+            .frame_name(frame_id.clone())
+            .await
+            .map_err(|e| format!("failed to query frame name: {e}"))?;
+        if name.as_deref() == Some(trimmed) {
+            return Ok(frame_id.clone());
+        }
+    }
+
+    for frame_id in &frames {
+        let url = page
+            .frame_url(frame_id.clone())
+            .await
+            .map_err(|e| format!("failed to query frame URL: {e}"))?
+            .unwrap_or_default();
+        if url == trimmed || url.contains(trimmed) {
+            return Ok(frame_id.clone());
+        }
+    }
+
+    let mut known_frames = Vec::new();
+    for frame_id in &frames {
+        let name = page
+            .frame_name(frame_id.clone())
+            .await
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let url = page
+            .frame_url(frame_id.clone())
+            .await
+            .unwrap_or(None)
+            .unwrap_or_default();
+        known_frames.push(format!(
+            "id={} name={} url={}",
+            frame_id.as_ref(),
+            name,
+            url
+        ));
+    }
+
+    Err(format!(
+        "frame not found for reference '{trimmed}'. Available frames: {}",
+        known_frames.join(" | ")
+    ))
+}
+
+async fn wait_for_frame_execution_context(
+    page: &chromiumoxide::Page,
+    frame_id: chromiumoxide::cdp::browser_protocol::page::FrameId,
+) -> Result<chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId, String> {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    loop {
+        let context = page
+            .frame_execution_context(frame_id.clone())
+            .await
+            .map_err(|e| format!("failed to query frame execution context: {e}"))?;
+        if let Some(context_id) = context {
+            return Ok(context_id);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "timeout waiting for frame execution context (frame id {})",
+                frame_id.as_ref()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+    }
+}
+
+#[allow(dead_code)]
+async fn ensure_element_receives_pointer_events(
+    element: &chromiumoxide::Element,
+) -> Result<(), String> {
+    let check = element
+        .call_js_fn(
+            r#"function() {
+                if (!this.isConnected) return 'Node is detached from document';
+                if (this.nodeType !== Node.ELEMENT_NODE) return 'Node is not of type HTMLElement';
+                this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+                const rect = this.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return 'Element is not visible';
+                const x = rect.left + rect.width / 2;
+                const y = rect.top + rect.height / 2;
+                if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) {
+                    return 'Element is outside of the viewport';
+                }
+                const hit = document.elementFromPoint(x, y);
+                if (!hit) return 'Element is outside of the viewport';
+                const containsComposed = (root, node) => {
+                    let current = node;
+                    while (current) {
+                        if (current === root) return true;
+                        current = current.parentNode || (current instanceof ShadowRoot ? current.host : null);
+                    }
+                    return false;
+                };
+                if (containsComposed(this, hit)) return '';
+                const describe = el => {
+                    if (!(el instanceof Element)) return 'Another node';
+                    let out = el.tagName.toLowerCase();
+                    if (el.id) out += '#' + el.id;
+                    if (el.classList && el.classList.length) {
+                        out += '.' + Array.from(el.classList).slice(0, 3).join('.');
+                    }
+                    return out;
+                };
+                return describe(hit) + ' intercepts pointer events';
+            }"#,
+            false,
+        )
+        .await
+        .map_err(|e| format!("pointer actionability check failed: {e}"))?;
+
+    let message = check
+        .result
+        .value
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if message.is_empty() {
+        Ok(())
+    } else {
+        Err(message.to_string())
+    }
+}
+
+async fn build_page_api_from_template(
+    template: &Arc<Mutex<PageInner>>,
+    page: chromiumoxide::Page,
+) -> PageApi {
+    let template = template.lock().await;
+    let page_inner = PageInner {
+        page,
+        browser: template.browser.clone(),
+        secret_store: template.secret_store.clone(),
+        declared_secrets: template.declared_secrets.clone(),
+        download_dir: template.download_dir.clone(),
+        target_frame_id: None,
+    };
+    PageApi::new(Arc::new(Mutex::new(page_inner)))
+}
+
+async fn resolve_secret_if_applicable(inner: &PageInner, value: &str) -> JsResult<String> {
+    let all_known = inner
+        .secret_store
+        .list()
+        .map_err(|e| js_err(format!("secret lookup failed: {e}")))?;
+    let referenced_name = value.trim();
+    if referenced_name.is_empty() {
+        return Ok(value.to_string());
+    }
+
+    let declared_domains = declared_domains_for_secret(&inner.declared_secrets, referenced_name);
+    let configured_in_store = all_known.iter().any(|(_, name)| name == referenced_name);
+    if declared_domains.is_empty() && !configured_in_store {
+        return Ok(value.to_string());
+    }
+
+    let current_url = inner.page.url().await.ok().flatten().unwrap_or_default();
+    let top_level_domain = normalize_domain_like_input(&current_url.to_string());
+    if top_level_domain.is_empty() {
+        return Err(js_err(format!(
+            "Secret '{referenced_name}' referenced before top-level navigation; call page.goto(...) first"
+        )));
+    }
+
+    if !declared_domains.contains(&top_level_domain) {
+        if declared_domains.is_empty() {
+            return Err(js_err(format!(
+                "Secret '{referenced_name}' is configured in keychain but not declared in manifest for domain '{top_level_domain}'"
+            )));
+        }
+        return Err(js_err(format!(
+            "Secret '{referenced_name}' was declared for domain(s) {} but current top-level domain is '{top_level_domain}'",
+            declared_domains.join(", ")
+        )));
+    }
+
+    for (domain, name) in &all_known {
+        if name == referenced_name && domain.eq_ignore_ascii_case(&top_level_domain) {
+            return inner.secret_store.get(domain, name).map_err(|e| {
+                js_err(format!(
+                    "failed to read secret '{name}' for domain '{domain}': {e}"
+                ))
+            });
+        }
+    }
+
+    Err(js_err(format!(
+        "Secret '{referenced_name}' was declared for '{top_level_domain}' but is not stored for that domain"
+    )))
+}
+
+fn declared_domains_for_secret(declared: &SecretDeclarations, secret_name: &str) -> Vec<String> {
+    let mut domains = declared
+        .iter()
+        .filter_map(|(domain, names)| {
+            if names.contains(secret_name) {
+                Some(domain.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    domains.sort();
+    domains
+}
+
+fn normalize_domain_like_input(input: &str) -> String {
+    extract_domain(input.trim()).to_ascii_lowercase()
+}
+
+fn extract_domain(url: &str) -> String {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    without_scheme
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -3073,98 +3160,6 @@ mod tests {
         assert_eq!(diff.changed[0].node.r#ref, "a");
         assert_eq!(diff.removed_refs.len(), 0);
         assert_eq!(diff.unchanged_count, 0);
-    }
-
-    fn test_refreshmint_inner(overrides: PromptOverrides) -> RefreshmintInner {
-        RefreshmintInner {
-            output_dir: PathBuf::new(),
-            prompt_overrides: overrides,
-            prompt_requires_override: true,
-            debug_output_sink: None,
-            session_metadata: SessionMetadata::default(),
-            staged_resources: Vec::new(),
-            scrape_session_id: String::new(),
-            extension_name: String::new(),
-            account_name: String::new(),
-            login_name: String::new(),
-            ledger_dir: PathBuf::new(),
-        }
-    }
-
-    #[test]
-    fn report_value_uses_debug_output_sink_when_present() {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut inner = test_refreshmint_inner(PromptOverrides::new());
-        inner.debug_output_sink = Some(sender);
-        let api = RefreshmintApi::new(Arc::new(Mutex::new(inner)));
-
-        api.js_report_value("alpha".to_string(), "42".to_string())
-            .unwrap_or_else(|err| panic!("reportValue failed: {err}"));
-
-        let event = receiver
-            .try_recv()
-            .unwrap_or_else(|err| panic!("missing output event: {err}"));
-        assert_eq!(event.stream, DebugOutputStream::Stdout);
-        assert_eq!(event.line, "alpha: 42");
-    }
-
-    #[test]
-    fn log_uses_debug_output_sink_when_present() {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut inner = test_refreshmint_inner(PromptOverrides::new());
-        inner.debug_output_sink = Some(sender);
-        let api = RefreshmintApi::new(Arc::new(Mutex::new(inner)));
-
-        api.log("hello".to_string())
-            .unwrap_or_else(|err| panic!("log failed: {err}"));
-
-        let event = receiver
-            .try_recv()
-            .unwrap_or_else(|err| panic!("missing output event: {err}"));
-        assert_eq!(event.stream, DebugOutputStream::Stderr);
-        assert_eq!(event.line, "hello");
-    }
-
-    #[test]
-    fn prompt_returns_override_when_present_in_strict_mode() {
-        let mut overrides = PromptOverrides::new();
-        overrides.insert("OTP".to_string(), "123456".to_string());
-        let api = RefreshmintApi::new(Arc::new(Mutex::new(test_refreshmint_inner(overrides))));
-
-        let value = api
-            .prompt("OTP".to_string())
-            .unwrap_or_else(|err| panic!("prompt unexpectedly failed: {err}"));
-        assert_eq!(value, "123456");
-    }
-
-    #[test]
-    fn prompt_errors_when_missing_in_strict_mode() {
-        let api = RefreshmintApi::new(Arc::new(Mutex::new(test_refreshmint_inner(
-            PromptOverrides::new(),
-        ))));
-
-        let err = match api.prompt("Security answer".to_string()) {
-            Ok(value) => panic!("expected missing prompt override error, got value: {value}"),
-            Err(err) => err,
-        };
-        let message = err.to_string();
-        assert!(message.contains("Security answer"));
-        assert!(message.contains("--prompt"));
-    }
-
-    #[test]
-    fn prompt_uses_trimmed_message_lookup() {
-        let mut overrides = PromptOverrides::new();
-        overrides.insert(
-            "Enter the texted MFA code:".to_string(),
-            "245221".to_string(),
-        );
-        let api = RefreshmintApi::new(Arc::new(Mutex::new(test_refreshmint_inner(overrides))));
-
-        let value = api
-            .prompt("Enter the texted MFA code: ".to_string())
-            .unwrap_or_else(|err| panic!("prompt unexpectedly failed: {err}"));
-        assert_eq!(value, "245221");
     }
 
     #[test]
