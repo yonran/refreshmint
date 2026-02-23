@@ -12,7 +12,10 @@
         "noUncheckedIndexedAccess": false,
         "exactOptionalPropertyTypes": false,
         "skipLibCheck": true,
-        "types": []
+        "types": [],
+        // don't use noUnused*; use @typescript-eslint/no-unused-vars instead
+        "noUnusedLocals": false,
+        "noUnusedParameters": false
     },
     "include": ["./**/*.mjs", "./**/*.d.ts"]
 }
