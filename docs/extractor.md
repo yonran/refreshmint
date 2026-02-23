@@ -12,8 +12,7 @@ Run extraction for all documents in an account:
 cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   account extract \
   --ledger /path/to/ledger.refreshmint \
-  --account Assets:Checking \
-  --extension my-extension
+  --account Assets:Checking
 ```
 
 Run extraction for specific documents:
@@ -27,7 +26,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   --document 2026-03-01-statement.csv
 ```
 
-`--extension` is optional when account config already has `extension`.
+The extension is read from the login config. The command fails if none is configured.
 
 Document selection behavior:
 
@@ -162,7 +161,6 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   account extract \
   --ledger /path/to/ledger.refreshmint \
   --account Assets:Checking \
-  --extension my-extension \
   --document 2026-01-31-sample.csv
 ```
 

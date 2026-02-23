@@ -161,8 +161,6 @@ struct DebugStartArgs {
     #[arg(long, alias = "account")]
     login: String,
     #[arg(long)]
-    extension: String,
-    #[arg(long)]
     ledger: Option<PathBuf>,
     #[arg(long)]
     profile: Option<PathBuf>,
@@ -264,8 +262,6 @@ struct ScrapeArgs {
     #[arg(long, alias = "account")]
     login: String,
     #[arg(long)]
-    extension: Option<String>,
-    #[arg(long)]
     ledger: Option<PathBuf>,
     #[arg(long)]
     profile: Option<PathBuf>,
@@ -311,8 +307,6 @@ struct AccountExtractArgs {
     login: String,
     #[arg(long)]
     label: String,
-    #[arg(long)]
-    extension: Option<String>,
     #[arg(long)]
     ledger: Option<PathBuf>,
     #[arg(
@@ -674,12 +668,8 @@ fn run_debug_start(
 
     let login_name = require_cli_login_name("login", &args.login)?;
     require_cli_existing_login(&ledger_dir, &login_name)?;
-    let extension = args.extension.trim().to_string();
-    if extension.is_empty() {
-        return Err(
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "extension is required").into(),
-        );
-    }
+    let extension_name = crate::login_config::resolve_login_extension(&ledger_dir, &login_name)
+        .map_err(std::io::Error::other)?;
 
     let socket = match args.socket {
         Some(path) => path,
@@ -687,7 +677,7 @@ fn run_debug_start(
     };
     let config = crate::scrape::debug::DebugStartConfig {
         login_name,
-        extension_name: extension,
+        extension_name,
         ledger_dir,
         profile_override: args.profile,
         socket_path: Some(socket),
@@ -911,16 +901,8 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
 
     let login_name = require_cli_login_name("login", &args.login)?;
     require_cli_existing_login(&ledger_dir, &login_name)?;
-    let extension_name = match args
-        .extension
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(explicit) => explicit.to_string(),
-        None => crate::login_config::resolve_login_extension(&ledger_dir, &login_name)
-            .map_err(std::io::Error::other)?,
-    };
+    let extension_name = crate::login_config::resolve_login_extension(&ledger_dir, &login_name)
+        .map_err(std::io::Error::other)?;
 
     let prompt_overrides = parse_prompt_overrides(&args.prompt)?;
 
@@ -991,16 +973,8 @@ fn run_account_extract(
 
     let login_name = require_cli_login_name("login", &args.login)?;
     let label = require_cli_label(&args.label)?;
-    let extension_name = match args
-        .extension
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(explicit) => explicit.to_string(),
-        None => crate::login_config::resolve_login_extension(&ledger_dir, &login_name)
-            .map_err(std::io::Error::other)?,
-    };
+    let extension_name = crate::login_config::resolve_login_extension(&ledger_dir, &login_name)
+        .map_err(std::io::Error::other)?;
     let gl_account = resolve_login_account_gl_account_cli(&ledger_dir, &login_name, &label)?;
 
     let listed_documents = if args.document.is_empty() {
@@ -1504,8 +1478,6 @@ mod tests {
             "chase-personal",
             "--label",
             "checking",
-            "--extension",
-            "chase-driver",
             "--document",
             "2024-01.csv",
             "--document",
@@ -1518,7 +1490,6 @@ mod tests {
                 AccountCommand::Extract(extract) => {
                     assert_eq!(extract.login, "chase-personal");
                     assert_eq!(extract.label, "checking");
-                    assert_eq!(extract.extension, Some("chase-driver".to_string()));
                     assert_eq!(
                         extract.document,
                         vec!["2024-01.csv".to_string(), "2024-02.csv".to_string()]
@@ -1647,20 +1618,12 @@ mod tests {
 
     #[test]
     fn scrape_subcommand_parses_login_flag() {
-        let cli = Cli::try_parse_from([
-            "refreshmint",
-            "scrape",
-            "--login",
-            "chase-personal",
-            "--extension",
-            "chase-driver",
-        ])
-        .unwrap_or_else(|err| panic!("Cli parsing failed: {err}"));
+        let cli = Cli::try_parse_from(["refreshmint", "scrape", "--login", "chase-personal"])
+            .unwrap_or_else(|err| panic!("Cli parsing failed: {err}"));
 
         match cli.command {
             Some(Commands::Scrape(args)) => {
                 assert_eq!(args.login, "chase-personal");
-                assert_eq!(args.extension, Some("chase-driver".to_string()));
             }
             _ => panic!("expected scrape command"),
         }

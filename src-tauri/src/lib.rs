@@ -390,17 +390,13 @@ fn require_existing_login(ledger_dir: &std::path::Path, login_name: &str) -> Res
 fn start_scrape_debug_session_for_login(
     ledger: String,
     login_name: String,
-    extension: String,
 ) -> Result<String, String> {
     let login_name = require_login_name_input(login_name)?;
-    let extension = extension.trim().to_string();
-    if extension.is_empty() {
-        return Err("extension is required".to_string());
-    }
 
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
     require_existing_login(&target_dir, &login_name)?;
+    let extension = login_config::resolve_login_extension(&target_dir, &login_name)?;
     let socket_path = crate::scrape::debug::default_debug_socket_path(&login_name)
         .map_err(|err| err.to_string())?;
 
@@ -446,14 +442,10 @@ fn start_scrape_debug_session_for_login(
 }
 
 #[tauri::command]
-fn start_scrape_debug_session(
-    ledger: String,
-    account: String,
-    extension: String,
-) -> Result<String, String> {
+fn start_scrape_debug_session(ledger: String, account: String) -> Result<String, String> {
     // Compatibility alias for legacy account-keyed callers.
     let login_name = require_non_empty_input("account", account)?;
-    start_scrape_debug_session_for_login(ledger, login_name, extension)
+    start_scrape_debug_session_for_login(ledger, login_name)
 }
 
 #[tauri::command]
@@ -573,14 +565,12 @@ fn read_login_account_document_rows(
 fn run_extraction(
     ledger: String,
     account_name: String,
-    extension_name: String,
     document_names: Vec<String>,
 ) -> Result<usize, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let account_name = require_non_empty_input("account_name", account_name)?;
-    let extension_name =
-        account_config::resolve_extension(&target_dir, &account_name, Some(&extension_name))
-            .map_err(|err| err.to_string())?;
+    let extension_name = account_config::resolve_extension(&target_dir, &account_name, None)
+        .map_err(|err| err.to_string())?;
 
     let result =
         extract::run_extraction(&target_dir, &account_name, &extension_name, &document_names)

@@ -216,20 +216,17 @@ export async function removeAccountSecret(
 export async function startScrapeDebugSession(
     ledger: string,
     account: string,
-    extension: string,
 ): Promise<string> {
-    return startScrapeDebugSessionForLogin(ledger, account, extension);
+    return startScrapeDebugSessionForLogin(ledger, account);
 }
 
 export async function startScrapeDebugSessionForLogin(
     ledger: string,
     loginName: string,
-    extension: string,
 ): Promise<string> {
     return invoke('start_scrape_debug_session_for_login', {
         ledger,
         loginName,
-        extension,
     });
 }
 
@@ -280,13 +277,11 @@ export async function readLoginAccountDocumentRows(
 export async function runExtraction(
     ledger: string,
     accountName: string,
-    extensionName: string,
     documentNames: string[],
 ): Promise<number> {
     return invoke('run_extraction', {
         ledger,
         accountName,
-        extensionName,
         documentNames,
     });
 }

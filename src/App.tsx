@@ -1682,19 +1682,12 @@ function App() {
             setScrapeStatus(selectedLoginMappingError ?? 'Login is required.');
             return;
         }
-        const extension = scrapeExtension.trim();
-        if (extension.length === 0) {
-            setScrapeStatus('Extension is required.');
-            return;
-        }
-
         setIsStartingScrapeDebug(true);
-        setScrapeStatus(`Starting debug session for ${extension}...`);
+        setScrapeStatus('Starting debug session...');
         try {
             const socket = await startScrapeDebugSessionForLogin(
                 ledger.path,
                 loginName,
-                extension,
             );
             setScrapeDebugSocket(socket);
             setScrapeStatus(`Debug session started. Socket: ${socket}`);

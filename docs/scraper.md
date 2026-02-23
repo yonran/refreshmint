@@ -10,11 +10,10 @@ For extension structure and manifest details, see `docs/extension.md`.
 cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   scrape \
   --ledger /path/to/ledger.refreshmint \
-  --account Assets:Checking \
-  --extension my-extension
+  --account Assets:Checking
 ```
 
-`--extension` is optional when account config already has `extension`.
+The extension is read from the login config. The command fails if none is configured.
 
 If your script uses `refreshmint.prompt(message)`, supply overrides:
 
@@ -23,7 +22,6 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   scrape \
   --ledger /path/to/ledger.refreshmint \
   --account Assets:Checking \
-  --extension my-extension \
   --prompt "OTP=123456" \
   --prompt "Security answer=blue"
 ```
@@ -196,7 +194,6 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
   debug start \
   --ledger /path/to/ledger.refreshmint \
   --login my-bankofamerica \
-  --extension bankofamerica \
   --socket ~/Library/Caches/refreshmint/debug/debug.sock
 ```
 
@@ -277,22 +274,22 @@ For frame APIs, `frameRef` can be frame id, frame name, or frame URL (full match
 
 Locators provide reusable element finding logic with strictness (fails if multiple elements match) and auto-waiting.
 
-| Method                                          | Description                                                                                             |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `locator.locator(selector)`                     | Create a sub-locator scoped to this locator.                                                            |
-| `locator.first()`                               | Filter to the first matching element.                                                                   |
-| `locator.last()`                                | Filter to the last matching element.                                                                    |
-| `locator.nth(index)`                            | Filter to the element at the 0-based index.                                                             |
-| `await locator.count()`                         | Return number of matching elements.                                                                     |
-| `await locator.click(options?)`                 | Click the element. `options` can be `{ timeout?: number }` or a timeout number.                         |
-| `await locator.fill(value, options?)`           | Fill the element with `value`. `options` can be `{ timeout?: number }` or a timeout number.             |
-| `await locator.innerText(options?)`             | Return visible text.                                                                                    |
-| `await locator.textContent(options?)`           | Return text content.                                                                                    |
-| `await locator.getAttribute(name, options?)`    | Return attribute value.                                                                                 |
-| `await locator.inputValue(options?)`            | Return current input value.                                                                             |
-| `await locator.isVisible()`                     | Return whether element is visible.                                                                      |
-| `await locator.isEnabled()`                     | Return whether element is enabled.                                                                      |
-| `await locator.wait_for(options?)`              | Wait for state (`attached`, `detached`, `visible`, `hidden`). Default: `{ state: 'visible' }`.          |
+| Method                                       | Description                                                                                    |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `locator.locator(selector)`                  | Create a sub-locator scoped to this locator.                                                   |
+| `locator.first()`                            | Filter to the first matching element.                                                          |
+| `locator.last()`                             | Filter to the last matching element.                                                           |
+| `locator.nth(index)`                         | Filter to the element at the 0-based index.                                                    |
+| `await locator.count()`                      | Return number of matching elements.                                                            |
+| `await locator.click(options?)`              | Click the element. `options` can be `{ timeout?: number }` or a timeout number.                |
+| `await locator.fill(value, options?)`        | Fill the element with `value`. `options` can be `{ timeout?: number }` or a timeout number.    |
+| `await locator.innerText(options?)`          | Return visible text.                                                                           |
+| `await locator.textContent(options?)`        | Return text content.                                                                           |
+| `await locator.getAttribute(name, options?)` | Return attribute value.                                                                        |
+| `await locator.inputValue(options?)`         | Return current input value.                                                                    |
+| `await locator.isVisible()`                  | Return whether element is visible.                                                             |
+| `await locator.isEnabled()`                  | Return whether element is enabled.                                                             |
+| `await locator.wait_for(options?)`           | Wait for state (`attached`, `detached`, `visible`, `hidden`). Default: `{ state: 'visible' }`. |
 
 ### `browser`
 
