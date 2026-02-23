@@ -549,6 +549,13 @@ export async function removeLoginSecret(
     await invoke('remove_login_secret', { loginName, domain, name });
 }
 
+export async function clearLoginProfile(
+    ledger: string,
+    loginName: string,
+): Promise<void> {
+    await invoke('clear_login_profile', { ledger, loginName });
+}
+
 export async function runScrapeForLogin(
     ledger: string,
     loginName: string,

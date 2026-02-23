@@ -30,6 +30,20 @@ pub fn resolve_profile_dir(
     Ok(base.join(ledger_hash).join(sanitized))
 }
 
+/// Delete the browser profile directory for a given login.
+pub fn clear_login_profile(
+    ledger_path: &std::path::Path,
+    login_name: &str,
+    _lock: &crate::login_config::LoginLock,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let profile_dir = resolve_profile_dir(ledger_path, login_name, None)
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    if profile_dir.exists() {
+        std::fs::remove_dir_all(&profile_dir)?;
+    }
+    Ok(())
+}
+
 /// Resolve the download directory for a scrape run.
 ///
 /// `<base>/downloads/<extname>-<timestamp>/`

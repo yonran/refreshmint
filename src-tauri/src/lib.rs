@@ -118,6 +118,7 @@ pub fn run_with_context(
             add_login_secret,
             reenter_login_secret,
             remove_login_secret,
+            clear_login_profile,
             migrate_ledger,
         ])
         .setup(|app| {
@@ -1025,6 +1026,18 @@ fn remove_login_secret(login_name: String, domain: String, name: String) -> Resu
     let name = require_non_empty_input("name", name)?;
     let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
     store.delete(&domain, &name).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn clear_login_profile(ledger: String, login_name: String) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_login_name_input(login_name)?;
+    require_existing_login(&target_dir, &login_name)?;
+
+    let lock = login_config::acquire_login_lock(&target_dir, &login_name)
+        .map_err(|err| err.to_string())?;
+    scrape::profile::clear_login_profile(&target_dir, &login_name, &lock)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

@@ -77,6 +77,8 @@ enum LoginCommand {
     SetAccount(LoginSetAccountArgs),
     #[command(alias = "remove-account")]
     DeleteAccount(LoginDeleteAccountArgs),
+    #[command(alias = "clear-chrome-profile")]
+    ClearProfile(LoginClearProfileArgs),
 }
 
 #[derive(Args)]
@@ -131,6 +133,14 @@ struct LoginDeleteAccountArgs {
     name: String,
     #[arg(long)]
     label: String,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct LoginClearProfileArgs {
+    #[arg(long, value_name = "NAME")]
+    name: String,
     #[arg(long)]
     ledger: Option<PathBuf>,
 }
@@ -465,6 +475,9 @@ fn run_login(args: LoginArgs, context: tauri::Context<tauri::Wry>) -> Result<(),
         LoginCommand::SetAccount(set_args) => run_login_set_account(set_args, context),
         LoginCommand::DeleteAccount(delete_account_args) => {
             run_login_delete_account(delete_account_args, context)
+        }
+        LoginCommand::ClearProfile(clear_profile_args) => {
+            run_login_clear_profile(clear_profile_args, context)
         }
     }
 }
@@ -878,6 +891,23 @@ fn run_login_delete_account(
     crate::login_config::remove_login_account(&ledger_dir, &login_name, &label)
         .map_err(std::io::Error::other)?;
     println!("Removed label '{label}' from login '{login_name}'.");
+    Ok(())
+}
+
+fn run_login_clear_profile(
+    args: LoginClearProfileArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let login_name = require_cli_login_name("name", &args.name)?;
+    require_cli_existing_login(&ledger_dir, &login_name)?;
+
+    let lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
+        .map_err(std::io::Error::other)?;
+    crate::scrape::profile::clear_login_profile(&ledger_dir, &login_name, &lock)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!("Cleared browser profile for login '{login_name}'.");
     Ok(())
 }
 
