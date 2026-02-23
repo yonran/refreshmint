@@ -911,12 +911,16 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
 
     let login_name = require_cli_login_name("login", &args.login)?;
     require_cli_existing_login(&ledger_dir, &login_name)?;
-    let extension_name = crate::login_config::resolve_login_extension(
-        &ledger_dir,
-        &login_name,
-        args.extension.as_deref(),
-    )
-    .map_err(std::io::Error::other)?;
+    let extension_name = match args
+        .extension
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(explicit) => explicit.to_string(),
+        None => crate::login_config::resolve_login_extension(&ledger_dir, &login_name)
+            .map_err(std::io::Error::other)?,
+    };
 
     let prompt_overrides = parse_prompt_overrides(&args.prompt)?;
 
@@ -987,12 +991,16 @@ fn run_account_extract(
 
     let login_name = require_cli_login_name("login", &args.login)?;
     let label = require_cli_label(&args.label)?;
-    let extension_name = crate::login_config::resolve_login_extension(
-        &ledger_dir,
-        &login_name,
-        args.extension.as_deref(),
-    )
-    .map_err(std::io::Error::other)?;
+    let extension_name = match args
+        .extension
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(explicit) => explicit.to_string(),
+        None => crate::login_config::resolve_login_extension(&ledger_dir, &login_name)
+            .map_err(std::io::Error::other)?,
+    };
     let gl_account = resolve_login_account_gl_account_cli(&ledger_dir, &login_name, &label)?;
 
     let listed_documents = if args.document.is_empty() {

@@ -244,9 +244,8 @@ export async function getScrapeDebugSessionSocket(): Promise<string | null> {
 export async function runScrape(
     ledger: string,
     account: string,
-    extension: string,
 ): Promise<void> {
-    await runScrapeForLogin(ledger, account, extension);
+    await runScrapeForLogin(ledger, account);
 }
 
 export async function listDocuments(
@@ -296,14 +295,12 @@ export async function runLoginAccountExtraction(
     ledger: string,
     loginName: string,
     label: string,
-    extensionName: string,
     documentNames: string[],
 ): Promise<number> {
     return invoke('run_login_account_extraction', {
         ledger,
         loginName,
         label,
-        extensionName,
         documentNames,
     });
 }
@@ -560,9 +557,8 @@ export async function removeLoginSecret(
 export async function runScrapeForLogin(
     ledger: string,
     loginName: string,
-    extension: string,
 ): Promise<void> {
-    await invoke('run_scrape_for_login', { ledger, loginName, extension });
+    await invoke('run_scrape_for_login', { ledger, loginName });
 }
 
 export async function migrateLedger(

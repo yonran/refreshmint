@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Menu, MenuItem, Submenu } from '@tauri-apps/api/menu';
 import { documentDir, join } from '@tauri-apps/api/path';
@@ -36,6 +36,7 @@ import {
     type LoginConfig,
     listLoginAccountDocuments,
     listLoginSecrets,
+    readLoginAccountDocumentRows,
     listLogins,
     listScrapeExtensions,
     loadScrapeExtension,
@@ -267,6 +268,12 @@ function App() {
         AccountJournalEntry[]
     >([]);
     const [pipelineStatus, setPipelineStatus] = useState<string | null>(null);
+    const [pipelineSubTab, setPipelineSubTab] = useState<
+        'evidence' | 'evidence-rows' | 'account-rows' | 'gl-rows'
+    >('evidence');
+    const [evidenceRowsDocument, setEvidenceRowsDocument] = useState('');
+    const [documentRows, setDocumentRows] = useState<string[][]>([]);
+    const [isLoadingDocumentRows, setIsLoadingDocumentRows] = useState(false);
     const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
     const [isRunningExtraction, setIsRunningExtraction] = useState(false);
     const [isLoadingAccountJournal, setIsLoadingAccountJournal] =
@@ -444,6 +451,11 @@ function App() {
         },
         0,
     );
+    const hasExtension =
+        selectedLoginAccount !== null &&
+        (loginConfigsByName[
+            selectedLoginAccount.loginName
+        ]?.extension?.trim() ?? '') !== '';
     const requestLoginConfigReload = useCallback(() => {
         setLoginConfigsReloadToken((current) => current + 1);
     }, []);
@@ -468,6 +480,38 @@ function App() {
               return requiredSecretKeySet.has(key) ? count : count + 1;
           }, 0)
         : 0;
+
+    const pipelineGlRows = useMemo(() => {
+        if (!ledger || accountJournalEntries.length === 0) return [];
+        const reconciledIds = new Set(
+            accountJournalEntries
+                .filter((e) => e.reconciled !== null)
+                .map((e) => {
+                    const parts = (e.reconciled ?? '').split(':');
+                    return parts[parts.length - 1] ?? '';
+                })
+                .filter((id) => id.length > 0),
+        );
+        return ledger.transactions.filter((txn) => reconciledIds.has(txn.id));
+    }, [ledger, accountJournalEntries]);
+
+    const evidencedRowNumbers = useMemo(() => {
+        if (!evidenceRowsDocument) return new Set<number>();
+        const rowNumbers = new Set<number>();
+        for (const entry of accountJournalEntries) {
+            for (const evidence of entry.evidence) {
+                const prefix = evidenceRowsDocument + ':';
+                if (evidence.startsWith(prefix)) {
+                    const rest = evidence.slice(prefix.length);
+                    const rowNum = parseInt(rest.split(':')[0] ?? '', 10);
+                    if (!isNaN(rowNum)) {
+                        rowNumbers.add(rowNum);
+                    }
+                }
+            }
+        }
+        return rowNumbers;
+    }, [evidenceRowsDocument, accountJournalEntries]);
 
     useEffect(() => {
         secretDomainRef.current = secretDomain;
@@ -524,6 +568,10 @@ function App() {
             setAccountJournalEntries([]);
             setUnreconciledEntries([]);
             setPipelineStatus(null);
+            setPipelineSubTab('evidence');
+            setEvidenceRowsDocument('');
+            setDocumentRows([]);
+            setIsLoadingDocumentRows(false);
             setIsLoadingDocuments(false);
             setIsRunningExtraction(false);
             setIsLoadingAccountJournal(false);
@@ -1111,6 +1159,11 @@ function App() {
             startupCancelledRef.current = true;
         };
     }, [pruneRecentLedger, recordRecentLedger]);
+
+    useEffect(() => {
+        setEvidenceRowsDocument('');
+        setDocumentRows([]);
+    }, [selectedLoginAccount]);
 
     useEffect(() => {
         if (ledgerPath === null || selectedLoginAccount === null) {
@@ -2258,6 +2311,67 @@ function App() {
         setPipelineStatus(null);
     }
 
+    async function handleLoadDocumentRows(documentName: string) {
+        if (!ledger || selectedLoginAccount === null) return;
+        setEvidenceRowsDocument(documentName);
+        if (!documentName) {
+            setDocumentRows([]);
+            return;
+        }
+        setIsLoadingDocumentRows(true);
+        try {
+            const rows = await readLoginAccountDocumentRows(
+                ledger.path,
+                selectedLoginAccount.loginName,
+                selectedLoginAccount.label,
+                documentName,
+            );
+            setDocumentRows(rows);
+        } catch {
+            setDocumentRows([]);
+        } finally {
+            setIsLoadingDocumentRows(false);
+        }
+    }
+
+    async function handlePipelineExtraction(documentName: string) {
+        if (!ledger || selectedLoginAccount === null || !documentName) return;
+        const { loginName, label } = selectedLoginAccount;
+        setIsRunningExtraction(true);
+        setPipelineStatus(`Running extraction for ${documentName}...`);
+        try {
+            const newCount = await runLoginAccountExtraction(
+                ledger.path,
+                loginName,
+                label,
+                [documentName],
+            );
+            const [journal, unreconciled] = await Promise.all([
+                getLoginAccountJournal(ledger.path, loginName, label),
+                getLoginAccountUnreconciled(ledger.path, loginName, label),
+            ]);
+            setAccountJournalEntries(journal);
+            setUnreconciledEntries(unreconciled);
+            setReconcileDrafts((current) => {
+                const next: Record<string, ReconcileDraft> = {};
+                for (const entry of unreconciled) {
+                    next[entry.id] = current[entry.id] ?? {
+                        counterpartAccount: '',
+                        postingIndex: '',
+                    };
+                }
+                return next;
+            });
+            setPipelineStatus(
+                `Extraction complete. ${newCount} new entr${newCount === 1 ? 'y' : 'ies'} added.`,
+            );
+        } catch (error) {
+            setPipelineStatus(`Extraction failed: ${String(error)}`);
+        } finally {
+            setIsRunningExtraction(false);
+        }
+    }
+
     async function handleRunExtraction() {
         if (!ledger) {
             return;
@@ -2283,12 +2397,6 @@ function App() {
             );
             return;
         }
-        const extension = scrapeExtension.trim();
-        if (extension.length === 0) {
-            setPipelineStatus('Extension is required.');
-            return;
-        }
-
         const documentNames =
             selectedDocumentNames.length > 0
                 ? selectedDocumentNames
@@ -2307,7 +2415,6 @@ function App() {
                 ledger.path,
                 mapping.loginName,
                 mapping.label,
-                extension,
                 documentNames,
             );
             await refreshAccountPipelineData(account);
@@ -2396,11 +2503,6 @@ function App() {
         } finally {
             setBusyReconcileEntryId(null);
         }
-    }
-
-    function handlePrepareUnreconcile(entryId: string) {
-        setUnreconcileEntryId(entryId);
-        setPipelineStatus(null);
     }
 
     async function handleUnreconcileAccountEntry() {
@@ -2528,17 +2630,12 @@ function App() {
             return;
         }
         const account = scrapeAccount.trim();
-        const extension = scrapeExtension.trim();
-        if (extension.length === 0) {
-            setScrapeStatus('Extension is required.');
-            return;
-        }
 
         setIsRunningScrape(true);
-        setScrapeStatus(`Running ${extension} for ${loginName}...`);
+        setScrapeStatus(`Running scrape for ${loginName}...`);
         try {
-            await runScrapeForLogin(ledger.path, loginName, extension);
-            setScrapeStatus(`Scrape completed for ${extension}.`);
+            await runScrapeForLogin(ledger.path, loginName);
+            setScrapeStatus(`Scrape completed for ${loginName}.`);
             try {
                 if (selectedLoginMapping !== null && account.length > 0) {
                     await refreshAccountPipelineData(account);
@@ -2853,16 +2950,14 @@ function App() {
                         </button>
                         <button
                             className={
-                                activeTab === 'account-journals'
-                                    ? 'tab active'
-                                    : 'tab'
+                                activeTab === 'pipeline' ? 'tab active' : 'tab'
                             }
                             onClick={() => {
-                                setActiveTab('account-journals');
+                                setActiveTab('pipeline');
                             }}
                             type="button"
                         >
-                            Source Journals
+                            Pipeline
                         </button>
                         <button
                             className={
@@ -3388,22 +3483,23 @@ function App() {
                                 />
                             </div>
                         </div>
-                    ) : activeTab === 'account-journals' ? (
+                    ) : activeTab === 'pipeline' ? (
                         <div className="transactions-panel">
                             <section className="txn-form">
                                 <div className="txn-form-header">
                                     <div>
-                                        <h2>Source journals</h2>
+                                        <h2>Pipeline</h2>
                                         <p>
-                                            View extracted transactions and
-                                            reconciliation status for each bank
-                                            account label.
+                                            Inspect the ETL stages for a bank
+                                            account: evidence documents, raw
+                                            rows, extracted account entries, and
+                                            reconciled GL transactions.
                                         </p>
                                     </div>
                                 </div>
                                 <div className="txn-grid">
                                     <label className="field">
-                                        <span>Selected bank account</span>
+                                        <span>Bank account</span>
                                         <select
                                             value={
                                                 selectedLoginAccount !== null
@@ -3451,51 +3547,276 @@ function App() {
                                         </select>
                                     </label>
                                 </div>
+                                <div className="tabs pipeline-subtabs">
+                                    <button
+                                        className={
+                                            pipelineSubTab === 'evidence'
+                                                ? 'tab active'
+                                                : 'tab'
+                                        }
+                                        onClick={() => {
+                                            setPipelineSubTab('evidence');
+                                        }}
+                                        type="button"
+                                    >
+                                        Evidence
+                                    </button>
+                                    <button
+                                        className={
+                                            pipelineSubTab === 'evidence-rows'
+                                                ? 'tab active'
+                                                : 'tab'
+                                        }
+                                        onClick={() => {
+                                            setPipelineSubTab('evidence-rows');
+                                        }}
+                                        type="button"
+                                    >
+                                        Evidence Rows
+                                    </button>
+                                    <button
+                                        className={
+                                            pipelineSubTab === 'account-rows'
+                                                ? 'tab active'
+                                                : 'tab'
+                                        }
+                                        onClick={() => {
+                                            setPipelineSubTab('account-rows');
+                                        }}
+                                        type="button"
+                                    >
+                                        Account Rows
+                                    </button>
+                                    <button
+                                        className={
+                                            pipelineSubTab === 'gl-rows'
+                                                ? 'tab active'
+                                                : 'tab'
+                                        }
+                                        onClick={() => {
+                                            setPipelineSubTab('gl-rows');
+                                        }}
+                                        type="button"
+                                    >
+                                        GL Rows
+                                    </button>
+                                </div>
                                 {selectedLoginAccount === null ? (
                                     <p className="hint">
-                                        Select a login and label to view its
-                                        extracted transactions.
+                                        Select a bank account to inspect its
+                                        pipeline stages.
                                     </p>
-                                ) : (
+                                ) : pipelineSubTab === 'evidence' ? (
+                                    isLoadingDocuments ? (
+                                        <p className="status">
+                                            Loading documents...
+                                        </p>
+                                    ) : documents.length === 0 ? (
+                                        <p className="hint">
+                                            No documents found for this account.
+                                        </p>
+                                    ) : (
+                                        <div className="table-wrap">
+                                            <table className="ledger-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Document</th>
+                                                        <th>Type</th>
+                                                        <th>Coverage End</th>
+                                                        <th>Scraped At</th>
+                                                        <th>Scrape Session</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {documents.map((doc) => (
+                                                        <tr key={doc.filename}>
+                                                            <td className="mono">
+                                                                {doc.filename}
+                                                            </td>
+                                                            <td className="mono">
+                                                                {doc.info
+                                                                    ?.mimeType ??
+                                                                    '-'}
+                                                            </td>
+                                                            <td className="mono">
+                                                                {doc.info
+                                                                    ?.coverageEndDate ??
+                                                                    '-'}
+                                                            </td>
+                                                            <td className="mono">
+                                                                {doc.info
+                                                                    ?.scrapedAt ??
+                                                                    '-'}
+                                                            </td>
+                                                            <td className="mono">
+                                                                {doc.info
+                                                                    ?.scrapeSessionId ??
+                                                                    '-'}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )
+                                ) : pipelineSubTab === 'evidence-rows' ? (
                                     <>
-                                        <div className="txn-form-header">
-                                            <div>
-                                                <h3>Journal entries</h3>
-                                                <p>
-                                                    Transactions extracted for{' '}
-                                                    <span className="mono">
-                                                        {
-                                                            selectedLoginAccount.loginName
-                                                        }
-                                                        /
-                                                        {
-                                                            selectedLoginAccount.label
-                                                        }
+                                        <div className="txn-grid">
+                                            <label className="field">
+                                                <span>Document</span>
+                                                <select
+                                                    value={evidenceRowsDocument}
+                                                    onChange={(e) => {
+                                                        void handleLoadDocumentRows(
+                                                            e.target.value,
+                                                        );
+                                                    }}
+                                                >
+                                                    <option value="">
+                                                        Select a document...
+                                                    </option>
+                                                    {documents
+                                                        .filter((d) =>
+                                                            d.filename
+                                                                .toLowerCase()
+                                                                .endsWith(
+                                                                    '.csv',
+                                                                ),
+                                                        )
+                                                        .map((d) => (
+                                                            <option
+                                                                key={d.filename}
+                                                                value={
+                                                                    d.filename
+                                                                }
+                                                            >
+                                                                {d.filename}
+                                                            </option>
+                                                        ))}
+                                                </select>
+                                            </label>
+                                            <div className="field">
+                                                <span />
+                                                <button
+                                                    type="button"
+                                                    className="primary-button"
+                                                    onClick={() => {
+                                                        void handlePipelineExtraction(
+                                                            evidenceRowsDocument,
+                                                        );
+                                                    }}
+                                                    disabled={
+                                                        !evidenceRowsDocument ||
+                                                        isRunningExtraction ||
+                                                        !hasExtension
+                                                    }
+                                                >
+                                                    {isRunningExtraction
+                                                        ? 'Extracting...'
+                                                        : evidencedRowNumbers.size >
+                                                            0
+                                                          ? 'Re-extract document → account rows'
+                                                          : 'Extract document → account rows'}
+                                                </button>
+                                                {!hasExtension && (
+                                                    <span className="hint">
+                                                        No extension bound — set
+                                                        one in Scraping.
                                                     </span>
-                                                    .
-                                                </p>
+                                                )}
                                             </div>
                                         </div>
-                                        {isLoadingAccountJournal ? (
-                                            <p className="status">
-                                                Loading source journal...
-                                            </p>
-                                        ) : accountJournalEntries.length ===
-                                          0 ? (
+                                        {evidenceRowsDocument === '' ? (
                                             <p className="hint">
-                                                No transactions extracted for
-                                                this account yet.
+                                                Select a CSV document to view
+                                                its raw rows.
+                                            </p>
+                                        ) : isLoadingDocumentRows ? (
+                                            <p className="status">
+                                                Loading rows...
+                                            </p>
+                                        ) : documentRows.length === 0 ? (
+                                            <p className="hint">
+                                                No rows found.
                                             </p>
                                         ) : (
                                             <div className="table-wrap">
-                                                <AccountJournalTable
-                                                    entries={
-                                                        accountJournalEntries
-                                                    }
-                                                />
+                                                <table className="ledger-table">
+                                                    <tbody>
+                                                        {documentRows.map(
+                                                            (row, rowIndex) => {
+                                                                const rowNum =
+                                                                    rowIndex +
+                                                                    1;
+                                                                const isHeader =
+                                                                    rowIndex ===
+                                                                    0;
+                                                                const isEvidenced =
+                                                                    evidencedRowNumbers.has(
+                                                                        rowNum,
+                                                                    );
+                                                                return (
+                                                                    <tr
+                                                                        key={
+                                                                            rowIndex
+                                                                        }
+                                                                        className={
+                                                                            isHeader
+                                                                                ? 'evidence-header-row'
+                                                                                : isEvidenced
+                                                                                  ? 'evidence-highlighted-row'
+                                                                                  : undefined
+                                                                        }
+                                                                    >
+                                                                        <td className="mono">
+                                                                            {
+                                                                                rowNum
+                                                                            }
+                                                                        </td>
+                                                                        {row.map(
+                                                                            (
+                                                                                cell,
+                                                                                colIndex,
+                                                                            ) => (
+                                                                                <td
+                                                                                    key={
+                                                                                        colIndex
+                                                                                    }
+                                                                                    className="mono"
+                                                                                >
+                                                                                    {
+                                                                                        cell
+                                                                                    }
+                                                                                </td>
+                                                                            ),
+                                                                        )}
+                                                                    </tr>
+                                                                );
+                                                            },
+                                                        )}
+                                                    </tbody>
+                                                </table>
                                             </div>
                                         )}
                                     </>
+                                ) : pipelineSubTab === 'account-rows' ? (
+                                    isLoadingAccountJournal ? (
+                                        <p className="status">
+                                            Loading account rows...
+                                        </p>
+                                    ) : (
+                                        <div className="table-wrap">
+                                            <AccountJournalTable
+                                                entries={accountJournalEntries}
+                                            />
+                                        </div>
+                                    )
+                                ) : (
+                                    <div className="table-wrap">
+                                        <TransactionsTable
+                                            transactions={pipelineGlRows}
+                                        />
+                                    </div>
                                 )}
                                 {pipelineStatus === null ? null : (
                                     <p className="status">{pipelineStatus}</p>
@@ -4626,97 +4947,6 @@ function App() {
                                                                         .info
                                                                         ?.scrapeSessionId ??
                                                                         '-'}
-                                                                </td>
-                                                            </tr>
-                                                        ),
-                                                    )}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    )}
-                                    <div className="txn-form-header">
-                                        <div>
-                                            <h3>Account journal</h3>
-                                            <p>
-                                                Entries extracted for this
-                                                account with evidence and
-                                                reconciliation status.
-                                            </p>
-                                        </div>
-                                    </div>
-                                    {isLoadingAccountJournal ? (
-                                        <p className="status">
-                                            Loading account journal...
-                                        </p>
-                                    ) : accountJournalEntries.length === 0 ? (
-                                        <p className="hint">
-                                            {selectedScrapeAccount.length === 0
-                                                ? 'Choose a GL account to view its journal.'
-                                                : !hasResolvedLoginMapping
-                                                  ? 'Resolve login mapping first to view journal entries.'
-                                                  : 'No account journal entries found for this login mapping.'}
-                                        </p>
-                                    ) : (
-                                        <div className="table-wrap">
-                                            <table className="ledger-table">
-                                                <thead>
-                                                    <tr>
-                                                        <th>Date</th>
-                                                        <th>Status</th>
-                                                        <th>ID</th>
-                                                        <th>Description</th>
-                                                        <th>Evidence</th>
-                                                        <th>Reconciled</th>
-                                                        <th>Actions</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {accountJournalEntries.map(
-                                                        (entry) => (
-                                                            <tr key={entry.id}>
-                                                                <td className="mono">
-                                                                    {entry.date}
-                                                                </td>
-                                                                <td>
-                                                                    {
-                                                                        entry.status
-                                                                    }
-                                                                </td>
-                                                                <td className="mono">
-                                                                    {entry.id}
-                                                                </td>
-                                                                <td>
-                                                                    {
-                                                                        entry.description
-                                                                    }
-                                                                </td>
-                                                                <td className="mono">
-                                                                    {
-                                                                        entry
-                                                                            .evidence
-                                                                            .length
-                                                                    }
-                                                                </td>
-                                                                <td className="mono">
-                                                                    {entry.reconciled ??
-                                                                        '-'}
-                                                                </td>
-                                                                <td>
-                                                                    <div className="pipeline-row-actions">
-                                                                        <button
-                                                                            type="button"
-                                                                            className="ghost-button"
-                                                                            onClick={() => {
-                                                                                handlePrepareUnreconcile(
-                                                                                    entry.id,
-                                                                                );
-                                                                            }}
-                                                                        >
-                                                                            Set
-                                                                            for
-                                                                            unreconcile
-                                                                        </button>
-                                                                    </div>
                                                                 </td>
                                                             </tr>
                                                         ),

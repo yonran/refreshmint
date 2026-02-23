@@ -273,24 +273,10 @@ pub fn acquire_login_lock(
     Ok(LoginLock { _file: file })
 }
 
-/// Resolve the extension to use for a login.
+/// Resolve the extension to use for a login from the login config.
 ///
-/// Priority:
-/// 1. Explicitly provided value (if non-empty)
-/// 2. Login config `extension` field
-/// 3. Error
-pub fn resolve_login_extension(
-    ledger_dir: &Path,
-    login_name: &str,
-    explicit: Option<&str>,
-) -> Result<String, String> {
-    if let Some(ext) = explicit {
-        let trimmed = ext.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-
+/// Returns an error if no extension is configured.
+pub fn resolve_login_extension(ledger_dir: &Path, login_name: &str) -> Result<String, String> {
     let config = read_login_config(ledger_dir, login_name);
     if let Some(ext) = config.extension {
         let trimmed = ext.trim();
@@ -301,7 +287,7 @@ pub fn resolve_login_extension(
 
     Err(format!(
         "no extension configured for login '{login_name}'. \
-         Specify --extension or set it in logins/{login_name}/config.json"
+         Set it in logins/{login_name}/config.json"
     ))
 }
 
@@ -575,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_login_extension_prefers_explicit() {
+    fn resolve_login_extension_reads_from_config() {
         let dir = create_temp_dir("login-ext-resolve");
         let config = LoginConfig {
             extension: Some("saved-ext".to_string()),
@@ -583,21 +569,7 @@ mod tests {
         };
         write_login_config(&dir, "chase", &config).unwrap();
 
-        let result = resolve_login_extension(&dir, "chase", Some("explicit-ext"));
-        assert_eq!(result.unwrap(), "explicit-ext");
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn resolve_login_extension_falls_back_to_config() {
-        let dir = create_temp_dir("login-ext-fallback");
-        let config = LoginConfig {
-            extension: Some("saved-ext".to_string()),
-            accounts: BTreeMap::new(),
-        };
-        write_login_config(&dir, "chase", &config).unwrap();
-
-        let result = resolve_login_extension(&dir, "chase", None);
+        let result = resolve_login_extension(&dir, "chase");
         assert_eq!(result.unwrap(), "saved-ext");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -605,7 +577,7 @@ mod tests {
     #[test]
     fn resolve_login_extension_errors_when_none_configured() {
         let dir = create_temp_dir("login-ext-none");
-        let result = resolve_login_extension(&dir, "chase", None);
+        let result = resolve_login_extension(&dir, "chase");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no extension configured"));
         let _ = fs::remove_dir_all(&dir);

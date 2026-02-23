@@ -91,6 +91,7 @@ pub fn run_with_context(
             run_scrape,
             list_documents,
             list_login_account_documents,
+            read_login_account_document_rows,
             run_extraction,
             run_login_account_extraction,
             get_account_journal,
@@ -500,20 +501,15 @@ fn get_scrape_debug_session_socket() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn run_scrape_for_login(
-    ledger: String,
-    login_name: String,
-    extension: String,
-) -> Result<(), String> {
+async fn run_scrape_for_login(ledger: String, login_name: String) -> Result<(), String> {
     let login_name = require_login_name_input(login_name)?;
 
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
     require_existing_login(&target_dir, &login_name)?;
 
-    let extension =
-        login_config::resolve_login_extension(&target_dir, &login_name, Some(&extension))
-            .map_err(|err| err.to_string())?;
+    let extension = login_config::resolve_login_extension(&target_dir, &login_name)
+        .map_err(|err| err.to_string())?;
 
     let config = scrape::ScrapeConfig {
         login_name,
@@ -531,9 +527,9 @@ async fn run_scrape_for_login(
 }
 
 #[tauri::command]
-async fn run_scrape(ledger: String, account: String, extension: String) -> Result<(), String> {
+async fn run_scrape(ledger: String, account: String) -> Result<(), String> {
     let login_name = require_non_empty_input("account", account)?;
-    run_scrape_for_login(ledger, login_name, extension).await
+    run_scrape_for_login(ledger, login_name).await
 }
 
 #[tauri::command]
@@ -556,6 +552,20 @@ fn list_login_account_documents(
     let login_name = require_login_name_input(login_name)?;
     let label = require_label_input(label)?;
     extract::list_documents_for_login_account(&target_dir, &login_name, &label)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn read_login_account_document_rows(
+    ledger: String,
+    login_name: String,
+    label: String,
+    document_name: String,
+) -> Result<Vec<Vec<String>>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_login_name_input(login_name)?;
+    let label = require_label_input(label)?;
+    extract::read_login_account_document_csv_rows(&target_dir, &login_name, &label, &document_name)
         .map_err(|err| err.to_string())
 }
 
@@ -639,16 +649,14 @@ fn run_login_account_extraction(
     ledger: String,
     login_name: String,
     label: String,
-    extension_name: String,
     document_names: Vec<String>,
 ) -> Result<usize, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
     let label = require_label_input(label)?;
 
-    let extension_name =
-        login_config::resolve_login_extension(&target_dir, &login_name, Some(&extension_name))
-            .map_err(|err| err.to_string())?;
+    let extension_name = login_config::resolve_login_extension(&target_dir, &login_name)
+        .map_err(|err| err.to_string())?;
     let gl_account = resolve_login_account_gl_account(&target_dir, &login_name, &label)?;
 
     let result = extract::run_extraction_for_login_account(
@@ -957,9 +965,7 @@ fn sync_login_secrets_for_extension(
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
     let login_name = require_login_name_input(login_name)?;
     require_existing_login(&target_dir, &login_name)?;
-    let extension =
-        login_config::resolve_login_extension(&target_dir, &login_name, Some(&extension))
-            .map_err(|err| err.to_string())?;
+    let extension = extension.trim().to_string();
 
     let extension_dir = account_config::resolve_extension_dir(&target_dir, &extension);
     let declared =
