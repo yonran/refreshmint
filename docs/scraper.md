@@ -234,6 +234,7 @@ All methods are async and should be awaited.
 
 | Method                                               | Description                                                                                                                                                      |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `page.locator(selector)`                             | Create a `Locator` for reusable element interactions with strictness checks and auto-waiting.                                                                    |
 | `await page.goto(url)`                               | Navigate to a URL.                                                                                                                                               |
 | `await page.url()`                                   | Return current page URL as a string.                                                                                                                             |
 | `await page.reload()`                                | Reload current page.                                                                                                                                             |
@@ -271,6 +272,27 @@ All methods are async and should be awaited.
 For frame APIs, `frameRef` can be frame id, frame name, or frame URL (full match or substring).
 
 `page` is target-stable: one `Page` handle maps to one tab/window for the full run.
+
+### `Locator`
+
+Locators provide reusable element finding logic with strictness (fails if multiple elements match) and auto-waiting.
+
+| Method                                          | Description                                                                                             |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `locator.locator(selector)`                     | Create a sub-locator scoped to this locator.                                                            |
+| `locator.first()`                               | Filter to the first matching element.                                                                   |
+| `locator.last()`                                | Filter to the last matching element.                                                                    |
+| `locator.nth(index)`                            | Filter to the element at the 0-based index.                                                             |
+| `await locator.count()`                         | Return number of matching elements.                                                                     |
+| `await locator.click(options?)`                 | Click the element. `options` can be `{ timeout?: number }` or a timeout number.                         |
+| `await locator.fill(value, options?)`           | Fill the element with `value`. `options` can be `{ timeout?: number }` or a timeout number.             |
+| `await locator.innerText(options?)`             | Return visible text.                                                                                    |
+| `await locator.textContent(options?)`           | Return text content.                                                                                    |
+| `await locator.getAttribute(name, options?)`    | Return attribute value.                                                                                 |
+| `await locator.inputValue(options?)`            | Return current input value.                                                                             |
+| `await locator.isVisible()`                     | Return whether element is visible.                                                                      |
+| `await locator.isEnabled()`                     | Return whether element is enabled.                                                                      |
+| `await locator.wait_for(options?)`              | Wait for state (`attached`, `detached`, `visible`, `hidden`). Default: `{ state: 'visible' }`.          |
 
 ### `browser`
 

@@ -9,7 +9,32 @@ interface PageSnapshotOptions {
     track?: string;
 }
 
+interface Locator {
+    readonly selector: string;
+    locator(selector: string): Locator;
+    first(): Locator;
+    last(): Locator;
+    nth(index: number): Locator;
+    count(): Promise<number>;
+    click(options?: { timeout?: number } | number): Promise<void>;
+    fill(value: string, options?: { timeout?: number } | number): Promise<void>;
+    innerText(options?: { timeout?: number } | number): Promise<string>;
+    textContent(options?: { timeout?: number } | number): Promise<string>;
+    getAttribute(
+        name: string,
+        options?: { timeout?: number } | number,
+    ): Promise<string>;
+    inputValue(options?: { timeout?: number } | number): Promise<string>;
+    isVisible(): Promise<boolean>;
+    isEnabled(): Promise<boolean>;
+    wait_for(options?: {
+        state?: 'attached' | 'detached' | 'visible' | 'hidden';
+        timeout?: number;
+    }): Promise<void>;
+}
+
 interface PageApi {
+    locator(selector: string): Locator;
     goto(url: string): Promise<void>;
     url(): Promise<string>;
     reload(): Promise<void>;
