@@ -206,7 +206,7 @@ impl Locator {
         self.ensure_element_state("visible", timeout_ms).await?;
 
         let inner = self.inner.lock().await;
-        let actual_value = resolve_secret_if_applicable(&inner, &value).await?;
+        let actual_value: String = resolve_secret_if_applicable(&inner, &value).await?;
         drop(inner);
 
         let steps_json = serde_json::to_string(&self.steps).unwrap_or_default();
@@ -362,15 +362,16 @@ impl Locator {
 
     async fn evaluate_internal(&self, expression: String) -> JsResult<String> {
         let inner = self.inner.lock().await;
-        let context_id = if let Some(frame_id) = &inner.target_frame_id {
-            Some(
-                wait_for_frame_execution_context(&inner.page, frame_id.clone())
-                    .await
-                    .map_err(|e| js_err(format!("failed to get frame context: {e}")))?,
-            )
-        } else {
-            None
-        };
+        let context_id: Option<chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId> =
+            if let Some(frame_id) = &inner.target_frame_id {
+                Some(
+                    wait_for_frame_execution_context(&inner.page, frame_id.clone())
+                        .await
+                        .map_err(|e| js_err(format!("failed to get frame context: {e}")))?,
+                )
+            } else {
+                None
+            };
 
         let mut builder = EvaluateParams::builder()
             .expression(expression)
