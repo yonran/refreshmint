@@ -1,0 +1,6 @@
+{
+    "name": "chase",
+    "secrets": {
+        "secure.chase.com": ["chase_username", "chase_password"]
+    }
+}
