@@ -6,7 +6,7 @@ use rquickjs::class::Trace;
 use rquickjs::{function::Opt, Ctx, JsLifetime, Result as JsResult};
 use tokio::sync::Mutex;
 
-use super::locator::Locator;
+use super::locator::{build_role_selector, Locator};
 use crate::secret::SecretStore;
 
 pub(crate) fn js_err(msg: String) -> rquickjs::Error {
@@ -217,6 +217,17 @@ impl BrowserApi {
 impl PageApi {
     /// Create a locator for the given selector.
     pub fn locator(&self, selector: String) -> Locator {
+        Locator::new(self.inner.clone(), selector)
+    }
+
+    /// Create a locator for elements with the given ARIA role.
+    #[qjs(rename = "getByRole")]
+    pub fn get_by_role(
+        &self,
+        role: String,
+        options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+    ) -> Locator {
+        let selector = build_role_selector(&role, options.0);
         Locator::new(self.inner.clone(), selector)
     }
 

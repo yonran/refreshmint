@@ -9,9 +9,22 @@ interface PageSnapshotOptions {
     track?: string;
 }
 
+interface ByRoleOptions {
+    name?: string | RegExp;
+    exact?: boolean;
+    checked?: boolean;
+    disabled?: boolean;
+    expanded?: boolean;
+    includeHidden?: boolean;
+    level?: number;
+    pressed?: boolean;
+    selected?: boolean;
+}
+
 interface Locator {
     readonly selector: string;
     locator(selector: string): Locator;
+    getByRole(role: string, options?: ByRoleOptions): Locator;
     first(): Locator;
     last(): Locator;
     nth(index: number): Locator;
@@ -35,6 +48,7 @@ interface Locator {
 
 interface PageApi {
     locator(selector: string): Locator;
+    getByRole(role: string, options?: ByRoleOptions): Locator;
     goto(url: string): Promise<void>;
     url(): Promise<string>;
     reload(): Promise<void>;

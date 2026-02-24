@@ -88,6 +88,109 @@ try {
 }
 "##;
 
+const GET_BY_ROLE_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("getByRole test start");
+  const html = encodeURIComponent(`
+    <h1>Page Title</h1>
+    <h2 id="s1">Section One</h2>
+    <h2 id="s2">Section Two</h2>
+    <button id="submit">Submit</button>
+    <button aria-label="Close dialog">X</button>
+    <a href="#">Home link</a>
+    <input type="text" placeholder="Email address" />
+    <input type="text" aria-label="Username" />
+    <input type="checkbox" id="chk" />
+    <label for="chk">Accept terms</label>
+    <div id="form-area">
+      <button id="inner-btn">Log In</button>
+    </div>
+  `);
+  await page.goto(`data:text/html,${html}`);
+
+  // 1. Count all buttons (implicit role from <button> + aria-label button)
+  const allButtons = page.getByRole('button');
+  const btnCount = await allButtons.count();
+  if (btnCount !== 3) throw new Error(`Expected 3 buttons, got ${btnCount}`);
+
+  // 2. getByRole with exact name (case-insensitive substring, default)
+  const submitBtn = page.getByRole('button', { name: 'Submit' });
+  const submitText = await submitBtn.innerText();
+  if (submitText !== 'Submit') throw new Error(`Expected Submit, got ${submitText}`);
+
+  // 3. getByRole with exact:true (full match, case-insensitive)
+  const exactBtn = page.getByRole('button', { name: 'submit', exact: true });
+  const exactCount = await exactBtn.count();
+  if (exactCount !== 1) throw new Error(`Expected 1 exact button match, got ${exactCount}`);
+
+  // 4. Name matched via aria-label
+  const closeBtn = page.getByRole('button', { name: 'Close dialog' });
+  const closeCount = await closeBtn.count();
+  if (closeCount !== 1) throw new Error(`Expected 1 close button, got ${closeCount}`);
+
+  // 5. Link via implicit role
+  const links = page.getByRole('link');
+  const linkCount = await links.count();
+  if (linkCount !== 1) throw new Error(`Expected 1 link, got ${linkCount}`);
+
+  // 6. Headings - count
+  const headings = page.getByRole('heading');
+  const headingCount = await headings.count();
+  if (headingCount !== 3) throw new Error(`Expected 3 headings (h1+h2+h2), got ${headingCount}`);
+
+  // 7. Headings - filter by level
+  const h2s = page.getByRole('heading', { level: 2 });
+  const h2Count = await h2s.count();
+  if (h2Count !== 2) throw new Error(`Expected 2 h2 headings, got ${h2Count}`);
+
+  // 8. Textboxes
+  const textboxes = page.getByRole('textbox');
+  const tbCount = await textboxes.count();
+  if (tbCount !== 2) throw new Error(`Expected 2 textboxes, got ${tbCount}`);
+
+  // 9. Textbox by accessible name via placeholder
+  const emailInput = page.getByRole('textbox', { name: 'Email' });
+  const emailCount = await emailInput.count();
+  if (emailCount !== 1) throw new Error(`Expected 1 email input, got ${emailCount}`);
+
+  // 10. Textbox by aria-label
+  const usernameInput = page.getByRole('textbox', { name: 'Username' });
+  const usernameCount = await usernameInput.count();
+  if (usernameCount !== 1) throw new Error(`Expected 1 username input, got ${usernameCount}`);
+
+  // 11. Checkbox via implicit role
+  const checkboxes = page.getByRole('checkbox');
+  const cbCount = await checkboxes.count();
+  if (cbCount !== 1) throw new Error(`Expected 1 checkbox, got ${cbCount}`);
+
+  // 12. Chaining: form area -> button
+  const innerBtn = page.locator('#form-area').getByRole('button', { name: 'Log In' });
+  const innerBtnText = await innerBtn.innerText();
+  if (innerBtnText !== 'Log In') throw new Error(`Expected Log In, got ${innerBtnText}`);
+
+  // 13. locator('role=...') string syntax also works
+  const roleStrBtn = page.locator('role=button[name="Submit"i]');
+  const roleStrText = await roleStrBtn.innerText();
+  if (roleStrText !== 'Submit') throw new Error(`Expected Submit via role= string, got ${roleStrText}`);
+
+  // 14. nth on getByRole
+  const firstH2 = page.getByRole('heading', { level: 2 }).first();
+  const firstH2Text = await firstH2.innerText();
+  if (firstH2Text !== 'Section One') throw new Error(`Expected Section One, got ${firstH2Text}`);
+
+  await refreshmint.saveResource("get_by_role.bin", [111, 107]);
+  refreshmint.log("getByRole test done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("getByRole test error: " + msg);
+  try {
+     const body = await page.evaluate("document.body.innerHTML");
+     refreshmint.log("Body: " + body);
+  } catch (_) {}
+  throw e;
+}
+"##;
+
 struct TestSandbox {
     root: PathBuf,
 }
@@ -161,6 +264,59 @@ fn locator_api_works() -> Result<(), Box<dyn Error>> {
     // If test failed, this file won't exist or won't have "ok"
     if !output_file.exists() {
         return Err("locator.bin not found, test likely failed".into());
+    }
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn get_by_role_api_works() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping getByRole test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let sandbox = TestSandbox::new("get-by-role")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{}\"}}", EXTENSION_NAME),
+    )?;
+    fs::write(&driver_path, GET_BY_ROLE_DRIVER_SOURCE)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        login_name: LOGIN_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    scrape::run_scrape(config)?;
+
+    let output_file = ledger_dir
+        .join("cache")
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("get_by_role.bin");
+
+    if !output_file.exists() {
+        return Err("get_by_role.bin not found, test likely failed".into());
     }
     let bytes = fs::read(&output_file)?;
     assert_eq!(bytes, b"ok");

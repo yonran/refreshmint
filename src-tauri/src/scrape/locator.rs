@@ -12,10 +12,32 @@ use super::js_api::{
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const POLL_INTERVAL_MS: u64 = 100;
 
-#[derive(Clone, serde::Serialize, Debug, PartialEq, Eq)]
-struct LocatorStep {
-    selector: String,
-    index: Option<i32>,
+#[derive(Clone, serde::Serialize, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum LocatorStep {
+    Css {
+        selector: String,
+        index: Option<i32>,
+    },
+    Role {
+        role: String,
+        /// Plain string name filter (used when name_pattern is None)
+        name: Option<String>,
+        /// Regex source (when name is a regex)
+        name_pattern: Option<String>,
+        /// Regex flags (when name is a regex)
+        name_flags: Option<String>,
+        /// true = case-sensitive full match for string names; false = case-insensitive substring
+        exact: bool,
+        checked: Option<bool>,
+        disabled: Option<bool>,
+        expanded: Option<bool>,
+        include_hidden: bool,
+        level: Option<u32>,
+        pressed: Option<bool>,
+        selected: Option<bool>,
+        index: Option<i32>,
+    },
 }
 
 fn parse_timeout(options: Option<Value<'_>>) -> u64 {
@@ -33,9 +55,262 @@ fn parse_timeout(options: Option<Value<'_>>) -> u64 {
     DEFAULT_TIMEOUT_MS
 }
 
+/// Parse a `role=button[name="Log In"i][checked=true]` selector into a `LocatorStep::Role`.
+/// Returns `None` if the selector does not start with `role=`.
+fn parse_role_selector(s: &str) -> Option<LocatorStep> {
+    let rest = s.strip_prefix("role=")?;
+
+    // role name is everything up to the first '[' or end of string
+    let (role_name, mut attrs_str) = match rest.find('[') {
+        Some(pos) => (&rest[..pos], &rest[pos..]),
+        None => (rest, ""),
+    };
+    let role = role_name.trim().to_string();
+    if role.is_empty() {
+        return None;
+    }
+
+    let mut name: Option<String> = None;
+    let mut name_pattern: Option<String> = None;
+    let mut name_flags: Option<String> = None;
+    let mut exact = false;
+    let mut checked: Option<bool> = None;
+    let mut disabled: Option<bool> = None;
+    let mut expanded: Option<bool> = None;
+    let mut include_hidden = false;
+    let mut level: Option<u32> = None;
+    let mut pressed: Option<bool> = None;
+    let mut selected: Option<bool> = None;
+
+    // Parse attribute list: each attr is `[name=value]`
+    while let Some(rest2) = attrs_str.strip_prefix('[') {
+        // find the closing ']' — must account for quoted strings and regex
+        let close = find_attr_close(rest2)?;
+        let attr_content = &rest2[..close];
+        attrs_str = &rest2[close + 1..];
+
+        // split on first '='
+        let eq = attr_content.find('=')?;
+        let attr_name = attr_content[..eq].trim();
+        let attr_val = attr_content[eq + 1..].trim();
+
+        match attr_name {
+            "name" => {
+                if let Some(regex_str) = attr_val.strip_prefix('/') {
+                    // regex: /pattern/flags
+                    let (src, flags) = parse_regex_literal(regex_str);
+                    name_pattern = Some(src.to_string());
+                    name_flags = Some(flags.to_string());
+                } else if attr_val.starts_with('"') || attr_val.starts_with('\'') {
+                    // string with optional trailing 'i' or 's'
+                    let (string_val, suffix) = parse_quoted_string(attr_val);
+                    name = Some(string_val);
+                    exact = suffix == "s";
+                }
+            }
+            "checked" => checked = parse_bool(attr_val),
+            "disabled" => disabled = parse_bool(attr_val),
+            "expanded" => expanded = parse_bool(attr_val),
+            "include-hidden" => include_hidden = attr_val == "true",
+            "level" => level = attr_val.parse().ok(),
+            "pressed" => pressed = parse_bool(attr_val),
+            "selected" => selected = parse_bool(attr_val),
+            _ => {} // unknown attr: ignore
+        }
+    }
+
+    Some(LocatorStep::Role {
+        role,
+        name,
+        name_pattern,
+        name_flags,
+        exact,
+        checked,
+        disabled,
+        expanded,
+        include_hidden,
+        level,
+        pressed,
+        selected,
+        index: None,
+    })
+}
+
+/// Find the position of the closing `]` for an attribute value that may contain
+/// quoted strings (`"..."` or `'...'`) or regex literals (`/.../`).
+fn find_attr_close(s: &str) -> Option<usize> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            ']' => return Some(i),
+            '"' | '\'' => {
+                let q = chars[i];
+                i += 1;
+                while i < chars.len() && chars[i] != q {
+                    if chars[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1; // skip closing quote
+                        // skip optional suffix 'i' or 's'
+                if i < chars.len() && (chars[i] == 'i' || chars[i] == 's') {
+                    i += 1;
+                }
+            }
+            '/' => {
+                // regex literal
+                i += 1;
+                while i < chars.len() && chars[i] != '/' {
+                    if chars[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1; // skip closing '/'
+                        // skip flags
+                while i < chars.len() && chars[i].is_alphabetic() {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Parse a regex literal `pattern/flags` (the leading `/` has already been stripped).
+fn parse_regex_literal(s: &str) -> (&str, &str) {
+    // find closing `/` not preceded by `\`
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+        } else if bytes[i] == b'/' {
+            let src = &s[..i];
+            let flags = &s[i + 1..];
+            return (src, flags);
+        } else {
+            i += 1;
+        }
+    }
+    (s, "")
+}
+
+/// Parse a quoted string `"value"i` or `'value'i` and return (unescaped value, suffix).
+fn parse_quoted_string(s: &str) -> (String, &str) {
+    if s.is_empty() {
+        return (String::new(), "");
+    }
+    let Some(quote) = s.chars().next() else {
+        return (String::new(), "");
+    };
+    if quote != '"' && quote != '\'' {
+        return (s.to_string(), "");
+    }
+    let inner = &s[1..];
+    let mut result = String::new();
+    let mut iter = inner.char_indices();
+    let mut suffix_start = inner.len();
+    while let Some((i, c)) = iter.next() {
+        if c == '\\' {
+            // take next char
+            if let Some((_, nc)) = iter.next() {
+                result.push(nc);
+            }
+        } else if c == quote {
+            suffix_start = i + 1;
+            break;
+        } else {
+            result.push(c);
+        }
+    }
+    let suffix = &inner[suffix_start..];
+    (result, suffix)
+}
+
+fn parse_bool(s: &str) -> Option<bool> {
+    match s {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Build a `role=...` selector string from a role name and JS options object.
+pub(crate) fn build_role_selector(role: &str, options: Option<Value<'_>>) -> String {
+    let mut s = format!("role={role}");
+    let Some(val) = options else {
+        return s;
+    };
+    let Some(obj) = val.as_object() else {
+        return s;
+    };
+
+    // name: string | RegExp
+    // QuickJS RegExp objects have `source` and `flags` string properties.
+    if let Ok(name_val) = obj.get::<_, Value<'_>>("name") {
+        if let Some(name_str) = name_val.as_string() {
+            if let Ok(name_string) = name_str.to_string() {
+                // Check exact option
+                let exact = obj.get::<_, bool>("exact").unwrap_or(false);
+                let suffix = if exact { "s" } else { "i" };
+                // Escape double quotes in the name
+                let escaped = name_string.replace('\\', "\\\\").replace('"', "\\\"");
+                s.push_str(&format!("[name=\"{escaped}\"{suffix}]"));
+            }
+        } else if name_val.is_object() {
+            // Could be a RegExp: try to extract source and flags
+            if let Some(name_obj) = name_val.as_object() {
+                let source = name_obj.get::<_, String>("source").unwrap_or_default();
+                let flags = name_obj.get::<_, String>("flags").unwrap_or_default();
+                if !source.is_empty() {
+                    s.push_str(&format!("[name=/{source}/{flags}]"));
+                }
+            }
+        }
+    }
+
+    // exact is already consumed above for string names; no separate attr needed
+    // checked
+    if let Ok(v) = obj.get::<_, bool>("checked") {
+        s.push_str(&format!("[checked={v}]"));
+    }
+    // disabled
+    if let Ok(v) = obj.get::<_, bool>("disabled") {
+        s.push_str(&format!("[disabled={v}]"));
+    }
+    // expanded
+    if let Ok(v) = obj.get::<_, bool>("expanded") {
+        s.push_str(&format!("[expanded={v}]"));
+    }
+    // includeHidden
+    if let Ok(v) = obj.get::<_, bool>("includeHidden") {
+        if v {
+            s.push_str("[include-hidden=true]");
+        }
+    }
+    // level
+    if let Ok(v) = obj.get::<_, u32>("level") {
+        s.push_str(&format!("[level={v}]"));
+    }
+    // pressed
+    if let Ok(v) = obj.get::<_, bool>("pressed") {
+        s.push_str(&format!("[pressed={v}]"));
+    }
+    // selected
+    if let Ok(v) = obj.get::<_, bool>("selected") {
+        s.push_str(&format!("[selected={v}]"));
+    }
+
+    s
+}
+
 fn chain_selector(steps: &[LocatorStep], selector: String) -> Vec<LocatorStep> {
     let mut new_steps = steps.to_vec();
-    new_steps.push(LocatorStep {
+    new_steps.push(LocatorStep::Css {
         selector,
         index: None,
     });
@@ -45,37 +320,9 @@ fn chain_selector(steps: &[LocatorStep], selector: String) -> Vec<LocatorStep> {
 fn chain_nth(steps: &[LocatorStep], index: i32) -> Vec<LocatorStep> {
     let mut new_steps = steps.to_vec();
     if let Some(last) = new_steps.last_mut() {
-        if last.index.is_some() {
-            // Last step already has an index filter. We cannot merge multiple indices.
-            // We must add a new step that selects all children of the current set, then filters.
-            // However, our step structure assumes `selector` + `index`.
-            // Using ":scope" (if supported) or similar would be ideal.
-            // But strict Playwright semantics: `nth()` filters the result of the previous locator.
-            // If the previous locator step already has an index, it returned a single element (or specific set).
-            // `nth` on that result means filtering again.
-            // Since we can't represent "filter only" step, we add a step with empty selector?
-            // Or effectively "current set".
-            // Since our JS resolver does `root.querySelectorAll(step.selector)`,
-            // if we want to filter the current roots, we need a selector that returns the roots themselves.
-            // But `querySelectorAll` matches descendants.
-            // Actually, if we just update the index, we replace the previous filter. That is WRONG.
-            // `locator('div').nth(0).nth(0)`
-            // 1. `div` >> nth=0 -> returns [div#1]
-            // 2. `.nth(0)` on that -> returns [div#1] (first of the list)
-            // If we overwrite: `div` >> nth=0. Correct.
-            // `locator('div').nth(5).nth(0)` -> 6th div, then 1st of that list.
-            // If we overwrite: `div` >> nth=0 -> 1st div. WRONG.
-            // So we MUST NOT overwrite if index is present.
-            // We need to support chaining indices.
-            // For now, we fall back to overwriting (previous implementation behavior) but comment it.
-            // To fix properly, `LocatorStep` needs to support multiple ops or we need a ":scope" step?
-            // Actually, `chain_selector` adds a step.
-            // If we want to filter existing list, we can't easily do it with `querySelectorAll` unless using `:scope`?
-            // But `querySelectorAll` on an element searches descendants.
-            // Let's assume standard usage for now (selector -> nth -> selector -> nth).
-            last.index = Some(index);
-        } else {
-            last.index = Some(index);
+        match last {
+            LocatorStep::Css { index: idx, .. } => *idx = Some(index),
+            LocatorStep::Role { index: idx, .. } => *idx = Some(index),
         }
     }
     new_steps
@@ -85,8 +332,12 @@ fn debug_selector_string(steps: &[LocatorStep]) -> String {
     steps
         .iter()
         .map(|step| {
-            let mut s = step.selector.clone();
-            if let Some(idx) = step.index {
+            let (label, index) = match step {
+                LocatorStep::Css { selector, index } => (selector.clone(), *index),
+                LocatorStep::Role { role, index, .. } => (format!("role={role}"), *index),
+            };
+            let mut s = label;
+            if let Some(idx) = index {
                 if idx == 0 {
                     s.push_str(" >> nth=0");
                 } else if idx == -1 {
@@ -117,12 +368,17 @@ unsafe impl<'js> JsLifetime<'js> for Locator {
 
 impl Locator {
     pub(crate) fn new(inner: Arc<Mutex<PageInner>>, selector: String) -> Self {
-        Self {
-            inner,
-            steps: vec![LocatorStep {
+        let step = if let Some(role_step) = parse_role_selector(&selector) {
+            role_step
+        } else {
+            LocatorStep::Css {
                 selector,
                 index: None,
-            }],
+            }
+        };
+        Self {
+            inner,
+            steps: vec![step],
         }
     }
 }
@@ -140,6 +396,22 @@ impl Locator {
         Locator {
             inner: self.inner.clone(),
             steps: chain_selector(&self.steps, selector),
+        }
+    }
+
+    /// Create a new locator that finds elements by ARIA role relative to this locator.
+    #[qjs(rename = "getByRole")]
+    pub fn get_by_role(&self, role: String, options: Opt<Value<'_>>) -> Locator {
+        let selector = build_role_selector(&role, options.0);
+        let step = parse_role_selector(&selector).unwrap_or(LocatorStep::Css {
+            selector,
+            index: None,
+        });
+        let mut steps = self.steps.clone();
+        steps.push(step);
+        Locator {
+            inner: self.inner.clone(),
+            steps,
         }
     }
 
@@ -327,24 +599,137 @@ impl Locator {
         // This resolver logic walks the steps.
         // For each step, it queries within the previous roots.
         let resolver_js = r#"
+            const IMPLICIT_ROLE = (el) => {
+                const explicit = el.getAttribute('role');
+                if (explicit) return explicit.trim().split(/\s+/)[0].toLowerCase();
+                const tag = el.tagName.toLowerCase();
+                const type = (el.getAttribute('type') || 'text').toLowerCase();
+                if (tag === 'button') return 'button';
+                if (tag === 'a' && el.hasAttribute('href')) return 'link';
+                if (tag === 'input') {
+                    if (type === 'button' || type === 'submit' || type === 'reset' || type === 'image') return 'button';
+                    if (type === 'checkbox') return 'checkbox';
+                    if (type === 'radio') return 'radio';
+                    if (type === 'range') return 'slider';
+                    if (type === 'number') return 'spinbutton';
+                    if (type === 'search') return 'searchbox';
+                    return 'textbox';
+                }
+                if (tag === 'textarea') return 'textbox';
+                if (tag === 'select') return el.hasAttribute('multiple') ? 'listbox' : 'combobox';
+                if (tag === 'option') return 'option';
+                if (tag === 'img') return 'img';
+                if (/^h[1-6]$/.test(tag)) return 'heading';
+                if (tag === 'summary') return 'button';
+                if (tag === 'meter') return 'meter';
+                if (tag === 'progress') return 'progressbar';
+                if (tag === 'table') return 'table';
+                if (tag === 'tr') return 'row';
+                if (tag === 'td') return 'cell';
+                if (tag === 'th') return 'columnheader';
+                if (tag === 'li') return 'listitem';
+                if (tag === 'nav') return 'navigation';
+                if (tag === 'section' && (el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby'))) return 'region';
+                return '';
+            };
+
+            const ACCESSIBLE_NAME = (el) => {
+                const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+                if (ariaLabel) return ariaLabel;
+                const lbIds = (el.getAttribute('aria-labelledby') || '').trim().split(/\s+/).filter(Boolean);
+                if (lbIds.length) {
+                    const text = lbIds.map(id => { const r = document.getElementById(id); return r ? (r.innerText || r.textContent || '').trim() : ''; }).filter(Boolean).join(' ');
+                    if (text) return text;
+                }
+                if (el.labels && el.labels.length) {
+                    const text = Array.from(el.labels).map(l => (l.innerText || l.textContent || '').trim()).filter(Boolean).join(' ');
+                    if (text) return text;
+                }
+                const tag = el.tagName.toLowerCase();
+                if (['button','a','h1','h2','h3','h4','h5','h6','summary'].includes(tag))
+                    return (el.innerText || el.textContent || '').trim();
+                if (tag === 'img') return (el.getAttribute('alt') || '').trim();
+                return (el.getAttribute('placeholder') || el.getAttribute('title') || '').trim();
+            };
+
+            const IS_ARIA_HIDDEN = (el) => {
+                if (el.getAttribute('aria-hidden') === 'true') return true;
+                const s = window.getComputedStyle(el);
+                return s.display === 'none' || s.visibility === 'hidden';
+            };
+
             const resolveLocator = async (steps) => {
                 let roots = [document];
                 for (const step of steps) {
                     let nextRoots = [];
-                    for (const root of roots) {
-                        const els = root.querySelectorAll(step.selector);
-                        const arr = Array.from(els);
-                        if (step.index !== null) {
-                            // index applies to the list of matches for this step's selector
-                            // relative to the current root.
-                            // Handle negative index? Playwright .nth(-1) is last.
-                            let idx = step.index;
-                            if (idx < 0) idx = arr.length + idx;
-                            if (idx >= 0 && idx < arr.length) {
-                                nextRoots.push(arr[idx]);
+                    if (step.type === 'role') {
+                        for (const root of roots) {
+                            const candidates = Array.from(root === document ? root.querySelectorAll('*') : [root, ...root.querySelectorAll('*')]);
+                            const matched = candidates.filter(el => {
+                                if (IMPLICIT_ROLE(el) !== step.role) return false;
+                                if (!step.includeHidden && IS_ARIA_HIDDEN(el)) return false;
+                                if (step.name !== null && step.name !== undefined) {
+                                    const accName = ACCESSIBLE_NAME(el);
+                                    if (step.namePattern !== null && step.namePattern !== undefined) {
+                                        if (!new RegExp(step.namePattern, step.nameFlags || '').test(accName)) return false;
+                                    } else {
+                                        const a = accName.toLowerCase();
+                                        const b = step.name.toLowerCase();
+                                        if (step.exact ? a !== b : !a.includes(b)) return false;
+                                    }
+                                }
+                                if (step.checked !== null && step.checked !== undefined) {
+                                    const v = el.getAttribute('aria-checked');
+                                    const actual = v !== null ? v === 'true' : (typeof el.checked === 'boolean' ? el.checked : null);
+                                    if (actual !== step.checked) return false;
+                                }
+                                if (step.disabled !== null && step.disabled !== undefined) {
+                                    const dis = !!el.disabled || el.getAttribute('aria-disabled') === 'true';
+                                    if (dis !== step.disabled) return false;
+                                }
+                                if (step.expanded !== null && step.expanded !== undefined) {
+                                    const exp = el.getAttribute('aria-expanded');
+                                    if (exp === null || (exp === 'true') !== step.expanded) return false;
+                                }
+                                if (step.level !== null && step.level !== undefined) {
+                                    const m = el.tagName.match(/^H([1-6])$/i);
+                                    const lv = m ? parseInt(m[1]) : (el.getAttribute('aria-level') ? parseInt(el.getAttribute('aria-level')) : null);
+                                    if (lv !== step.level) return false;
+                                }
+                                if (step.pressed !== null && step.pressed !== undefined) {
+                                    const pr = el.getAttribute('aria-pressed');
+                                    if (pr === null || (pr === 'true') !== step.pressed) return false;
+                                }
+                                if (step.selected !== null && step.selected !== undefined) {
+                                    const v = el.getAttribute('aria-selected');
+                                    const actual = v !== null ? v === 'true' : (typeof el.selected === 'boolean' ? el.selected : null);
+                                    if (actual !== step.selected) return false;
+                                }
+                                return true;
+                            });
+                            if (step.index !== null && step.index !== undefined) {
+                                let idx = step.index;
+                                if (idx < 0) idx = matched.length + idx;
+                                if (idx >= 0 && idx < matched.length) {
+                                    nextRoots.push(matched[idx]);
+                                }
+                            } else {
+                                nextRoots.push(...matched);
                             }
-                        } else {
-                            nextRoots.push(...arr);
+                        }
+                    } else {
+                        for (const root of roots) {
+                            const els = root.querySelectorAll(step.selector);
+                            const arr = Array.from(els);
+                            if (step.index !== null) {
+                                let idx = step.index;
+                                if (idx < 0) idx = arr.length + idx;
+                                if (idx >= 0 && idx < arr.length) {
+                                    nextRoots.push(arr[idx]);
+                                }
+                            } else {
+                                nextRoots.push(...arr);
+                            }
                         }
                     }
                     roots = nextRoots;
@@ -492,60 +877,66 @@ mod tests {
 
     #[test]
     fn test_chain_selector() {
-        let initial = vec![LocatorStep {
+        let initial = vec![LocatorStep::Css {
             selector: "div".into(),
             index: None,
         }];
         let chained = chain_selector(&initial, "span".into());
 
         assert_eq!(chained.len(), 2);
-        assert_eq!(chained[0].selector, "div");
-        assert_eq!(chained[1].selector, "span");
-        assert_eq!(chained[1].index, None);
+        assert!(matches!(&chained[0], LocatorStep::Css { selector, .. } if selector == "div"));
+        assert!(matches!(&chained[1], LocatorStep::Css { selector, .. } if selector == "span"));
+        assert!(matches!(&chained[1], LocatorStep::Css { index: None, .. }));
     }
 
     #[test]
     fn test_chain_nth() {
-        let initial = vec![LocatorStep {
+        let initial = vec![LocatorStep::Css {
             selector: "li".into(),
             index: None,
         }];
         let chained = chain_nth(&initial, 2);
 
         assert_eq!(chained.len(), 1);
-        assert_eq!(chained[0].selector, "li");
-        assert_eq!(chained[0].index, Some(2));
+        assert!(matches!(&chained[0], LocatorStep::Css { selector, .. } if selector == "li"));
+        assert!(matches!(
+            &chained[0],
+            LocatorStep::Css { index: Some(2), .. }
+        ));
     }
 
     #[test]
     fn test_chain_nth_updates_existing_nth() {
         // Current implementation overwrites index (limitation logic documented in chain_nth)
-        let initial = vec![LocatorStep {
+        let initial = vec![LocatorStep::Css {
             selector: "li".into(),
             index: Some(0),
         }];
         let chained = chain_nth(&initial, 2);
 
         assert_eq!(chained.len(), 1);
-        assert_eq!(chained[0].index, Some(2));
+        assert!(matches!(
+            &chained[0],
+            LocatorStep::Css { index: Some(2), .. }
+        ));
     }
 
     #[test]
     fn test_debug_selector_string() {
         let steps = vec![
-            LocatorStep {
+            LocatorStep::Css {
                 selector: "div".into(),
                 index: None,
             },
-            LocatorStep {
+            LocatorStep::Css {
                 selector: "ul".into(),
                 index: Some(0),
             },
-            LocatorStep {
+            LocatorStep::Css {
                 selector: "li".into(),
                 index: Some(5),
             },
-            LocatorStep {
+            LocatorStep::Css {
                 selector: "span".into(),
                 index: Some(-1),
             },
@@ -553,5 +944,266 @@ mod tests {
 
         let s = debug_selector_string(&steps);
         assert_eq!(s, "div >> ul >> nth=0 >> li >> nth=5 >> span >> nth=-1");
+    }
+
+    #[test]
+    fn test_parse_role_selector_simple() {
+        let Some(step) = parse_role_selector("role=button") else {
+            panic!("expected role selector to parse");
+        };
+        assert!(matches!(&step, LocatorStep::Role { role, name: None, .. } if role == "button"));
+    }
+
+    #[test]
+    fn test_parse_role_selector_with_name() {
+        let Some(step) = parse_role_selector(r#"role=button[name="Log In"i]"#) else {
+            panic!("expected role selector to parse");
+        };
+        match step {
+            LocatorStep::Role {
+                role, name, exact, ..
+            } => {
+                assert_eq!(role, "button");
+                assert_eq!(name.as_deref(), Some("Log In"));
+                assert!(!exact);
+            }
+            _ => panic!("expected Role step"),
+        }
+    }
+
+    #[test]
+    fn test_parse_role_selector_exact() {
+        let Some(step) = parse_role_selector(r#"role=button[name="Submit"s]"#) else {
+            panic!("expected role selector to parse");
+        };
+        match step {
+            LocatorStep::Role { name, exact, .. } => {
+                assert_eq!(name.as_deref(), Some("Submit"));
+                assert!(exact);
+            }
+            _ => panic!("expected Role step"),
+        }
+    }
+
+    #[test]
+    fn test_parse_role_selector_regex() {
+        let Some(step) = parse_role_selector(r#"role=heading[name=/^Log/i]"#) else {
+            panic!("expected role selector to parse");
+        };
+        match step {
+            LocatorStep::Role {
+                role,
+                name_pattern,
+                name_flags,
+                ..
+            } => {
+                assert_eq!(role, "heading");
+                assert_eq!(name_pattern.as_deref(), Some("^Log"));
+                assert_eq!(name_flags.as_deref(), Some("i"));
+            }
+            _ => panic!("expected Role step"),
+        }
+    }
+
+    #[test]
+    fn test_parse_role_selector_with_level() {
+        let Some(step) = parse_role_selector("role=heading[level=2]") else {
+            panic!("expected role selector to parse");
+        };
+        match step {
+            LocatorStep::Role { role, level, .. } => {
+                assert_eq!(role, "heading");
+                assert_eq!(level, Some(2));
+            }
+            _ => panic!("expected Role step"),
+        }
+    }
+
+    #[test]
+    fn test_parse_role_selector_not_role() {
+        assert!(parse_role_selector("button").is_none());
+        assert!(parse_role_selector("[role=button]").is_none());
+    }
+
+    #[test]
+    fn test_parse_role_selector_checked() {
+        let Some(step) = parse_role_selector("role=checkbox[checked=true]") else {
+            panic!("expected role selector to parse");
+        };
+        match step {
+            LocatorStep::Role { checked, .. } => {
+                assert_eq!(checked, Some(true));
+            }
+            _ => panic!("expected Role step"),
+        }
+    }
+
+    #[test]
+    fn test_parse_role_selector_multiple_attrs() {
+        let Some(step) =
+            parse_role_selector(r#"role=checkbox[name="Accept"i][checked=true][disabled=false]"#)
+        else {
+            panic!("expected role selector to parse");
+        };
+        match step {
+            LocatorStep::Role {
+                role,
+                name,
+                exact,
+                checked,
+                disabled,
+                ..
+            } => {
+                assert_eq!(role, "checkbox");
+                assert_eq!(name.as_deref(), Some("Accept"));
+                assert!(!exact);
+                assert_eq!(checked, Some(true));
+                assert_eq!(disabled, Some(false));
+            }
+            _ => panic!("expected Role step"),
+        }
+    }
+
+    #[test]
+    fn test_parse_role_selector_bool_attrs() {
+        let Some(step) = parse_role_selector(
+            "role=button[disabled=true][expanded=false][pressed=true][selected=false]",
+        ) else {
+            panic!("expected role selector to parse");
+        };
+        match step {
+            LocatorStep::Role {
+                disabled,
+                expanded,
+                pressed,
+                selected,
+                ..
+            } => {
+                assert_eq!(disabled, Some(true));
+                assert_eq!(expanded, Some(false));
+                assert_eq!(pressed, Some(true));
+                assert_eq!(selected, Some(false));
+            }
+            _ => panic!("expected Role step"),
+        }
+    }
+
+    #[test]
+    fn test_parse_role_selector_include_hidden() {
+        let Some(step) = parse_role_selector("role=button[include-hidden=true]") else {
+            panic!("expected role selector to parse");
+        };
+        match step {
+            LocatorStep::Role { include_hidden, .. } => {
+                assert!(include_hidden);
+            }
+            _ => panic!("expected Role step"),
+        }
+    }
+
+    #[test]
+    fn test_parse_role_selector_name_with_escaped_quote() {
+        let Some(step) = parse_role_selector(r#"role=button[name="Say \"hi\""i]"#) else {
+            panic!("expected role selector to parse");
+        };
+        match step {
+            LocatorStep::Role { name, .. } => {
+                assert_eq!(name.as_deref(), Some(r#"Say "hi""#));
+            }
+            _ => panic!("expected Role step"),
+        }
+    }
+
+    #[test]
+    fn test_build_role_selector_no_options() {
+        let s = build_role_selector("button", None);
+        assert_eq!(s, "role=button");
+        // Should round-trip through parse
+        let Some(step) = parse_role_selector(&s) else {
+            panic!("expected role selector to parse");
+        };
+        assert!(matches!(&step, LocatorStep::Role { role, name: None, .. } if role == "button"));
+    }
+
+    #[test]
+    fn test_chain_nth_on_role_step() {
+        let initial = vec![LocatorStep::Role {
+            role: "button".into(),
+            name: None,
+            name_pattern: None,
+            name_flags: None,
+            exact: false,
+            checked: None,
+            disabled: None,
+            expanded: None,
+            include_hidden: false,
+            level: None,
+            pressed: None,
+            selected: None,
+            index: None,
+        }];
+        let chained = chain_nth(&initial, 1);
+        assert!(matches!(
+            &chained[0],
+            LocatorStep::Role { index: Some(1), .. }
+        ));
+    }
+
+    #[test]
+    fn test_debug_selector_string_with_role_step() {
+        let steps = vec![
+            LocatorStep::Css {
+                selector: "form".into(),
+                index: None,
+            },
+            LocatorStep::Role {
+                role: "textbox".into(),
+                name: None,
+                name_pattern: None,
+                name_flags: None,
+                exact: false,
+                checked: None,
+                disabled: None,
+                expanded: None,
+                include_hidden: false,
+                level: None,
+                pressed: None,
+                selected: None,
+                index: Some(0),
+            },
+        ];
+        let s = debug_selector_string(&steps);
+        assert_eq!(s, "form >> role=textbox >> nth=0");
+    }
+
+    #[test]
+    fn test_locator_new_role_selector() {
+        // Verify Locator::new parses role= selectors into a Role step
+        // (we test serialization instead of constructing a real Locator since that requires Arc<Mutex<PageInner>>)
+        let Some(step) = parse_role_selector("role=textbox[name=\"Email\"i]") else {
+            panic!("expected role selector to parse");
+        };
+        let json = match serde_json::to_string(&step) {
+            Ok(json) => json,
+            Err(err) => panic!("failed to serialize role step: {err}"),
+        };
+        assert!(json.contains("\"type\":\"role\""));
+        assert!(json.contains("\"role\":\"textbox\""));
+        assert!(json.contains("\"name\":\"Email\""));
+    }
+
+    #[test]
+    fn test_css_step_serialization() {
+        let step = LocatorStep::Css {
+            selector: "button.primary".into(),
+            index: Some(0),
+        };
+        let json = match serde_json::to_string(&step) {
+            Ok(json) => json,
+            Err(err) => panic!("failed to serialize css step: {err}"),
+        };
+        assert!(json.contains("\"type\":\"css\""));
+        assert!(json.contains("\"selector\":\"button.primary\""));
+        assert!(json.contains("\"index\":0"));
     }
 }
