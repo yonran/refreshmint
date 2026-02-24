@@ -1271,6 +1271,11 @@ impl PageApi {
     /// Type text into an element, character by character.
     #[qjs(rename = "type")]
     pub async fn js_type(&self, selector: String, text: String) -> JsResult<()> {
+        let actual_text = {
+            let inner = self.inner.lock().await;
+            resolve_secret_if_applicable(&inner, &text).await?
+        };
+
         let inner = self.inner.lock().await;
         if let Some(frame_id) = &inner.target_frame_id {
             // Frame context: focus element via JS, then dispatch CDP key events
@@ -1302,7 +1307,7 @@ impl PageApi {
                 .map_err(|e| js_err(format!("type failed: {e}")))?;
             inner
                 .page
-                .type_str(&text)
+                .type_str(&actual_text)
                 .await
                 .map_err(|e| js_err(format!("type failed: {e}")))?;
         } else {
@@ -1320,7 +1325,7 @@ impl PageApi {
                 .await
                 .map_err(|e| js_err(format!("type click failed: {e}")))?;
             element
-                .type_str(&text)
+                .type_str(&actual_text)
                 .await
                 .map_err(|e| js_err(format!("type failed: {e}")))?;
         }
