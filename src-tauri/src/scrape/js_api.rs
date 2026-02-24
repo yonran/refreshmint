@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rquickjs::class::Trace;
-use rquickjs::{function::Opt, Ctx, JsLifetime, Result as JsResult};
+use rquickjs::{function::Opt, Class, Ctx, IntoJs, JsLifetime, Result as JsResult, Value};
 use tokio::sync::Mutex;
 
 use super::locator::{build_role_selector, Locator};
@@ -210,6 +210,383 @@ impl PageApi {
 impl BrowserApi {
     pub fn new(page_inner: Arc<Mutex<PageInner>>) -> Self {
         Self { page_inner }
+    }
+}
+
+/// A reference to a non-serializable JavaScript object in the browser.
+///
+/// Returned by `page.evaluate()` when the result cannot be serialised by value
+/// (e.g. functions, symbols, complex circular graphs).  Matches the Playwright
+/// `JSHandle` API.
+#[rquickjs::class(rename = "JSHandle")]
+#[derive(Trace)]
+pub struct JsHandle {
+    #[qjs(skip_trace)]
+    object_id: String,
+    #[qjs(skip_trace)]
+    description: String,
+    #[qjs(skip_trace)]
+    page_inner: Arc<Mutex<PageInner>>,
+}
+
+// Safety: JsHandle only contains Arc<Mutex<...>> and String which are 'static.
+#[allow(unsafe_code)]
+unsafe impl<'js> JsLifetime<'js> for JsHandle {
+    type Changed<'to> = JsHandle;
+}
+
+#[rquickjs::methods]
+impl JsHandle {
+    #[qjs(rename = "toString")]
+    pub fn to_string_repr(&self) -> String {
+        format!("JSHandle@{}", self.description)
+    }
+
+    pub async fn dispose(&self) -> JsResult<()> {
+        use chromiumoxide::cdp::js_protocol::runtime::ReleaseObjectParams;
+        let inner = self.page_inner.lock().await;
+        inner
+            .page
+            .execute(ReleaseObjectParams::new(self.object_id.clone()))
+            .await
+            .map_err(|e| js_err(format!("JSHandle.dispose failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Return the serialised value of this handle as a JSON string.
+    ///
+    /// Equivalent to Playwright's `jsHandle.jsonValue()`, but returns a JSON
+    /// string rather than a typed value (callers can `JSON.parse()` if needed).
+    #[qjs(rename = "jsonValue")]
+    pub async fn json_value(&self) -> JsResult<String> {
+        let inner = self.page_inner.lock().await;
+        let result = call_function_on_handle(
+            &inner.page,
+            &self.object_id,
+            "function() { return this; }",
+            &[],
+            true,
+        )
+        .await
+        .map_err(|e| js_err(format!("JSHandle.jsonValue failed: {e}")))?;
+        let mut text =
+            stringify_evaluation_result(result.value.as_ref(), result.description.as_deref());
+        scrub_known_secrets(&inner.secret_store, &mut text);
+        Ok(text)
+    }
+}
+
+/// A reference to a DOM element in the browser.
+///
+/// Returned by `page.evaluate()` when the CDP result is a DOM node,
+/// and by `page.$()`, `page.$$()`, and `elementHandle.$()`.
+/// Matches the Playwright `ElementHandle` API (subset).
+#[rquickjs::class(rename = "ElementHandle")]
+#[derive(Trace)]
+pub struct ElementHandle {
+    #[qjs(skip_trace)]
+    object_id: String,
+    #[qjs(skip_trace)]
+    description: String,
+    #[qjs(skip_trace)]
+    page_inner: Arc<Mutex<PageInner>>,
+}
+
+// Safety: ElementHandle only contains Arc<Mutex<...>> and String which are 'static.
+#[allow(unsafe_code)]
+unsafe impl<'js> JsLifetime<'js> for ElementHandle {
+    type Changed<'to> = ElementHandle;
+}
+
+#[rquickjs::methods]
+impl ElementHandle {
+    #[qjs(rename = "toString")]
+    pub fn to_string_repr(&self) -> String {
+        format!("ElementHandle@{}", self.description)
+    }
+
+    pub async fn dispose(&self) -> JsResult<()> {
+        use chromiumoxide::cdp::js_protocol::runtime::ReleaseObjectParams;
+        let inner = self.page_inner.lock().await;
+        inner
+            .page
+            .execute(ReleaseObjectParams::new(self.object_id.clone()))
+            .await
+            .map_err(|e| js_err(format!("ElementHandle.dispose failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Return the element's `outerHTML` as a string.
+    #[qjs(rename = "jsonValue")]
+    pub async fn json_value(&self) -> JsResult<String> {
+        let inner = self.page_inner.lock().await;
+        let result = call_function_on_handle(
+            &inner.page,
+            &self.object_id,
+            "function() { return this.outerHTML !== undefined ? this.outerHTML : this.textContent; }",
+            &[],
+            true,
+        )
+        .await
+        .map_err(|e| js_err(format!("ElementHandle.jsonValue failed: {e}")))?;
+        let mut text =
+            stringify_evaluation_result(result.value.as_ref(), result.description.as_deref());
+        scrub_known_secrets(&inner.secret_store, &mut text);
+        Ok(text)
+    }
+
+    pub async fn click(&self) -> JsResult<()> {
+        let inner = self.page_inner.lock().await;
+        call_function_on_handle(
+            &inner.page,
+            &self.object_id,
+            r#"function() {
+                if (!this.isConnected) throw new Error('click: element is detached');
+                this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+                this.click();
+            }"#,
+            &[],
+            true,
+        )
+        .await
+        .map_err(|e| js_err(format!("ElementHandle.click failed: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn fill(&self, value: String) -> JsResult<()> {
+        use chromiumoxide::cdp::js_protocol::runtime::CallArgument;
+        let actual_value = {
+            let inner = self.page_inner.lock().await;
+            resolve_secret_if_applicable(&inner, &value).await?
+        };
+        let inner = self.page_inner.lock().await;
+        let value_arg = CallArgument {
+            value: Some(serde_json::Value::String(actual_value)),
+            unserializable_value: None,
+            object_id: None,
+        };
+        call_function_on_handle(
+            &inner.page,
+            &self.object_id,
+            r#"function(v) {
+                if (!this.isConnected) throw new Error('fill: element is detached');
+                this.focus();
+                this.value = v;
+                this.dispatchEvent(new Event('input', { bubbles: true }));
+                this.dispatchEvent(new Event('change', { bubbles: true }));
+            }"#,
+            &[value_arg],
+            true,
+        )
+        .await
+        .map_err(|e| js_err(format!("ElementHandle.fill failed: {e}")))?;
+        Ok(())
+    }
+
+    #[qjs(rename = "textContent")]
+    pub async fn text_content(&self) -> JsResult<Option<String>> {
+        let inner = self.page_inner.lock().await;
+        let result = call_function_on_handle(
+            &inner.page,
+            &self.object_id,
+            "function() { return this.textContent; }",
+            &[],
+            true,
+        )
+        .await
+        .map_err(|e| js_err(format!("ElementHandle.textContent failed: {e}")))?;
+        Ok(result
+            .value
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string))
+    }
+
+    #[qjs(rename = "innerText")]
+    pub async fn inner_text(&self) -> JsResult<Option<String>> {
+        let inner = self.page_inner.lock().await;
+        let result = call_function_on_handle(
+            &inner.page,
+            &self.object_id,
+            "function() { return 'innerText' in this ? this.innerText : this.textContent; }",
+            &[],
+            true,
+        )
+        .await
+        .map_err(|e| js_err(format!("ElementHandle.innerText failed: {e}")))?;
+        Ok(result
+            .value
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string))
+    }
+
+    #[qjs(rename = "getAttribute")]
+    pub async fn get_attribute(&self, name: String) -> JsResult<Option<String>> {
+        use chromiumoxide::cdp::js_protocol::runtime::CallArgument;
+        let inner = self.page_inner.lock().await;
+        let name_arg = CallArgument {
+            value: Some(serde_json::Value::String(name)),
+            unserializable_value: None,
+            object_id: None,
+        };
+        let result = call_function_on_handle(
+            &inner.page,
+            &self.object_id,
+            "function(n) { return this.getAttribute(n); }",
+            &[name_arg],
+            true,
+        )
+        .await
+        .map_err(|e| js_err(format!("ElementHandle.getAttribute failed: {e}")))?;
+        Ok(result
+            .value
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string))
+    }
+
+    #[qjs(rename = "isVisible")]
+    pub async fn is_visible(&self) -> JsResult<bool> {
+        let inner = self.page_inner.lock().await;
+        let result = call_function_on_handle(
+            &inner.page,
+            &self.object_id,
+            r#"function() {
+                if (!this.isConnected) return false;
+                const rect = this.getBoundingClientRect();
+                if (rect.width === 0 && rect.height === 0) return false;
+                const style = window.getComputedStyle(this);
+                return style.display !== 'none'
+                    && style.visibility !== 'hidden'
+                    && style.opacity !== '0';
+            }"#,
+            &[],
+            true,
+        )
+        .await
+        .map_err(|e| js_err(format!("ElementHandle.isVisible failed: {e}")))?;
+        Ok(result
+            .value
+            .as_ref()
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false))
+    }
+
+    /// Return the first descendant element matching `selector`, or `null`.
+    #[qjs(rename = "$")]
+    pub async fn query_selector(&self, selector: String) -> JsResult<Option<ElementHandle>> {
+        use chromiumoxide::cdp::js_protocol::runtime::{CallArgument, RemoteObjectSubtype};
+        let inner = self.page_inner.lock().await;
+        let sel_arg = CallArgument {
+            value: Some(serde_json::Value::String(selector.clone())),
+            unserializable_value: None,
+            object_id: None,
+        };
+        let result = call_function_on_handle(
+            &inner.page,
+            &self.object_id,
+            "function(sel) { return this.querySelector(sel); }",
+            &[sel_arg],
+            false,
+        )
+        .await
+        .map_err(|e| js_err(format!("ElementHandle.$({selector}) failed: {e}")))?;
+        let Some(object_id) = result.object_id else {
+            return Ok(None);
+        };
+        if result.subtype == Some(RemoteObjectSubtype::Null) {
+            return Ok(None);
+        }
+        Ok(Some(ElementHandle {
+            object_id: object_id.as_ref().to_string(),
+            description: result.description.unwrap_or_default(),
+            page_inner: self.page_inner.clone(),
+        }))
+    }
+
+    /// Return all descendant elements matching `selector`.
+    #[qjs(rename = "$$")]
+    pub async fn query_selector_all(&self, selector: String) -> JsResult<Vec<ElementHandle>> {
+        use chromiumoxide::cdp::js_protocol::runtime::CallArgument;
+        let inner = self.page_inner.lock().await;
+        let sel_arg = CallArgument {
+            value: Some(serde_json::Value::String(selector.clone())),
+            unserializable_value: None,
+            object_id: None,
+        };
+        let array_result = call_function_on_handle(
+            &inner.page,
+            &self.object_id,
+            "function(sel) { return Array.from(this.querySelectorAll(sel)); }",
+            &[sel_arg],
+            false,
+        )
+        .await
+        .map_err(|e| js_err(format!("ElementHandle.$$({selector}) failed: {e}")))?;
+        let array_id = match array_result.object_id {
+            Some(id) => id,
+            None => return Ok(vec![]),
+        };
+        collect_element_handles_from_array(&inner.page, array_id, self.page_inner.clone())
+            .await
+            .map_err(|e| js_err(format!("ElementHandle.$$({selector}) collect failed: {e}")))
+    }
+}
+
+/// Return value from `evaluate` / `evaluateHandle` / `callFunction`.
+///
+/// Serialisable primitives and JSON-safe objects are returned as their native
+/// JS types; non-serialisable values (functions, DOM nodes, circular graphs,
+/// …) are returned as `JSHandle` or `ElementHandle` instances.
+pub enum JsEvalResult {
+    /// A JS string.  Secret values have been scrubbed to `[REDACTED]`.
+    Str(String),
+    /// A JSON literal (number / boolean / null / array / plain object).
+    /// Stored as a JSON string so it can be parsed via `ctx.eval()`.
+    Json(String),
+    /// A special numeric literal that JSON cannot represent: `NaN`, `Infinity`,
+    /// `-Infinity`, or `-0`.
+    Unserializable(String),
+    /// A non-DOM remote object (function, symbol, Map, …).
+    JsHandleResult(JsHandle),
+    /// A DOM element remote object.
+    ElementHandleResult(ElementHandle),
+    /// `undefined`.
+    Undefined,
+}
+
+impl JsEvalResult {
+    /// Convert to the legacy string representation used by internal helpers
+    /// (`eval_string`, `eval_bool`, `waitForSelector`, …).
+    pub(crate) fn into_string_repr(self) -> String {
+        match self {
+            JsEvalResult::Str(s) => s,
+            JsEvalResult::Json(s) => s,
+            JsEvalResult::Unserializable(s) => s,
+            JsEvalResult::JsHandleResult(h) => format!("JSHandle@{}", h.description),
+            JsEvalResult::ElementHandleResult(h) => {
+                format!("ElementHandle@{}", h.description)
+            }
+            JsEvalResult::Undefined => "undefined".to_string(),
+        }
+    }
+}
+
+impl<'js> IntoJs<'js> for JsEvalResult {
+    fn into_js(self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        match self {
+            JsEvalResult::Str(s) => rquickjs::String::from_str(ctx.clone(), &s).map(Value::from),
+            JsEvalResult::Json(s) => ctx.eval(s.into_bytes()),
+            JsEvalResult::Unserializable(s) => ctx.eval(s.into_bytes()),
+            JsEvalResult::JsHandleResult(h) => {
+                Class::instance(ctx.clone(), h).map(|c| c.into_value())
+            }
+            JsEvalResult::ElementHandleResult(h) => {
+                Class::instance(ctx.clone(), h).map(|c| c.into_value())
+            }
+            JsEvalResult::Undefined => Ok(Value::new_undefined(ctx.clone())),
+        }
     }
 }
 
@@ -462,7 +839,7 @@ impl PageApi {
 
         loop {
             let res = self
-                .evaluate_in_active_context(probe.clone())
+                .eval_string(probe.clone(), "waitForSelector")
                 .await
                 .map_err(|e| js_err(format!("waitForSelector failed: {e}")))?;
             if res == "true" {
@@ -1111,20 +1488,21 @@ impl PageApi {
         &self,
         frame_ref: String,
         expression: String,
-    ) -> JsResult<String> {
+    ) -> JsResult<JsEvalResult> {
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
         let inner = self.inner.lock().await;
+        let page_inner_arc = self.inner.clone();
         let frame_id = resolve_frame_id(&inner.page, &frame_ref)
             .await
             .map_err(|e| js_err(format!("frameEvaluate failed: {e}")))?;
         let context_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
             .await
             .map_err(|e| js_err(format!("frameEvaluate failed: {e}")))?;
-        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
         let eval = EvaluateParams::builder()
             .expression(expression)
             .context_id(context_id)
             .await_promise(true)
-            .return_by_value(true)
+            .return_by_value(false)
             .build()
             .map_err(|e| js_err(format!("frameEvaluate invalid expression params: {e}")))?;
         let result = inner
@@ -1132,10 +1510,11 @@ impl PageApi {
             .evaluate_expression(eval)
             .await
             .map_err(|e| js_err(format!("frameEvaluate failed: {e}")))?;
-        let mut text =
-            stringify_evaluation_result(result.value(), result.object().description.as_deref());
-        scrub_known_secrets(&inner.secret_store, &mut text);
-        Ok(text)
+        let mut eval_result = remote_object_to_eval_result(result.object().clone(), page_inner_arc);
+        if let JsEvalResult::Str(ref mut s) = eval_result {
+            scrub_known_secrets(&inner.secret_store, s);
+        }
+        Ok(eval_result)
     }
 
     /// Fill a value in a frame execution context.
@@ -1379,10 +1758,186 @@ impl PageApi {
 
     /// Evaluate a JavaScript expression in the browser context.
     ///
-    /// The return value is scrubbed: all known secret values are replaced
-    /// with `[REDACTED]`.
-    pub async fn evaluate(&self, expression: String) -> JsResult<String> {
+    /// Returns the result as a native JS value: number, boolean, string, object,
+    /// array, `null`, or `undefined` for serialisable values; a `JSHandle` or
+    /// `ElementHandle` for non-serialisable ones (functions, DOM nodes, …).
+    ///
+    /// Secret string values in the result are scrubbed to `[REDACTED]`.
+    pub async fn evaluate(&self, expression: String) -> JsResult<JsEvalResult> {
         self.evaluate_in_active_context(expression).await
+    }
+
+    /// Like `evaluate`, but always returns a handle regardless of whether the
+    /// value is serialisable.  Kept for Playwright API compatibility.
+    #[qjs(rename = "evaluateHandle")]
+    pub async fn js_evaluate_handle(&self, expression: String) -> JsResult<JsEvalResult> {
+        self.evaluate_in_active_context(expression).await
+    }
+
+    /// Call a JS function expression with the given arguments.
+    ///
+    /// Arguments may be primitive values **or** `JSHandle` / `ElementHandle`
+    /// instances returned by a previous `evaluate` call.  Handles are passed
+    /// directly to the browser by `objectId` without serialisation, so this
+    /// works even for non-serialisable values.
+    ///
+    /// ```js
+    /// const el = await page.evaluate("document.querySelector('#submit')");
+    /// const tag = await page.callFunction("el => el.tagName", el);
+    /// ```
+    #[qjs(rename = "callFunction")]
+    pub async fn js_call_function(
+        &self,
+        fn_expression: String,
+        args: Opt<rquickjs::Value<'_>>,
+    ) -> JsResult<JsEvalResult> {
+        use chromiumoxide::cdp::js_protocol::runtime::{
+            CallArgument, CallFunctionOnParams, ExecutionContextId,
+        };
+
+        // Build the argument list, extracting objectIds from any handles.
+        let call_args: Vec<CallArgument> = if let Some(arg_val) = args.0 {
+            js_value_to_call_args(&arg_val).map_err(|e| js_err(format!("callFunction: {e}")))?
+        } else {
+            Vec::new()
+        };
+
+        let inner = self.inner.lock().await;
+        let page_inner_arc = self.inner.clone();
+
+        // Obtain the execution context id for the active context.
+        let context_id: ExecutionContextId = if let Some(frame_id) = &inner.target_frame_id {
+            wait_for_frame_execution_context(&inner.page, frame_id.clone())
+                .await
+                .map_err(|e| js_err(format!("callFunction failed to get frame context: {e}")))?
+        } else {
+            // Main frame: get the main frame id and then its context.
+            let main_frame = inner
+                .page
+                .mainframe()
+                .await
+                .map_err(|e| js_err(format!("callFunction failed to get main frame: {e}")))?
+                .ok_or_else(|| js_err("callFunction: main frame not available".to_string()))?;
+            wait_for_frame_execution_context(&inner.page, main_frame)
+                .await
+                .map_err(|e| js_err(format!("callFunction failed to get main context: {e}")))?
+        };
+
+        let mut builder = CallFunctionOnParams::builder()
+            .function_declaration(fn_expression)
+            .execution_context_id(context_id)
+            .return_by_value(false)
+            .await_promise(true);
+        for arg in &call_args {
+            builder = builder.argument(arg.clone());
+        }
+        let params = builder
+            .build()
+            .map_err(|e| js_err(format!("callFunction build failed: {e}")))?;
+        let response = inner
+            .page
+            .execute(params)
+            .await
+            .map_err(|e| js_err(format!("callFunction CDP failed: {e}")))?;
+        if let Some(exc) = &response.result.exception_details {
+            let msg = exc
+                .exception
+                .as_ref()
+                .and_then(|o| o.description.as_deref())
+                .unwrap_or(&exc.text);
+            return Err(js_err(msg.to_string()));
+        }
+        let mut eval_result = remote_object_to_eval_result(response.result.result, page_inner_arc);
+        if let JsEvalResult::Str(ref mut s) = eval_result {
+            scrub_known_secrets(&inner.secret_store, s);
+        }
+        Ok(eval_result)
+    }
+
+    /// Return the first element in the document matching `selector`, or `null`.
+    ///
+    /// Equivalent to `document.querySelector(selector)`.
+    #[qjs(rename = "$")]
+    pub async fn js_query_selector(&self, selector: String) -> JsResult<Option<ElementHandle>> {
+        use chromiumoxide::cdp::js_protocol::runtime::RemoteObjectSubtype;
+        let selector_json = serde_json::to_string(&selector).unwrap_or_else(|_| "\"\"".to_string());
+        let js = format!("document.querySelector({selector_json})");
+        let result = self.evaluate_in_active_context(js).await?;
+        match result {
+            JsEvalResult::ElementHandleResult(eh) => Ok(Some(eh)),
+            JsEvalResult::Json(ref s) if s == "null" => Ok(None),
+            // querySelector returns null (subtype "null") when nothing found.
+            // remote_object_to_eval_result maps that to Json("null").
+            _ => {
+                // If the result was a handle with Node subtype it's already
+                // caught above; anything else means no match.
+                let _ = RemoteObjectSubtype::Null; // keep import happy
+                Ok(None)
+            }
+        }
+    }
+
+    /// Return all elements in the document matching `selector`.
+    ///
+    /// Equivalent to `Array.from(document.querySelectorAll(selector))`.
+    #[qjs(rename = "$$")]
+    pub async fn js_query_selector_all(&self, selector: String) -> JsResult<Vec<ElementHandle>> {
+        use chromiumoxide::cdp::js_protocol::runtime::{CallArgument, EvaluateParams};
+        let inner = self.inner.lock().await;
+        let page_inner_arc = self.inner.clone();
+
+        // Evaluate `Array.from(document.querySelectorAll(sel))` with
+        // returnByValue:false so we get the array as a remote object.
+        let sel_json = serde_json::to_string(&selector).unwrap_or_else(|_| "\"\"".to_string());
+        let expr = format!("Array.from(document.querySelectorAll({sel_json}))");
+
+        let (array_obj, context_id_opt) = if let Some(frame_id) = &inner.target_frame_id {
+            let ctx_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
+                .await
+                .map_err(|e| js_err(format!("$$({selector}) frame context: {e}")))?;
+            let eval = EvaluateParams::builder()
+                .expression(expr)
+                .context_id(ctx_id)
+                .await_promise(false)
+                .return_by_value(false)
+                .build()
+                .map_err(|e| js_err(format!("$$({selector}) params: {e}")))?;
+            let res = inner
+                .page
+                .evaluate_expression(eval)
+                .await
+                .map_err(|e| js_err(format!("$$({selector}) eval: {e}")))?;
+            (res.object().clone(), Some(ctx_id))
+        } else {
+            let eval = EvaluateParams::builder()
+                .expression(expr)
+                .await_promise(false)
+                .return_by_value(false)
+                .build()
+                .map_err(|e| js_err(format!("$$({selector}) params: {e}")))?;
+            let res = inner
+                .page
+                .evaluate_expression(eval)
+                .await
+                .map_err(|e| js_err(format!("$$({selector}) eval: {e}")))?;
+            (res.object().clone(), None)
+        };
+        let _ = (
+            CallArgument {
+                value: None,
+                unserializable_value: None,
+                object_id: None,
+            },
+            context_id_opt,
+        );
+
+        let array_id = match array_obj.object_id {
+            Some(id) => id,
+            None => return Ok(vec![]),
+        };
+        collect_element_handles_from_array(&inner.page, array_id, page_inner_arc)
+            .await
+            .map_err(|e| js_err(format!("$$({selector}) collect: {e}")))
     }
 
     /// Take a screenshot and return the PNG bytes as a base64 string.
@@ -1543,19 +2098,23 @@ impl BrowserApi {
 
 impl PageApi {
     /// Evaluate `expression` in the active frame context (or the main frame if none is set).
-    /// Secret values in the result are scrubbed.
-    async fn evaluate_in_active_context(&self, expression: String) -> JsResult<String> {
+    ///
+    /// Uses `returnByValue: false` so non-serialisable results (DOM nodes, functions, …)
+    /// come back as remote-object handles rather than `undefined`.
+    /// Secret string values in the result are scrubbed to `[REDACTED]`.
+    async fn evaluate_in_active_context(&self, expression: String) -> JsResult<JsEvalResult> {
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
         let inner = self.inner.lock().await;
+        let page_inner_arc = self.inner.clone();
         if let Some(frame_id) = &inner.target_frame_id {
             let context_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
                 .await
                 .map_err(|e| js_err(format!("failed to get frame context: {e}")))?;
-            use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
             let eval = EvaluateParams::builder()
                 .expression(expression)
                 .context_id(context_id)
                 .await_promise(true)
-                .return_by_value(true)
+                .return_by_value(false)
                 .build()
                 .map_err(|e| js_err(format!("evaluate invalid params: {e}")))?;
             let result = inner
@@ -1563,19 +2122,30 @@ impl PageApi {
                 .evaluate_expression(eval)
                 .await
                 .map_err(|e| js_err(format!("evaluate failed: {e}")))?;
-            let mut text =
-                stringify_evaluation_result(result.value(), result.object().description.as_deref());
-            scrub_known_secrets(&inner.secret_store, &mut text);
-            Ok(text)
+            let mut eval_result =
+                remote_object_to_eval_result(result.object().clone(), page_inner_arc);
+            if let JsEvalResult::Str(ref mut s) = eval_result {
+                scrub_known_secrets(&inner.secret_store, s);
+            }
+            Ok(eval_result)
         } else {
+            let eval = EvaluateParams::builder()
+                .expression(expression)
+                .await_promise(true)
+                .return_by_value(false)
+                .build()
+                .map_err(|e| js_err(format!("evaluate invalid params: {e}")))?;
             let result = inner
                 .page
-                .evaluate(expression)
+                .evaluate_expression(eval)
                 .await
                 .map_err(|e| js_err(format!("evaluate failed: {e}")))?;
-            let text =
-                stringify_evaluation_result(result.value(), result.object().description.as_deref());
-            Ok(text)
+            let mut eval_result =
+                remote_object_to_eval_result(result.object().clone(), page_inner_arc);
+            if let JsEvalResult::Str(ref mut s) = eval_result {
+                scrub_known_secrets(&inner.secret_store, s);
+            }
+            Ok(eval_result)
         }
     }
 
@@ -1791,11 +2361,12 @@ impl PageApi {
     }
 
     async fn eval_string(&self, expression: String, _method_name: &str) -> JsResult<String> {
-        self.evaluate_in_active_context(expression).await
+        let result = self.evaluate_in_active_context(expression).await?;
+        Ok(result.into_string_repr())
     }
 
     async fn eval_bool(&self, expression: String, _method_name: &str) -> JsResult<bool> {
-        let text = self.evaluate_in_active_context(expression).await?;
+        let text = self.eval_string(expression, _method_name).await?;
         Ok(text == "true")
     }
 
@@ -1920,6 +2491,144 @@ async fn build_page_api_from_template(
         target_frame_id: None,
     };
     PageApi::new(Arc::new(Mutex::new(page_inner)))
+}
+
+/// Call a JS function on a CDP remote object by `objectId`.
+///
+/// If `return_by_value` is `true`, the result is serialised to JSON and
+/// returned in `RemoteObject.value`.  If `false`, the result is a new remote
+/// object (useful for chaining handles).
+async fn call_function_on_handle(
+    page: &chromiumoxide::Page,
+    object_id: &str,
+    function_declaration: &str,
+    args: &[chromiumoxide::cdp::js_protocol::runtime::CallArgument],
+    return_by_value: bool,
+) -> Result<chromiumoxide::cdp::js_protocol::runtime::RemoteObject, String> {
+    use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+    let mut builder = CallFunctionOnParams::builder()
+        .function_declaration(function_declaration)
+        .object_id(object_id.to_string())
+        .return_by_value(return_by_value)
+        .await_promise(true);
+    for arg in args {
+        builder = builder.argument(arg.clone());
+    }
+    let params = builder
+        .build()
+        .map_err(|e| format!("callFunctionOn build failed: {e}"))?;
+    let response = page
+        .execute(params)
+        .await
+        .map_err(|e| format!("callFunctionOn CDP failed: {e}"))?;
+    if let Some(exc) = &response.result.exception_details {
+        let msg = exc
+            .exception
+            .as_ref()
+            .and_then(|o| o.description.as_deref())
+            .unwrap_or(&exc.text);
+        return Err(msg.to_string());
+    }
+    Ok(response.result.result)
+}
+
+/// Enumerate an array handle returned by CDP and collect its DOM-element items
+/// as `ElementHandle` instances.
+///
+/// Uses `Runtime.getProperties` with `ownProperties: true` to get
+/// integer-indexed properties, which each correspond to an array element.
+async fn collect_element_handles_from_array(
+    page: &chromiumoxide::Page,
+    array_id: chromiumoxide::cdp::js_protocol::runtime::RemoteObjectId,
+    page_inner: Arc<Mutex<PageInner>>,
+) -> Result<Vec<ElementHandle>, String> {
+    use chromiumoxide::cdp::js_protocol::runtime::GetPropertiesParams;
+    let params = GetPropertiesParams::builder()
+        .object_id(array_id)
+        .own_properties(true)
+        .build()
+        .map_err(|e| format!("getProperties build failed: {e}"))?;
+    let response = page
+        .execute(params)
+        .await
+        .map_err(|e| format!("getProperties CDP failed: {e}"))?;
+    let mut elements = Vec::new();
+    for prop in &response.result.result {
+        // Only numeric-indexed array elements (skip "length", etc.)
+        if prop.name.parse::<u64>().is_err() {
+            continue;
+        }
+        let Some(remote) = &prop.value else {
+            continue;
+        };
+        let Some(object_id) = &remote.object_id else {
+            continue;
+        };
+        elements.push(ElementHandle {
+            object_id: object_id.as_ref().to_string(),
+            description: remote.description.clone().unwrap_or_default(),
+            page_inner: page_inner.clone(),
+        });
+    }
+    Ok(elements)
+}
+
+/// Convert a CDP `RemoteObject` to a `JsEvalResult`.
+///
+/// DOM nodes (subtype `"node"`) become `ElementHandle`, other remote objects
+/// with an `objectId` become `JsHandle`, and serialisable primitives/objects
+/// are returned as their JSON representation (or a raw string for JS strings).
+fn remote_object_to_eval_result(
+    obj: chromiumoxide::cdp::js_protocol::runtime::RemoteObject,
+    page_inner: Arc<Mutex<PageInner>>,
+) -> JsEvalResult {
+    use chromiumoxide::cdp::js_protocol::runtime::{RemoteObjectSubtype, RemoteObjectType};
+
+    // --- Serialisable value path (value field is populated) ---
+    if let Some(value) = obj.value {
+        return match value {
+            serde_json::Value::String(s) => JsEvalResult::Str(s),
+            other => {
+                let json = serde_json::to_string(&other).unwrap_or_else(|_| other.to_string());
+                JsEvalResult::Json(json)
+            }
+        };
+    }
+
+    // --- Unserializable JS number (NaN, Infinity, -Infinity, -0) ---
+    if let Some(unserializable) = obj.unserializable_value {
+        return JsEvalResult::Unserializable(unserializable.as_ref().to_string());
+    }
+
+    // --- Remote object handle ---
+    if let Some(object_id) = obj.object_id {
+        let description = obj.description.unwrap_or_default();
+        let oid = object_id.as_ref().to_string();
+        if obj.subtype == Some(RemoteObjectSubtype::Node) {
+            return JsEvalResult::ElementHandleResult(ElementHandle {
+                object_id: oid,
+                description,
+                page_inner,
+            });
+        }
+        return JsEvalResult::JsHandleResult(JsHandle {
+            object_id: oid,
+            description,
+            page_inner,
+        });
+    }
+
+    // --- Null (subtype "null", type "object", no objectId) ---
+    if obj.subtype == Some(RemoteObjectSubtype::Null) {
+        return JsEvalResult::Json("null".to_string());
+    }
+
+    // --- Undefined ---
+    if obj.r#type == RemoteObjectType::Undefined {
+        return JsEvalResult::Undefined;
+    }
+
+    JsEvalResult::Undefined
 }
 
 pub(crate) fn stringify_evaluation_result(
@@ -2928,6 +3637,109 @@ impl RefreshmintApi {
 }
 
 /// Register the `page`, `browser`, and `refreshmint` globals on a QuickJS context.
+/// Convert a QuickJS `Value` (or array of values) to a list of `CallArgument`s
+/// for use with `Runtime.callFunctionOn`.
+///
+/// `JSHandle` and `ElementHandle` instances are passed by `objectId`.
+/// All other values are serialised to JSON via `serde_json`.
+fn js_value_to_call_args(
+    val: &rquickjs::Value<'_>,
+) -> Result<Vec<chromiumoxide::cdp::js_protocol::runtime::CallArgument>, String> {
+    use chromiumoxide::cdp::js_protocol::runtime::CallArgument;
+
+    fn single_arg(v: &rquickjs::Value<'_>) -> Result<CallArgument, String> {
+        // Check if it's a JSHandle instance.
+        if let Ok(cls) = Class::<JsHandle>::from_value(v) {
+            let object_id = cls.borrow().object_id.clone();
+            return Ok(CallArgument {
+                value: None,
+                unserializable_value: None,
+                object_id: Some(object_id.into()),
+            });
+        }
+        // Check if it's an ElementHandle instance.
+        if let Ok(cls) = Class::<ElementHandle>::from_value(v) {
+            let object_id = cls.borrow().object_id.clone();
+            return Ok(CallArgument {
+                value: None,
+                unserializable_value: None,
+                object_id: Some(object_id.into()),
+            });
+        }
+        // Fallback: serialise as JSON.
+        let json_val =
+            rquickjs_value_to_json(v).map_err(|e| format!("could not serialise argument: {e}"))?;
+        Ok(CallArgument {
+            value: Some(json_val),
+            unserializable_value: None,
+            object_id: None,
+        })
+    }
+
+    // If the value is an Array, expand it into individual args.
+    if let Some(arr) = val.as_array() {
+        let len = arr.len();
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let item: rquickjs::Value<'_> = arr
+                .get(i)
+                .map_err(|e| format!("failed to get arg {i}: {e}"))?;
+            out.push(single_arg(&item)?);
+        }
+        return Ok(out);
+    }
+
+    // Single argument.
+    Ok(vec![single_arg(val)?])
+}
+
+/// Best-effort serialisation of a `rquickjs::Value` to `serde_json::Value`.
+fn rquickjs_value_to_json(val: &rquickjs::Value<'_>) -> Result<serde_json::Value, String> {
+    if val.is_null() || val.is_undefined() {
+        return Ok(serde_json::Value::Null);
+    }
+    if let Some(b) = val.as_bool() {
+        return Ok(serde_json::Value::Bool(b));
+    }
+    if let Some(i) = val.as_int() {
+        return Ok(serde_json::Value::Number(i.into()));
+    }
+    if let Some(f) = val.as_float() {
+        if let Some(n) = serde_json::Number::from_f64(f) {
+            return Ok(serde_json::Value::Number(n));
+        }
+        return Ok(serde_json::Value::Null);
+    }
+    if let Some(s) = val.as_string() {
+        let rust_str = s
+            .to_string()
+            .map_err(|e| format!("string conversion failed: {e}"))?;
+        return Ok(serde_json::Value::String(rust_str));
+    }
+    if let Some(arr) = val.as_array() {
+        let len = arr.len();
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let item: rquickjs::Value<'_> = arr.get(i).map_err(|e| format!("array[{i}]: {e}"))?;
+            out.push(rquickjs_value_to_json(&item)?);
+        }
+        return Ok(serde_json::Value::Array(out));
+    }
+    if let Some(obj) = val.as_object() {
+        let mut map = serde_json::Map::new();
+        for key in obj.keys::<rquickjs::String<'_>>() {
+            let k = key.map_err(|e| format!("object key: {e}"))?;
+            let k_str = k.to_string().map_err(|e| format!("object key str: {e}"))?;
+            let v: rquickjs::Value<'_> = obj
+                .get(k.clone())
+                .map_err(|e| format!("object[{k_str}]: {e}"))?;
+            map.insert(k_str, rquickjs_value_to_json(&v)?);
+        }
+        return Ok(serde_json::Value::Object(map));
+    }
+    Err(format!("unsupported value type: {}", val.type_name()))
+}
+
 pub fn register_globals(
     ctx: &Ctx<'_>,
     page_inner: Arc<Mutex<PageInner>>,
