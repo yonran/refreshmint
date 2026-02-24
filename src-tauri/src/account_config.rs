@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,8 +22,15 @@ fn config_path(ledger_dir: &Path, account_name: &str) -> PathBuf {
 pub fn read_account_config(ledger_dir: &Path, account_name: &str) -> AccountConfig {
     let path = config_path(ledger_dir, account_name);
     match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-        Err(_) => AccountConfig::default(),
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
+            eprintln!("warning: failed to parse '{}': {e}", path.display());
+            AccountConfig::default()
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => AccountConfig::default(),
+        Err(e) => {
+            eprintln!("warning: failed to read '{}': {e}", path.display());
+            AccountConfig::default()
+        }
     }
 }
 

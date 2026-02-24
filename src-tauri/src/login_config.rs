@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -83,8 +83,15 @@ pub fn login_account_journal_path(ledger_dir: &Path, login_name: &str, label: &s
 pub fn read_login_config(ledger_dir: &Path, login_name: &str) -> LoginConfig {
     let path = login_config_path(ledger_dir, login_name);
     match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-        Err(_) => LoginConfig::default(),
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
+            eprintln!("warning: failed to parse '{}': {e}", path.display());
+            LoginConfig::default()
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => LoginConfig::default(),
+        Err(e) => {
+            eprintln!("warning: failed to read '{}': {e}", path.display());
+            LoginConfig::default()
+        }
     }
 }
 
@@ -142,10 +149,12 @@ fn replace_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
 }
 
 /// List all login names by scanning the `logins/` directory.
-pub fn list_logins(ledger_dir: &Path) -> Vec<String> {
+pub fn list_logins(ledger_dir: &Path) -> io::Result<Vec<String>> {
     let logins_dir = ledger_dir.join("logins");
-    let Ok(entries) = std::fs::read_dir(&logins_dir) else {
-        return Vec::new();
+    let entries = match std::fs::read_dir(&logins_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
 
     let mut names = Vec::new();
@@ -162,7 +171,7 @@ pub fn list_logins(ledger_dir: &Path) -> Vec<String> {
         names.push(name);
     }
     names.sort();
-    names
+    Ok(names)
 }
 
 /// A conflict entry for GL account uniqueness violations.
@@ -191,7 +200,7 @@ pub fn check_gl_account_uniqueness(
     exclude_label: &str,
     gl_account: &str,
 ) -> Result<(), String> {
-    let logins = list_logins(ledger_dir);
+    let logins = list_logins(ledger_dir).map_err(|e| e.to_string())?;
     for login in &logins {
         let config = read_login_config(ledger_dir, login);
         for (label, acct_config) in &config.accounts {
@@ -212,7 +221,7 @@ pub fn check_gl_account_uniqueness(
 
 /// Scan all login configs and return a list of GL account conflicts.
 pub fn find_gl_account_conflicts(ledger_dir: &Path) -> Vec<GlAccountConflict> {
-    let logins = list_logins(ledger_dir);
+    let logins = list_logins(ledger_dir).unwrap_or_default();
     let mut gl_map: BTreeMap<String, Vec<GlAccountConflictEntry>> = BTreeMap::new();
 
     for login in &logins {
@@ -402,7 +411,7 @@ mod tests {
         // Create a file (should be ignored)
         fs::write(dir.join("logins").join("not-a-dir"), "").unwrap();
 
-        let logins = list_logins(&dir);
+        let logins = list_logins(&dir).unwrap();
         assert_eq!(logins, vec!["amex".to_string(), "chase".to_string()]);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -410,7 +419,7 @@ mod tests {
     #[test]
     fn list_logins_returns_empty_when_no_logins_dir() {
         let dir = create_temp_dir("login-list-empty");
-        let logins = list_logins(&dir);
+        let logins = list_logins(&dir).unwrap();
         assert!(logins.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -628,36 +637,45 @@ pub fn delete_login(
     // Check if any sub-account has data
     let accounts_dir = login_dir.join("accounts");
     if accounts_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&accounts_dir) {
-            for entry in entries {
-                let Ok(entry) = entry else { continue };
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let label = entry.file_name().to_string_lossy().to_string();
+        let entries = std::fs::read_dir(&accounts_dir).map_err(|e| {
+            format!(
+                "failed to read accounts directory '{}': {e}",
+                accounts_dir.display()
+            )
+        })?;
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let label = entry.file_name().to_string_lossy().to_string();
 
-                // Check for documents
-                let docs_dir = path.join("documents");
-                if docs_dir.exists() && has_files(&docs_dir) {
+            // Check for documents
+            let docs_dir = path.join("documents");
+            if docs_dir.exists()
+                && has_files(&docs_dir).map_err(|e| {
+                    format!("failed to check documents in '{}': {e}", docs_dir.display())
+                })?
+            {
+                return Err(format!(
+                    "login '{login_name}' label '{label}' has documents or journal data; \
+                     remove data before deleting login"
+                )
+                .into());
+            }
+
+            // Check for journal
+            let journal = path.join("account.journal");
+            if journal.exists() {
+                let content = std::fs::read_to_string(&journal)
+                    .map_err(|e| format!("failed to read journal '{}': {e}", journal.display()))?;
+                if !content.trim().is_empty() {
                     return Err(format!(
                         "login '{login_name}' label '{label}' has documents or journal data; \
                          remove data before deleting login"
                     )
                     .into());
-                }
-
-                // Check for journal
-                let journal = path.join("account.journal");
-                if journal.exists() {
-                    let content = std::fs::read_to_string(&journal).unwrap_or_default();
-                    if !content.trim().is_empty() {
-                        return Err(format!(
-                            "login '{login_name}' label '{label}' has documents or journal data; \
-                             remove data before deleting login"
-                        )
-                        .into());
-                    }
                 }
             }
         }
@@ -668,17 +686,19 @@ pub fn delete_login(
 }
 
 /// Check if a directory contains any files (not recursively deep, just immediate).
-fn has_files(dir: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
+fn has_files(dir: &Path) -> io::Result<bool> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
     };
     for entry in entries {
         let Ok(entry) = entry else { continue };
         if entry.path().is_file() {
-            return true;
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }
 
 /// Remove a login account (label). Refuses if the sub-account dir has documents or journal data.
@@ -705,7 +725,11 @@ pub fn remove_login_account(
         .join(label);
     if account_dir.exists() {
         let docs_dir = account_dir.join("documents");
-        if docs_dir.exists() && has_files(&docs_dir) {
+        if docs_dir.exists()
+            && has_files(&docs_dir).map_err(|e| {
+                format!("failed to check documents in '{}': {e}", docs_dir.display())
+            })?
+        {
             return Err(format!(
                 "login '{login_name}' label '{label}' has documents; remove data before removing account"
             )
@@ -713,7 +737,8 @@ pub fn remove_login_account(
         }
         let journal = account_dir.join("account.journal");
         if journal.exists() {
-            let content = std::fs::read_to_string(&journal).unwrap_or_default();
+            let content = std::fs::read_to_string(&journal)
+                .map_err(|e| format!("failed to read journal '{}': {e}", journal.display()))?;
             if !content.trim().is_empty() {
                 return Err(format!(
                     "login '{login_name}' label '{label}' has journal data; remove data before removing account"

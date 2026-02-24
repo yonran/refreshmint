@@ -91,7 +91,7 @@ pub fn open_ledger_dir(path: &Path) -> Result<LedgerView, Box<dyn std::error::Er
     }
 
     let transactions = run_hledger_print(&journal_path)?;
-    let accounts = build_account_rows(path, &transactions);
+    let accounts = build_account_rows(path, &transactions)?;
     let transaction_rows = build_transaction_rows(&transactions);
     let gl_account_conflicts = crate::login_config::find_gl_account_conflicts(path);
 
@@ -124,7 +124,10 @@ fn run_hledger_print(journal_path: &Path) -> io::Result<Vec<Transaction>> {
     }
 }
 
-fn build_account_rows(path: &Path, transactions: &[Transaction]) -> Vec<AccountRow> {
+fn build_account_rows(
+    path: &Path,
+    transactions: &[Transaction],
+) -> Result<Vec<AccountRow>, Box<dyn std::error::Error>> {
     let mut accounts: BTreeMap<String, Option<BTreeMap<String, CommodityTotal>>> = BTreeMap::new();
 
     for txn in transactions {
@@ -146,7 +149,7 @@ fn build_account_rows(path: &Path, transactions: &[Transaction]) -> Vec<AccountR
 
     // Build GL account -> (login, label) map for unreconciled counts
     let mut gl_to_login: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-    let logins = crate::login_config::list_logins(path);
+    let logins = crate::login_config::list_logins(path)?;
     for login in &logins {
         let config = crate::login_config::read_login_config(path, login);
         for (label, account_config) in &config.accounts {
@@ -159,7 +162,7 @@ fn build_account_rows(path: &Path, transactions: &[Transaction]) -> Vec<AccountR
         }
     }
 
-    accounts
+    let rows = accounts
         .into_iter()
         .map(|(name, totals)| {
             let mut unreconciled_count = 0;
@@ -179,7 +182,8 @@ fn build_account_rows(path: &Path, transactions: &[Transaction]) -> Vec<AccountR
                 unreconciled_count,
             }
         })
-        .collect()
+        .collect();
+    Ok(rows)
 }
 
 fn build_transaction_rows(transactions: &[Transaction]) -> Vec<TransactionRow> {

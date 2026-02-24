@@ -768,7 +768,7 @@ fn run_login_list(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    for login in crate::login_config::list_logins(&ledger_dir) {
+    for login in crate::login_config::list_logins(&ledger_dir)? {
         println!("{login}");
     }
     Ok(())

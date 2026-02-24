@@ -806,7 +806,7 @@ fn resolve_login_account_gl_account(
 fn list_logins(ledger: String) -> Result<Vec<String>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
-    Ok(login_config::list_logins(&target_dir))
+    login_config::list_logins(&target_dir).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
