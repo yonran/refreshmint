@@ -625,3 +625,92 @@ details[open] > .disclosure-summary::before {
 .evidence-highlighted-row td {
     background: #fffbe6;
 }
+
+/* Account Rows sub-tab */
+.account-rows-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.pipeline-gl-account-row {
+    align-items: center;
+}
+
+.pipeline-gl-account-label {
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+/* Status chips for account rows */
+.status-chip {
+    display: inline-flex;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    line-height: 1.35;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    border: 1px solid #d1d1d1;
+    background: #f2f2f2;
+    color: #555;
+}
+
+.status-chip-ok {
+    border-color: #b4d9b4;
+    background: #eaf5ea;
+    color: #2d6a2d;
+}
+
+.status-chip-warning {
+    border-color: #e8c97a;
+    background: #fff8e1;
+    color: #7a5500;
+}
+
+.row-needs-sync td {
+    background: #fffdf0;
+}
+
+.text-muted {
+    color: #999;
+    font-style: italic;
+}
+
+/* Transfer matching modal */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgb(0 0 0 / 35%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 1rem;
+}
+
+.modal-dialog {
+    width: min(680px, 100%);
+    max-height: 80vh;
+    background: #fff;
+    border: 1px solid #e3e3e3;
+    border-radius: 0.9rem;
+    box-shadow: 0 14px 28px rgb(0 0 0 / 20%);
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    overflow-y: auto;
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.modal-header h3 {
+    margin: 0;
+    font-size: 1rem;
+}

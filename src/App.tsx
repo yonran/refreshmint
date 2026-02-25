@@ -25,12 +25,14 @@ import {
     addLoginSecret,
     addTransaction,
     addTransactionText,
+    type CategoryResult,
     createLogin,
     deleteLoginAccount,
     deleteLogin,
     getLoginAccountJournal,
     getLoginConfig,
     getLoginAccountUnposted,
+    getUnpostedEntriesForTransfer,
     getScrapeDebugSessionSocket,
     type LoginAccountConfig,
     type LoginConfig,
@@ -49,6 +51,7 @@ import {
     type NewTransactionInput,
     type PostingRow,
     postLoginAccountEntry,
+    postLoginAccountTransfer,
     postTransfer,
     reenterLoginSecret,
     removeLoginSecret,
@@ -58,9 +61,12 @@ import {
     setLoginExtension,
     startScrapeDebugSessionForLogin,
     stopScrapeDebugSession,
+    suggestCategories,
+    syncGlTransaction,
     type SecretEntry,
     syncLoginSecretsForExtension,
     type TransactionRow,
+    type UnpostedTransferResult,
     unpostLoginAccountEntry,
     validateTransaction,
     validateTransactionText,
@@ -291,6 +297,22 @@ function App() {
         entryId2: '',
     });
     const [isPostingTransfer, setIsPostingTransfer] = useState(false);
+    const [pipelineSelectedEntryIds, setPipelineSelectedEntryIds] = useState<
+        Set<string>
+    >(new Set());
+    const [pipelineCategorySuggestions, setPipelineCategorySuggestions] =
+        useState<Record<string, CategoryResult>>({});
+    const [pipelineGlAccountDraft, setPipelineGlAccountDraft] = useState('');
+    const [isSavingPipelineGlAccount, setIsSavingPipelineGlAccount] =
+        useState(false);
+    const [isPipelinePosting, setIsPipelinePosting] = useState(false);
+    const [transferModalEntryId, setTransferModalEntryId] = useState<
+        string | null
+    >(null);
+    const [transferModalResults, setTransferModalResults] = useState<
+        UnpostedTransferResult[]
+    >([]);
+    const [isLoadingTransferModal, setIsLoadingTransferModal] = useState(false);
     const [secretPrompt, setSecretPrompt] = useState<SecretPromptState | null>(
         null,
     );
@@ -322,6 +344,7 @@ function App() {
         openRecent: (_path: string) => {},
     });
     const startupCancelledRef = useRef(false);
+    const suggestRequestId = useRef(0);
     const secretDomainRef = useRef('');
     const secretNameRef = useRef('');
     const secretPromptResolverRef = useRef<
@@ -490,6 +513,15 @@ function App() {
         );
         return ledger.transactions.filter((txn) => postedIds.has(txn.id));
     }, [ledger, accountJournalEntries]);
+
+    const pipelineGlAccount = useMemo<string | null>(() => {
+        if (!selectedLoginAccount) return null;
+        return (
+            loginConfigsByName[selectedLoginAccount.loginName]?.accounts[
+                selectedLoginAccount.label
+            ]?.glAccount ?? null
+        );
+    }, [selectedLoginAccount, loginConfigsByName]);
 
     const evidencedRowNumbers = useMemo(() => {
         if (!evidenceRowsDocument) return new Set<number>();
@@ -1153,6 +1185,10 @@ function App() {
     useEffect(() => {
         setEvidenceRowsDocument('');
         setDocumentRows([]);
+        setPipelineSelectedEntryIds(new Set());
+        setPipelineCategorySuggestions({});
+        setPipelineGlAccountDraft('');
+        setTransferModalEntryId(null);
     }, [selectedLoginAccount]);
 
     useEffect(() => {
@@ -1188,6 +1224,20 @@ function App() {
                         }
                         return next;
                     });
+                    // Non-blocking category suggestions (fail-open)
+                    const reqId = ++suggestRequestId.current;
+                    suggestCategories(ledgerPath, loginName, label)
+                        .then((result) => {
+                            if (
+                                !cancelled &&
+                                reqId === suggestRequestId.current
+                            ) {
+                                setPipelineCategorySuggestions(result);
+                            }
+                        })
+                        .catch((err: unknown) => {
+                            console.error('suggestCategories failed:', err);
+                        });
                 })
                 .catch((error: unknown) => {
                     if (!cancelled) {
@@ -2573,6 +2623,250 @@ function App() {
         }
     }
 
+    /** Reload journal + unposted data for the current pipeline login/label. */
+    async function refreshPipelineLoginAccountData() {
+        if (!ledger || !selectedLoginAccount) return;
+        const { loginName, label } = selectedLoginAccount;
+        const [fetchedJournal, fetchedUnposted] = await Promise.all([
+            getLoginAccountJournal(ledger.path, loginName, label),
+            getLoginAccountUnposted(ledger.path, loginName, label),
+        ]);
+        setAccountJournalEntries(fetchedJournal);
+        setUnpostedEntries(fetchedUnposted);
+        setPostDrafts((current) => {
+            const next: Record<string, PostDraft> = {};
+            for (const entry of fetchedUnposted) {
+                next[entry.id] = current[entry.id] ?? {
+                    counterpartAccount: '',
+                    postingIndex: '',
+                };
+            }
+            return next;
+        });
+        // Non-blocking re-run of suggestCategories to refresh mismatch flags
+        const reqId = ++suggestRequestId.current;
+        suggestCategories(ledger.path, loginName, label)
+            .then((result) => {
+                if (reqId === suggestRequestId.current) {
+                    setPipelineCategorySuggestions(result);
+                }
+            })
+            .catch((err: unknown) => {
+                console.error('suggestCategories failed:', err);
+            });
+    }
+
+    async function handleSavePipelineGlAccount() {
+        if (!ledger || !selectedLoginAccount) return;
+        const { loginName, label } = selectedLoginAccount;
+        const glAccount = pipelineGlAccountDraft.trim();
+        setIsSavingPipelineGlAccount(true);
+        try {
+            await setLoginAccount(
+                ledger.path,
+                loginName,
+                label,
+                glAccount.length === 0 ? null : glAccount,
+            );
+            requestLoginConfigReload();
+            setPipelineGlAccountDraft('');
+        } catch (error) {
+            setPipelineStatus(`Failed to save GL account: ${String(error)}`);
+        } finally {
+            setIsSavingPipelineGlAccount(false);
+        }
+    }
+
+    /**
+     * Core posting logic that throws on error. Used by both the single-entry
+     * handler (which catches) and the bulk handlers (which stop on throw).
+     * Returns the GL transaction ID string on success.
+     */
+    async function doPipelinePost(entryId: string): Promise<string> {
+        if (!ledger || !selectedLoginAccount) {
+            throw new Error('No ledger or account selected.');
+        }
+        const { loginName, label } = selectedLoginAccount;
+        const suggestion = pipelineCategorySuggestions[entryId];
+
+        if (suggestion?.transferMatch) {
+            // Auto-matched transfer: extract the other side's login/label from the locator
+            // locator format: logins/{loginName}/accounts/{label}
+            const locator = suggestion.transferMatch.accountLocator;
+            const parts = locator.split('/');
+            const otherLoginName = parts[1] ?? '';
+            const otherLabel = parts[3] ?? '';
+            if (!otherLoginName || !otherLabel) {
+                throw new Error(
+                    `Transfer: could not parse locator: ${locator}`,
+                );
+            }
+            const glId = await postLoginAccountTransfer(
+                ledger.path,
+                loginName,
+                label,
+                entryId,
+                otherLoginName,
+                otherLabel,
+                suggestion.transferMatch.entryId,
+            );
+            return `Transfer posted: ${entryId} ↔ ${suggestion.transferMatch.entryId} (${glId})`;
+        }
+
+        const draft = postDrafts[entryId] ?? {
+            counterpartAccount: '',
+            postingIndex: '',
+        };
+        const counterpartAccount =
+            draft.counterpartAccount.trim() || (suggestion?.suggested ?? '');
+        if (!counterpartAccount) {
+            throw new Error('Counterpart account is required.');
+        }
+
+        const postingIndex = parseOptionalIndex(draft.postingIndex);
+        if (postingIndex.error !== null) {
+            throw new Error(postingIndex.error);
+        }
+
+        const glId = await postLoginAccountEntry(
+            ledger.path,
+            loginName,
+            label,
+            entryId,
+            counterpartAccount,
+            postingIndex.value,
+        );
+        return `Posted ${entryId} to ${glId}`;
+    }
+
+    async function handlePipelinePostEntry(entryId: string) {
+        setBusyPostEntryId(entryId);
+        try {
+            const message = await doPipelinePost(entryId);
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(message);
+        } catch (error) {
+            setPipelineStatus(`Post failed: ${String(error)}`);
+        } finally {
+            setBusyPostEntryId(null);
+        }
+    }
+
+    async function handlePipelinePostAll() {
+        if (!ledger || !selectedLoginAccount) return;
+        setIsPipelinePosting(true);
+        try {
+            for (const entry of unpostedEntries) {
+                setBusyPostEntryId(entry.id);
+                try {
+                    const message = await doPipelinePost(entry.id);
+                    await refreshPipelineLoginAccountData();
+                    setPipelineStatus(message);
+                } catch (error) {
+                    setPipelineStatus(`Post failed: ${String(error)}`);
+                    break; // stop-on-first-error
+                } finally {
+                    setBusyPostEntryId(null);
+                }
+            }
+        } finally {
+            setIsPipelinePosting(false);
+        }
+    }
+
+    async function handlePipelinePostSelected() {
+        if (!ledger || !selectedLoginAccount) return;
+        setIsPipelinePosting(true);
+        try {
+            for (const entry of unpostedEntries) {
+                if (!pipelineSelectedEntryIds.has(entry.id)) continue;
+                setBusyPostEntryId(entry.id);
+                try {
+                    const message = await doPipelinePost(entry.id);
+                    await refreshPipelineLoginAccountData();
+                    setPipelineStatus(message);
+                } catch (error) {
+                    setPipelineStatus(`Post failed: ${String(error)}`);
+                    break; // stop-on-first-error
+                } finally {
+                    setBusyPostEntryId(null);
+                }
+            }
+        } finally {
+            setIsPipelinePosting(false);
+            setPipelineSelectedEntryIds(new Set());
+        }
+    }
+
+    async function handlePipelineSyncEntry(entryId: string) {
+        if (!ledger || !selectedLoginAccount) return;
+        const { loginName, label } = selectedLoginAccount;
+        setBusyPostEntryId(entryId);
+        try {
+            const glId = await syncGlTransaction(
+                ledger.path,
+                loginName,
+                label,
+                entryId,
+            );
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(`Synced ${entryId} → ${glId}`);
+        } catch (error) {
+            setPipelineStatus(`Sync failed: ${String(error)}`);
+        } finally {
+            setBusyPostEntryId(null);
+        }
+    }
+
+    async function handleOpenTransferModal(entryId: string) {
+        if (!ledger || !selectedLoginAccount) return;
+        const { loginName, label } = selectedLoginAccount;
+        setTransferModalEntryId(entryId);
+        setIsLoadingTransferModal(true);
+        try {
+            const results = await getUnpostedEntriesForTransfer(
+                ledger.path,
+                loginName,
+                label,
+            );
+            setTransferModalResults(results);
+        } catch (error) {
+            setPipelineStatus(
+                `Failed to load transfer candidates: ${String(error)}`,
+            );
+            setTransferModalEntryId(null);
+        } finally {
+            setIsLoadingTransferModal(false);
+        }
+    }
+
+    async function handleLinkTransferFromModal(other: UnpostedTransferResult) {
+        if (!ledger || !selectedLoginAccount || transferModalEntryId === null)
+            return;
+        const { loginName, label } = selectedLoginAccount;
+        setBusyPostEntryId(transferModalEntryId);
+        setTransferModalEntryId(null);
+        try {
+            const glId = await postLoginAccountTransfer(
+                ledger.path,
+                loginName,
+                label,
+                transferModalEntryId,
+                other.loginName,
+                other.label,
+                other.entry.id,
+            );
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(
+                `Transfer posted: ${transferModalEntryId} ↔ ${other.entry.id} (${glId})`,
+            );
+        } catch (error) {
+            setPipelineStatus(`Transfer post failed: ${String(error)}`);
+        } finally {
+            setBusyPostEntryId(null);
+        }
+    }
+
     async function handleMigrateLegacyLedger() {
         if (!ledger) {
             return;
@@ -3778,10 +4072,483 @@ function App() {
                                             Loading account rows...
                                         </p>
                                     ) : (
-                                        <div className="table-wrap">
-                                            <AccountJournalTable
-                                                entries={accountJournalEntries}
-                                            />
+                                        <div className="account-rows-panel">
+                                            <div className="pipeline-panel">
+                                                <div className="pipeline-actions pipeline-gl-account-row">
+                                                    <span className="pipeline-gl-account-label">
+                                                        GL Account:
+                                                    </span>
+                                                    {pipelineGlAccount !==
+                                                        null &&
+                                                    pipelineGlAccount !== '' ? (
+                                                        <span className="mono">
+                                                            {pipelineGlAccount}
+                                                        </span>
+                                                    ) : (
+                                                        <>
+                                                            <input
+                                                                type="text"
+                                                                placeholder="Assets:Checking:Chase"
+                                                                value={
+                                                                    pipelineGlAccountDraft
+                                                                }
+                                                                onChange={(
+                                                                    e,
+                                                                ) => {
+                                                                    setPipelineGlAccountDraft(
+                                                                        e.target
+                                                                            .value,
+                                                                    );
+                                                                }}
+                                                            />
+                                                            <button
+                                                                type="button"
+                                                                className="primary-button"
+                                                                disabled={
+                                                                    isSavingPipelineGlAccount ||
+                                                                    pipelineGlAccountDraft.trim()
+                                                                        .length ===
+                                                                        0
+                                                                }
+                                                                onClick={() => {
+                                                                    void handleSavePipelineGlAccount();
+                                                                }}
+                                                            >
+                                                                {isSavingPipelineGlAccount
+                                                                    ? 'Saving...'
+                                                                    : 'Save GL Account'}
+                                                            </button>
+                                                        </>
+                                                    )}
+                                                </div>
+                                                <div className="pipeline-actions">
+                                                    <button
+                                                        type="button"
+                                                        className="primary-button"
+                                                        disabled={
+                                                            isPipelinePosting ||
+                                                            unpostedEntries.length ===
+                                                                0
+                                                        }
+                                                        onClick={() => {
+                                                            void handlePipelinePostAll();
+                                                        }}
+                                                    >
+                                                        {isPipelinePosting
+                                                            ? 'Posting...'
+                                                            : `Post All (${unpostedEntries.length.toString()})`}
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="ghost-button"
+                                                        disabled={
+                                                            isPipelinePosting ||
+                                                            pipelineSelectedEntryIds.size ===
+                                                                0
+                                                        }
+                                                        onClick={() => {
+                                                            void handlePipelinePostSelected();
+                                                        }}
+                                                    >
+                                                        {`Post Selected (${pipelineSelectedEntryIds.size.toString()})`}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div className="table-wrap">
+                                                <table className="ledger-table">
+                                                    <thead>
+                                                        <tr>
+                                                            <th></th>
+                                                            <th>Date</th>
+                                                            <th>Description</th>
+                                                            <th>Amount</th>
+                                                            <th>Counterpart</th>
+                                                            <th>Status</th>
+                                                            <th>Actions</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {accountJournalEntries.length ===
+                                                        0 ? (
+                                                            <tr>
+                                                                <td
+                                                                    colSpan={7}
+                                                                    className="table-empty"
+                                                                >
+                                                                    No entries
+                                                                    found.
+                                                                </td>
+                                                            </tr>
+                                                        ) : (
+                                                            accountJournalEntries.map(
+                                                                (entry) => {
+                                                                    const suggestion =
+                                                                        pipelineCategorySuggestions[
+                                                                            entry
+                                                                                .id
+                                                                        ];
+                                                                    const amountChanged =
+                                                                        suggestion?.amountChanged ??
+                                                                        false;
+                                                                    const statusChanged =
+                                                                        suggestion?.statusChanged ??
+                                                                        false;
+                                                                    const needsSync =
+                                                                        entry.posted !==
+                                                                            null &&
+                                                                        (amountChanged ||
+                                                                            statusChanged);
+                                                                    const isUnposted =
+                                                                        entry.posted ===
+                                                                        null;
+                                                                    const transferMatch =
+                                                                        suggestion?.transferMatch ??
+                                                                        null;
+                                                                    const isBusy =
+                                                                        busyPostEntryId ===
+                                                                        entry.id;
+                                                                    const isSelected =
+                                                                        pipelineSelectedEntryIds.has(
+                                                                            entry.id,
+                                                                        );
+                                                                    return (
+                                                                        <tr
+                                                                            key={
+                                                                                entry.id
+                                                                            }
+                                                                            className={
+                                                                                needsSync
+                                                                                    ? 'row-needs-sync'
+                                                                                    : undefined
+                                                                            }
+                                                                        >
+                                                                            <td>
+                                                                                {isUnposted && (
+                                                                                    <input
+                                                                                        type="checkbox"
+                                                                                        checked={
+                                                                                            isSelected
+                                                                                        }
+                                                                                        onChange={(
+                                                                                            e,
+                                                                                        ) => {
+                                                                                            setPipelineSelectedEntryIds(
+                                                                                                (
+                                                                                                    current,
+                                                                                                ) => {
+                                                                                                    const next =
+                                                                                                        new Set(
+                                                                                                            current,
+                                                                                                        );
+                                                                                                    if (
+                                                                                                        e
+                                                                                                            .target
+                                                                                                            .checked
+                                                                                                    )
+                                                                                                        next.add(
+                                                                                                            entry.id,
+                                                                                                        );
+                                                                                                    else
+                                                                                                        next.delete(
+                                                                                                            entry.id,
+                                                                                                        );
+                                                                                                    return next;
+                                                                                                },
+                                                                                            );
+                                                                                        }}
+                                                                                    />
+                                                                                )}
+                                                                            </td>
+                                                                            <td className="mono">
+                                                                                {
+                                                                                    entry.date
+                                                                                }
+                                                                            </td>
+                                                                            <td>
+                                                                                {
+                                                                                    entry.description
+                                                                                }
+                                                                            </td>
+                                                                            <td className="mono">
+                                                                                {entry.amount ??
+                                                                                    '-'}
+                                                                            </td>
+                                                                            <td>
+                                                                                {isUnposted ? (
+                                                                                    transferMatch !==
+                                                                                    null ? (
+                                                                                        <span className="text-muted">
+                                                                                            Transfer
+                                                                                            ↔{' '}
+                                                                                            {
+                                                                                                transferMatch.accountLocator
+                                                                                            }
+                                                                                        </span>
+                                                                                    ) : (
+                                                                                        <input
+                                                                                            type="text"
+                                                                                            value={
+                                                                                                postDrafts[
+                                                                                                    entry
+                                                                                                        .id
+                                                                                                ]
+                                                                                                    ?.counterpartAccount ??
+                                                                                                ''
+                                                                                            }
+                                                                                            placeholder={
+                                                                                                suggestion?.suggested ??
+                                                                                                'Expenses:...'
+                                                                                            }
+                                                                                            onChange={(
+                                                                                                e,
+                                                                                            ) => {
+                                                                                                handleSetPostDraft(
+                                                                                                    entry.id,
+                                                                                                    {
+                                                                                                        counterpartAccount:
+                                                                                                            e
+                                                                                                                .target
+                                                                                                                .value,
+                                                                                                    },
+                                                                                                );
+                                                                                            }}
+                                                                                        />
+                                                                                    )
+                                                                                ) : (
+                                                                                    <span className="text-muted">
+                                                                                        —
+                                                                                    </span>
+                                                                                )}
+                                                                            </td>
+                                                                            <td>
+                                                                                {isUnposted ? (
+                                                                                    <span className="status-chip">
+                                                                                        unposted
+                                                                                    </span>
+                                                                                ) : needsSync ? (
+                                                                                    <span className="status-chip status-chip-warning">
+                                                                                        ⚠
+                                                                                        needs
+                                                                                        sync
+                                                                                    </span>
+                                                                                ) : (
+                                                                                    <span className="status-chip status-chip-ok">
+                                                                                        posted
+                                                                                    </span>
+                                                                                )}
+                                                                            </td>
+                                                                            <td>
+                                                                                <div className="pipeline-row-actions">
+                                                                                    {isUnposted ? (
+                                                                                        <>
+                                                                                            <button
+                                                                                                type="button"
+                                                                                                className="primary-button"
+                                                                                                disabled={
+                                                                                                    isBusy ||
+                                                                                                    isPipelinePosting
+                                                                                                }
+                                                                                                onClick={() => {
+                                                                                                    void handlePipelinePostEntry(
+                                                                                                        entry.id,
+                                                                                                    );
+                                                                                                }}
+                                                                                            >
+                                                                                                {isBusy
+                                                                                                    ? 'Posting...'
+                                                                                                    : 'Post'}
+                                                                                            </button>
+                                                                                            {(entry.isTransfer ||
+                                                                                                transferMatch !==
+                                                                                                    null) && (
+                                                                                                <button
+                                                                                                    type="button"
+                                                                                                    className="ghost-button"
+                                                                                                    disabled={
+                                                                                                        isBusy ||
+                                                                                                        isPipelinePosting
+                                                                                                    }
+                                                                                                    onClick={() => {
+                                                                                                        void handleOpenTransferModal(
+                                                                                                            entry.id,
+                                                                                                        );
+                                                                                                    }}
+                                                                                                >
+                                                                                                    Link
+                                                                                                    Transfer
+                                                                                                </button>
+                                                                                            )}
+                                                                                        </>
+                                                                                    ) : needsSync ? (
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            className="ghost-button"
+                                                                                            disabled={
+                                                                                                isBusy ||
+                                                                                                isPipelinePosting
+                                                                                            }
+                                                                                            onClick={() => {
+                                                                                                void handlePipelineSyncEntry(
+                                                                                                    entry.id,
+                                                                                                );
+                                                                                            }}
+                                                                                        >
+                                                                                            {isBusy
+                                                                                                ? 'Syncing...'
+                                                                                                : 'Sync'}
+                                                                                        </button>
+                                                                                    ) : null}
+                                                                                </div>
+                                                                            </td>
+                                                                        </tr>
+                                                                    );
+                                                                },
+                                                            )
+                                                        )}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                            {transferModalEntryId !== null && (
+                                                <div
+                                                    className="modal-overlay"
+                                                    onClick={() => {
+                                                        setTransferModalEntryId(
+                                                            null,
+                                                        );
+                                                    }}
+                                                >
+                                                    <div
+                                                        className="modal-dialog"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                        }}
+                                                    >
+                                                        <div className="modal-header">
+                                                            <h3>
+                                                                Link Transfer
+                                                            </h3>
+                                                            <button
+                                                                type="button"
+                                                                className="ghost-button"
+                                                                onClick={() => {
+                                                                    setTransferModalEntryId(
+                                                                        null,
+                                                                    );
+                                                                }}
+                                                            >
+                                                                Close
+                                                            </button>
+                                                        </div>
+                                                        {isLoadingTransferModal ? (
+                                                            <p className="status">
+                                                                Loading
+                                                                entries...
+                                                            </p>
+                                                        ) : (
+                                                            <div className="table-wrap">
+                                                                <table className="ledger-table">
+                                                                    <thead>
+                                                                        <tr>
+                                                                            <th>
+                                                                                Date
+                                                                            </th>
+                                                                            <th>
+                                                                                Login/Label
+                                                                            </th>
+                                                                            <th>
+                                                                                Description
+                                                                            </th>
+                                                                            <th>
+                                                                                Amount
+                                                                            </th>
+                                                                            <th></th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody>
+                                                                        {transferModalResults.length ===
+                                                                        0 ? (
+                                                                            <tr>
+                                                                                <td
+                                                                                    colSpan={
+                                                                                        5
+                                                                                    }
+                                                                                    className="table-empty"
+                                                                                >
+                                                                                    No
+                                                                                    unposted
+                                                                                    entries
+                                                                                    found
+                                                                                    in
+                                                                                    other
+                                                                                    accounts.
+                                                                                </td>
+                                                                            </tr>
+                                                                        ) : (
+                                                                            transferModalResults.map(
+                                                                                (
+                                                                                    r,
+                                                                                ) => (
+                                                                                    <tr
+                                                                                        key={
+                                                                                            r
+                                                                                                .entry
+                                                                                                .id
+                                                                                        }
+                                                                                    >
+                                                                                        <td className="mono">
+                                                                                            {
+                                                                                                r
+                                                                                                    .entry
+                                                                                                    .date
+                                                                                            }
+                                                                                        </td>
+                                                                                        <td>
+                                                                                            {
+                                                                                                r.loginName
+                                                                                            }
+
+                                                                                            /
+                                                                                            {
+                                                                                                r.label
+                                                                                            }
+                                                                                        </td>
+                                                                                        <td>
+                                                                                            {
+                                                                                                r
+                                                                                                    .entry
+                                                                                                    .description
+                                                                                            }
+                                                                                        </td>
+                                                                                        <td className="mono">
+                                                                                            {r
+                                                                                                .entry
+                                                                                                .amount ??
+                                                                                                '-'}
+                                                                                        </td>
+                                                                                        <td>
+                                                                                            <button
+                                                                                                type="button"
+                                                                                                className="primary-button"
+                                                                                                onClick={() => {
+                                                                                                    void handleLinkTransferFromModal(
+                                                                                                        r,
+                                                                                                    );
+                                                                                                }}
+                                                                                            >
+                                                                                                Link
+                                                                                            </button>
+                                                                                        </td>
+                                                                                    </tr>
+                                                                                ),
+                                                                            )
+                                                                        )}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
                                     )
                                 ) : (
@@ -5475,52 +6242,6 @@ function PostingsList({ postings }: { postings: PostingRow[] }) {
                 </div>
             ))}
         </div>
-    );
-}
-
-function AccountJournalTable({ entries }: { entries: AccountJournalEntry[] }) {
-    return (
-        <table className="ledger-table">
-            <thead>
-                <tr>
-                    <th>Date</th>
-                    <th>Status</th>
-                    <th>Description</th>
-                    <th>Evidence</th>
-                    <th>Posted</th>
-                </tr>
-            </thead>
-            <tbody>
-                {entries.length === 0 ? (
-                    <tr>
-                        <td colSpan={5} className="table-empty">
-                            No entries found.
-                        </td>
-                    </tr>
-                ) : (
-                    entries.map((entry) => (
-                        <tr key={entry.id}>
-                            <td className="mono">{entry.date}</td>
-                            <td className="mono">{entry.status}</td>
-                            <td>{entry.description}</td>
-                            <td>
-                                <div className="evidence-list">
-                                    {entry.evidence.map((ev) => (
-                                        <span
-                                            key={ev}
-                                            className="evidence-chip"
-                                        >
-                                            {ev}
-                                        </span>
-                                    ))}
-                                </div>
-                            </td>
-                            <td className="mono">{entry.posted ?? '-'}</td>
-                        </tr>
-                    ))
-                )}
-            </tbody>
-        </table>
     );
 }
 

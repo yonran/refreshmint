@@ -418,15 +418,41 @@ export async function postTransfer(
     });
 }
 
+export interface UnpostedTransferResult {
+    loginName: string;
+    label: string;
+    entry: AccountJournalEntry;
+}
+
 export async function getUnpostedEntriesForTransfer(
     ledger: string,
     excludeLogin: string,
     excludeLabel: string,
-): Promise<AccountJournalEntry[]> {
+): Promise<UnpostedTransferResult[]> {
     return invoke('get_unposted_entries_for_transfer', {
         ledger,
         excludeLogin,
         excludeLabel,
+    });
+}
+
+export async function postLoginAccountTransfer(
+    ledger: string,
+    loginName1: string,
+    label1: string,
+    entryId1: string,
+    loginName2: string,
+    label2: string,
+    entryId2: string,
+): Promise<string> {
+    return invoke('post_login_account_transfer', {
+        ledger,
+        loginName1,
+        label1,
+        entryId1,
+        loginName2,
+        label2,
+        entryId2,
     });
 }
 

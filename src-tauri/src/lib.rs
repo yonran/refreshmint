@@ -104,6 +104,7 @@ pub fn run_with_context(
             unpost_entry,
             unpost_login_account_entry,
             post_transfer,
+            post_login_account_transfer,
             get_unposted_entries_for_transfer,
             sync_gl_transaction,
             suggest_categories,
@@ -1220,21 +1221,69 @@ fn post_transfer(
         .map_err(|err| err.to_string())
 }
 
+#[derive(serde::Serialize)]
+struct UnpostedTransferResult {
+    #[serde(rename = "loginName")]
+    login_name: String,
+    label: String,
+    entry: AccountJournalEntry,
+}
+
 #[tauri::command]
 fn get_unposted_entries_for_transfer(
     ledger: String,
     exclude_login: String,
     exclude_label: String,
-) -> Result<Vec<AccountJournalEntry>, String> {
+) -> Result<Vec<UnpostedTransferResult>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let exclude_login = require_login_name_input(exclude_login)?;
     let exclude_label = require_label_input(exclude_label)?;
     let triples =
         post::get_unposted_entries_for_transfer(&target_dir, &exclude_login, &exclude_label)
             .map_err(|err| err.to_string())?;
-    Ok(map_account_journal_entries(
-        triples.into_iter().map(|(_, _, e)| e).collect(),
-    ))
+    let results = triples
+        .into_iter()
+        .flat_map(|(login_name, label, e)| {
+            map_account_journal_entries(vec![e])
+                .into_iter()
+                .map(move |entry| UnpostedTransferResult {
+                    login_name: login_name.clone(),
+                    label: label.clone(),
+                    entry,
+                })
+        })
+        .collect();
+    Ok(results)
+}
+
+#[tauri::command]
+fn post_login_account_transfer(
+    ledger: String,
+    login_name1: String,
+    label1: String,
+    entry_id1: String,
+    login_name2: String,
+    label2: String,
+    entry_id2: String,
+) -> Result<String, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name1 = require_login_name_input(login_name1)?;
+    let label1 = require_label_input(label1)?;
+    let entry_id1 = require_non_empty_input("entry_id1", entry_id1)?;
+    let login_name2 = require_login_name_input(login_name2)?;
+    let label2 = require_label_input(label2)?;
+    let entry_id2 = require_non_empty_input("entry_id2", entry_id2)?;
+
+    post::post_login_account_transfer(
+        &target_dir,
+        &login_name1,
+        &label1,
+        &entry_id1,
+        &login_name2,
+        &label2,
+        &entry_id2,
+    )
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

@@ -496,6 +496,102 @@ pub fn unpost_login_account_entry(
     Ok(())
 }
 
+/// Post two login-account entries as an inter-account transfer.
+///
+/// Uses the new `logins/{login_name}/accounts/{label}` journal paths, unlike
+/// `post_transfer` which uses the legacy `accounts/{name}` paths.
+pub fn post_login_account_transfer(
+    ledger_dir: &Path,
+    login_name1: &str,
+    label1: &str,
+    entry_id1: &str,
+    login_name2: &str,
+    label2: &str,
+    entry_id2: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let journal_path1 =
+        account_journal::login_account_journal_path(ledger_dir, login_name1, label1);
+    let journal_path2 =
+        account_journal::login_account_journal_path(ledger_dir, login_name2, label2);
+
+    let mut entries1 = account_journal::read_journal_at_path(&journal_path1)?;
+    let mut entries2 = account_journal::read_journal_at_path(&journal_path2)?;
+    let original_entries1 = entries1.clone();
+    let original_entries2 = entries2.clone();
+
+    let idx1 = entries1
+        .iter()
+        .position(|e| e.id == entry_id1)
+        .ok_or_else(|| format!("entry not found in {login_name1}/{label1}: {entry_id1}"))?;
+    let idx2 = entries2
+        .iter()
+        .position(|e| e.id == entry_id2)
+        .ok_or_else(|| format!("entry not found in {login_name2}/{label2}: {entry_id2}"))?;
+
+    if entries1[idx1].posted.is_some() {
+        return Err(
+            format!("entry {entry_id1} in {login_name1}/{label1} is already posted").into(),
+        );
+    }
+    if entries2[idx2].posted.is_some() {
+        return Err(
+            format!("entry {entry_id2} in {login_name2}/{label2} is already posted").into(),
+        );
+    }
+
+    let gl_txn_id = uuid::Uuid::new_v4().to_string();
+    let source1 = format!("logins/{login_name1}/accounts/{label1}");
+    let source2 = format!("logins/{login_name2}/accounts/{label2}");
+    let gl_text = format_transfer_gl_transaction(
+        &entries1[idx1],
+        &source1,
+        &entries2[idx2],
+        &source2,
+        &gl_txn_id,
+    );
+
+    let gl_ref = format!("general.journal:{gl_txn_id}");
+    entries1[idx1].posted = Some(gl_ref.clone());
+    entries2[idx2].posted = Some(gl_ref);
+
+    if let Err(err) = account_journal::write_journal_at_path(&journal_path1, &entries1) {
+        return Err(err.into());
+    }
+    if let Err(err) = account_journal::write_journal_at_path(&journal_path2, &entries2) {
+        let _ = account_journal::write_journal_at_path(&journal_path1, &original_entries1);
+        return Err(err.into());
+    }
+
+    let journal_path = ledger_dir.join("general.journal");
+    if let Err(err) = append_to_journal(&journal_path, &gl_text) {
+        let _ = account_journal::write_journal_at_path(&journal_path1, &original_entries1);
+        let _ = account_journal::write_journal_at_path(&journal_path2, &original_entries2);
+        return Err(err.into());
+    }
+
+    let op = operations::GlOperation::TransferMatch {
+        entries: vec![
+            operations::TransferMatchEntry {
+                account: source1,
+                entry_id: entry_id1.to_string(),
+            },
+            operations::TransferMatchEntry {
+                account: source2,
+                entry_id: entry_id2.to_string(),
+            },
+        ],
+        timestamp: operations::now_timestamp(),
+    };
+    if let Err(err) = operations::append_gl_operation(ledger_dir, &op) {
+        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
+        let _ = account_journal::write_journal_at_path(&journal_path1, &original_entries1);
+        let _ = account_journal::write_journal_at_path(&journal_path2, &original_entries2);
+        return Err(err.into());
+    }
+
+    Ok(gl_txn_id)
+}
+
 /// `(login_name, label, entry)` triple returned by `get_unposted_entries_for_transfer`.
 pub type UnpostedTransferEntry = (String, String, AccountEntry);
 
