@@ -295,9 +295,9 @@ enum AccountCommand {
     Documents(AccountDocumentsArgs),
     Extract(AccountExtractArgs),
     Journal(AccountJournalArgs),
-    Unreconciled(AccountUnreconciledArgs),
-    Reconcile(AccountReconcileArgs),
-    Unreconcile(AccountUnreconcileArgs),
+    Unposted(AccountUnpostedArgs),
+    Post(AccountPostArgs),
+    Unpost(AccountUnpostArgs),
     Transfer(AccountTransferArgs),
 }
 
@@ -339,7 +339,7 @@ struct AccountJournalArgs {
 }
 
 #[derive(Args)]
-struct AccountUnreconciledArgs {
+struct AccountUnpostedArgs {
     #[arg(long, alias = "account")]
     login: String,
     #[arg(long)]
@@ -349,7 +349,7 @@ struct AccountUnreconciledArgs {
 }
 
 #[derive(Args)]
-struct AccountReconcileArgs {
+struct AccountPostArgs {
     #[arg(long, alias = "account")]
     login: String,
     #[arg(long)]
@@ -365,7 +365,7 @@ struct AccountReconcileArgs {
 }
 
 #[derive(Args)]
-struct AccountUnreconcileArgs {
+struct AccountUnpostArgs {
     #[arg(long, alias = "account")]
     login: String,
     #[arg(long)]
@@ -956,7 +956,7 @@ struct CliAccountJournalEntry {
     description: String,
     comment: String,
     evidence: Vec<String>,
-    reconciled: Option<String>,
+    posted: Option<String>,
     #[serde(rename = "isTransfer")]
     is_transfer: bool,
 }
@@ -969,13 +969,9 @@ fn run_account(
         AccountCommand::Documents(doc_args) => run_account_documents(doc_args, context),
         AccountCommand::Extract(extract_args) => run_account_extract(extract_args, context),
         AccountCommand::Journal(journal_args) => run_account_journal(journal_args, context),
-        AccountCommand::Unreconciled(unreconciled_args) => {
-            run_account_unreconciled(unreconciled_args, context)
-        }
-        AccountCommand::Reconcile(reconcile_args) => run_account_reconcile(reconcile_args, context),
-        AccountCommand::Unreconcile(unreconcile_args) => {
-            run_account_unreconcile(unreconcile_args, context)
-        }
+        AccountCommand::Unposted(unposted_args) => run_account_unposted(unposted_args, context),
+        AccountCommand::Post(post_args) => run_account_post(post_args, context),
+        AccountCommand::Unpost(unpost_args) => run_account_unpost(unpost_args, context),
         AccountCommand::Transfer(transfer_args) => run_account_transfer(transfer_args, context),
     }
 }
@@ -1102,17 +1098,16 @@ fn run_account_journal(
     Ok(())
 }
 
-fn run_account_unreconciled(
-    args: AccountUnreconciledArgs,
+fn run_account_unposted(
+    args: AccountUnpostedArgs,
     context: tauri::Context<tauri::Wry>,
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
     let login_name = require_cli_login_name("login", &args.login)?;
     let label = require_cli_label(&args.label)?;
-    let entries =
-        crate::reconcile::get_unreconciled_login_account(&ledger_dir, &login_name, &label)
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let entries = crate::post::get_unposted_login_account(&ledger_dir, &login_name, &label)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
     println!(
         "{}",
         serde_json::to_string_pretty(&map_entries_for_cli(entries))?
@@ -1120,8 +1115,8 @@ fn run_account_unreconciled(
     Ok(())
 }
 
-fn run_account_reconcile(
-    args: AccountReconcileArgs,
+fn run_account_post(
+    args: AccountPostArgs,
     context: tauri::Context<tauri::Wry>,
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
@@ -1131,7 +1126,7 @@ fn run_account_reconcile(
     let entry_id = require_cli_field("entry_id", &args.entry_id)?;
     let counterpart_account = require_cli_field("counterpart_account", &args.counterpart_account)?;
     let _ = resolve_login_account_gl_account_cli(&ledger_dir, &login_name, &label)?;
-    let gl_txn_id = crate::reconcile::reconcile_login_account_entry(
+    let gl_txn_id = crate::post::post_login_account_entry(
         &ledger_dir,
         &login_name,
         &label,
@@ -1144,8 +1139,8 @@ fn run_account_reconcile(
     Ok(())
 }
 
-fn run_account_unreconcile(
-    args: AccountUnreconcileArgs,
+fn run_account_unpost(
+    args: AccountUnpostArgs,
     context: tauri::Context<tauri::Wry>,
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
@@ -1153,7 +1148,7 @@ fn run_account_unreconcile(
     let login_name = require_cli_login_name("login", &args.login)?;
     let label = require_cli_label(&args.label)?;
     let entry_id = require_cli_field("entry_id", &args.entry_id)?;
-    crate::reconcile::unreconcile_login_account_entry(
+    crate::post::unpost_login_account_entry(
         &ledger_dir,
         &login_name,
         &label,
@@ -1175,14 +1170,9 @@ fn run_account_transfer(
     let entry_id1 = require_cli_field("entry_id1", &args.entry_id1)?;
     let account2 = require_cli_field("account2", &args.account2)?;
     let entry_id2 = require_cli_field("entry_id2", &args.entry_id2)?;
-    let gl_txn_id = crate::reconcile::reconcile_transfer(
-        &ledger_dir,
-        &account1,
-        &entry_id1,
-        &account2,
-        &entry_id2,
-    )
-    .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let gl_txn_id =
+        crate::post::post_transfer(&ledger_dir, &account1, &entry_id1, &account2, &entry_id2)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
     println!("{gl_txn_id}");
     Ok(())
 }
@@ -1206,7 +1196,7 @@ fn map_entries_for_cli(
                 description: entry.description,
                 comment: entry.comment,
                 evidence: entry.evidence,
-                reconciled: entry.reconciled,
+                posted: entry.posted,
                 is_transfer,
             }
         })
@@ -1532,11 +1522,11 @@ mod tests {
     }
 
     #[test]
-    fn account_reconcile_subcommand_parses_posting_index() {
+    fn account_post_subcommand_parses_posting_index() {
         let cli = Cli::try_parse_from([
             "refreshmint",
             "account",
-            "reconcile",
+            "post",
             "--login",
             "chase-personal",
             "--label",
@@ -1552,14 +1542,14 @@ mod tests {
 
         match cli.command {
             Some(Commands::Account(args)) => match args.command {
-                AccountCommand::Reconcile(reconcile) => {
-                    assert_eq!(reconcile.login, "chase-personal");
-                    assert_eq!(reconcile.label, "checking");
-                    assert_eq!(reconcile.entry_id, "txn-1");
-                    assert_eq!(reconcile.counterpart_account, "Expenses:Food");
-                    assert_eq!(reconcile.posting_index, Some(1));
+                AccountCommand::Post(post_args) => {
+                    assert_eq!(post_args.login, "chase-personal");
+                    assert_eq!(post_args.label, "checking");
+                    assert_eq!(post_args.entry_id, "txn-1");
+                    assert_eq!(post_args.counterpart_account, "Expenses:Food");
+                    assert_eq!(post_args.posting_index, Some(1));
                 }
-                _ => panic!("expected account reconcile command"),
+                _ => panic!("expected account post command"),
             },
             _ => panic!("expected account command"),
         }

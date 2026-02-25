@@ -10,7 +10,7 @@ pub mod extract;
 pub mod login_config;
 pub mod migration;
 pub mod operations;
-pub mod reconcile;
+pub mod post;
 pub mod transfer_detector;
 
 mod binpath;
@@ -96,13 +96,13 @@ pub fn run_with_context(
             run_login_account_extraction,
             get_account_journal,
             get_login_account_journal,
-            get_unreconciled,
-            get_login_account_unreconciled,
-            reconcile_entry,
-            reconcile_login_account_entry,
-            unreconcile_entry,
-            unreconcile_login_account_entry,
-            reconcile_transfer,
+            get_unposted,
+            get_login_account_unposted,
+            post_entry,
+            post_login_account_entry,
+            unpost_entry,
+            unpost_login_account_entry,
+            post_transfer,
             get_account_config,
             set_account_extension,
             list_logins,
@@ -1055,7 +1055,7 @@ struct AccountJournalEntry {
     description: String,
     comment: String,
     evidence: Vec<String>,
-    reconciled: Option<String>,
+    posted: Option<String>,
     #[serde(rename = "isTransfer")]
     is_transfer: bool,
 }
@@ -1089,19 +1089,15 @@ fn get_login_account_journal(
 }
 
 #[tauri::command]
-fn get_unreconciled(
-    ledger: String,
-    account_name: String,
-) -> Result<Vec<AccountJournalEntry>, String> {
+fn get_unposted(ledger: String, account_name: String) -> Result<Vec<AccountJournalEntry>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let account_name = require_non_empty_input("account_name", account_name)?;
-    let entries =
-        reconcile::get_unreconciled(&target_dir, &account_name).map_err(|err| err.to_string())?;
+    let entries = post::get_unposted(&target_dir, &account_name).map_err(|err| err.to_string())?;
     Ok(map_account_journal_entries(entries))
 }
 
 #[tauri::command]
-fn get_login_account_unreconciled(
+fn get_login_account_unposted(
     ledger: String,
     login_name: String,
     label: String,
@@ -1109,13 +1105,13 @@ fn get_login_account_unreconciled(
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
     let label = require_label_input(label)?;
-    let entries = reconcile::get_unreconciled_login_account(&target_dir, &login_name, &label)
+    let entries = post::get_unposted_login_account(&target_dir, &login_name, &label)
         .map_err(|err| err.to_string())?;
     Ok(map_account_journal_entries(entries))
 }
 
 #[tauri::command]
-fn reconcile_entry(
+fn post_entry(
     ledger: String,
     account_name: String,
     entry_id: String,
@@ -1127,7 +1123,7 @@ fn reconcile_entry(
     let entry_id = require_non_empty_input("entry_id", entry_id)?;
     let counterpart_account = require_non_empty_input("counterpart_account", counterpart_account)?;
 
-    reconcile::reconcile_entry(
+    post::post_entry(
         &target_dir,
         &account_name,
         &entry_id,
@@ -1138,7 +1134,7 @@ fn reconcile_entry(
 }
 
 #[tauri::command]
-fn reconcile_login_account_entry(
+fn post_login_account_entry(
     ledger: String,
     login_name: String,
     label: String,
@@ -1155,7 +1151,7 @@ fn reconcile_login_account_entry(
     // Reject reconciliation when this login label's GL mapping is unset or conflicting.
     let _ = resolve_login_account_gl_account(&target_dir, &login_name, &label)?;
 
-    reconcile::reconcile_login_account_entry(
+    post::post_login_account_entry(
         &target_dir,
         &login_name,
         &label,
@@ -1167,7 +1163,7 @@ fn reconcile_login_account_entry(
 }
 
 #[tauri::command]
-fn unreconcile_entry(
+fn unpost_entry(
     ledger: String,
     account_name: String,
     entry_id: String,
@@ -1177,12 +1173,12 @@ fn unreconcile_entry(
     let account_name = require_non_empty_input("account_name", account_name)?;
     let entry_id = require_non_empty_input("entry_id", entry_id)?;
 
-    reconcile::unreconcile_entry(&target_dir, &account_name, &entry_id, posting_index)
+    post::unpost_entry(&target_dir, &account_name, &entry_id, posting_index)
         .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
-fn unreconcile_login_account_entry(
+fn unpost_login_account_entry(
     ledger: String,
     login_name: String,
     label: String,
@@ -1194,18 +1190,12 @@ fn unreconcile_login_account_entry(
     let label = require_label_input(label)?;
     let entry_id = require_non_empty_input("entry_id", entry_id)?;
 
-    reconcile::unreconcile_login_account_entry(
-        &target_dir,
-        &login_name,
-        &label,
-        &entry_id,
-        posting_index,
-    )
-    .map_err(|err| err.to_string())
+    post::unpost_login_account_entry(&target_dir, &login_name, &label, &entry_id, posting_index)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
-fn reconcile_transfer(
+fn post_transfer(
     ledger: String,
     account1: String,
     entry_id1: String,
@@ -1218,7 +1208,7 @@ fn reconcile_transfer(
     let account2 = require_non_empty_input("account2", account2)?;
     let entry_id2 = require_non_empty_input("entry_id2", entry_id2)?;
 
-    reconcile::reconcile_transfer(&target_dir, &account1, &entry_id1, &account2, &entry_id2)
+    post::post_transfer(&target_dir, &account1, &entry_id1, &account2, &entry_id2)
         .map_err(|err| err.to_string())
 }
 
@@ -1241,7 +1231,7 @@ fn map_account_journal_entries(
                 description: e.description,
                 comment: e.comment,
                 evidence: e.evidence,
-                reconciled: e.reconciled,
+                posted: e.posted,
                 is_transfer,
             }
         })

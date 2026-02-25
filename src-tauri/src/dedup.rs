@@ -588,8 +588,8 @@ mod tests {
             ],
             tags: vec![],
             extracted_by: None,
-            reconciled: None,
-            reconciled_postings: Vec::new(),
+            posted: None,
+            posted_postings: Vec::new(),
         }
     }
 

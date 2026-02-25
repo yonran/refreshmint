@@ -169,7 +169,7 @@ fn build_account_rows(
             if let Some(mappings) = gl_to_login.get(&name) {
                 for (login, label) in mappings {
                     if let Ok(unreconciled) =
-                        crate::reconcile::get_unreconciled_login_account(path, login, label)
+                        crate::post::get_unposted_login_account(path, login, label)
                     {
                         unreconciled_count += unreconciled.len();
                     }

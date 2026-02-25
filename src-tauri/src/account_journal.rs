@@ -51,9 +51,9 @@ pub struct AccountEntry {
     #[serde(default)]
     pub extracted_by: Option<String>,
     #[serde(default)]
-    pub reconciled: Option<String>,
+    pub posted: Option<String>,
     #[serde(default)]
-    pub reconciled_postings: Vec<(usize, String)>,
+    pub posted_postings: Vec<(usize, String)>,
 }
 
 impl AccountEntry {
@@ -75,8 +75,8 @@ impl AccountEntry {
             postings,
             tags: Vec::new(),
             extracted_by: None,
-            reconciled: None,
-            reconciled_postings: Vec::new(),
+            posted: None,
+            posted_postings: Vec::new(),
         }
     }
 
@@ -162,13 +162,13 @@ pub fn format_entry(entry: &AccountEntry) -> String {
     }
 
     // reconciled tag
-    if let Some(reconciled) = &entry.reconciled {
-        comments.push(format!("reconciled: {reconciled}"));
+    if let Some(posted) = &entry.posted {
+        comments.push(format!("posted: {posted}"));
     }
 
     // reconciled-posting-N tags
-    for (idx, gl_ref) in &entry.reconciled_postings {
-        comments.push(format!("reconciled-posting-{idx}: {gl_ref}"));
+    for (idx, gl_ref) in &entry.posted_postings {
+        comments.push(format!("posted-posting-{idx}: {gl_ref}"));
     }
 
     // custom tags
@@ -176,8 +176,8 @@ pub fn format_entry(entry: &AccountEntry) -> String {
         if key != "id"
             && key != "evidence"
             && key != "extracted-by"
-            && key != "reconciled"
-            && !key.starts_with("reconciled-posting-")
+            && key != "posted"
+            && !key.starts_with("posted-posting-")
         {
             if value.is_empty() {
                 comments.push(format!("{key}:"));
@@ -342,8 +342,8 @@ pub fn parse_journal(content: &str) -> io::Result<Vec<AccountEntry>> {
         let mut id = String::new();
         let mut evidence = Vec::new();
         let mut extracted_by = None;
-        let mut reconciled = None;
-        let mut reconciled_postings = Vec::new();
+        let mut posted = None;
+        let mut posted_postings = Vec::new();
         let mut tags = Vec::new();
         let mut comment = String::new();
 
@@ -354,10 +354,10 @@ pub fn parse_journal(content: &str) -> io::Result<Vec<AccountEntry>> {
                 evidence.push(rest.trim().to_string());
             } else if let Some(rest) = comment_line.strip_prefix("extracted-by: ") {
                 extracted_by = Some(rest.trim().to_string());
-            } else if let Some(rest) = comment_line.strip_prefix("reconciled: ") {
-                reconciled = Some(rest.trim().to_string());
-            } else if let Some(rest) = strip_reconciled_posting_prefix(comment_line) {
-                reconciled_postings.push(rest);
+            } else if let Some(rest) = comment_line.strip_prefix("posted: ") {
+                posted = Some(rest.trim().to_string());
+            } else if let Some(rest) = strip_posted_posting_prefix(comment_line) {
+                posted_postings.push(rest);
             } else if let Some((key, value)) = parse_tag_line(comment_line) {
                 tags.push((key, value));
             } else {
@@ -385,8 +385,8 @@ pub fn parse_journal(content: &str) -> io::Result<Vec<AccountEntry>> {
             postings,
             tags,
             extracted_by,
-            reconciled,
-            reconciled_postings,
+            posted,
+            posted_postings,
         });
     }
 
@@ -434,8 +434,8 @@ fn parse_posting_line(line: &str) -> io::Result<EntryPosting> {
     Ok(EntryPosting { account, amount })
 }
 
-fn strip_reconciled_posting_prefix(line: &str) -> Option<(usize, String)> {
-    let rest = line.strip_prefix("reconciled-posting-")?;
+fn strip_posted_posting_prefix(line: &str) -> Option<(usize, String)> {
+    let rest = line.strip_prefix("posted-posting-")?;
     let colon_pos = rest.find(':')?;
     let idx_str = &rest[..colon_pos];
     let idx = idx_str.trim().parse::<usize>().ok()?;
@@ -512,8 +512,8 @@ mod tests {
             ],
             tags: vec![("bankId".to_string(), "FIT123".to_string())],
             extracted_by: Some("chase-driver:1.0".to_string()),
-            reconciled: None,
-            reconciled_postings: Vec::new(),
+            posted: None,
+            posted_postings: Vec::new(),
         };
 
         let formatted = format_entry(&entry);
@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn reconciled_posting_round_trip() {
+    fn posted_posting_round_trip() {
         let mut entry = AccountEntry::new(
             "2024-01-01".to_string(),
             EntryStatus::Cleared,
@@ -679,18 +679,15 @@ mod tests {
             ],
         );
         entry
-            .reconciled_postings
+            .posted_postings
             .push((0, "general.journal:gl-txn-1".to_string()));
 
         let formatted = format_entry(&entry);
-        assert!(formatted.contains("reconciled-posting-0: general.journal:gl-txn-1"));
+        assert!(formatted.contains("posted-posting-0: general.journal:gl-txn-1"));
 
         let parsed = parse_journal(&formatted).unwrap();
-        assert_eq!(parsed[0].reconciled_postings.len(), 1);
-        assert_eq!(parsed[0].reconciled_postings[0].0, 0);
-        assert_eq!(
-            parsed[0].reconciled_postings[0].1,
-            "general.journal:gl-txn-1"
-        );
+        assert_eq!(parsed[0].posted_postings.len(), 1);
+        assert_eq!(parsed[0].posted_postings[0].0, 0);
+        assert_eq!(parsed[0].posted_postings[0].1, "general.journal:gl-txn-1");
     }
 }

@@ -5,13 +5,13 @@ use std::path::Path;
 use crate::account_journal::{self, AccountEntry};
 use crate::operations;
 
-/// Reconcile a single account journal entry by assigning a counterpart account.
+/// Post a single account journal entry to the GL by assigning a counterpart account.
 ///
 /// For single-posting entries, creates a GL transaction with the real counterpart.
 /// For multi-posting entries, reconciles a specific posting by index.
 ///
 /// Returns the GL transaction ID.
-pub fn reconcile_entry(
+pub fn post_entry(
     ledger_dir: &Path,
     account_name: &str,
     entry_id: &str,
@@ -37,22 +37,22 @@ pub fn reconcile_entry(
             .into());
         }
     } else if entry.postings.is_empty() {
-        return Err(format!("entry {entry_id} has no postings to reconcile").into());
+        return Err(format!("entry {entry_id} has no postings to post").into());
     }
 
     // Check if already reconciled
     if let Some(posting_idx) = posting_index {
         if entry
-            .reconciled_postings
+            .posted_postings
             .iter()
             .any(|(idx, _)| *idx == posting_idx)
         {
             return Err(
-                format!("posting {posting_idx} of entry {entry_id} is already reconciled").into(),
+                format!("posting {posting_idx} of entry {entry_id} is already posted").into(),
             );
         }
-    } else if entry.reconciled.is_some() {
-        return Err(format!("entry {entry_id} is already reconciled").into());
+    } else if entry.posted.is_some() {
+        return Err(format!("entry {entry_id} is already posted").into());
     }
 
     // Generate GL transaction
@@ -70,10 +70,10 @@ pub fn reconcile_entry(
     let gl_ref = format!("general.journal:{gl_txn_id}");
     if let Some(posting_idx) = posting_index {
         entries[entry_idx]
-            .reconciled_postings
+            .posted_postings
             .push((posting_idx, gl_ref));
     } else {
-        entries[entry_idx].reconciled = Some(gl_ref);
+        entries[entry_idx].posted = Some(gl_ref);
     }
 
     // Write updated account journal first. If this fails, nothing else was mutated.
@@ -87,7 +87,7 @@ pub fn reconcile_entry(
     }
 
     // Log GL operation
-    let op = operations::GlOperation::Reconcile {
+    let op = operations::GlOperation::Post {
         account: account_name.to_string(),
         entry_id: entry_id.to_string(),
         counterpart_account: counterpart_account.to_string(),
@@ -103,8 +103,8 @@ pub fn reconcile_entry(
     Ok(gl_txn_id)
 }
 
-/// Reconcile a single login account journal entry by assigning a counterpart account.
-pub fn reconcile_login_account_entry(
+/// Post a single login account journal entry to the GL by assigning a counterpart account.
+pub fn post_login_account_entry(
     ledger_dir: &Path,
     login_name: &str,
     label: &str,
@@ -131,21 +131,21 @@ pub fn reconcile_login_account_entry(
             .into());
         }
     } else if entry.postings.is_empty() {
-        return Err(format!("entry {entry_id} has no postings to reconcile").into());
+        return Err(format!("entry {entry_id} has no postings to post").into());
     }
 
     if let Some(posting_idx) = posting_index {
         if entry
-            .reconciled_postings
+            .posted_postings
             .iter()
             .any(|(idx, _)| *idx == posting_idx)
         {
             return Err(
-                format!("posting {posting_idx} of entry {entry_id} is already reconciled").into(),
+                format!("posting {posting_idx} of entry {entry_id} is already posted").into(),
             );
         }
-    } else if entry.reconciled.is_some() {
-        return Err(format!("entry {entry_id} is already reconciled").into());
+    } else if entry.posted.is_some() {
+        return Err(format!("entry {entry_id} is already posted").into());
     }
 
     let gl_txn_id = uuid::Uuid::new_v4().to_string();
@@ -161,10 +161,10 @@ pub fn reconcile_login_account_entry(
     let gl_ref = format!("general.journal:{gl_txn_id}");
     if let Some(posting_idx) = posting_index {
         entries[entry_idx]
-            .reconciled_postings
+            .posted_postings
             .push((posting_idx, gl_ref));
     } else {
-        entries[entry_idx].reconciled = Some(gl_ref);
+        entries[entry_idx].posted = Some(gl_ref);
     }
 
     account_journal::write_journal_at_path(&journal_path, &entries)?;
@@ -175,7 +175,7 @@ pub fn reconcile_login_account_entry(
         return Err(err.into());
     }
 
-    let op = operations::GlOperation::Reconcile {
+    let op = operations::GlOperation::Post {
         account: source_locator,
         entry_id: entry_id.to_string(),
         counterpart_account: counterpart_account.to_string(),
@@ -191,8 +191,8 @@ pub fn reconcile_login_account_entry(
     Ok(gl_txn_id)
 }
 
-/// Undo a reconciliation by removing the GL entry and clearing reconciled tags.
-pub fn unreconcile_entry(
+/// Undo a posting by removing the GL entry and clearing reconciled tags.
+pub fn unpost_entry(
     ledger_dir: &Path,
     account_name: &str,
     entry_id: &str,
@@ -209,19 +209,17 @@ pub fn unreconcile_entry(
     // Get the GL reference to remove
     let gl_ref = if let Some(posting_idx) = posting_index {
         let pos = original_entries[entry_idx]
-            .reconciled_postings
+            .posted_postings
             .iter()
             .position(|(idx, _)| *idx == posting_idx)
-            .ok_or_else(|| {
-                format!("posting {posting_idx} of entry {entry_id} is not reconciled")
-            })?;
-        let (_, ref_str) = original_entries[entry_idx].reconciled_postings[pos].clone();
+            .ok_or_else(|| format!("posting {posting_idx} of entry {entry_id} is not posted"))?;
+        let (_, ref_str) = original_entries[entry_idx].posted_postings[pos].clone();
         ref_str
     } else {
         original_entries[entry_idx]
-            .reconciled
+            .posted
             .clone()
-            .ok_or_else(|| format!("entry {entry_id} is not reconciled"))?
+            .ok_or_else(|| format!("entry {entry_id} is not posted"))?
     };
 
     // Remove the GL transaction from general.journal
@@ -231,14 +229,14 @@ pub fn unreconcile_entry(
     // Update account journal entry state in memory
     if let Some(posting_idx) = posting_index {
         if let Some(pos) = entries[entry_idx]
-            .reconciled_postings
+            .posted_postings
             .iter()
             .position(|(idx, _)| *idx == posting_idx)
         {
-            entries[entry_idx].reconciled_postings.remove(pos);
+            entries[entry_idx].posted_postings.remove(pos);
         }
     } else {
-        entries[entry_idx].reconciled = None;
+        entries[entry_idx].posted = None;
     }
 
     // Write updated account journal
@@ -251,7 +249,7 @@ pub fn unreconcile_entry(
     }
 
     // Log undo operation
-    let op = operations::GlOperation::UndoReconcile {
+    let op = operations::GlOperation::UndoPost {
         account: account_name.to_string(),
         entry_id: entry_id.to_string(),
         posting_index,
@@ -269,8 +267,8 @@ pub fn unreconcile_entry(
     Ok(())
 }
 
-/// Undo reconciliation for a login account entry.
-pub fn unreconcile_login_account_entry(
+/// Undo posting for a login account entry.
+pub fn unpost_login_account_entry(
     ledger_dir: &Path,
     login_name: &str,
     label: &str,
@@ -287,19 +285,17 @@ pub fn unreconcile_login_account_entry(
 
     let gl_ref = if let Some(posting_idx) = posting_index {
         let pos = original_entries[entry_idx]
-            .reconciled_postings
+            .posted_postings
             .iter()
             .position(|(idx, _)| *idx == posting_idx)
-            .ok_or_else(|| {
-                format!("posting {posting_idx} of entry {entry_id} is not reconciled")
-            })?;
-        let (_, ref_str) = original_entries[entry_idx].reconciled_postings[pos].clone();
+            .ok_or_else(|| format!("posting {posting_idx} of entry {entry_id} is not posted"))?;
+        let (_, ref_str) = original_entries[entry_idx].posted_postings[pos].clone();
         ref_str
     } else {
         original_entries[entry_idx]
-            .reconciled
+            .posted
             .clone()
-            .ok_or_else(|| format!("entry {entry_id} is not reconciled"))?
+            .ok_or_else(|| format!("entry {entry_id} is not posted"))?
     };
 
     let gl_txn_id = gl_ref.strip_prefix("general.journal:").unwrap_or(&gl_ref);
@@ -307,14 +303,14 @@ pub fn unreconcile_login_account_entry(
 
     if let Some(posting_idx) = posting_index {
         if let Some(pos) = entries[entry_idx]
-            .reconciled_postings
+            .posted_postings
             .iter()
             .position(|(idx, _)| *idx == posting_idx)
         {
-            entries[entry_idx].reconciled_postings.remove(pos);
+            entries[entry_idx].posted_postings.remove(pos);
         }
     } else {
-        entries[entry_idx].reconciled = None;
+        entries[entry_idx].posted = None;
     }
 
     if let Err(err) = account_journal::write_journal_at_path(&journal_path, &entries) {
@@ -326,7 +322,7 @@ pub fn unreconcile_login_account_entry(
     }
 
     let source_locator = format!("logins/{login_name}/accounts/{label}");
-    let op = operations::GlOperation::UndoReconcile {
+    let op = operations::GlOperation::UndoPost {
         account: source_locator,
         entry_id: entry_id.to_string(),
         posting_index,
@@ -344,8 +340,8 @@ pub fn unreconcile_login_account_entry(
     Ok(())
 }
 
-/// Reconcile two entries across accounts as an inter-account transfer.
-pub fn reconcile_transfer(
+/// Post two entries across accounts as an inter-account transfer.
+pub fn post_transfer(
     ledger_dir: &Path,
     account1: &str,
     entry_id1: &str,
@@ -367,12 +363,12 @@ pub fn reconcile_transfer(
         .position(|e| e.id == entry_id2)
         .ok_or_else(|| format!("entry not found in {account2}: {entry_id2}"))?;
 
-    // Check neither is already reconciled
-    if entries1[idx1].reconciled.is_some() {
-        return Err(format!("entry {entry_id1} in {account1} is already reconciled").into());
+    // Check neither is already posted
+    if entries1[idx1].posted.is_some() {
+        return Err(format!("entry {entry_id1} in {account1} is already posted").into());
     }
-    if entries2[idx2].reconciled.is_some() {
-        return Err(format!("entry {entry_id2} in {account2} is already reconciled").into());
+    if entries2[idx2].posted.is_some() {
+        return Err(format!("entry {entry_id2} in {account2} is already posted").into());
     }
 
     // Generate GL transaction for transfer
@@ -389,8 +385,8 @@ pub fn reconcile_transfer(
 
     // Update both account journal entries
     let gl_ref = format!("general.journal:{gl_txn_id}");
-    entries1[idx1].reconciled = Some(gl_ref.clone());
-    entries2[idx2].reconciled = Some(gl_ref);
+    entries1[idx1].posted = Some(gl_ref.clone());
+    entries2[idx2].posted = Some(gl_ref);
 
     if let Err(err) = account_journal::write_journal(ledger_dir, account1, &entries1) {
         return Err(err.into());
@@ -432,37 +428,31 @@ pub fn reconcile_transfer(
     Ok(gl_txn_id)
 }
 
-/// Get unreconciled entries for an account.
-pub fn get_unreconciled(
+/// Get unposted entries for an account.
+pub fn get_unposted(
     ledger_dir: &Path,
     account_name: &str,
 ) -> Result<Vec<AccountEntry>, Box<dyn std::error::Error + Send + Sync>> {
     let entries = account_journal::read_journal(ledger_dir, account_name)?;
-    Ok(entries
-        .into_iter()
-        .filter(has_unreconciled_portion)
-        .collect())
+    Ok(entries.into_iter().filter(has_unposted_portion).collect())
 }
 
-/// Get unreconciled entries for a login account.
-pub fn get_unreconciled_login_account(
+/// Get unposted entries for a login account.
+pub fn get_unposted_login_account(
     ledger_dir: &Path,
     login_name: &str,
     label: &str,
 ) -> Result<Vec<AccountEntry>, Box<dyn std::error::Error + Send + Sync>> {
     let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
     let entries = account_journal::read_journal_at_path(&journal_path)?;
-    Ok(entries
-        .into_iter()
-        .filter(has_unreconciled_portion)
-        .collect())
+    Ok(entries.into_iter().filter(has_unposted_portion).collect())
 }
 
-fn has_unreconciled_portion(entry: &AccountEntry) -> bool {
-    if entry.reconciled.is_some() {
+fn has_unposted_portion(entry: &AccountEntry) -> bool {
+    if entry.posted.is_some() {
         return false;
     }
-    if entry.reconciled_postings.is_empty() {
+    if entry.posted_postings.is_empty() {
         return true;
     }
     if entry.postings.is_empty() {
@@ -470,7 +460,7 @@ fn has_unreconciled_portion(entry: &AccountEntry) -> bool {
     }
 
     let mut reconciled_mask = vec![false; entry.postings.len()];
-    for (idx, _) in &entry.reconciled_postings {
+    for (idx, _) in &entry.posted_postings {
         if *idx < reconciled_mask.len() {
             reconciled_mask[*idx] = true;
         }
@@ -515,7 +505,7 @@ fn format_gl_transaction(
     };
 
     format!(
-        "{}  {}  ; id: {}\n    ; generated-by: refreshmint-reconcile\n    {source_tag}\n    {real_account}  {amount_str}\n    {counterpart_account}\n",
+        "{}  {}  ; id: {}\n    ; generated-by: refreshmint-post\n    {source_tag}\n    {real_account}  {amount_str}\n    {counterpart_account}\n",
         entry.date, entry.description, gl_txn_id,
     )
 }
@@ -548,7 +538,7 @@ fn format_transfer_gl_transaction(
         .unwrap_or_default();
 
     format!(
-        "{}  {}  ; id: {}\n    ; generated-by: refreshmint-reconcile\n    ; source: {}:{}\n    ; source: {}:{}\n    {real_account1}  {amount1}\n    {real_account2}\n",
+        "{}  {}  ; id: {}\n    ; generated-by: refreshmint-post\n    ; source: {}:{}\n    ; source: {}:{}\n    {real_account1}  {amount1}\n    {real_account2}\n",
         entry1.date,
         entry1.description,
         gl_txn_id,
@@ -674,34 +664,34 @@ mod tests {
             ],
             tags: vec![],
             extracted_by: None,
-            reconciled: None,
-            reconciled_postings: Vec::new(),
+            posted: None,
+            posted_postings: Vec::new(),
         }
     }
 
     #[test]
-    fn reconcile_creates_gl_entry_and_tags_account() {
-        let root = temp_dir("reconcile");
+    fn post_creates_gl_entry_and_tags_account() {
+        let root = temp_dir("post");
         // Create general.journal
         fs::write(root.join("general.journal"), "").unwrap();
 
         let entries = vec![make_entry("txn-1", "2024-01-15", "Shell Oil", "-21.32")];
         account_journal::write_journal(&root, "chase", &entries).unwrap();
 
-        let gl_id = reconcile_entry(&root, "chase", "txn-1", "Expenses:Gas", None).unwrap();
+        let gl_id = post_entry(&root, "chase", "txn-1", "Expenses:Gas", None).unwrap();
 
         // Check GL entry was created
         let gl_content = fs::read_to_string(root.join("general.journal")).unwrap();
         assert!(gl_content.contains("Shell Oil"));
         assert!(gl_content.contains("Expenses:Gas"));
         assert!(gl_content.contains(&format!("id: {gl_id}")));
-        assert!(gl_content.contains("generated-by: refreshmint-reconcile"));
+        assert!(gl_content.contains("generated-by: refreshmint-post"));
         assert!(gl_content.contains("source: accounts/chase:txn-1"));
 
         // Check account journal was updated
         let updated = account_journal::read_journal(&root, "chase").unwrap();
         assert_eq!(
-            updated[0].reconciled.as_ref().unwrap(),
+            updated[0].posted.as_ref().unwrap(),
             &format!("general.journal:{gl_id}")
         );
 
@@ -713,21 +703,21 @@ mod tests {
     }
 
     #[test]
-    fn unreconcile_removes_gl_entry() {
-        let root = temp_dir("unreconcile");
+    fn unpost_removes_gl_entry() {
+        let root = temp_dir("unpost");
         fs::write(root.join("general.journal"), "").unwrap();
 
         let entries = vec![make_entry("txn-1", "2024-01-15", "Shell Oil", "-21.32")];
         account_journal::write_journal(&root, "chase", &entries).unwrap();
 
-        let gl_id = reconcile_entry(&root, "chase", "txn-1", "Expenses:Gas", None).unwrap();
+        let gl_id = post_entry(&root, "chase", "txn-1", "Expenses:Gas", None).unwrap();
 
         // Verify GL entry exists
         let gl_before = fs::read_to_string(root.join("general.journal")).unwrap();
         assert!(gl_before.contains(&gl_id));
 
-        // Unreconcile
-        unreconcile_entry(&root, "chase", "txn-1", None).unwrap();
+        // Unpost
+        unpost_entry(&root, "chase", "txn-1", None).unwrap();
 
         // Check GL entry was removed
         let gl_after = fs::read_to_string(root.join("general.journal")).unwrap();
@@ -735,28 +725,28 @@ mod tests {
 
         // Check account journal was updated
         let updated = account_journal::read_journal(&root, "chase").unwrap();
-        assert!(updated[0].reconciled.is_none());
+        assert!(updated[0].posted.is_none());
 
         // Check undo operation was logged
         let ops = operations::read_gl_operations(&root).unwrap();
-        assert_eq!(ops.len(), 2); // reconcile + undo-reconcile
+        assert_eq!(ops.len(), 2); // post + undo-post
 
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn get_unreconciled_filters_correctly() {
-        let root = temp_dir("unreconciled-filter");
+    fn get_unposted_filters_correctly() {
+        let root = temp_dir("unposted-filter");
 
         let mut entries = vec![
             make_entry("txn-1", "2024-01-15", "Shell Oil", "-21.32"),
             make_entry("txn-2", "2024-01-16", "Walmart", "-50.00"),
         ];
-        entries[0].reconciled = Some("general.journal:gl-1".to_string());
+        entries[0].posted = Some("general.journal:gl-1".to_string());
 
         account_journal::write_journal(&root, "test-acct", &entries).unwrap();
 
-        let unreconciled = get_unreconciled(&root, "test-acct").unwrap();
+        let unreconciled = get_unposted(&root, "test-acct").unwrap();
         assert_eq!(unreconciled.len(), 1);
         assert_eq!(unreconciled[0].id, "txn-2");
 
@@ -764,13 +754,13 @@ mod tests {
     }
 
     #[test]
-    fn get_unreconciled_includes_partially_reconciled_multi_posting_entries() {
-        let root = temp_dir("unreconciled-partial");
+    fn get_unposted_includes_partially_posted_multi_posting_entries() {
+        let root = temp_dir("unposted-partial");
         let mut entry = make_entry("txn-1", "2024-01-15", "Venmo pass-through", "-21.32");
-        entry.reconciled_postings = vec![(0, "general.journal:gl-1".to_string())];
+        entry.posted_postings = vec![(0, "general.journal:gl-1".to_string())];
         account_journal::write_journal(&root, "test-acct", &[entry]).unwrap();
 
-        let unreconciled = get_unreconciled(&root, "test-acct").unwrap();
+        let unreconciled = get_unposted(&root, "test-acct").unwrap();
         assert_eq!(unreconciled.len(), 1);
         assert_eq!(unreconciled[0].id, "txn-1");
 
@@ -778,13 +768,13 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_rejects_out_of_bounds_posting_index() {
+    fn post_rejects_out_of_bounds_posting_index() {
         let root = temp_dir("posting-index-bounds");
         fs::write(root.join("general.journal"), "").unwrap();
         let entries = vec![make_entry("txn-1", "2024-01-15", "Shell Oil", "-21.32")];
         account_journal::write_journal(&root, "chase", &entries).unwrap();
 
-        let err = reconcile_entry(&root, "chase", "txn-1", "Expenses:Gas", Some(99))
+        let err = post_entry(&root, "chase", "txn-1", "Expenses:Gas", Some(99))
             .expect_err("out-of-bounds index should error");
         assert!(err.to_string().contains("out of bounds"));
 
@@ -792,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_rejects_entry_without_postings() {
+    fn post_rejects_entry_without_postings() {
         let root = temp_dir("empty-postings");
         fs::write(root.join("general.journal"), "").unwrap();
 
@@ -806,12 +796,12 @@ mod tests {
             postings: Vec::new(),
             tags: vec![],
             extracted_by: None,
-            reconciled: None,
-            reconciled_postings: Vec::new(),
+            posted: None,
+            posted_postings: Vec::new(),
         };
         account_journal::write_journal(&root, "chase", &[entry]).unwrap();
 
-        let err = reconcile_entry(&root, "chase", "txn-1", "Expenses:Gas", None)
+        let err = post_entry(&root, "chase", "txn-1", "Expenses:Gas", None)
             .expect_err("empty postings should error");
         assert!(err.to_string().contains("has no postings"));
 

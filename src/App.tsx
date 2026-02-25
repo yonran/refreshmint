@@ -30,7 +30,7 @@ import {
     deleteLogin,
     getLoginAccountJournal,
     getLoginConfig,
-    getLoginAccountUnreconciled,
+    getLoginAccountUnposted,
     getScrapeDebugSessionSocket,
     type LoginAccountConfig,
     type LoginConfig,
@@ -48,8 +48,8 @@ import {
     type MigrationOutcome,
     type NewTransactionInput,
     type PostingRow,
-    reconcileLoginAccountEntry,
-    reconcileTransfer,
+    postLoginAccountEntry,
+    postTransfer,
     reenterLoginSecret,
     removeLoginSecret,
     runLoginAccountExtraction,
@@ -61,7 +61,7 @@ import {
     type SecretEntry,
     syncLoginSecretsForExtension,
     type TransactionRow,
-    unreconcileLoginAccountEntry,
+    unpostLoginAccountEntry,
     validateTransaction,
     validateTransactionText,
 } from './tauri-commands.ts';
@@ -81,7 +81,7 @@ type DraftPosting = {
 
 type TransactionEntryMode = 'form' | 'raw';
 
-type ReconcileDraft = {
+type PostDraft = {
     counterpartAccount: string;
     postingIndex: string;
 };
@@ -177,7 +177,7 @@ function App() {
     const [ledger, setLedger] = useState<LedgerView | null>(null);
     const [activeTab, setActiveTab] = useState<ActiveTab>('accounts');
     const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
-    const [unreconciledOnly, setUnreconciledOnly] = useState(false);
+    const [unpostedOnly, setUnpostedOnly] = useState(false);
     const [selectedLoginAccount, setSelectedLoginAccount] =
         useState<LoginAccountRef | null>(null);
     const [loginAccounts, setLoginAccounts] = useState<LoginAccountRef[]>([]);
@@ -264,7 +264,7 @@ function App() {
     const [accountJournalEntries, setAccountJournalEntries] = useState<
         AccountJournalEntry[]
     >([]);
-    const [unreconciledEntries, setUnreconciledEntries] = useState<
+    const [unpostedEntries, setUnpostedEntries] = useState<
         AccountJournalEntry[]
     >([]);
     const [pipelineStatus, setPipelineStatus] = useState<string | null>(null);
@@ -278,23 +278,19 @@ function App() {
     const [isRunningExtraction, setIsRunningExtraction] = useState(false);
     const [isLoadingAccountJournal, setIsLoadingAccountJournal] =
         useState(false);
-    const [isLoadingUnreconciled, setIsLoadingUnreconciled] = useState(false);
-    const [reconcileDrafts, setReconcileDrafts] = useState<
-        Record<string, ReconcileDraft>
-    >({});
-    const [busyReconcileEntryId, setBusyReconcileEntryId] = useState<
-        string | null
-    >(null);
-    const [unreconcileEntryId, setUnreconcileEntryId] = useState('');
-    const [unreconcilePostingIndex, setUnreconcilePostingIndex] = useState('');
-    const [isUnreconcilingEntry, setIsUnreconcilingEntry] = useState(false);
+    const [isLoadingUnposted, setIsLoadingUnposted] = useState(false);
+    const [postDrafts, setPostDrafts] = useState<Record<string, PostDraft>>({});
+    const [busyPostEntryId, setBusyPostEntryId] = useState<string | null>(null);
+    const [unpostEntryId, setUnpostEntryId] = useState('');
+    const [unpostPostingIndex, setUnpostPostingIndex] = useState('');
+    const [isUnpostingEntry, setIsUnpostingEntry] = useState(false);
     const [transferDraft, setTransferDraft] = useState<TransferDraft>({
         account1: '',
         entryId1: '',
         account2: '',
         entryId2: '',
     });
-    const [isReconcilingTransfer, setIsReconcilingTransfer] = useState(false);
+    const [isPostingTransfer, setIsPostingTransfer] = useState(false);
     const [secretPrompt, setSecretPrompt] = useState<SecretPromptState | null>(
         null,
     );
@@ -350,7 +346,7 @@ function App() {
               ) {
                   return false;
               }
-              if (unreconciledOnly) {
+              if (unpostedOnly) {
                   // This is a bit tricky because "unreconciled" in the main ledger isn't directly tracked the same way.
                   // But we can filter for transactions that have an "Equity:Unreconciled" account.
                   if (
@@ -483,16 +479,16 @@ function App() {
 
     const pipelineGlRows = useMemo(() => {
         if (!ledger || accountJournalEntries.length === 0) return [];
-        const reconciledIds = new Set(
+        const postedIds = new Set(
             accountJournalEntries
-                .filter((e) => e.reconciled !== null)
+                .filter((e) => e.posted !== null)
                 .map((e) => {
-                    const parts = (e.reconciled ?? '').split(':');
+                    const parts = (e.posted ?? '').split(':');
                     return parts[parts.length - 1] ?? '';
                 })
                 .filter((id) => id.length > 0),
         );
-        return ledger.transactions.filter((txn) => reconciledIds.has(txn.id));
+        return ledger.transactions.filter((txn) => postedIds.has(txn.id));
     }, [ledger, accountJournalEntries]);
 
     const evidencedRowNumbers = useMemo(() => {
@@ -566,7 +562,7 @@ function App() {
             setDocuments([]);
             setSelectedDocumentNames([]);
             setAccountJournalEntries([]);
-            setUnreconciledEntries([]);
+            setUnpostedEntries([]);
             setPipelineStatus(null);
             setPipelineSubTab('evidence');
             setEvidenceRowsDocument('');
@@ -575,19 +571,19 @@ function App() {
             setIsLoadingDocuments(false);
             setIsRunningExtraction(false);
             setIsLoadingAccountJournal(false);
-            setIsLoadingUnreconciled(false);
-            setReconcileDrafts({});
-            setBusyReconcileEntryId(null);
-            setUnreconcileEntryId('');
-            setUnreconcilePostingIndex('');
-            setIsUnreconcilingEntry(false);
+            setIsLoadingUnposted(false);
+            setPostDrafts({});
+            setBusyPostEntryId(null);
+            setUnpostEntryId('');
+            setUnpostPostingIndex('');
+            setIsUnpostingEntry(false);
             setTransferDraft({
                 account1: '',
                 entryId1: '',
                 account2: '',
                 entryId2: '',
             });
-            setIsReconcilingTransfer(false);
+            setIsPostingTransfer(false);
         }
     }, [ledger]);
 
@@ -995,11 +991,11 @@ function App() {
             setDocuments([]);
             setSelectedDocumentNames([]);
             setAccountJournalEntries([]);
-            setUnreconciledEntries([]);
-            setReconcileDrafts({});
+            setUnpostedEntries([]);
+            setPostDrafts({});
             setIsLoadingDocuments(false);
             setIsLoadingAccountJournal(false);
-            setIsLoadingUnreconciled(false);
+            setIsLoadingUnposted(false);
             return;
         }
 
@@ -1007,11 +1003,11 @@ function App() {
             setDocuments([]);
             setSelectedDocumentNames([]);
             setAccountJournalEntries([]);
-            setUnreconciledEntries([]);
-            setReconcileDrafts({});
+            setUnpostedEntries([]);
+            setPostDrafts({});
             setIsLoadingDocuments(false);
             setIsLoadingAccountJournal(false);
-            setIsLoadingUnreconciled(false);
+            setIsLoadingUnposted(false);
             return;
         }
 
@@ -1020,7 +1016,7 @@ function App() {
         const timer = window.setTimeout(() => {
             setIsLoadingDocuments(true);
             setIsLoadingAccountJournal(true);
-            setIsLoadingUnreconciled(true);
+            setIsLoadingUnposted(true);
             void Promise.all([
                 listLoginAccountDocuments(
                     ledgerPath,
@@ -1032,57 +1028,51 @@ function App() {
                     mapping.loginName,
                     mapping.label,
                 ),
-                getLoginAccountUnreconciled(
+                getLoginAccountUnposted(
                     ledgerPath,
                     mapping.loginName,
                     mapping.label,
                 ),
             ])
-                .then(
-                    ([
-                        fetchedDocuments,
-                        fetchedJournal,
-                        fetchedUnreconciled,
-                    ]) => {
-                        if (cancelled) {
-                            return;
-                        }
-                        setDocuments(fetchedDocuments);
-                        setSelectedDocumentNames((current) =>
-                            current.filter((name) =>
-                                fetchedDocuments.some(
-                                    (doc) => doc.filename === name,
-                                ),
+                .then(([fetchedDocuments, fetchedJournal, fetchedUnposted]) => {
+                    if (cancelled) {
+                        return;
+                    }
+                    setDocuments(fetchedDocuments);
+                    setSelectedDocumentNames((current) =>
+                        current.filter((name) =>
+                            fetchedDocuments.some(
+                                (doc) => doc.filename === name,
                             ),
-                        );
-                        setAccountJournalEntries(fetchedJournal);
-                        setUnreconciledEntries(fetchedUnreconciled);
-                        setReconcileDrafts((current) => {
-                            const next: Record<string, ReconcileDraft> = {};
-                            for (const entry of fetchedUnreconciled) {
-                                next[entry.id] = current[entry.id] ?? {
-                                    counterpartAccount: '',
-                                    postingIndex: '',
-                                };
-                            }
-                            return next;
-                        });
-                        setTransferDraft((current) => ({
-                            ...current,
-                            account1:
-                                current.account1.trim().length > 0
-                                    ? current.account1
-                                    : selectedScrapeAccount,
-                        }));
-                    },
-                )
+                        ),
+                    );
+                    setAccountJournalEntries(fetchedJournal);
+                    setUnpostedEntries(fetchedUnposted);
+                    setPostDrafts((current) => {
+                        const next: Record<string, PostDraft> = {};
+                        for (const entry of fetchedUnposted) {
+                            next[entry.id] = current[entry.id] ?? {
+                                counterpartAccount: '',
+                                postingIndex: '',
+                            };
+                        }
+                        return next;
+                    });
+                    setTransferDraft((current) => ({
+                        ...current,
+                        account1:
+                            current.account1.trim().length > 0
+                                ? current.account1
+                                : selectedScrapeAccount,
+                    }));
+                })
                 .catch((error: unknown) => {
                     if (!cancelled) {
                         setDocuments([]);
                         setSelectedDocumentNames([]);
                         setAccountJournalEntries([]);
-                        setUnreconciledEntries([]);
-                        setReconcileDrafts({});
+                        setUnpostedEntries([]);
+                        setPostDrafts({});
                         setPipelineStatus(
                             `Failed to load login pipeline data: ${String(error)}`,
                         );
@@ -1092,7 +1082,7 @@ function App() {
                     if (!cancelled) {
                         setIsLoadingDocuments(false);
                         setIsLoadingAccountJournal(false);
-                        setIsLoadingUnreconciled(false);
+                        setIsLoadingUnposted(false);
                     }
                 });
         }, 250);
@@ -1175,36 +1165,30 @@ function App() {
         const timer = window.setTimeout(() => {
             setIsLoadingDocuments(true);
             setIsLoadingAccountJournal(true);
-            setIsLoadingUnreconciled(true);
+            setIsLoadingUnposted(true);
             void Promise.all([
                 listLoginAccountDocuments(ledgerPath, loginName, label),
                 getLoginAccountJournal(ledgerPath, loginName, label),
-                getLoginAccountUnreconciled(ledgerPath, loginName, label),
+                getLoginAccountUnposted(ledgerPath, loginName, label),
             ])
-                .then(
-                    ([
-                        fetchedDocuments,
-                        fetchedJournal,
-                        fetchedUnreconciled,
-                    ]) => {
-                        if (cancelled) {
-                            return;
+                .then(([fetchedDocuments, fetchedJournal, fetchedUnposted]) => {
+                    if (cancelled) {
+                        return;
+                    }
+                    setDocuments(fetchedDocuments);
+                    setAccountJournalEntries(fetchedJournal);
+                    setUnpostedEntries(fetchedUnposted);
+                    setPostDrafts((current) => {
+                        const next: Record<string, PostDraft> = {};
+                        for (const entry of fetchedUnposted) {
+                            next[entry.id] = current[entry.id] ?? {
+                                counterpartAccount: '',
+                                postingIndex: '',
+                            };
                         }
-                        setDocuments(fetchedDocuments);
-                        setAccountJournalEntries(fetchedJournal);
-                        setUnreconciledEntries(fetchedUnreconciled);
-                        setReconcileDrafts((current) => {
-                            const next: Record<string, ReconcileDraft> = {};
-                            for (const entry of fetchedUnreconciled) {
-                                next[entry.id] = current[entry.id] ?? {
-                                    counterpartAccount: '',
-                                    postingIndex: '',
-                                };
-                            }
-                            return next;
-                        });
-                    },
-                )
+                        return next;
+                    });
+                })
                 .catch((error: unknown) => {
                     if (!cancelled) {
                         setPipelineStatus(
@@ -1216,7 +1200,7 @@ function App() {
                     if (!cancelled) {
                         setIsLoadingDocuments(false);
                         setIsLoadingAccountJournal(false);
-                        setIsLoadingUnreconciled(false);
+                        setIsLoadingUnposted(false);
                     }
                 });
         }, 200);
@@ -2204,8 +2188,8 @@ function App() {
             setDocuments([]);
             setSelectedDocumentNames([]);
             setAccountJournalEntries([]);
-            setUnreconciledEntries([]);
-            setReconcileDrafts({});
+            setUnpostedEntries([]);
+            setPostDrafts({});
             return;
         }
         const mappings = loginAccountMappings[account] ?? [];
@@ -2223,9 +2207,9 @@ function App() {
 
         setIsLoadingDocuments(true);
         setIsLoadingAccountJournal(true);
-        setIsLoadingUnreconciled(true);
+        setIsLoadingUnposted(true);
         try {
-            const [fetchedDocuments, fetchedJournal, fetchedUnreconciled] =
+            const [fetchedDocuments, fetchedJournal, fetchedUnposted] =
                 await Promise.all([
                     listLoginAccountDocuments(
                         ledger.path,
@@ -2237,7 +2221,7 @@ function App() {
                         mapping.loginName,
                         mapping.label,
                     ),
-                    getLoginAccountUnreconciled(
+                    getLoginAccountUnposted(
                         ledger.path,
                         mapping.loginName,
                         mapping.label,
@@ -2250,10 +2234,10 @@ function App() {
                 ),
             );
             setAccountJournalEntries(fetchedJournal);
-            setUnreconciledEntries(fetchedUnreconciled);
-            setReconcileDrafts((current) => {
-                const next: Record<string, ReconcileDraft> = {};
-                for (const entry of fetchedUnreconciled) {
+            setUnpostedEntries(fetchedUnposted);
+            setPostDrafts((current) => {
+                const next: Record<string, PostDraft> = {};
+                for (const entry of fetchedUnposted) {
                     next[entry.id] = current[entry.id] ?? {
                         counterpartAccount: '',
                         postingIndex: '',
@@ -2271,7 +2255,7 @@ function App() {
         } finally {
             setIsLoadingDocuments(false);
             setIsLoadingAccountJournal(false);
-            setIsLoadingUnreconciled(false);
+            setIsLoadingUnposted(false);
         }
     }
 
@@ -2339,15 +2323,15 @@ function App() {
                 label,
                 [documentName],
             );
-            const [journal, unreconciled] = await Promise.all([
+            const [journal, unposted] = await Promise.all([
                 getLoginAccountJournal(ledger.path, loginName, label),
-                getLoginAccountUnreconciled(ledger.path, loginName, label),
+                getLoginAccountUnposted(ledger.path, loginName, label),
             ]);
             setAccountJournalEntries(journal);
-            setUnreconciledEntries(unreconciled);
-            setReconcileDrafts((current) => {
-                const next: Record<string, ReconcileDraft> = {};
-                for (const entry of unreconciled) {
+            setUnpostedEntries(unposted);
+            setPostDrafts((current) => {
+                const next: Record<string, PostDraft> = {};
+                for (const entry of unposted) {
                     next[entry.id] = current[entry.id] ?? {
                         counterpartAccount: '',
                         postingIndex: '',
@@ -2421,11 +2405,8 @@ function App() {
         }
     }
 
-    function handleSetReconcileDraft(
-        entryId: string,
-        patch: Partial<ReconcileDraft>,
-    ) {
-        setReconcileDrafts((current) => ({
+    function handleSetPostDraft(entryId: string, patch: Partial<PostDraft>) {
+        setPostDrafts((current) => ({
             ...current,
             [entryId]: {
                 counterpartAccount: '',
@@ -2437,7 +2418,7 @@ function App() {
         setPipelineStatus(null);
     }
 
-    async function handleReconcileAccountEntry(entryId: string) {
+    async function handlePostAccountEntry(entryId: string) {
         if (!ledger) {
             return;
         }
@@ -2462,7 +2443,7 @@ function App() {
             );
             return;
         }
-        const draft = reconcileDrafts[entryId] ?? {
+        const draft = postDrafts[entryId] ?? {
             counterpartAccount: '',
             postingIndex: '',
         };
@@ -2478,9 +2459,9 @@ function App() {
             return;
         }
 
-        setBusyReconcileEntryId(entryId);
+        setBusyPostEntryId(entryId);
         try {
-            const glId = await reconcileLoginAccountEntry(
+            const glId = await postLoginAccountEntry(
                 ledger.path,
                 mapping.loginName,
                 mapping.label,
@@ -2489,16 +2470,16 @@ function App() {
                 postingIndex.value,
             );
             await refreshAccountPipelineData(account);
-            setUnreconcileEntryId(entryId);
-            setPipelineStatus(`Reconciled ${entryId} to ${glId}.`);
+            setUnpostEntryId(entryId);
+            setPipelineStatus(`Posted ${entryId} to ${glId}.`);
         } catch (error) {
-            setPipelineStatus(`Reconcile failed: ${String(error)}`);
+            setPipelineStatus(`Post failed: ${String(error)}`);
         } finally {
-            setBusyReconcileEntryId(null);
+            setBusyPostEntryId(null);
         }
     }
 
-    async function handleUnreconcileAccountEntry() {
+    async function handleUnpostAccountEntry() {
         if (!ledger) {
             return;
         }
@@ -2523,21 +2504,21 @@ function App() {
             );
             return;
         }
-        const entryId = unreconcileEntryId.trim();
+        const entryId = unpostEntryId.trim();
         if (entryId.length === 0) {
-            setPipelineStatus('Entry ID is required for unreconcile.');
+            setPipelineStatus('Entry ID is required for unpost.');
             return;
         }
 
-        const postingIndex = parseOptionalIndex(unreconcilePostingIndex);
+        const postingIndex = parseOptionalIndex(unpostPostingIndex);
         if (postingIndex.error !== null) {
             setPipelineStatus(postingIndex.error);
             return;
         }
 
-        setIsUnreconcilingEntry(true);
+        setIsUnpostingEntry(true);
         try {
-            await unreconcileLoginAccountEntry(
+            await unpostLoginAccountEntry(
                 ledger.path,
                 mapping.loginName,
                 mapping.label,
@@ -2545,15 +2526,15 @@ function App() {
                 postingIndex.value,
             );
             await refreshAccountPipelineData(account);
-            setPipelineStatus(`Unreconciled ${entryId}.`);
+            setPipelineStatus(`Unposted ${entryId}.`);
         } catch (error) {
-            setPipelineStatus(`Unreconcile failed: ${String(error)}`);
+            setPipelineStatus(`Unpost failed: ${String(error)}`);
         } finally {
-            setIsUnreconcilingEntry(false);
+            setIsUnpostingEntry(false);
         }
     }
 
-    async function handleReconcileTransferPair() {
+    async function handlePostTransferPair() {
         if (!ledger) {
             return;
         }
@@ -2570,9 +2551,9 @@ function App() {
             return;
         }
 
-        setIsReconcilingTransfer(true);
+        setIsPostingTransfer(true);
         try {
-            const glId = await reconcileTransfer(
+            const glId = await postTransfer(
                 ledger.path,
                 account1,
                 entryId1,
@@ -2583,12 +2564,12 @@ function App() {
                 await refreshAccountPipelineData(scrapeAccount);
             }
             setPipelineStatus(
-                `Transfer reconciliation complete: ${entryId1} ↔ ${entryId2} (${glId}).`,
+                `Transfer posting complete: ${entryId1} ↔ ${entryId2} (${glId}).`,
             );
         } catch (error) {
-            setPipelineStatus(`Transfer reconcile failed: ${String(error)}`);
+            setPipelineStatus(`Transfer post failed: ${String(error)}`);
         } finally {
-            setIsReconcilingTransfer(false);
+            setIsPostingTransfer(false);
         }
     }
 
@@ -2838,7 +2819,7 @@ function App() {
                                     <p>
                                         Multiple login labels map to the same GL
                                         account. Resolve these before extraction
-                                        or reconciliation.
+                                        or posting.
                                     </p>
                                 </div>
                             </div>
@@ -2984,13 +2965,12 @@ function App() {
                                             {selectedAccount}
                                         </span>
                                         {selectedAccountRow &&
-                                        selectedAccountRow.unreconciledCount >
-                                            0 ? (
+                                        selectedAccountRow.unpostedCount > 0 ? (
                                             <span className="secret-chip warning">
                                                 {
-                                                    selectedAccountRow.unreconciledCount
+                                                    selectedAccountRow.unpostedCount
                                                 }{' '}
-                                                unreconciled
+                                                unposted
                                             </span>
                                         ) : null}
                                     </div>
@@ -2998,20 +2978,20 @@ function App() {
                                         <label className="checkbox-field">
                                             <input
                                                 type="checkbox"
-                                                checked={unreconciledOnly}
+                                                checked={unpostedOnly}
                                                 onChange={(e) => {
-                                                    setUnreconciledOnly(
+                                                    setUnpostedOnly(
                                                         e.target.checked,
                                                     );
                                                 }}
                                             />
-                                            <span>Unreconciled only</span>
+                                            <span>Unposted only</span>
                                         </label>
                                         <button
                                             className="ghost-button"
                                             onClick={() => {
                                                 setSelectedAccount(null);
-                                                setUnreconciledOnly(false);
+                                                setUnpostedOnly(false);
                                             }}
                                         >
                                             Clear filter
@@ -3486,7 +3466,7 @@ function App() {
                                             Inspect the ETL stages for a bank
                                             account: evidence documents, raw
                                             rows, extracted account entries, and
-                                            reconciled GL transactions.
+                                            posted GL transactions.
                                         </p>
                                     </div>
                                 </div>
@@ -4791,7 +4771,7 @@ function App() {
                                                 Select documents, run
                                                 extraction, and review
                                                 account-level journal and
-                                                reconciliation state.
+                                                posting state.
                                             </p>
                                         </div>
                                         <div className="header-actions">
@@ -4805,17 +4785,16 @@ function App() {
                                                     !hasResolvedLoginMapping ||
                                                     isLoadingDocuments ||
                                                     isLoadingAccountJournal ||
-                                                    isLoadingUnreconciled ||
+                                                    isLoadingUnposted ||
                                                     isRunningExtraction ||
-                                                    busyReconcileEntryId !==
-                                                        null ||
-                                                    isUnreconcilingEntry ||
-                                                    isReconcilingTransfer
+                                                    busyPostEntryId !== null ||
+                                                    isUnpostingEntry ||
+                                                    isPostingTransfer
                                                 }
                                             >
                                                 {isLoadingDocuments ||
                                                 isLoadingAccountJournal ||
-                                                isLoadingUnreconciled
+                                                isLoadingUnposted
                                                     ? 'Refreshing...'
                                                     : 'Refresh pipeline'}
                                             </button>
@@ -4950,24 +4929,24 @@ function App() {
                                     )}
                                     <div className="txn-form-header">
                                         <div>
-                                            <h3>Reconciliation queue</h3>
+                                            <h3>Posting queue</h3>
                                             <p>
                                                 Assign counterpart accounts for
-                                                unreconciled entries.
+                                                unposted entries.
                                             </p>
                                         </div>
                                     </div>
-                                    {isLoadingUnreconciled ? (
+                                    {isLoadingUnposted ? (
                                         <p className="status">
-                                            Loading unreconciled entries...
+                                            Loading unposted entries...
                                         </p>
-                                    ) : unreconciledEntries.length === 0 ? (
+                                    ) : unpostedEntries.length === 0 ? (
                                         <p className="hint">
                                             {selectedScrapeAccount.length === 0
-                                                ? 'Choose a GL account to view unreconciled entries.'
+                                                ? 'Choose a GL account to view unposted entries.'
                                                 : !hasResolvedLoginMapping
-                                                  ? 'Resolve login mapping first to view unreconciled entries.'
-                                                  : 'No unreconciled entries for this login mapping.'}
+                                                  ? 'Resolve login mapping first to view unposted entries.'
+                                                  : 'No unposted entries for this login mapping.'}
                                         </p>
                                     ) : (
                                         <div className="table-wrap">
@@ -4983,10 +4962,10 @@ function App() {
                                                     </tr>
                                                 </thead>
                                                 <tbody>
-                                                    {unreconciledEntries.map(
+                                                    {unpostedEntries.map(
                                                         (entry) => {
                                                             const draft =
-                                                                reconcileDrafts[
+                                                                postDrafts[
                                                                     entry.id
                                                                 ] ?? {
                                                                     counterpartAccount:
@@ -4995,7 +4974,7 @@ function App() {
                                                                         '',
                                                                 };
                                                             const isBusy =
-                                                                busyReconcileEntryId ===
+                                                                busyPostEntryId ===
                                                                 entry.id;
                                                             return (
                                                                 <tr
@@ -5028,7 +5007,7 @@ function App() {
                                                                             onChange={(
                                                                                 event,
                                                                             ) => {
-                                                                                handleSetReconcileDraft(
+                                                                                handleSetPostDraft(
                                                                                     entry.id,
                                                                                     {
                                                                                         counterpartAccount:
@@ -5050,7 +5029,7 @@ function App() {
                                                                             onChange={(
                                                                                 event,
                                                                             ) => {
-                                                                                handleSetReconcileDraft(
+                                                                                handleSetPostDraft(
                                                                                     entry.id,
                                                                                     {
                                                                                         postingIndex:
@@ -5068,19 +5047,19 @@ function App() {
                                                                                 type="button"
                                                                                 className="primary-button"
                                                                                 onClick={() => {
-                                                                                    void handleReconcileAccountEntry(
+                                                                                    void handlePostAccountEntry(
                                                                                         entry.id,
                                                                                     );
                                                                                 }}
                                                                                 disabled={
                                                                                     isBusy ||
-                                                                                    isUnreconcilingEntry ||
-                                                                                    isReconcilingTransfer
+                                                                                    isUnpostingEntry ||
+                                                                                    isPostingTransfer
                                                                                 }
                                                                             >
                                                                                 {isBusy
-                                                                                    ? 'Reconciling...'
-                                                                                    : 'Reconcile'}
+                                                                                    ? 'Posting...'
+                                                                                    : 'Post'}
                                                                             </button>
                                                                             <button
                                                                                 type="button"
@@ -5142,13 +5121,13 @@ function App() {
                                     )}
                                     <div className="txn-grid">
                                         <label className="field">
-                                            <span>Unreconcile entry ID</span>
+                                            <span>Unpost entry ID</span>
                                             <input
                                                 type="text"
-                                                value={unreconcileEntryId}
+                                                value={unpostEntryId}
                                                 placeholder="entry id"
                                                 onChange={(event) => {
-                                                    setUnreconcileEntryId(
+                                                    setUnpostEntryId(
                                                         event.target.value,
                                                     );
                                                     setPipelineStatus(null);
@@ -5157,15 +5136,14 @@ function App() {
                                         </label>
                                         <label className="field">
                                             <span>
-                                                Unreconcile posting index
-                                                (optional)
+                                                Unpost posting index (optional)
                                             </span>
                                             <input
                                                 type="text"
-                                                value={unreconcilePostingIndex}
+                                                value={unpostPostingIndex}
                                                 placeholder="0"
                                                 onChange={(event) => {
-                                                    setUnreconcilePostingIndex(
+                                                    setUnpostPostingIndex(
                                                         event.target.value,
                                                     );
                                                     setPipelineStatus(null);
@@ -5178,18 +5156,18 @@ function App() {
                                             type="button"
                                             className="ghost-button"
                                             onClick={() => {
-                                                void handleUnreconcileAccountEntry();
+                                                void handleUnpostAccountEntry();
                                             }}
-                                            disabled={isUnreconcilingEntry}
+                                            disabled={isUnpostingEntry}
                                         >
-                                            {isUnreconcilingEntry
-                                                ? 'Unreconciling...'
-                                                : 'Unreconcile entry'}
+                                            {isUnpostingEntry
+                                                ? 'Unposting...'
+                                                : 'Unpost entry'}
                                         </button>
                                     </div>
                                     <div className="txn-form-header">
                                         <div>
-                                            <h3>Transfer reconciliation</h3>
+                                            <h3>Transfer posting</h3>
                                             <p>
                                                 Match two entries across
                                                 accounts as a transfer.
@@ -5279,13 +5257,13 @@ function App() {
                                             type="button"
                                             className="ghost-button"
                                             onClick={() => {
-                                                void handleReconcileTransferPair();
+                                                void handlePostTransferPair();
                                             }}
-                                            disabled={isReconcilingTransfer}
+                                            disabled={isPostingTransfer}
                                         >
-                                            {isReconcilingTransfer
-                                                ? 'Reconciling transfer...'
-                                                : 'Reconcile transfer'}
+                                            {isPostingTransfer
+                                                ? 'Posting transfer...'
+                                                : 'Post transfer'}
                                         </button>
                                     </div>
                                 </section>
@@ -5383,9 +5361,9 @@ function AccountsTable({
                                 {formatTotals(account.totals)}
                             </td>
                             <td>
-                                {account.unreconciledCount > 0 ? (
+                                {account.unpostedCount > 0 ? (
                                     <span className="secret-chip warning">
-                                        {account.unreconciledCount} unreconciled
+                                        {account.unpostedCount} unposted
                                     </span>
                                 ) : (
                                     <span className="status-dim">
@@ -5509,7 +5487,7 @@ function AccountJournalTable({ entries }: { entries: AccountJournalEntry[] }) {
                     <th>Status</th>
                     <th>Description</th>
                     <th>Evidence</th>
-                    <th>Reconciled</th>
+                    <th>Posted</th>
                 </tr>
             </thead>
             <tbody>
@@ -5537,7 +5515,7 @@ function AccountJournalTable({ entries }: { entries: AccountJournalEntry[] }) {
                                     ))}
                                 </div>
                             </td>
-                            <td className="mono">{entry.reconciled ?? '-'}</td>
+                            <td className="mono">{entry.posted ?? '-'}</td>
                         </tr>
                     ))
                 )}

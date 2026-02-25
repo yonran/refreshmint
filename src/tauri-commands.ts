@@ -20,7 +20,7 @@ export interface GlAccountConflictEntry {
 export interface AccountRow {
     name: string;
     totals: AmountTotal[] | null;
-    unreconciledCount: number;
+    unpostedCount: number;
 }
 
 export interface TransactionRow {
@@ -108,7 +108,7 @@ export interface AccountJournalEntry {
     description: string;
     comment: string;
     evidence: string[];
-    reconciled: string | null;
+    posted: string | null;
     isTransfer: boolean;
 }
 
@@ -315,33 +315,33 @@ export async function getLoginAccountJournal(
     return invoke('get_login_account_journal', { ledger, loginName, label });
 }
 
-export async function getUnreconciled(
+export async function getUnposted(
     ledger: string,
     accountName: string,
 ): Promise<AccountJournalEntry[]> {
-    return invoke('get_unreconciled', { ledger, accountName });
+    return invoke('get_unposted', { ledger, accountName });
 }
 
-export async function getLoginAccountUnreconciled(
+export async function getLoginAccountUnposted(
     ledger: string,
     loginName: string,
     label: string,
 ): Promise<AccountJournalEntry[]> {
-    return invoke('get_login_account_unreconciled', {
+    return invoke('get_login_account_unposted', {
         ledger,
         loginName,
         label,
     });
 }
 
-export async function reconcileEntry(
+export async function postEntry(
     ledger: string,
     accountName: string,
     entryId: string,
     counterpartAccount: string,
     postingIndex: number | null,
 ): Promise<string> {
-    return invoke('reconcile_entry', {
+    return invoke('post_entry', {
         ledger,
         accountName,
         entryId,
@@ -350,7 +350,7 @@ export async function reconcileEntry(
     });
 }
 
-export async function reconcileLoginAccountEntry(
+export async function postLoginAccountEntry(
     ledger: string,
     loginName: string,
     label: string,
@@ -358,7 +358,7 @@ export async function reconcileLoginAccountEntry(
     counterpartAccount: string,
     postingIndex: number | null,
 ): Promise<string> {
-    return invoke('reconcile_login_account_entry', {
+    return invoke('post_login_account_entry', {
         ledger,
         loginName,
         label,
@@ -368,13 +368,13 @@ export async function reconcileLoginAccountEntry(
     });
 }
 
-export async function unreconcileEntry(
+export async function unpostEntry(
     ledger: string,
     accountName: string,
     entryId: string,
     postingIndex: number | null,
 ): Promise<void> {
-    await invoke('unreconcile_entry', {
+    await invoke('unpost_entry', {
         ledger,
         accountName,
         entryId,
@@ -382,14 +382,14 @@ export async function unreconcileEntry(
     });
 }
 
-export async function unreconcileLoginAccountEntry(
+export async function unpostLoginAccountEntry(
     ledger: string,
     loginName: string,
     label: string,
     entryId: string,
     postingIndex: number | null,
 ): Promise<void> {
-    await invoke('unreconcile_login_account_entry', {
+    await invoke('unpost_login_account_entry', {
         ledger,
         loginName,
         label,
@@ -398,14 +398,14 @@ export async function unreconcileLoginAccountEntry(
     });
 }
 
-export async function reconcileTransfer(
+export async function postTransfer(
     ledger: string,
     account1: string,
     entryId1: string,
     account2: string,
     entryId2: string,
 ): Promise<string> {
-    return invoke('reconcile_transfer', {
+    return invoke('post_transfer', {
         ledger,
         account1,
         entryId1,

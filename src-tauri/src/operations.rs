@@ -65,9 +65,9 @@ pub enum DedupOverrideAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum GlOperation {
-    /// Reconcile an account journal entry to the GL with a counterpart account.
-    #[serde(rename = "reconcile")]
-    Reconcile {
+    /// Post an account journal entry to the GL with a counterpart account.
+    #[serde(rename = "post")]
+    Post {
         account: String,
         #[serde(rename = "entryId")]
         entry_id: String,
@@ -85,9 +85,9 @@ pub enum GlOperation {
         timestamp: String,
     },
 
-    /// Undo a previous reconciliation.
-    #[serde(rename = "undo-reconcile")]
-    UndoReconcile {
+    /// Undo a previous posting.
+    #[serde(rename = "undo-post")]
+    UndoPost {
         account: String,
         #[serde(rename = "entryId")]
         entry_id: String,
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn round_trip_gl_operations() {
         let root = temp_dir("gl-ops");
-        let op = GlOperation::Reconcile {
+        let op = GlOperation::Post {
             account: "chase-checking".to_string(),
             entry_id: "txn-abc123".to_string(),
             counterpart_account: "Expenses:Food".to_string(),
@@ -285,10 +285,10 @@ mod tests {
         append_gl_operation(&root, &op).unwrap();
         let ops = read_gl_operations(&root).unwrap();
         assert_eq!(ops.len(), 1);
-        if let GlOperation::Reconcile { account, .. } = &ops[0] {
+        if let GlOperation::Post { account, .. } = &ops[0] {
             assert_eq!(account, "chase-checking");
         } else {
-            panic!("expected Reconcile");
+            panic!("expected Post");
         }
 
         let _ = fs::remove_dir_all(&root);
