@@ -504,9 +504,10 @@ fn format_gl_transaction(
         (first_posting.account.clone(), amount)
     };
 
+    let status_marker = entry.status.hledger_marker();
     format!(
-        "{}  {}  ; id: {}\n    ; generated-by: refreshmint-post\n    {source_tag}\n    {real_account}  {amount_str}\n    {counterpart_account}\n",
-        entry.date, entry.description, gl_txn_id,
+        "{}  {}{}  ; id: {}\n    ; generated-by: refreshmint-post\n    {source_tag}\n    {real_account}  {amount_str}\n    {counterpart_account}\n",
+        entry.date, status_marker, entry.description, gl_txn_id,
     )
 }
 
@@ -514,10 +515,21 @@ fn format_gl_transaction(
 fn format_transfer_gl_transaction(
     entry1: &AccountEntry,
     source1: &str,
-    _entry2: &AccountEntry,
+    entry2: &AccountEntry,
     source2: &str,
     gl_txn_id: &str,
 ) -> String {
+    use crate::account_journal::EntryStatus;
+    // Both cleared → GL gets * (Cleared); either pending → GL gets ! (Pending); else unmarked.
+    let status_marker =
+        if entry1.status == EntryStatus::Cleared && entry2.status == EntryStatus::Cleared {
+            "* "
+        } else if entry1.status == EntryStatus::Pending || entry2.status == EntryStatus::Pending {
+            "! "
+        } else {
+            ""
+        };
+
     let amount1 = entry1
         .postings
         .first()
@@ -531,21 +543,22 @@ fn format_transfer_gl_transaction(
         .map(|p| p.account.clone())
         .unwrap_or_default();
 
-    let real_account2 = _entry2
+    let real_account2 = entry2
         .postings
         .first()
         .map(|p| p.account.clone())
         .unwrap_or_default();
 
     format!(
-        "{}  {}  ; id: {}\n    ; generated-by: refreshmint-post\n    ; source: {}:{}\n    ; source: {}:{}\n    {real_account1}  {amount1}\n    {real_account2}\n",
+        "{}  {}{}  ; id: {}\n    ; generated-by: refreshmint-post\n    ; source: {}:{}\n    ; source: {}:{}\n    {real_account1}  {amount1}\n    {real_account2}\n",
         entry1.date,
+        status_marker,
         entry1.description,
         gl_txn_id,
         source1,
         entry1.id,
         source2,
-        _entry2.id,
+        entry2.id,
     )
 }
 
@@ -806,5 +819,63 @@ mod tests {
         assert!(err.to_string().contains("has no postings"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn format_gl_transaction_cleared_gets_star_marker() {
+        let mut entry = make_entry("txn-1", "2024-01-15", "Shell Oil", "-21.32");
+        entry.status = EntryStatus::Cleared;
+        let text = format_gl_transaction(&entry, "accounts/chase", "Expenses:Gas", "gl-id", None);
+        assert!(text.starts_with("2024-01-15  * Shell Oil"));
+    }
+
+    #[test]
+    fn format_gl_transaction_pending_gets_exclamation_marker() {
+        let mut entry = make_entry("txn-1", "2024-01-15", "Shell Oil", "-21.32");
+        entry.status = EntryStatus::Pending;
+        let text = format_gl_transaction(&entry, "accounts/chase", "Expenses:Gas", "gl-id", None);
+        assert!(text.starts_with("2024-01-15  ! Shell Oil"));
+    }
+
+    #[test]
+    fn format_gl_transaction_unmarked_has_no_status_marker() {
+        let mut entry = make_entry("txn-1", "2024-01-15", "Shell Oil", "-21.32");
+        entry.status = EntryStatus::Unmarked;
+        let text = format_gl_transaction(&entry, "accounts/chase", "Expenses:Gas", "gl-id", None);
+        assert!(text.starts_with("2024-01-15  Shell Oil"));
+        assert!(!text.contains("* Shell Oil"));
+        assert!(!text.contains("! Shell Oil"));
+    }
+
+    #[test]
+    fn format_transfer_gl_transaction_both_cleared_gets_star() {
+        let e1 = make_entry("txn-1", "2024-01-15", "Transfer", "-100.00");
+        let e2 = make_entry("txn-2", "2024-01-15", "Transfer", "100.00");
+        let text =
+            format_transfer_gl_transaction(&e1, "accounts/chase", &e2, "accounts/boa", "gl-id");
+        assert!(text.starts_with("2024-01-15  * Transfer"));
+    }
+
+    #[test]
+    fn format_transfer_gl_transaction_one_pending_gets_exclamation() {
+        let e1 = make_entry("txn-1", "2024-01-15", "Transfer", "-100.00");
+        let mut e2 = make_entry("txn-2", "2024-01-15", "Transfer", "100.00");
+        e2.status = EntryStatus::Pending;
+        let text =
+            format_transfer_gl_transaction(&e1, "accounts/chase", &e2, "accounts/boa", "gl-id");
+        assert!(text.starts_with("2024-01-15  ! Transfer"));
+    }
+
+    #[test]
+    fn format_transfer_gl_transaction_both_unmarked_has_no_marker() {
+        let mut e1 = make_entry("txn-1", "2024-01-15", "Transfer", "-100.00");
+        let mut e2 = make_entry("txn-2", "2024-01-15", "Transfer", "100.00");
+        e1.status = EntryStatus::Unmarked;
+        e2.status = EntryStatus::Unmarked;
+        let text =
+            format_transfer_gl_transaction(&e1, "accounts/chase", &e2, "accounts/boa", "gl-id");
+        assert!(text.starts_with("2024-01-15  Transfer"));
+        assert!(!text.contains("* Transfer"));
+        assert!(!text.contains("! Transfer"));
     }
 }
