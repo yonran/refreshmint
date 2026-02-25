@@ -190,7 +190,12 @@ fn build_transaction_rows(transactions: &[Transaction]) -> Vec<TransactionRow> {
     transactions
         .iter()
         .map(|txn| TransactionRow {
-            id: txn.tindex.to_string(),
+            id: txn
+                .ttags
+                .iter()
+                .find(|(k, _)| k == "id")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| txn.tindex.to_string()),
             date: txn.tdate.clone(),
             description: transaction_description(txn),
             description_raw: txn.tdescription.clone(),
@@ -413,4 +418,54 @@ fn totals_to_rows(totals: &BTreeMap<String, CommodityTotal>) -> Option<Vec<Amoun
         })
         .collect::<Vec<_>>();
     Some(rows)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::hledger::{SourcePos, SourceSpan, Status};
+
+    fn dummy_source_pos() -> SourcePos {
+        SourcePos {
+            source_name: String::new(),
+            source_line: 1,
+            source_column: 1,
+        }
+    }
+
+    fn dummy_span() -> SourceSpan {
+        SourceSpan(dummy_source_pos(), dummy_source_pos())
+    }
+
+    fn make_txn(tindex: i64, ttags: Vec<(String, String)>) -> Transaction {
+        Transaction {
+            tindex,
+            tprecedingcomment: String::new(),
+            tsourcepos: dummy_span(),
+            tdate: "2024-01-01".to_string(),
+            tdate2: None,
+            tstatus: Status::Cleared,
+            tcode: String::new(),
+            tdescription: "Test".to_string(),
+            tcomment: String::new(),
+            ttags,
+            tpostings: vec![],
+        }
+    }
+
+    #[test]
+    fn build_transaction_rows_uses_id_tag_when_present() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let txn = make_txn(5, vec![("id".to_string(), uuid.to_string())]);
+        let rows = build_transaction_rows(&[txn]);
+        assert_eq!(rows[0].id, uuid);
+    }
+
+    #[test]
+    fn build_transaction_rows_falls_back_to_tindex_when_id_absent() {
+        let txn = make_txn(7, vec![]);
+        let rows = build_transaction_rows(&[txn]);
+        assert_eq!(rows[0].id, "7");
+    }
 }
