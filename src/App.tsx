@@ -153,6 +153,41 @@ function normalizeLoginConfig(
     return normalized;
 }
 
+function suggestGlAccountName(label: string): string {
+    const lc = label.toLowerCase();
+    const name = label.charAt(0).toUpperCase() + label.slice(1);
+    if (/credit|card|visa|mastercard|amex|discover/.test(lc)) {
+        return `Liabilities:CreditCard:${name}`;
+    }
+    if (/savings/.test(lc)) {
+        return `Assets:Savings:${name}`;
+    }
+    return `Assets:Checking:${name}`;
+}
+
+function applyCategoriesToDrafts(
+    suggestions: Record<string, CategoryResult>,
+    setPostDrafts: React.Dispatch<
+        React.SetStateAction<Record<string, PostDraft>>
+    >,
+) {
+    setPostDrafts((current) => {
+        const next = { ...current };
+        for (const [entryId, result] of Object.entries(suggestions)) {
+            if (
+                result.suggested !== null &&
+                !(next[entryId]?.counterpartAccount ?? '').trim()
+            ) {
+                next[entryId] = {
+                    ...(next[entryId] ?? { postingIndex: '' }),
+                    counterpartAccount: result.suggested,
+                };
+            }
+        }
+        return next;
+    });
+}
+
 function secretPairKey(domain: string, name: string): string {
     return `${domain}/${name}`;
 }
@@ -1187,7 +1222,11 @@ function App() {
         setDocumentRows([]);
         setPipelineSelectedEntryIds(new Set());
         setPipelineCategorySuggestions({});
-        setPipelineGlAccountDraft('');
+        setPipelineGlAccountDraft(
+            selectedLoginAccount
+                ? suggestGlAccountName(selectedLoginAccount.label)
+                : '',
+        );
         setTransferModalEntryId(null);
     }, [selectedLoginAccount]);
 
@@ -1233,6 +1272,7 @@ function App() {
                                 reqId === suggestRequestId.current
                             ) {
                                 setPipelineCategorySuggestions(result);
+                                applyCategoriesToDrafts(result, setPostDrafts);
                             }
                         })
                         .catch((err: unknown) => {
@@ -2649,6 +2689,7 @@ function App() {
             .then((result) => {
                 if (reqId === suggestRequestId.current) {
                     setPipelineCategorySuggestions(result);
+                    applyCategoriesToDrafts(result, setPostDrafts);
                 }
             })
             .catch((err: unknown) => {
@@ -4088,7 +4129,9 @@ function App() {
                                                         <>
                                                             <input
                                                                 type="text"
-                                                                placeholder="Assets:Checking:Chase"
+                                                                placeholder={suggestGlAccountName(
+                                                                    selectedLoginAccount.label,
+                                                                )}
                                                                 value={
                                                                     pipelineGlAccountDraft
                                                                 }
