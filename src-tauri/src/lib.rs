@@ -104,6 +104,7 @@ pub fn run_with_context(
             unpost_login_account_entry,
             post_transfer,
             get_unposted_entries_for_transfer,
+            sync_gl_transaction,
             get_account_config,
             set_account_extension,
             list_logins,
@@ -1228,6 +1229,22 @@ fn get_unposted_entries_for_transfer(
     Ok(map_account_journal_entries(
         triples.into_iter().map(|(_, _, e)| e).collect(),
     ))
+}
+
+#[tauri::command]
+fn sync_gl_transaction(
+    ledger: String,
+    login_name: String,
+    label: String,
+    entry_id: String,
+) -> Result<String, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_login_name_input(login_name)?;
+    let label = require_label_input(label)?;
+    let entry_id = require_non_empty_input("entry_id", entry_id)?;
+
+    post::sync_gl_transaction(&target_dir, &login_name, &label, &entry_id)
+        .map_err(|err| err.to_string())
 }
 
 fn map_account_journal_entries(

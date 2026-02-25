@@ -95,6 +95,31 @@ pub enum GlOperation {
         posting_index: Option<usize>,
         timestamp: String,
     },
+
+    /// Sync an existing GL transaction in-place (amounts/status updated).
+    #[serde(rename = "sync-transaction")]
+    SyncTransaction {
+        account: String,
+        #[serde(rename = "entryId")]
+        entry_id: String,
+        #[serde(rename = "glTxnId")]
+        gl_txn_id: String,
+        /// Snapshot of all source entries after the sync (for audit/replay).
+        sources: Vec<SyncSource>,
+        timestamp: String,
+    },
+}
+
+/// A source-entry snapshot recorded inside a `SyncTransaction` operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncSource {
+    pub account: String,
+    #[serde(rename = "entryId")]
+    pub entry_id: String,
+    /// New amount (quantity + commodity), if available.
+    pub amount: Option<String>,
+    /// New status marker: `""`, `"!"`, or `"*"`.
+    pub status: String,
 }
 
 /// An entry in a transfer-match operation.

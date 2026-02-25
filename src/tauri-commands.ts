@@ -426,6 +426,15 @@ export async function getUnpostedEntriesForTransfer(
     });
 }
 
+export async function syncGlTransaction(
+    ledger: string,
+    loginName: string,
+    label: string,
+    entryId: string,
+): Promise<string> {
+    return invoke('sync_gl_transaction', { ledger, loginName, label, entryId });
+}
+
 export interface AccountConfig {
     extension?: string;
 }

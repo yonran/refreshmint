@@ -798,6 +798,162 @@ fn remove_gl_transaction(
     Ok(removed_block)
 }
 
+/// Replace a GL block in general.journal in-place.
+///
+/// Finds the block with `id: <gl_txn_id>` and replaces it with `new_block`.
+fn replace_gl_block(ledger_dir: &Path, gl_txn_id: &str, new_block: &str) -> io::Result<()> {
+    let journal_path = ledger_dir.join("general.journal");
+    let content = fs::read_to_string(&journal_path)?;
+    let marker = format!("id: {gl_txn_id}");
+    let mut replaced = false;
+    let blocks: Vec<String> = split_journal_blocks(&content)
+        .into_iter()
+        .map(|block| {
+            if !replaced && block.contains(&marker) {
+                replaced = true;
+                new_block.trim_end().to_string()
+            } else {
+                block
+            }
+        })
+        .collect();
+    if !replaced {
+        return Err(io::Error::other(format!(
+            "GL transaction not found in general.journal: {gl_txn_id}"
+        )));
+    }
+    let mut final_content = blocks.join("\n\n");
+    if !final_content.is_empty() {
+        final_content.push('\n');
+    }
+    fs::write(&journal_path, final_content)
+}
+
+/// Extract the counterpart account (last indented non-comment posting line) from a GL block.
+fn extract_counterpart_from_block(block: &str) -> Option<String> {
+    block
+        .lines()
+        .rfind(|line| {
+            let is_indented = line.starts_with(' ') || line.starts_with('\t');
+            let trimmed = line.trim();
+            is_indented && !trimmed.is_empty() && !trimmed.starts_with(';')
+        })
+        .map(|line| line.trim().to_string())
+}
+
+/// Load account entries for each `(locator, entry_id)` pair.
+///
+/// Returns a vec of `(locator, entry_id, AccountEntry)` triples (same shape as
+/// `UnpostedTransferEntry`).
+fn load_source_entries(
+    ledger_dir: &Path,
+    sources: &[(String, String)],
+) -> Result<Vec<UnpostedTransferEntry>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut result = Vec::new();
+    for (locator, entry_id) in sources {
+        let path = journal_path_for_locator(ledger_dir, locator)
+            .ok_or_else(|| format!("unknown source locator: {locator}"))?;
+        let entries = account_journal::read_journal_at_path(&path)?;
+        let entry = entries
+            .into_iter()
+            .find(|e| &e.id == entry_id)
+            .ok_or_else(|| format!("entry {entry_id} not found in {locator}"))?;
+        result.push((locator.clone(), entry_id.clone(), entry));
+    }
+    Ok(result)
+}
+
+/// Sync an existing GL transaction in-place to reflect updated amounts/status.
+///
+/// Rebuilds the GL block from the current state of each source entry without
+/// changing `; source:`, `; id:`, or `; generated-by:` tags.  The `posted`
+/// ref on the account journal entry is left unchanged.
+///
+/// Returns the GL transaction UUID.
+pub fn sync_gl_transaction(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    entry_id: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // 1. Load the triggering entry and get its GL ref.
+    let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
+    let entries = account_journal::read_journal_at_path(&journal_path)?;
+    let entry = entries
+        .iter()
+        .find(|e| e.id == entry_id)
+        .ok_or_else(|| format!("entry not found: {entry_id}"))?;
+    let gl_ref = entry
+        .posted
+        .as_ref()
+        .ok_or_else(|| format!("entry {entry_id} is not posted"))?;
+    let gl_txn_id = gl_ref
+        .strip_prefix("general.journal:")
+        .unwrap_or(gl_ref)
+        .to_string();
+
+    // 2. Find the existing GL block.
+    let gl_block = find_gl_block(ledger_dir, &gl_txn_id)?
+        .ok_or_else(|| format!("GL transaction not found: {gl_txn_id}"))?;
+
+    // 3. Parse sources and load their current entries (fail fast before any writes).
+    let raw_sources = parse_sources_from_block(&gl_block);
+    let loaded = load_source_entries(ledger_dir, &raw_sources)?;
+
+    // 4. Rebuild the GL block.
+    let new_block = match loaded.as_slice() {
+        [(loc1, _, e1), (loc2, _, e2)] => {
+            // Transfer: two sources.
+            format_transfer_gl_transaction(e1, loc1, e2, loc2, &gl_txn_id)
+        }
+        [(loc, _, e)] => {
+            // Single posting: extract counterpart from existing block.
+            let counterpart = extract_counterpart_from_block(&gl_block)
+                .ok_or("could not extract counterpart account from GL block")?;
+            format_gl_transaction(e, loc, &counterpart, &gl_txn_id, None)
+        }
+        _ => {
+            return Err(format!(
+                "unexpected source count: {} in GL block {gl_txn_id}",
+                loaded.len()
+            )
+            .into());
+        }
+    };
+
+    // 5. Replace GL block in general.journal (single file write; only point of mutation).
+    replace_gl_block(ledger_dir, &gl_txn_id, &new_block)?;
+
+    // 6. Append SyncTransaction to ops log (best-effort; non-fatal on failure).
+    let sync_sources: Vec<operations::SyncSource> = loaded
+        .iter()
+        .map(|(loc, eid, e)| {
+            let amount = e
+                .postings
+                .first()
+                .and_then(|p| p.amount.as_ref())
+                .map(|a| format!("{} {}", a.quantity, a.commodity));
+            operations::SyncSource {
+                account: loc.clone(),
+                entry_id: eid.clone(),
+                amount,
+                status: e.status.hledger_marker().trim().to_string(),
+            }
+        })
+        .collect();
+    let source_locator = format!("logins/{login_name}/accounts/{label}");
+    let op = operations::GlOperation::SyncTransaction {
+        account: source_locator,
+        entry_id: entry_id.to_string(),
+        gl_txn_id: gl_txn_id.clone(),
+        sources: sync_sources,
+        timestamp: operations::now_timestamp(),
+    };
+    let _ = operations::append_gl_operation(ledger_dir, &op);
+
+    Ok(gl_txn_id)
+}
+
 fn split_journal_blocks(content: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let mut current = String::new();
@@ -1108,6 +1264,74 @@ mod tests {
             after2[0].posted.is_none(),
             "other side should also be unposted"
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_gl_transaction_updates_amount_and_status_in_place() {
+        let root = temp_dir("sync-gl");
+        fs::write(root.join("general.journal"), "").unwrap();
+
+        // Set up a login account entry and post it.
+        let entry = make_entry("txn-1", "2024-01-15", "Shell Oil", "-21.32");
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(&journal_path, &[entry]).unwrap();
+
+        let gl_id =
+            post_login_account_entry(&root, "chase", "checking", "txn-1", "Expenses:Gas", None)
+                .unwrap();
+
+        // Mutate the entry: change amount and set status to Pending.
+        let mut entries = account_journal::read_journal_at_path(&journal_path).unwrap();
+        entries[0].postings[0].amount = Some(account_journal::SimpleAmount {
+            commodity: "USD".to_string(),
+            quantity: "-25.00".to_string(),
+        });
+        entries[0].status = EntryStatus::Pending;
+        account_journal::write_journal_at_path(&journal_path, &entries).unwrap();
+
+        // Sync the GL transaction.
+        let returned_id = sync_gl_transaction(&root, "chase", "checking", "txn-1").unwrap();
+        assert_eq!(
+            returned_id, gl_id,
+            "returned ID must match original GL txn ID"
+        );
+
+        // GL block reflects new amount and status.
+        let gl_content = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(gl_content.contains("-25.00"), "amount should be updated");
+        assert!(
+            gl_content.contains(&format!("id: {gl_id}")),
+            "id tag must be preserved"
+        );
+        assert!(
+            gl_content.contains("! Shell Oil"),
+            "status marker should be !"
+        );
+        assert!(
+            gl_content.contains("source: logins/chase/accounts/checking:txn-1"),
+            "source tag must be preserved"
+        );
+        assert!(
+            gl_content.contains("Expenses:Gas"),
+            "counterpart must be preserved"
+        );
+        // Old amount must be gone.
+        assert!(!gl_content.contains("-21.32"), "old amount should be gone");
+
+        // The `posted` ref on the account entry is unchanged.
+        let after = account_journal::read_journal_at_path(&journal_path).unwrap();
+        assert_eq!(
+            after[0].posted.as_deref(),
+            Some(&format!("general.journal:{gl_id}")[..]),
+            "posted ref must be unchanged"
+        );
+
+        // Ops log has post + sync.
+        let ops = operations::read_gl_operations(&root).unwrap();
+        assert_eq!(ops.len(), 2);
+        matches!(&ops[1], operations::GlOperation::SyncTransaction { .. });
 
         let _ = fs::remove_dir_all(&root);
     }
