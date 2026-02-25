@@ -2,6 +2,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::error::CdpError;
 use futures::StreamExt;
 
 /// Find the Chrome or Edge binary on the system.
@@ -99,8 +100,23 @@ pub async fn launch_browser(
                     }
                 }
                 Some(Err(err)) => {
-                    eprintln!("[browser] Handler error after {count} events: {err}");
-                    break;
+                    match &err {
+                        // Fatal: underlying transport or process is gone.
+                        CdpError::Ws(_)
+                        | CdpError::Io(_)
+                        | CdpError::ChannelSendError(_)
+                        | CdpError::LaunchExit(_, _)
+                        | CdpError::LaunchTimeout(_)
+                        | CdpError::LaunchIo(_, _) => {
+                            eprintln!("[browser] Fatal handler error after {count} events: {err}");
+                            break;
+                        }
+                        // Non-fatal: a single malformed/unexpected CDP message.
+                        // Log and keep processing so the session stays alive.
+                        _ => {
+                            eprintln!("[browser] Non-fatal handler error after {count} events (continuing): {err}");
+                        }
+                    }
                 }
                 None => {
                     eprintln!("[browser] Handler stream ended after {count} events.");
