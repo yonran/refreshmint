@@ -2880,13 +2880,26 @@ async fn ensure_element_receives_pointer_events(
                 }
                 const hit = document.elementFromPoint(x, y);
                 if (!hit) return 'Element is outside of the viewport';
-                const containsComposed = (root, node) => {
-                    let current = node;
-                    while (current) {
-                        if (current === root) return true;
-                        current = current.parentNode || (current instanceof ShadowRoot ? current.host : null);
+                const containsComposed = (target, hit) => {
+                    // 1. Walk up the normal DOM and open shadow roots
+                    let cur = hit;
+                    while (cur) {
+                        if (cur === target) return true;
+                        cur = cur.parentNode || (cur instanceof ShadowRoot ? cur.host : null);
                     }
-                    return false;
+                    
+                    // 2. If the hit element has a closed shadow root, check if target is inside.
+                    const checkDeepContains = (parent, node) => {
+                        if (parent === node) return true;
+                        const root = parent.shadowRoot || parent.openOrClosedShadowRoot;
+                        if (root && checkDeepContains(root, node)) return true;
+                        for (const child of parent.children || []) {
+                            if (checkDeepContains(child, node)) return true;
+                        }
+                        return false;
+                    };
+                    
+                    return checkDeepContains(hit, target);
                 };
                 if (containsComposed(this, hit)) return '';
                 const describe = el => {
