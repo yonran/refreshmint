@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+use chromiumoxide::cdp::browser_protocol::dom::GetContentQuadsParams;
+use chromiumoxide::cdp::js_protocol::runtime::{CallFunctionOnParams, EvaluateParams};
+use chromiumoxide::layout::ElementQuad;
 use rquickjs::{class::Trace, function::Opt, JsLifetime, Result as JsResult, Value};
 
 use super::js_api::{
@@ -11,6 +13,177 @@ use super::js_api::{
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const POLL_INTERVAL_MS: u64 = 100;
+
+const RESOLVER_JS: &str = r#"
+    // Shadow-piercing querySelectorAll: matches selector in root then recurses
+    // into every open shadow root found in root's subtree. Mirrors Playwright's
+    // _queryCSS implementation.
+    const queryAllDeep = (root, selector) => {
+        const result = [];
+        const query = (r) => {
+            for (const el of r.querySelectorAll(selector)) result.push(el);
+            if (r.shadowRoot) query(r.shadowRoot);
+            for (const el of r.querySelectorAll('*')) {
+                if (el.shadowRoot) query(el.shadowRoot);
+            }
+        };
+        query(root);
+        return result;
+    };
+
+    // Collect all descendant elements including those inside shadow roots.
+    // Includes `root` itself when it is an Element (not document).
+    const collectAllDeep = (root) => {
+        const result = root === document ? [] : [root];
+        const collect = (r) => {
+            if (r.shadowRoot) collect(r.shadowRoot);
+            for (const el of r.querySelectorAll('*')) {
+                result.push(el);
+                if (el.shadowRoot) collect(el.shadowRoot);
+            }
+        };
+        collect(root);
+        return result;
+    };
+
+    const IMPLICIT_ROLE = (el) => {
+        const explicit = el.getAttribute('role');
+        if (explicit) return explicit.trim().split(/\s+/)[0].toLowerCase();
+        const tag = el.tagName.toLowerCase();
+        const type = (el.getAttribute('type') || 'text').toLowerCase();
+        if (tag === 'button') return 'button';
+        if (tag === 'a' && el.hasAttribute('href')) return 'link';
+        if (tag === 'input') {
+            if (type === 'button' || type === 'submit' || type === 'reset' || type === 'image') return 'button';
+            if (type === 'checkbox') return 'checkbox';
+            if (type === 'radio') return 'radio';
+            if (type === 'range') return 'slider';
+            if (type === 'number') return 'spinbutton';
+            if (type === 'search') return 'searchbox';
+            return 'textbox';
+        }
+        if (tag === 'textarea') return 'textbox';
+        if (tag === 'select') return el.hasAttribute('multiple') ? 'listbox' : 'combobox';
+        if (tag === 'option') return 'option';
+        if (tag === 'img') return 'img';
+        if (/^h[1-6]$/.test(tag)) return 'heading';
+        if (tag === 'summary') return 'button';
+        if (tag === 'meter') return 'meter';
+        if (tag === 'progress') return 'progressbar';
+        if (tag === 'table') return 'table';
+        if (tag === 'tr') return 'row';
+        if (tag === 'td') return 'cell';
+        if (tag === 'th') return 'columnheader';
+        if (tag === 'li') return 'listitem';
+        if (tag === 'nav') return 'navigation';
+        if (tag === 'section' && (el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby'))) return 'region';
+        return '';
+    };
+
+    const ACCESSIBLE_NAME = (el) => {
+        const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+        if (ariaLabel) return ariaLabel;
+        const lbIds = (el.getAttribute('aria-labelledby') || '').trim().split(/\s+/).filter(Boolean);
+        if (lbIds.length) {
+            const text = lbIds.map(id => { const r = document.getElementById(id); return r ? (r.innerText || r.textContent || '').trim() : ''; }).filter(Boolean).join(' ');
+            if (text) return text;
+        }
+        if (el.labels && el.labels.length) {
+            const text = Array.from(el.labels).map(l => (l.innerText || l.textContent || '').trim()).filter(Boolean).join(' ');
+            if (text) return text;
+        }
+        const tag = el.tagName.toLowerCase();
+        if (['button','a','h1','h2','h3','h4','h5','h6','summary'].includes(tag))
+            return (el.innerText || el.textContent || '').trim();
+        if (tag === 'img') return (el.getAttribute('alt') || '').trim();
+        return (el.getAttribute('placeholder') || el.getAttribute('title') || '').trim();
+    };
+
+    const IS_ARIA_HIDDEN = (el) => {
+        if (el.getAttribute('aria-hidden') === 'true') return true;
+        const s = window.getComputedStyle(el);
+        return s.display === 'none' || s.visibility === 'hidden';
+    };
+
+    const resolveLocator = async (steps) => {
+        let roots = [document];
+        for (const step of steps) {
+            let nextRoots = [];
+            if (step.type === 'role') {
+                for (const root of roots) {
+                    const candidates = collectAllDeep(root);
+                    const matched = candidates.filter(el => {
+                        if (IMPLICIT_ROLE(el) !== step.role) return false;
+                        if (!step.includeHidden && IS_ARIA_HIDDEN(el)) return false;
+                        if (step.name !== null && step.name !== undefined) {
+                            const accName = ACCESSIBLE_NAME(el);
+                            if (step.namePattern !== null && step.namePattern !== undefined) {
+                                if (!new RegExp(step.namePattern, step.nameFlags || '').test(accName)) return false;
+                            } else {
+                                const a = accName.toLowerCase();
+                                const b = step.name.toLowerCase();
+                                if (step.exact ? a !== b : !a.includes(b)) return false;
+                            }
+                        }
+                        if (step.checked !== null && step.checked !== undefined) {
+                            const v = el.getAttribute('aria-checked');
+                            const actual = v !== null ? v === 'true' : (typeof el.checked === 'boolean' ? el.checked : null);
+                            if (actual !== step.checked) return false;
+                        }
+                        if (step.disabled !== null && step.disabled !== undefined) {
+                            const dis = !!el.disabled || el.getAttribute('aria-disabled') === 'true';
+                            if (dis !== step.disabled) return false;
+                        }
+                        if (step.expanded !== null && step.expanded !== undefined) {
+                            const exp = el.getAttribute('aria-expanded');
+                            if (exp === null || (exp === 'true') !== step.expanded) return false;
+                        }
+                        if (step.level !== null && step.level !== undefined) {
+                            const m = el.tagName.match(/^H([1-6])$/i);
+                            const lv = m ? parseInt(m[1]) : (el.getAttribute('aria-level') ? parseInt(el.getAttribute('aria-level')) : null);
+                            if (lv !== step.level) return false;
+                        }
+                        if (step.pressed !== null && step.pressed !== undefined) {
+                            const pr = el.getAttribute('aria-pressed');
+                            if (pr === null || (pr === 'true') !== step.pressed) return false;
+                        }
+                        if (step.selected !== null && step.selected !== undefined) {
+                            const v = el.getAttribute('aria-selected');
+                            const actual = v !== null ? v === 'true' : (typeof el.selected === 'boolean' ? el.selected : null);
+                            if (actual !== step.selected) return false;
+                        }
+                        return true;
+                    });
+                    if (step.index !== null && step.index !== undefined) {
+                        let idx = step.index;
+                        if (idx < 0) idx = matched.length + idx;
+                        if (idx >= 0 && idx < matched.length) {
+                            nextRoots.push(matched[idx]);
+                        }
+                    } else {
+                        nextRoots.push(...matched);
+                    }
+                }
+            } else {
+                for (const root of roots) {
+                    const arr = queryAllDeep(root, step.selector);
+                    if (step.index !== null) {
+                        let idx = step.index;
+                        if (idx < 0) idx = arr.length + idx;
+                        if (idx >= 0 && idx < arr.length) {
+                            nextRoots.push(arr[idx]);
+                        }
+                    } else {
+                        nextRoots.push(...arr);
+                    }
+                }
+            }
+            roots = nextRoots;
+            if (roots.length === 0) break;
+        }
+        return roots;
+    };
+"#;
 
 #[derive(Clone, serde::Serialize, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -447,29 +620,145 @@ impl Locator {
         Ok(count)
     }
 
-    /// Click the element.
+    /// Click the element using a trusted CDP mouse click (Input.dispatchMouseEvent).
+    ///
+    /// Unlike `el.click()` via Runtime.evaluate, this produces `isTrusted: true` events,
+    /// which is required for sites that check event.isTrusted (e.g. login flows).
     pub async fn click(&self, options: Opt<Value<'_>>) -> JsResult<()> {
         let timeout_ms = parse_timeout(options.0);
         self.ensure_element_state("visible", timeout_ms).await?;
 
-        let steps_json = serde_json::to_string(&self.steps).unwrap_or_default();
-        let expression = format!(
-            r#"(async (steps) => {{
-                const els = await resolveLocator(steps);
-                if (els.length === 0) return 'Element not found';
-                if (els.length > 1) return 'Strict mode violation: ' + els.length + ' elements found';
-                const el = els[0];
-                if (!el.isConnected) return 'Node is detached from document';
-                el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
-                const rect = el.getBoundingClientRect();
-                if (rect.width <= 0 || rect.height <= 0) return 'Element is not visible';
-                el.click();
-                return '';
-            }})({steps_json})"#
-        );
+        // Hold the lock for the entire click sequence.
+        let inner = self.inner.lock().await;
 
-        let result = self.evaluate_internal_with_resolver(expression).await?;
-        self.check_error(&result, "click")
+        // A. Determine frame execution context.
+        let context_id = if let Some(frame_id) = &inner.target_frame_id {
+            Some(
+                wait_for_frame_execution_context(&inner.page, frame_id.clone())
+                    .await
+                    .map_err(|e| js_err(format!("click: frame context: {e}")))?,
+            )
+        } else {
+            None
+        };
+
+        // B. Resolve element → RemoteObjectId via evaluate with return_by_value=false.
+        let object_id = {
+            let steps_json = serde_json::to_string(&self.steps).unwrap_or_default();
+            let expression = format!(
+                r#"(async (steps) => {{
+                    const els = await resolveLocator(steps);
+                    if (els.length === 0) throw new Error('Element not found');
+                    if (els.length > 1) throw new Error('Strict mode violation: ' + els.length + ' elements found');
+                    return els[0];
+                }})({steps_json})"#
+            );
+            let full_expression = format!("(() => {{ {RESOLVER_JS} return {expression} }})()");
+
+            let mut builder = EvaluateParams::builder()
+                .expression(full_expression)
+                .await_promise(true)
+                .return_by_value(false);
+            if let Some(cid) = context_id {
+                builder = builder.context_id(cid);
+            }
+            let eval = builder
+                .build()
+                .map_err(|e| js_err(format!("click: params: {e}")))?;
+
+            let result = inner
+                .page
+                .evaluate_expression(eval)
+                .await
+                .map_err(|e| js_err(format!("click: resolve element: {e}")))?;
+
+            result
+                .object()
+                .object_id
+                .clone()
+                .ok_or_else(|| js_err("click: element resolved to null".to_string()))?
+        };
+
+        // C. Scroll into view and check actionability (detached, visible, not occluded).
+        //    Uses shadow-aware elementFromPoint traversal to detect occlusion.
+        let scroll = inner
+            .page
+            .execute(
+                CallFunctionOnParams::builder()
+                    .function_declaration(
+                        r#"function() {
+                        if (!this.isConnected) return 'Node is detached from document';
+                        this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+                        const rect = this.getBoundingClientRect();
+                        if (rect.width <= 0 || rect.height <= 0) return 'Element is not visible';
+                        const x = rect.left + rect.width / 2;
+                        const y = rect.top + rect.height / 2;
+                        const hit = document.elementFromPoint(x, y);
+                        if (!hit) return 'Element is outside of the viewport';
+                        const containsComposed = (root, node) => {
+                            let cur = node;
+                            while (cur) {
+                                if (cur === root) return true;
+                                cur = cur.parentNode || (cur instanceof ShadowRoot ? cur.host : null);
+                            }
+                            return false;
+                        };
+                        if (!containsComposed(this, hit)) {
+                            const el = hit instanceof Element ? hit : hit.parentElement;
+                            const tag = el ? el.tagName.toLowerCase() : 'unknown';
+                            return tag + ' intercepts pointer events';
+                        }
+                        return '';
+                    }"#,
+                    )
+                    .object_id(object_id.clone())
+                    .await_promise(false)
+                    .return_by_value(true)
+                    .build()
+                    .map_err(|e| js_err(format!("click: scroll params: {e}")))?,
+            )
+            .await
+            .map_err(|e| js_err(format!("click: scroll: {e}")))?;
+        let msg = scroll
+            .result
+            .result
+            .value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if !msg.is_empty() {
+            return Err(js_err(format!("click: {msg}")));
+        }
+
+        // D. Get clickable coordinates — DOM.getContentQuads returns top-level viewport coords,
+        //    so this works correctly even inside iframes.
+        let quads = inner
+            .page
+            .execute(
+                GetContentQuadsParams::builder()
+                    .object_id(object_id)
+                    .build(),
+            )
+            .await
+            .map_err(|e| js_err(format!("click: getContentQuads: {e}")))?;
+        let point = quads
+            .quads
+            .iter()
+            .filter(|q| q.inner().len() == 8)
+            .map(ElementQuad::from_quad)
+            .filter(|q| q.quad_area() > 1.)
+            .map(|q| q.quad_center())
+            .next()
+            .ok_or_else(|| js_err("click: element not visible in viewport".to_string()))?;
+
+        // E. Trusted mouse click via Input.dispatchMouseEvent.
+        inner
+            .page
+            .click(point)
+            .await
+            .map_err(|e| js_err(format!("click: dispatch: {e}")))?;
+
+        Ok(())
     }
 
     /// Fill the input.
@@ -596,182 +885,7 @@ impl Locator {
 impl Locator {
     /// Injects the `resolveLocator` helper function and evaluates the expression.
     async fn evaluate_internal_with_resolver(&self, expression: String) -> JsResult<String> {
-        // This resolver logic walks the steps.
-        // For each step, it queries within the previous roots.
-        let resolver_js = r#"
-            // Shadow-piercing querySelectorAll: matches selector in root then recurses
-            // into every open shadow root found in root's subtree. Mirrors Playwright's
-            // _queryCSS implementation.
-            const queryAllDeep = (root, selector) => {
-                const result = [];
-                const query = (r) => {
-                    for (const el of r.querySelectorAll(selector)) result.push(el);
-                    if (r.shadowRoot) query(r.shadowRoot);
-                    for (const el of r.querySelectorAll('*')) {
-                        if (el.shadowRoot) query(el.shadowRoot);
-                    }
-                };
-                query(root);
-                return result;
-            };
-
-            // Collect all descendant elements including those inside shadow roots.
-            // Includes `root` itself when it is an Element (not document).
-            const collectAllDeep = (root) => {
-                const result = root === document ? [] : [root];
-                const collect = (r) => {
-                    if (r.shadowRoot) collect(r.shadowRoot);
-                    for (const el of r.querySelectorAll('*')) {
-                        result.push(el);
-                        if (el.shadowRoot) collect(el.shadowRoot);
-                    }
-                };
-                collect(root);
-                return result;
-            };
-
-            const IMPLICIT_ROLE = (el) => {
-                const explicit = el.getAttribute('role');
-                if (explicit) return explicit.trim().split(/\s+/)[0].toLowerCase();
-                const tag = el.tagName.toLowerCase();
-                const type = (el.getAttribute('type') || 'text').toLowerCase();
-                if (tag === 'button') return 'button';
-                if (tag === 'a' && el.hasAttribute('href')) return 'link';
-                if (tag === 'input') {
-                    if (type === 'button' || type === 'submit' || type === 'reset' || type === 'image') return 'button';
-                    if (type === 'checkbox') return 'checkbox';
-                    if (type === 'radio') return 'radio';
-                    if (type === 'range') return 'slider';
-                    if (type === 'number') return 'spinbutton';
-                    if (type === 'search') return 'searchbox';
-                    return 'textbox';
-                }
-                if (tag === 'textarea') return 'textbox';
-                if (tag === 'select') return el.hasAttribute('multiple') ? 'listbox' : 'combobox';
-                if (tag === 'option') return 'option';
-                if (tag === 'img') return 'img';
-                if (/^h[1-6]$/.test(tag)) return 'heading';
-                if (tag === 'summary') return 'button';
-                if (tag === 'meter') return 'meter';
-                if (tag === 'progress') return 'progressbar';
-                if (tag === 'table') return 'table';
-                if (tag === 'tr') return 'row';
-                if (tag === 'td') return 'cell';
-                if (tag === 'th') return 'columnheader';
-                if (tag === 'li') return 'listitem';
-                if (tag === 'nav') return 'navigation';
-                if (tag === 'section' && (el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby'))) return 'region';
-                return '';
-            };
-
-            const ACCESSIBLE_NAME = (el) => {
-                const ariaLabel = (el.getAttribute('aria-label') || '').trim();
-                if (ariaLabel) return ariaLabel;
-                const lbIds = (el.getAttribute('aria-labelledby') || '').trim().split(/\s+/).filter(Boolean);
-                if (lbIds.length) {
-                    const text = lbIds.map(id => { const r = document.getElementById(id); return r ? (r.innerText || r.textContent || '').trim() : ''; }).filter(Boolean).join(' ');
-                    if (text) return text;
-                }
-                if (el.labels && el.labels.length) {
-                    const text = Array.from(el.labels).map(l => (l.innerText || l.textContent || '').trim()).filter(Boolean).join(' ');
-                    if (text) return text;
-                }
-                const tag = el.tagName.toLowerCase();
-                if (['button','a','h1','h2','h3','h4','h5','h6','summary'].includes(tag))
-                    return (el.innerText || el.textContent || '').trim();
-                if (tag === 'img') return (el.getAttribute('alt') || '').trim();
-                return (el.getAttribute('placeholder') || el.getAttribute('title') || '').trim();
-            };
-
-            const IS_ARIA_HIDDEN = (el) => {
-                if (el.getAttribute('aria-hidden') === 'true') return true;
-                const s = window.getComputedStyle(el);
-                return s.display === 'none' || s.visibility === 'hidden';
-            };
-
-            const resolveLocator = async (steps) => {
-                let roots = [document];
-                for (const step of steps) {
-                    let nextRoots = [];
-                    if (step.type === 'role') {
-                        for (const root of roots) {
-                            const candidates = collectAllDeep(root);
-                            const matched = candidates.filter(el => {
-                                if (IMPLICIT_ROLE(el) !== step.role) return false;
-                                if (!step.includeHidden && IS_ARIA_HIDDEN(el)) return false;
-                                if (step.name !== null && step.name !== undefined) {
-                                    const accName = ACCESSIBLE_NAME(el);
-                                    if (step.namePattern !== null && step.namePattern !== undefined) {
-                                        if (!new RegExp(step.namePattern, step.nameFlags || '').test(accName)) return false;
-                                    } else {
-                                        const a = accName.toLowerCase();
-                                        const b = step.name.toLowerCase();
-                                        if (step.exact ? a !== b : !a.includes(b)) return false;
-                                    }
-                                }
-                                if (step.checked !== null && step.checked !== undefined) {
-                                    const v = el.getAttribute('aria-checked');
-                                    const actual = v !== null ? v === 'true' : (typeof el.checked === 'boolean' ? el.checked : null);
-                                    if (actual !== step.checked) return false;
-                                }
-                                if (step.disabled !== null && step.disabled !== undefined) {
-                                    const dis = !!el.disabled || el.getAttribute('aria-disabled') === 'true';
-                                    if (dis !== step.disabled) return false;
-                                }
-                                if (step.expanded !== null && step.expanded !== undefined) {
-                                    const exp = el.getAttribute('aria-expanded');
-                                    if (exp === null || (exp === 'true') !== step.expanded) return false;
-                                }
-                                if (step.level !== null && step.level !== undefined) {
-                                    const m = el.tagName.match(/^H([1-6])$/i);
-                                    const lv = m ? parseInt(m[1]) : (el.getAttribute('aria-level') ? parseInt(el.getAttribute('aria-level')) : null);
-                                    if (lv !== step.level) return false;
-                                }
-                                if (step.pressed !== null && step.pressed !== undefined) {
-                                    const pr = el.getAttribute('aria-pressed');
-                                    if (pr === null || (pr === 'true') !== step.pressed) return false;
-                                }
-                                if (step.selected !== null && step.selected !== undefined) {
-                                    const v = el.getAttribute('aria-selected');
-                                    const actual = v !== null ? v === 'true' : (typeof el.selected === 'boolean' ? el.selected : null);
-                                    if (actual !== step.selected) return false;
-                                }
-                                return true;
-                            });
-                            if (step.index !== null && step.index !== undefined) {
-                                let idx = step.index;
-                                if (idx < 0) idx = matched.length + idx;
-                                if (idx >= 0 && idx < matched.length) {
-                                    nextRoots.push(matched[idx]);
-                                }
-                            } else {
-                                nextRoots.push(...matched);
-                            }
-                        }
-                    } else {
-                        for (const root of roots) {
-                            const arr = queryAllDeep(root, step.selector);
-                            if (step.index !== null) {
-                                let idx = step.index;
-                                if (idx < 0) idx = arr.length + idx;
-                                if (idx >= 0 && idx < arr.length) {
-                                    nextRoots.push(arr[idx]);
-                                }
-                            } else {
-                                nextRoots.push(...arr);
-                            }
-                        }
-                    }
-                    roots = nextRoots;
-                    if (roots.length === 0) break;
-                }
-                return roots;
-            };
-        "#;
-
-        // Wrap everything in an IIFE
-        let full_expression = format!("(() => {{ {resolver_js} return {expression} }})()");
-
+        let full_expression = format!("(() => {{ {RESOLVER_JS} return {expression} }})()");
         self.evaluate_internal(full_expression).await
     }
 
