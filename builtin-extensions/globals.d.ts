@@ -46,6 +46,23 @@ interface Locator {
     }): Promise<void>;
 }
 
+interface JSHandle {
+    dispose(): Promise<void>;
+    jsonValue(): Promise<string>;
+    toString(): string;
+}
+
+interface ElementHandle extends JSHandle {
+    click(): Promise<void>;
+    fill(value: string): Promise<void>;
+    textContent(): Promise<string | null>;
+    innerText(): Promise<string | null>;
+    getAttribute(name: string): Promise<string | null>;
+    isVisible(): Promise<boolean>;
+    $(selector: string): Promise<ElementHandle | null>;
+    $$(selector: string): Promise<ElementHandle[]>;
+}
+
 interface PageApi {
     locator(selector: string): Locator;
     getByRole(role: string, options?: ByRoleOptions): Locator;
@@ -83,6 +100,7 @@ interface PageApi {
     isVisible(selector: string): Promise<boolean>;
     isEnabled(selector: string): Promise<boolean>;
     evaluate(expression: string): Promise<unknown>;
+    evaluateHandle(expression: string): Promise<unknown>;
     frameEvaluate(frameRef: string, expression: string): Promise<unknown>;
     frameFill(frameRef: string, selector: string, value: string): Promise<void>;
     snapshot(options?: PageSnapshotOptions): Promise<string>;
