@@ -191,6 +191,43 @@ try {
 }
 "##;
 
+const SHADOW_DOM_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("shadow DOM test start");
+  const html = encodeURIComponent(`
+    <div id="host"></div>
+    <script>
+      const shadow = document.getElementById('host').attachShadow({ mode: 'open' });
+      shadow.innerHTML = '<button id="shadow-btn">Shadow Button</button>';
+    </script>
+  `);
+  await page.goto(`data:text/html,${html}`);
+
+  // 1. locator('button').count() should find the button inside the shadow root
+  const count = await page.locator('button').count();
+  if (count !== 1) throw new Error(`Expected 1 shadow button, got ${count}`);
+
+  // 2. getByRole finds the shadow button by name
+  const shadowBtn = page.getByRole('button', { name: 'Shadow Button' });
+  const text = await shadowBtn.innerText();
+  if (text !== 'Shadow Button') throw new Error(`Expected Shadow Button, got ${text}`);
+
+  // 3. Click the shadow button via CSS locator
+  await page.locator('button').click();
+
+  await refreshmint.saveResource("shadow_dom.bin", [111, 107]);
+  refreshmint.log("shadow DOM test done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("shadow DOM test error: " + msg);
+  try {
+     const body = await page.evaluate("document.body.innerHTML");
+     refreshmint.log("Body: " + body);
+  } catch (_) {}
+  throw e;
+}
+"##;
+
 struct TestSandbox {
     root: PathBuf,
 }
@@ -317,6 +354,59 @@ fn get_by_role_api_works() -> Result<(), Box<dyn Error>> {
 
     if !output_file.exists() {
         return Err("get_by_role.bin not found, test likely failed".into());
+    }
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn shadow_dom_api_works() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping shadow DOM test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let sandbox = TestSandbox::new("shadow-dom")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{}\"}}", EXTENSION_NAME),
+    )?;
+    fs::write(&driver_path, SHADOW_DOM_DRIVER_SOURCE)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        login_name: LOGIN_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    scrape::run_scrape(config)?;
+
+    let output_file = ledger_dir
+        .join("cache")
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("shadow_dom.bin");
+
+    if !output_file.exists() {
+        return Err("shadow_dom.bin not found, test likely failed".into());
     }
     let bytes = fs::read(&output_file)?;
     assert_eq!(bytes, b"ok");

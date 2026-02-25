@@ -599,6 +599,37 @@ impl Locator {
         // This resolver logic walks the steps.
         // For each step, it queries within the previous roots.
         let resolver_js = r#"
+            // Shadow-piercing querySelectorAll: matches selector in root then recurses
+            // into every open shadow root found in root's subtree. Mirrors Playwright's
+            // _queryCSS implementation.
+            const queryAllDeep = (root, selector) => {
+                const result = [];
+                const query = (r) => {
+                    for (const el of r.querySelectorAll(selector)) result.push(el);
+                    if (r.shadowRoot) query(r.shadowRoot);
+                    for (const el of r.querySelectorAll('*')) {
+                        if (el.shadowRoot) query(el.shadowRoot);
+                    }
+                };
+                query(root);
+                return result;
+            };
+
+            // Collect all descendant elements including those inside shadow roots.
+            // Includes `root` itself when it is an Element (not document).
+            const collectAllDeep = (root) => {
+                const result = root === document ? [] : [root];
+                const collect = (r) => {
+                    if (r.shadowRoot) collect(r.shadowRoot);
+                    for (const el of r.querySelectorAll('*')) {
+                        result.push(el);
+                        if (el.shadowRoot) collect(el.shadowRoot);
+                    }
+                };
+                collect(root);
+                return result;
+            };
+
             const IMPLICIT_ROLE = (el) => {
                 const explicit = el.getAttribute('role');
                 if (explicit) return explicit.trim().split(/\s+/)[0].toLowerCase();
@@ -664,7 +695,7 @@ impl Locator {
                     let nextRoots = [];
                     if (step.type === 'role') {
                         for (const root of roots) {
-                            const candidates = Array.from(root === document ? root.querySelectorAll('*') : [root, ...root.querySelectorAll('*')]);
+                            const candidates = collectAllDeep(root);
                             const matched = candidates.filter(el => {
                                 if (IMPLICIT_ROLE(el) !== step.role) return false;
                                 if (!step.includeHidden && IS_ARIA_HIDDEN(el)) return false;
@@ -719,8 +750,7 @@ impl Locator {
                         }
                     } else {
                         for (const root of roots) {
-                            const els = root.querySelectorAll(step.selector);
-                            const arr = Array.from(els);
+                            const arr = queryAllDeep(root, step.selector);
                             if (step.index !== null) {
                                 let idx = step.index;
                                 if (idx < 0) idx = arr.length + idx;
