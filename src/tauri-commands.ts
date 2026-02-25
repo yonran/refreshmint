@@ -439,6 +439,31 @@ export async function syncGlTransaction(
     return invoke('sync_gl_transaction', { ledger, loginName, label, entryId });
 }
 
+export interface TransferMatch {
+    accountLocator: string;
+    entryId: string;
+    matchedAmount: string;
+}
+
+export interface CategoryResult {
+    /** Suggested counterpart account, or null if confidence < 0.5. */
+    suggested: string | null;
+    /** True if the entry's posting amount differs from the GL transaction. */
+    amountChanged: boolean;
+    /** True if the entry's status differs from the GL transaction. */
+    statusChanged: boolean;
+    /** Auto-detected transfer match, or null if none / ambiguous. */
+    transferMatch: TransferMatch | null;
+}
+
+export async function suggestCategories(
+    ledger: string,
+    loginName: string,
+    label: string,
+): Promise<Record<string, CategoryResult>> {
+    return invoke('suggest_categories', { ledger, loginName, label });
+}
+
 export interface AccountConfig {
     extension?: string;
 }

@@ -5,6 +5,7 @@ pub mod secret;
 
 pub mod account_config;
 pub mod account_journal;
+pub mod categorize;
 pub mod dedup;
 pub mod extract;
 pub mod login_config;
@@ -105,6 +106,7 @@ pub fn run_with_context(
             post_transfer,
             get_unposted_entries_for_transfer,
             sync_gl_transaction,
+            suggest_categories,
             get_account_config,
             set_account_extension,
             list_logins,
@@ -1249,6 +1251,19 @@ fn sync_gl_transaction(
 
     post::sync_gl_transaction(&target_dir, &login_name, &label, &entry_id)
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn suggest_categories(
+    ledger: String,
+    login_name: String,
+    label: String,
+) -> Result<std::collections::HashMap<String, categorize::CategoryResult>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_login_name_input(login_name)?;
+    let label = require_label_input(label)?;
+
+    categorize::suggest_categories(&target_dir, &login_name, &label).map_err(|err| err.to_string())
 }
 
 fn map_account_journal_entries(
