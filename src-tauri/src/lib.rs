@@ -1060,6 +1060,10 @@ struct AccountJournalEntry {
     posted: Option<String>,
     #[serde(rename = "isTransfer")]
     is_transfer: bool,
+    /// Quantity of the first posting (no commodity symbol), e.g. `"-21.32"`.
+    amount: Option<String>,
+    /// All tags on the entry, as `(key, value)` pairs.
+    tags: Vec<(String, String)>,
 }
 
 #[tauri::command]
@@ -1259,6 +1263,12 @@ fn map_account_journal_entries(
                 account_journal::EntryStatus::Pending => "pending",
                 account_journal::EntryStatus::Unmarked => "unmarked",
             };
+            let amount = e
+                .postings
+                .first()
+                .and_then(|p| p.amount.as_ref())
+                .map(|a| a.quantity.clone());
+            let tags = e.tags.clone();
             AccountJournalEntry {
                 id: e.id,
                 date: e.date,
@@ -1268,6 +1278,8 @@ fn map_account_journal_entries(
                 evidence: e.evidence,
                 posted: e.posted,
                 is_transfer,
+                amount,
+                tags,
             }
         })
         .collect()

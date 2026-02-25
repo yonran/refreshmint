@@ -110,6 +110,10 @@ export interface AccountJournalEntry {
     evidence: string[];
     posted: string | null;
     isTransfer: boolean;
+    /** Quantity of the first posting (no commodity symbol), e.g. "-21.32". */
+    amount: string | null;
+    /** All tags on the entry as [key, value] pairs. */
+    tags: [string, string][];
 }
 
 export interface NewTransactionInput {
