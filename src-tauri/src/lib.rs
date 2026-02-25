@@ -103,6 +103,7 @@ pub fn run_with_context(
             unpost_entry,
             unpost_login_account_entry,
             post_transfer,
+            get_unposted_entries_for_transfer,
             get_account_config,
             set_account_extension,
             list_logins,
@@ -1210,6 +1211,23 @@ fn post_transfer(
 
     post::post_transfer(&target_dir, &account1, &entry_id1, &account2, &entry_id2)
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn get_unposted_entries_for_transfer(
+    ledger: String,
+    exclude_login: String,
+    exclude_label: String,
+) -> Result<Vec<AccountJournalEntry>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let exclude_login = require_login_name_input(exclude_login)?;
+    let exclude_label = require_label_input(exclude_label)?;
+    let triples =
+        post::get_unposted_entries_for_transfer(&target_dir, &exclude_login, &exclude_label)
+            .map_err(|err| err.to_string())?;
+    Ok(map_account_journal_entries(
+        triples.into_iter().map(|(_, _, e)| e).collect(),
+    ))
 }
 
 fn map_account_journal_entries(

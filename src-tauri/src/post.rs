@@ -191,7 +191,131 @@ pub fn post_login_account_entry(
     Ok(gl_txn_id)
 }
 
-/// Undo a posting by removing the GL entry and clearing reconciled tags.
+// ---------------------------------------------------------------------------
+// Transfer-aware unpost helpers
+// ---------------------------------------------------------------------------
+
+/// Find a GL block by its id tag without removing it.
+fn find_gl_block(ledger_dir: &Path, gl_txn_id: &str) -> io::Result<Option<String>> {
+    let journal_path = ledger_dir.join("general.journal");
+    if !journal_path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&journal_path)?;
+    let marker = format!("id: {gl_txn_id}");
+    Ok(split_journal_blocks(&content)
+        .into_iter()
+        .find(|block| block.contains(&marker)))
+}
+
+/// Parse `; source: <locator>:<entry_id>` lines from a GL block.
+///
+/// Skips posting-indexed sources (`; source: ...:posting:<n>`).
+/// Returns vec of `(locator, entry_id)`.
+fn parse_sources_from_block(block: &str) -> Vec<(String, String)> {
+    let mut sources = Vec::new();
+    for line in block.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("; source: ") {
+            if rest.contains(":posting:") {
+                continue; // skip posting-indexed sources
+            }
+            if let Some(colon_pos) = rest.rfind(':') {
+                let locator = rest[..colon_pos].to_string();
+                let entry_id = rest[colon_pos + 1..].to_string();
+                if !locator.is_empty() && !entry_id.is_empty() {
+                    sources.push((locator, entry_id));
+                }
+            }
+        }
+    }
+    sources
+}
+
+/// Resolve a source locator string to its journal file path.
+fn journal_path_for_locator(ledger_dir: &Path, locator: &str) -> Option<std::path::PathBuf> {
+    if let Some(rest) = locator.strip_prefix("logins/") {
+        if let Some(accounts_pos) = rest.find("/accounts/") {
+            let login = &rest[..accounts_pos];
+            let label = &rest[accounts_pos + "/accounts/".len()..];
+            return Some(account_journal::login_account_journal_path(
+                ledger_dir, login, label,
+            ));
+        }
+    } else if let Some(acct_name) = locator.strip_prefix("accounts/") {
+        return Some(account_journal::account_journal_path(ledger_dir, acct_name));
+    }
+    None
+}
+
+/// Holds a pre-loaded other-side journal with the `posted` tag cleared for
+/// the given entry, plus the original snapshot for rollback.
+struct OtherSideJournal {
+    path: std::path::PathBuf,
+    updated: Vec<AccountEntry>,
+    original: Vec<AccountEntry>,
+}
+
+/// Pre-load all source journals for a GL transaction except the triggering
+/// `(triggering_locator, triggering_entry_id)` pair, with `posted` cleared
+/// for each matching entry.  Fails fast before any GL mutation.
+fn preload_other_sides(
+    ledger_dir: &Path,
+    gl_txn_id: &str,
+    triggering_locator: &str,
+    triggering_entry_id: &str,
+) -> Result<Vec<OtherSideJournal>, Box<dyn std::error::Error + Send + Sync>> {
+    let block = match find_gl_block(ledger_dir, gl_txn_id)? {
+        Some(b) => b,
+        None => return Ok(vec![]),
+    };
+    let mut other_sides = Vec::new();
+    for (locator, entry_id) in parse_sources_from_block(&block) {
+        if locator == triggering_locator && entry_id == triggering_entry_id {
+            continue;
+        }
+        let path = journal_path_for_locator(ledger_dir, &locator)
+            .ok_or_else(|| format!("unknown source locator: {locator}"))?;
+        let original = account_journal::read_journal_at_path(&path)?;
+        let mut updated = original.clone();
+        if let Some(idx) = updated.iter().position(|e| e.id == entry_id) {
+            updated[idx].posted = None;
+        }
+        other_sides.push(OtherSideJournal {
+            path,
+            updated,
+            original,
+        });
+    }
+    Ok(other_sides)
+}
+
+/// Write pre-loaded other-side journals.  On failure, best-effort restores
+/// already-written journals and re-appends the removed GL block.
+fn write_other_sides(
+    ledger_dir: &Path,
+    other_sides: &[OtherSideJournal],
+    removed_gl_block: &Option<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for (i, side) in other_sides.iter().enumerate() {
+        if let Err(err) = account_journal::write_journal_at_path(&side.path, &side.updated) {
+            // Best-effort rollback
+            if let Some(ref removed) = removed_gl_block {
+                let _ = append_to_journal(&ledger_dir.join("general.journal"), removed);
+            }
+            for prev in other_sides.iter().take(i) {
+                let _ = account_journal::write_journal_at_path(&prev.path, &prev.original);
+            }
+            return Err(err.into());
+        }
+    }
+    Ok(())
+}
+
+/// Undo a posting by removing the GL entry and clearing posted tags.
+///
+/// For transfer GL transactions (two `; source:` lines), also clears the
+/// `posted` tag on the other-side account journal entry.
 pub fn unpost_entry(
     ledger_dir: &Path,
     account_name: &str,
@@ -222,11 +346,19 @@ pub fn unpost_entry(
             .ok_or_else(|| format!("entry {entry_id} is not posted"))?
     };
 
-    // Remove the GL transaction from general.journal
     let gl_txn_id = gl_ref.strip_prefix("general.journal:").unwrap_or(&gl_ref);
+    let triggering_locator = format!("accounts/{account_name}");
+
+    // Pre-load other-side journals before any mutation (fail fast).
+    let other_sides = preload_other_sides(ledger_dir, gl_txn_id, &triggering_locator, entry_id)?;
+
+    // Remove the GL transaction from general.journal (point of no return).
     let removed_gl_txn = remove_gl_transaction(ledger_dir, gl_txn_id)?;
 
-    // Update account journal entry state in memory
+    // Clear posted on other-side entries.
+    write_other_sides(ledger_dir, &other_sides, &removed_gl_txn)?;
+
+    // Update triggering account journal entry in memory.
     if let Some(posting_idx) = posting_index {
         if let Some(pos) = entries[entry_idx]
             .posted_postings
@@ -239,16 +371,19 @@ pub fn unpost_entry(
         entries[entry_idx].posted = None;
     }
 
-    // Write updated account journal
+    // Write updated account journal.
     if let Err(err) = account_journal::write_journal(ledger_dir, account_name, &entries) {
-        if let Some(removed) = removed_gl_txn {
+        if let Some(removed) = &removed_gl_txn {
             let journal_path = ledger_dir.join("general.journal");
-            let _ = append_to_journal(&journal_path, &removed);
+            let _ = append_to_journal(&journal_path, removed);
+        }
+        for side in &other_sides {
+            let _ = account_journal::write_journal_at_path(&side.path, &side.original);
         }
         return Err(err.into());
     }
 
-    // Log undo operation
+    // Log undo operation.
     let op = operations::GlOperation::UndoPost {
         account: account_name.to_string(),
         entry_id: entry_id.to_string(),
@@ -257,6 +392,9 @@ pub fn unpost_entry(
     };
     if let Err(err) = operations::append_gl_operation(ledger_dir, &op) {
         let _ = account_journal::write_journal(ledger_dir, account_name, &original_entries);
+        for side in &other_sides {
+            let _ = account_journal::write_journal_at_path(&side.path, &side.original);
+        }
         if let Some(removed) = removed_gl_txn {
             let journal_path = ledger_dir.join("general.journal");
             let _ = append_to_journal(&journal_path, &removed);
@@ -268,6 +406,9 @@ pub fn unpost_entry(
 }
 
 /// Undo posting for a login account entry.
+///
+/// For transfer GL transactions (two `; source:` lines), also clears the
+/// `posted` tag on the other-side account journal entry.
 pub fn unpost_login_account_entry(
     ledger_dir: &Path,
     login_name: &str,
@@ -299,8 +440,18 @@ pub fn unpost_login_account_entry(
     };
 
     let gl_txn_id = gl_ref.strip_prefix("general.journal:").unwrap_or(&gl_ref);
+    let source_locator = format!("logins/{login_name}/accounts/{label}");
+
+    // Pre-load other-side journals before any mutation (fail fast).
+    let other_sides = preload_other_sides(ledger_dir, gl_txn_id, &source_locator, entry_id)?;
+
+    // Remove GL block (point of no return).
     let removed_gl_txn = remove_gl_transaction(ledger_dir, gl_txn_id)?;
 
+    // Clear posted on other-side entries.
+    write_other_sides(ledger_dir, &other_sides, &removed_gl_txn)?;
+
+    // Update triggering entry in memory.
     if let Some(posting_idx) = posting_index {
         if let Some(pos) = entries[entry_idx]
             .posted_postings
@@ -314,14 +465,16 @@ pub fn unpost_login_account_entry(
     }
 
     if let Err(err) = account_journal::write_journal_at_path(&journal_path, &entries) {
-        if let Some(removed) = removed_gl_txn {
+        if let Some(removed) = &removed_gl_txn {
             let gl_journal_path = ledger_dir.join("general.journal");
-            let _ = append_to_journal(&gl_journal_path, &removed);
+            let _ = append_to_journal(&gl_journal_path, removed);
+        }
+        for side in &other_sides {
+            let _ = account_journal::write_journal_at_path(&side.path, &side.original);
         }
         return Err(err.into());
     }
 
-    let source_locator = format!("logins/{login_name}/accounts/{label}");
     let op = operations::GlOperation::UndoPost {
         account: source_locator,
         entry_id: entry_id.to_string(),
@@ -330,6 +483,9 @@ pub fn unpost_login_account_entry(
     };
     if let Err(err) = operations::append_gl_operation(ledger_dir, &op) {
         let _ = account_journal::write_journal_at_path(&journal_path, &original_entries);
+        for side in &other_sides {
+            let _ = account_journal::write_journal_at_path(&side.path, &side.original);
+        }
         if let Some(removed) = removed_gl_txn {
             let gl_journal_path = ledger_dir.join("general.journal");
             let _ = append_to_journal(&gl_journal_path, &removed);
@@ -338,6 +494,41 @@ pub fn unpost_login_account_entry(
     }
 
     Ok(())
+}
+
+/// `(login_name, label, entry)` triple returned by `get_unposted_entries_for_transfer`.
+pub type UnpostedTransferEntry = (String, String, AccountEntry);
+
+/// Get all unposted entries across ALL login accounts except the specified
+/// `(exclude_login, exclude_label)` pair.  Sorted by date descending.
+pub fn get_unposted_entries_for_transfer(
+    ledger_dir: &Path,
+    exclude_login: &str,
+    exclude_label: &str,
+) -> Result<Vec<UnpostedTransferEntry>, Box<dyn std::error::Error + Send + Sync>> {
+    let logins = crate::login_config::list_logins(ledger_dir)?;
+    let mut result: Vec<UnpostedTransferEntry> = Vec::new();
+
+    for login in &logins {
+        let config = crate::login_config::read_login_config(ledger_dir, login);
+        for label in config.accounts.keys() {
+            if login == exclude_login && label == exclude_label {
+                continue;
+            }
+            let journal_path =
+                account_journal::login_account_journal_path(ledger_dir, login, label);
+            let entries = account_journal::read_journal_at_path(&journal_path)?;
+            for entry in entries {
+                if entry.posted.is_none() && entry.posted_postings.is_empty() {
+                    result.push((login.clone(), label.clone(), entry));
+                }
+            }
+        }
+    }
+
+    // Sort by date descending.
+    result.sort_by(|a, b| b.2.date.cmp(&a.2.date));
+    Ok(result)
 }
 
 /// Post two entries across accounts as an inter-account transfer.
@@ -877,5 +1068,47 @@ mod tests {
         assert!(text.starts_with("2024-01-15  Transfer"));
         assert!(!text.contains("* Transfer"));
         assert!(!text.contains("! Transfer"));
+    }
+
+    #[test]
+    fn unpost_transfer_clears_posted_on_both_sides() {
+        let root = temp_dir("unpost-transfer");
+        fs::write(root.join("general.journal"), "").unwrap();
+
+        // Set up two accounts with one entry each.
+        let entries1 = vec![make_entry("txn-a", "2024-01-15", "Transfer out", "-200.00")];
+        let entries2 = vec![make_entry("txn-b", "2024-01-15", "Transfer in", "200.00")];
+        account_journal::write_journal(&root, "chase", &entries1).unwrap();
+        account_journal::write_journal(&root, "boa", &entries2).unwrap();
+
+        // Post as a transfer.
+        let gl_id = post_transfer(&root, "chase", "txn-a", "boa", "txn-b").unwrap();
+
+        // Verify both sides are posted.
+        let before1 = account_journal::read_journal(&root, "chase").unwrap();
+        let before2 = account_journal::read_journal(&root, "boa").unwrap();
+        assert!(before1[0].posted.is_some());
+        assert!(before2[0].posted.is_some());
+
+        // Unpost from the first side.
+        unpost_entry(&root, "chase", "txn-a", None).unwrap();
+
+        // GL block removed.
+        let gl_content = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(!gl_content.contains(&gl_id));
+
+        // Both sides cleared.
+        let after1 = account_journal::read_journal(&root, "chase").unwrap();
+        let after2 = account_journal::read_journal(&root, "boa").unwrap();
+        assert!(
+            after1[0].posted.is_none(),
+            "triggering side should be unposted"
+        );
+        assert!(
+            after2[0].posted.is_none(),
+            "other side should also be unposted"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

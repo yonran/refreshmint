@@ -414,6 +414,18 @@ export async function postTransfer(
     });
 }
 
+export async function getUnpostedEntriesForTransfer(
+    ledger: string,
+    excludeLogin: string,
+    excludeLabel: string,
+): Promise<AccountJournalEntry[]> {
+    return invoke('get_unposted_entries_for_transfer', {
+        ledger,
+        excludeLogin,
+        excludeLabel,
+    });
+}
+
 export interface AccountConfig {
     extension?: string;
 }
