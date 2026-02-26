@@ -66,14 +66,20 @@ interface ElementHandle extends JSHandle {
 interface PageApi {
     locator(selector: string): Locator;
     getByRole(role: string, options?: ByRoleOptions): Locator;
-    goto(url: string): Promise<void>;
+    goto(
+        url: string,
+        options?: {
+            waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit';
+            timeout?: number;
+        },
+    ): Promise<void>;
     url(): Promise<string>;
     reload(): Promise<void>;
     waitForSelector(selector: string, timeoutMs?: number): Promise<void>;
     waitForNavigation(timeoutMs?: number): Promise<void>;
     waitForURL(pattern: string, timeoutMs?: number): Promise<void>;
     waitForLoadState(
-        state?: 'load' | 'domcontentloaded' | 'networkidle',
+        state?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit',
         timeoutMs?: number,
     ): Promise<void>;
     waitForResponse(urlPattern: string, timeoutMs?: number): Promise<string>;

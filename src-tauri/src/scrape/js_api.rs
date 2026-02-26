@@ -20,6 +20,12 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const POLL_INTERVAL_MS: u64 = 100;
 const TAB_QUERY_TIMEOUT_MS: u64 = 5_000;
 
+#[derive(Debug, Clone)]
+struct GotoOptions {
+    wait_until: String,
+    timeout_ms: u64,
+}
+
 fn is_transport_disconnected_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("receiver is gone")
@@ -36,6 +42,44 @@ fn format_browser_error(context: &str, err: &str) -> String {
         return format!("{BROWSER_DISCONNECTED_ERROR} ({context}: {err})");
     }
     format!("{context}: {err}")
+}
+
+fn goto_deadline(timeout_ms: u64) -> Option<tokio::time::Instant> {
+    if timeout_ms == 0 {
+        None
+    } else {
+        Some(tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms))
+    }
+}
+
+fn goto_timeout_err(timeout_ms: u64, url: &str) -> rquickjs::Error {
+    js_err(format!(
+        "TimeoutError: page.goto(\"{url}\"): Timeout {timeout_ms}ms exceeded."
+    ))
+}
+
+fn goto_remaining(
+    deadline: Option<tokio::time::Instant>,
+    timeout_ms: u64,
+    url: &str,
+) -> JsResult<Option<std::time::Duration>> {
+    let Some(deadline) = deadline else {
+        return Ok(None);
+    };
+    let now = tokio::time::Instant::now();
+    if now >= deadline {
+        return Err(goto_timeout_err(timeout_ms, url));
+    }
+    Ok(Some(deadline.saturating_duration_since(now)))
+}
+
+fn is_browser_error_url(url: &str) -> bool {
+    url.starts_with("chrome-error://")
+}
+
+fn is_cdp_request_timeout(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("request timed out") || (lower.contains("timeout") && lower.contains("request"))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -610,15 +654,31 @@ impl PageApi {
 
     /// Navigate to a URL.
     #[qjs(rename = "goto")]
-    pub async fn js_goto(&self, url: String) -> JsResult<()> {
+    pub async fn js_goto(&self, url: String, options: Opt<rquickjs::Value<'_>>) -> JsResult<()> {
+        let GotoOptions {
+            wait_until,
+            timeout_ms,
+        } = parse_goto_options(options.0)?;
+        let deadline = goto_deadline(timeout_ms);
         let current_url = self.current_url().await?;
-        if current_url == url {
+        let page = {
             let inner = self.inner.lock().await;
-            inner
-                .page
-                .reload()
-                .await
-                .map_err(|e| js_err(format!("goto failed (same-url reload): {e}")))?;
+            inner.page.clone()
+        };
+        if current_url == url {
+            if let Some(remaining) = goto_remaining(deadline, timeout_ms, &url)? {
+                tokio::time::timeout(remaining, page.reload())
+                    .await
+                    .map_err(|_| goto_timeout_err(timeout_ms, &url))?
+                    .map_err(|e| js_err(format!("goto failed (same-url reload): {e}")))?;
+            } else {
+                page.reload()
+                    .await
+                    .map_err(|e| js_err(format!("goto failed (same-url reload): {e}")))?;
+            }
+            self.wait_for_goto_wait_until(&wait_until, deadline, timeout_ms, &url)
+                .await?;
+            self.ensure_not_browser_error_page(&url).await?;
             return Ok(());
         }
 
@@ -627,35 +687,38 @@ impl PageApi {
             let expression =
                 format!("(() => {{ window.location.href = {url_json}; return true; }})()");
 
-            {
-                let inner = self.inner.lock().await;
-                inner
-                    .page
-                    .evaluate(expression.as_str())
+            if let Some(remaining) = goto_remaining(deadline, timeout_ms, &url)? {
+                tokio::time::timeout(remaining, page.evaluate(expression.as_str()))
+                    .await
+                    .map_err(|_| goto_timeout_err(timeout_ms, &url))?
+                    .map_err(|e| js_err(format!("goto failed (hash-navigation): {e}")))?;
+            } else {
+                page.evaluate(expression.as_str())
                     .await
                     .map_err(|e| js_err(format!("goto failed (hash-navigation): {e}")))?;
             }
 
-            let deadline =
-                tokio::time::Instant::now() + std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS);
             loop {
                 let observed = self.current_url().await?;
                 if observed == url {
-                    return Ok(());
+                    break;
                 }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(js_err(format!(
-                        "goto failed (hash-navigation): timeout {DEFAULT_TIMEOUT_MS}ms exceeded (current URL {observed})"
-                    )));
+                if let Some(limit) = deadline {
+                    if tokio::time::Instant::now() >= limit {
+                        return Err(goto_timeout_err(timeout_ms, &url));
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
             }
+            self.wait_for_goto_wait_until(&wait_until, deadline, timeout_ms, &url)
+                .await?;
+            self.ensure_not_browser_error_page(&url).await?;
+            return Ok(());
         }
 
-        let inner = self.inner.lock().await;
         if url.starts_with("data:") {
             // Robustly navigate to about:blank first
-            let current_href = match inner.page.evaluate("window.location.href").await {
+            let current_href = match page.evaluate("window.location.href").await {
                 Ok(res) => res
                     .value()
                     .and_then(|v| v.as_str())
@@ -671,11 +734,11 @@ impl PageApi {
                     .url("about:blank")
                     .build()
                     .map_err(|e| js_err(format!("goto(data) prelude build failed: {e}")))?;
-                inner.page.execute(params).await.ok();
+                page.execute(params).await.ok();
 
                 for _ in 0..50 {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    if let Ok(res) = inner.page.evaluate("window.location.href").await {
+                    if let Ok(res) = page.evaluate("window.location.href").await {
                         let h = res.value().and_then(|v| v.as_str()).unwrap_or("");
                         if h == "about:blank" {
                             break;
@@ -709,21 +772,62 @@ impl PageApi {
                 .return_by_value(false)
                 .build()
                 .map_err(|e| js_err(format!("goto(data) build failed: {e}")))?;
-            inner
-                .page
-                .evaluate_expression(eval)
+            page.evaluate_expression(eval)
                 .await
                 .map_err(|e| js_err(format!("goto(data) failed: {e}")))?;
 
             // Brief wait for rendering
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         } else {
-            inner
-                .page
-                .goto(&url)
-                .await
-                .map_err(|e| js_err(format!("goto failed: {e}")))?;
+            use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
+            let params = NavigateParams::builder()
+                .url(url.clone())
+                .build()
+                .map_err(|e| js_err(format!("goto build failed: {e}")))?;
+            let nav_outcome = if let Some(remaining) = goto_remaining(deadline, timeout_ms, &url)? {
+                tokio::time::timeout(remaining, page.execute(params))
+                    .await
+                    .ok()
+            } else {
+                Some(page.execute(params).await)
+            };
+
+            if let Some(nav_result) = nav_outcome {
+                match nav_result {
+                    Ok(nav_result) => {
+                        if let Some(error_text) = nav_result.result.error_text {
+                            return Err(js_err(format!("goto failed: {error_text} at {url}")));
+                        }
+                    }
+                    Err(err) => {
+                        let err_text = err.to_string();
+                        if is_cdp_request_timeout(&err_text) {
+                            // Chromiumoxide wraps Page.navigate as a navigation request and can
+                            // surface a timeout before our explicit waitUntil completes.
+                            // Keep observing URL/lifecycle up to the caller's timeout.
+                        } else {
+                            return Err(js_err(format!("goto failed: {err}")));
+                        }
+                    }
+                }
+            }
+
+            loop {
+                let observed = self.current_url().await?;
+                if observed != current_url {
+                    break;
+                }
+                if let Some(limit) = deadline {
+                    if tokio::time::Instant::now() >= limit {
+                        return Err(goto_timeout_err(timeout_ms, &url));
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+            }
         }
+        self.wait_for_goto_wait_until(&wait_until, deadline, timeout_ms, &url)
+            .await?;
+        self.ensure_not_browser_error_page(&url).await?;
         Ok(())
     }
 
@@ -915,13 +1019,20 @@ impl PageApi {
     ) -> JsResult<()> {
         let requested_state = state.unwrap_or_else(|| "load".to_string());
         let state = requested_state.to_ascii_lowercase();
-        if state != "load" && state != "domcontentloaded" && state != "networkidle" {
+        if state != "load"
+            && state != "domcontentloaded"
+            && state != "networkidle"
+            && state != "commit"
+        {
             return Err(js_err(format!(
                 "waitForLoadState unsupported state: {requested_state}"
             )));
         }
 
         let timeout_ms = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        if state == "commit" {
+            return Ok(());
+        }
         if state == "networkidle" {
             let page = {
                 let inner = self.inner.lock().await;
@@ -2365,6 +2476,65 @@ impl PageApi {
         Ok(String::new())
     }
 
+    async fn wait_for_goto_wait_until(
+        &self,
+        wait_until: &str,
+        deadline: Option<tokio::time::Instant>,
+        timeout_ms: u64,
+        url: &str,
+    ) -> JsResult<()> {
+        match wait_until {
+            "commit" => Ok(()),
+            "networkidle" => {
+                let page = {
+                    let inner = self.inner.lock().await;
+                    inner.page.clone()
+                };
+                if let Some(remaining) = goto_remaining(deadline, timeout_ms, url)? {
+                    tokio::time::timeout(remaining, page.wait_for_network_idle())
+                        .await
+                        .map_err(|_| goto_timeout_err(timeout_ms, url))?
+                        .map(|_| ())
+                        .map_err(|e| js_err(format!("waitForLoadState(networkidle) failed: {e}")))
+                } else {
+                    page.wait_for_network_idle()
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| js_err(format!("waitForLoadState(networkidle) failed: {e}")))
+                }
+            }
+            "load" | "domcontentloaded" => loop {
+                let ready = match wait_until {
+                    "load" => self.ready_state_is_complete().await?,
+                    "domcontentloaded" => self.ready_state_is_interactive_or_complete().await?,
+                    _ => false,
+                };
+                if ready {
+                    return Ok(());
+                }
+                if let Some(limit) = deadline {
+                    if tokio::time::Instant::now() >= limit {
+                        return Err(goto_timeout_err(timeout_ms, url));
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+            },
+            _ => Err(js_err(format!(
+                "waitUntil: expected one of (load|domcontentloaded|networkidle|commit), got {wait_until}"
+            ))),
+        }
+    }
+
+    async fn ensure_not_browser_error_page(&self, requested_url: &str) -> JsResult<()> {
+        let observed = self.current_url().await?;
+        if is_browser_error_url(&observed) {
+            return Err(js_err(format!(
+                "goto failed: navigation to \"{requested_url}\" failed (landed on {observed})"
+            )));
+        }
+        Ok(())
+    }
+
     async fn eval_string(&self, expression: String, _method_name: &str) -> JsResult<String> {
         let result = self.evaluate_in_active_context(expression).await?;
         Ok(result.into_string_repr())
@@ -3264,6 +3434,49 @@ fn parse_snapshot_options(options: Option<rquickjs::Value<'_>>) -> JsResult<Snap
         }
     }
     Ok(result)
+}
+
+fn parse_goto_options(options: Option<rquickjs::Value<'_>>) -> JsResult<GotoOptions> {
+    let mut wait_until = "load".to_string();
+    let mut timeout_ms = DEFAULT_TIMEOUT_MS;
+    if let Some(opts) = options {
+        let Some(obj) = opts.as_object() else {
+            return Err(js_err(
+                "goto options must be an object when provided".to_string(),
+            ));
+        };
+        if let Ok(Some(wait_until_value)) = obj.get::<_, Option<String>>("waitUntil") {
+            wait_until = wait_until_value;
+        }
+        if let Ok(Some(timeout)) = obj.get::<_, Option<u64>>("timeout") {
+            timeout_ms = timeout;
+        } else if let Ok(Some(timeout)) = obj.get::<_, Option<f64>>("timeout") {
+            if timeout.is_sign_negative() {
+                return Err(js_err(
+                    "goto timeout must be a non-negative number".to_string(),
+                ));
+            }
+            timeout_ms = timeout as u64;
+        }
+    }
+
+    if wait_until == "networkidle0" {
+        wait_until = "networkidle".to_string();
+    }
+    if wait_until != "load"
+        && wait_until != "domcontentloaded"
+        && wait_until != "networkidle"
+        && wait_until != "commit"
+    {
+        return Err(js_err(format!(
+            "waitUntil: expected one of (load|domcontentloaded|networkidle|commit), got {wait_until}"
+        )));
+    }
+
+    Ok(GotoOptions {
+        wait_until,
+        timeout_ms,
+    })
 }
 
 fn snapshot_nodes_by_ref(nodes: &[SnapshotNode]) -> BTreeMap<String, SnapshotNode> {
