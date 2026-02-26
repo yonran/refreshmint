@@ -35,6 +35,10 @@ CLI runs fail with an explicit error when a required prompt override is missing.
 - globals available:
     - `page` for browser automation
     - `refreshmint` for logging/resources/prompt helpers
+- built-in utility modules:
+    - `import { inspect } from 'refreshmint:util'`
+        - `inspect(value, options?)` returns a readable string including nested structure
+        - for `Error` values it includes `name`, `stack`, and `cause` details
 
 Errors thrown from your script fail the scrape run.
 

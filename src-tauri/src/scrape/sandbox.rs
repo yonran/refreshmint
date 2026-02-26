@@ -1,10 +1,17 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Exception, Promise};
+use rquickjs::loader::{BuiltinLoader, BuiltinResolver};
+use rquickjs::{
+    AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Exception, Module, Promise,
+};
 use tokio::sync::Mutex;
 
 use super::js_api::{self, PageInner, RefreshmintInner};
+
+const REFRESHMINT_UTIL_MODULE_NAME: &str = "refreshmint:util";
+const REFRESHMINT_UTIL_MODULE_SOURCE: &str =
+    include_str!("../../../builtin-extensions/_shared/refreshmint-util.mjs");
 
 #[derive(Clone, Copy)]
 pub struct SandboxRunOptions {
@@ -34,6 +41,13 @@ fn format_caught_js_error(caught: CaughtError<'_>) -> String {
         CaughtError::Value(_) => "JavaScript exception (non-Error value thrown)".to_string(),
         CaughtError::Error(error) => error.to_string(),
     }
+}
+
+fn source_uses_static_module_syntax(source: &str) -> bool {
+    source.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("import ") || trimmed.starts_with("export ")
+    })
 }
 
 /// Run a driver script inside a QuickJS sandbox with the given page and config.
@@ -86,6 +100,13 @@ async fn run_script_source_internal(
 
     maybe_diag(options, "[sandbox] Creating QuickJS runtime...");
     let runtime = AsyncRuntime::new()?;
+    runtime
+        .set_loader(
+            BuiltinResolver::default().with_module(REFRESHMINT_UTIL_MODULE_NAME),
+            BuiltinLoader::default()
+                .with_module(REFRESHMINT_UTIL_MODULE_NAME, REFRESHMINT_UTIL_MODULE_SOURCE),
+        )
+        .await;
     let context = AsyncContext::full(&runtime).await?;
     maybe_diag(options, "[sandbox] Runtime created.");
 
@@ -102,20 +123,32 @@ async fn run_script_source_internal(
             }
             maybe_diag(options, "[sandbox] Globals registered.");
 
-            // Wrap the driver source in an async IIFE so top-level await works
-            let wrapped = format!(
-                "(async () => {{\n{source}\n}})();\n",
-                source = driver_source
-            );
-
-            maybe_diag(options, "[sandbox] Evaluating wrapped script...");
-            let result = ctx.eval::<Promise, _>(wrapped).catch(&ctx);
-            let promise = match result {
-                Ok(p) => {
-                    maybe_diag(options, "[sandbox] Script evaluated, got promise.");
-                    p
+            let promise = if source_uses_static_module_syntax(&driver_source) {
+                maybe_diag(options, "[sandbox] Evaluating script as module...");
+                let module = Module::declare(ctx.clone(), "__driver__.mjs", driver_source.as_str())
+                    .catch(&ctx)
+                    .map_err(|e| format!("failed to compile driver module: {e}"))?;
+                let (_module, module_promise) = module
+                    .eval()
+                    .catch(&ctx)
+                    .map_err(|e| format!("failed to eval driver module: {e}"))?;
+                maybe_diag(options, "[sandbox] Module evaluated, got promise.");
+                module_promise
+            } else {
+                // Wrap script source in an async IIFE so top-level await works
+                let wrapped = format!(
+                    "(async () => {{\n{source}\n}})();\n",
+                    source = driver_source
+                );
+                maybe_diag(options, "[sandbox] Evaluating wrapped script...");
+                let result = ctx.eval::<Promise, _>(wrapped).catch(&ctx);
+                match result {
+                    Ok(p) => {
+                        maybe_diag(options, "[sandbox] Script evaluated, got promise.");
+                        p
+                    }
+                    Err(e) => return Err(format!("failed to eval driver: {e}")),
                 }
-                Err(e) => return Err(format!("failed to eval driver: {e}")),
             };
 
             ctx.globals()
@@ -586,5 +619,37 @@ await run();
             .with(|ctx| ctx.globals().get("__count").map_err(|e| e.to_string()))
             .await;
         assert_eq!(count.unwrap_or_default(), 2000);
+    }
+
+    #[tokio::test]
+    async fn module_import_refreshmint_util_inspect_works() {
+        let source = r#"
+import { inspect } from 'refreshmint:util';
+const root = { answer: 42 };
+root.self = root;
+const cause = new TypeError('bad mfa code');
+const err = new Error('top level failure');
+err.cause = cause;
+err.details = root;
+
+const out = inspect(err);
+if (!out.includes('Error: top level failure')) {
+  throw new Error('inspect output missing error header: ' + out);
+}
+if (!out.includes('cause')) {
+  throw new Error('inspect output missing cause: ' + out);
+}
+if (!out.includes('[Circular]')) {
+  throw new Error('inspect output missing circular marker: ' + out);
+}
+"#;
+        let options = SandboxRunOptions {
+            emit_diagnostics: false,
+        };
+        let result = run_script_source_internal(source, None, options).await;
+        assert!(
+            result.is_ok(),
+            "expected module import script to pass: {result:?}"
+        );
     }
 }

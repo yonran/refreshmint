@@ -121,6 +121,12 @@ export default defineConfig(
                 refreshmint: 'readonly',
             },
         },
+        rules: {
+            'import-x/no-unresolved': [
+                'error',
+                { ignore: ['^refreshmint:util$'] },
+            ],
+        },
     },
     {
         files: ['builtin-extensions/**/*.d.ts'],

@@ -167,3 +167,11 @@ interface RefreshmintApi {
 declare const page: PageApi;
 declare const browser: BrowserApi;
 declare const refreshmint: RefreshmintApi;
+
+declare module 'refreshmint:util' {
+    interface InspectOptions {
+        depth?: number;
+    }
+
+    export function inspect(value: unknown, options?: InspectOptions): string;
+}
