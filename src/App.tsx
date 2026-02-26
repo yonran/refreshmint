@@ -348,6 +348,7 @@ function App() {
         UnpostedTransferResult[]
     >([]);
     const [isLoadingTransferModal, setIsLoadingTransferModal] = useState(false);
+    const [transactionsSearch, setTransactionsSearch] = useState('');
     const [secretPrompt, setSecretPrompt] = useState<SecretPromptState | null>(
         null,
     );
@@ -411,6 +412,17 @@ function App() {
                       !txn.postings.some((p) =>
                           p.account.startsWith('Equity:Unreconciled'),
                       )
+                  ) {
+                      return false;
+                  }
+              }
+              if (transactionsSearch.trim()) {
+                  const q = transactionsSearch.trim().toLowerCase();
+                  if (
+                      !txn.id.toLowerCase().includes(q) &&
+                      !txn.description.toLowerCase().includes(q) &&
+                      !txn.date.includes(q) &&
+                      !txn.accounts.toLowerCase().includes(q)
                   ) {
                       return false;
                   }
@@ -3337,6 +3349,16 @@ function App() {
                                         ) : null}
                                     </div>
                                     <div className="filter-actions">
+                                        <input
+                                            type="search"
+                                            placeholder="Search transactions…"
+                                            value={transactionsSearch}
+                                            onChange={(e) => {
+                                                setTransactionsSearch(
+                                                    e.target.value,
+                                                );
+                                            }}
+                                        />
                                         <label className="checkbox-field">
                                             <input
                                                 type="checkbox"
@@ -3354,6 +3376,7 @@ function App() {
                                             onClick={() => {
                                                 setSelectedAccount(null);
                                                 setUnpostedOnly(false);
+                                                setTransactionsSearch('');
                                             }}
                                         >
                                             Clear filter
@@ -4449,25 +4472,60 @@ function App() {
                                                                                                 </button>
                                                                                             )}
                                                                                         </>
-                                                                                    ) : needsSync ? (
-                                                                                        <button
-                                                                                            type="button"
-                                                                                            className="ghost-button"
-                                                                                            disabled={
-                                                                                                isBusy ||
-                                                                                                isPipelinePosting
-                                                                                            }
-                                                                                            onClick={() => {
-                                                                                                void handlePipelineSyncEntry(
-                                                                                                    entry.id,
-                                                                                                );
-                                                                                            }}
-                                                                                        >
-                                                                                            {isBusy
-                                                                                                ? 'Syncing...'
-                                                                                                : 'Sync'}
-                                                                                        </button>
-                                                                                    ) : null}
+                                                                                    ) : (
+                                                                                        <>
+                                                                                            {needsSync && (
+                                                                                                <button
+                                                                                                    type="button"
+                                                                                                    className="ghost-button"
+                                                                                                    disabled={
+                                                                                                        isBusy ||
+                                                                                                        isPipelinePosting
+                                                                                                    }
+                                                                                                    onClick={() => {
+                                                                                                        void handlePipelineSyncEntry(
+                                                                                                            entry.id,
+                                                                                                        );
+                                                                                                    }}
+                                                                                                >
+                                                                                                    {isBusy
+                                                                                                        ? 'Syncing...'
+                                                                                                        : 'Sync'}
+                                                                                                </button>
+                                                                                            )}
+                                                                                            <button
+                                                                                                type="button"
+                                                                                                className="ghost-button"
+                                                                                                onClick={() => {
+                                                                                                    const parts =
+                                                                                                        (
+                                                                                                            entry.posted ??
+                                                                                                            ''
+                                                                                                        ).split(
+                                                                                                            ':',
+                                                                                                        );
+                                                                                                    const glTxnId =
+                                                                                                        parts[
+                                                                                                            parts.length -
+                                                                                                                1
+                                                                                                        ] ??
+                                                                                                        '';
+                                                                                                    if (
+                                                                                                        glTxnId
+                                                                                                    ) {
+                                                                                                        setTransactionsSearch(
+                                                                                                            glTxnId,
+                                                                                                        );
+                                                                                                        setActiveTab(
+                                                                                                            'transactions',
+                                                                                                        );
+                                                                                                    }
+                                                                                                }}
+                                                                                            >
+                                                                                                View
+                                                                                            </button>
+                                                                                        </>
+                                                                                    )}
                                                                                 </div>
                                                                             </td>
                                                                         </tr>
