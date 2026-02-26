@@ -349,6 +349,7 @@ function App() {
     >([]);
     const [isLoadingTransferModal, setIsLoadingTransferModal] = useState(false);
     const [transactionsSearch, setTransactionsSearch] = useState('');
+    const [transferModalSearch, setTransferModalSearch] = useState('');
     const [secretPrompt, setSecretPrompt] = useState<SecretPromptState | null>(
         null,
     );
@@ -569,6 +570,19 @@ function App() {
             ]?.glAccount ?? null
         );
     }, [selectedLoginAccount, loginConfigsByName]);
+
+    const visibleTransferResults = useMemo(() => {
+        const q = transferModalSearch.trim().toLowerCase();
+        if (!q) return transferModalResults;
+        return transferModalResults.filter(
+            (r) =>
+                r.loginName.toLowerCase().includes(q) ||
+                r.label.toLowerCase().includes(q) ||
+                r.entry.description.toLowerCase().includes(q) ||
+                r.entry.date.includes(q) ||
+                (r.entry.amount ?? '').includes(q),
+        );
+    }, [transferModalResults, transferModalSearch]);
 
     const evidencedRowNumbers = useMemo(() => {
         if (!evidenceRowsDocument) return new Set<number>();
@@ -2901,6 +2915,7 @@ function App() {
         if (!ledger || !selectedLoginAccount) return;
         const { loginName, label } = selectedLoginAccount;
         setTransferModalEntryId(entryId);
+        setTransferModalSearch('');
         setIsLoadingTransferModal(true);
         try {
             const results = await getUnpostedEntriesForTransfer(
@@ -4567,6 +4582,19 @@ function App() {
                                                                 Close
                                                             </button>
                                                         </div>
+                                                        <input
+                                                            type="search"
+                                                            placeholder="Search candidates…"
+                                                            value={
+                                                                transferModalSearch
+                                                            }
+                                                            onChange={(e) => {
+                                                                setTransferModalSearch(
+                                                                    e.target
+                                                                        .value,
+                                                                );
+                                                            }}
+                                                        />
                                                         {isLoadingTransferModal ? (
                                                             <p className="status">
                                                                 Loading
@@ -4593,7 +4621,7 @@ function App() {
                                                                         </tr>
                                                                     </thead>
                                                                     <tbody>
-                                                                        {transferModalResults.length ===
+                                                                        {visibleTransferResults.length ===
                                                                         0 ? (
                                                                             <tr>
                                                                                 <td
@@ -4612,7 +4640,7 @@ function App() {
                                                                                 </td>
                                                                             </tr>
                                                                         ) : (
-                                                                            transferModalResults.map(
+                                                                            visibleTransferResults.map(
                                                                                 (
                                                                                     r,
                                                                                 ) => (
