@@ -286,6 +286,7 @@ function App() {
     const [secretDomain, setSecretDomain] = useState('');
     const [secretName, setSecretName] = useState('');
     const [secretValue, setSecretValue] = useState('');
+    const [isSecretsPanelExpanded, setIsSecretsPanelExpanded] = useState(false);
     const [secretsStatus, setSecretsStatus] = useState<string | null>(null);
     const [isRunningScrape, setIsRunningScrape] = useState(false);
     const [isLoadingScrapeExtensions, setIsLoadingScrapeExtensions] =
@@ -652,6 +653,7 @@ function App() {
             setSecretDomain('');
             setSecretName('');
             setSecretValue('');
+            setIsSecretsPanelExpanded(false);
             setSecretsStatus(null);
             setIsLoadingAccountSecrets(false);
             setIsSavingAccountSecret(false);
@@ -927,6 +929,10 @@ function App() {
             setHasRequiredSecretsSync(false);
             return;
         }
+        if (!isSecretsPanelExpanded) {
+            setIsLoadingAccountSecrets(false);
+            return;
+        }
 
         const loginName = activeSecretsLoginName;
         let cancelled = false;
@@ -957,7 +963,7 @@ function App() {
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [activeSecretsLoginName, ledgerPath]);
+    }, [activeSecretsLoginName, isSecretsPanelExpanded, ledgerPath]);
 
     useEffect(() => {
         if (ledgerPath === null) {
@@ -970,6 +976,10 @@ function App() {
         if (activeSecretsLoginName === null || extension.length === 0) {
             setRequiredSecretsForExtension([]);
             setHasRequiredSecretsSync(false);
+            return;
+        }
+        if (!isSecretsPanelExpanded) {
+            setIsLoadingAccountSecrets(false);
             return;
         }
 
@@ -1064,7 +1074,12 @@ function App() {
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [activeSecretsLoginName, ledgerPath, scrapeExtension]);
+    }, [
+        activeSecretsLoginName,
+        isSecretsPanelExpanded,
+        ledgerPath,
+        scrapeExtension,
+    ]);
 
     // Load login config and auto-populate extension when account mapping changes.
     useEffect(() => {
@@ -5516,6 +5531,7 @@ function App() {
                                                     void handleRefreshAccountSecrets();
                                                 }}
                                                 disabled={
+                                                    !isSecretsPanelExpanded ||
                                                     !hasActiveSecretsLogin ||
                                                     isLoadingAccountSecrets ||
                                                     isSavingAccountSecret ||
@@ -5528,246 +5544,291 @@ function App() {
                                             </button>
                                         </div>
                                     </div>
-                                    <form
-                                        className="secret-form"
-                                        onSubmit={handleSubmitSecretForm}
+                                    <details
+                                        className="login-create-disclosure"
+                                        open={isSecretsPanelExpanded}
+                                        onToggle={(event) => {
+                                            setIsSecretsPanelExpanded(
+                                                event.currentTarget.open,
+                                            );
+                                        }}
                                     >
-                                        <div className="txn-grid">
-                                            <label className="field">
-                                                <span>Domain</span>
-                                                <input
-                                                    type="text"
-                                                    value={secretDomain}
-                                                    placeholder="example.com"
-                                                    onChange={(event) => {
-                                                        setSecretDomain(
-                                                            event.target.value,
-                                                        );
-                                                        setSecretsStatus(null);
-                                                    }}
-                                                    disabled={
-                                                        !hasActiveSecretsLogin ||
-                                                        isSavingAccountSecret ||
-                                                        busySecretKey !== null
-                                                    }
-                                                />
-                                            </label>
-                                            <label className="field">
-                                                <span>Name</span>
-                                                <input
-                                                    type="text"
-                                                    value={secretName}
-                                                    placeholder="password"
-                                                    onChange={(event) => {
-                                                        setSecretName(
-                                                            event.target.value,
-                                                        );
-                                                        setSecretsStatus(null);
-                                                    }}
-                                                    disabled={
-                                                        !hasActiveSecretsLogin ||
-                                                        isSavingAccountSecret ||
-                                                        busySecretKey !== null
-                                                    }
-                                                />
-                                            </label>
-                                            <label className="field">
-                                                <span>Value</span>
-                                                <input
-                                                    type="password"
-                                                    autoComplete="new-password"
-                                                    value={secretValue}
-                                                    placeholder={
-                                                        secretValuePlaceholder
-                                                    }
-                                                    onChange={(event) => {
-                                                        setSecretValue(
-                                                            event.target.value,
-                                                        );
-                                                        setSecretsStatus(null);
-                                                    }}
-                                                    disabled={
-                                                        !hasActiveSecretsLogin ||
-                                                        isSavingAccountSecret ||
-                                                        busySecretKey !== null
-                                                    }
-                                                />
-                                            </label>
-                                        </div>
-                                        <div className="txn-actions">
-                                            <button
-                                                type="button"
-                                                className="ghost-button"
-                                                onClick={() => {
-                                                    void handleSaveAccountSecret(
-                                                        'add',
-                                                    );
-                                                }}
-                                                disabled={
-                                                    !hasActiveSecretsLogin ||
-                                                    (trimmedSecretDomain.length >
-                                                        0 &&
-                                                        trimmedSecretName.length >
-                                                            0 &&
-                                                        currentSecretPairExists) ||
-                                                    isSavingAccountSecret ||
-                                                    busySecretKey !== null
+                                        <summary className="disclosure-summary">
+                                            {isSecretsPanelExpanded
+                                                ? 'Hide secrets'
+                                                : 'Show secrets'}
+                                        </summary>
+                                        <div className="login-create-body">
+                                            <form
+                                                className="secret-form"
+                                                onSubmit={
+                                                    handleSubmitSecretForm
                                                 }
                                             >
-                                                {isSavingAccountSecret
-                                                    ? 'Saving...'
-                                                    : 'Add new pair'}
-                                            </button>
-                                            <button
-                                                type="submit"
-                                                className="ghost-button"
-                                                disabled={
-                                                    !hasActiveSecretsLogin ||
-                                                    !currentSecretPairExists ||
-                                                    isSavingAccountSecret ||
-                                                    busySecretKey !== null
-                                                }
-                                            >
-                                                {isSavingAccountSecret
-                                                    ? 'Saving...'
-                                                    : currentSecretHasValue
-                                                      ? 'Change value'
-                                                      : 'Set value'}
-                                            </button>
-                                        </div>
-                                        <p className="hint">
-                                            Add new pair creates a new
-                                            domain/name. Press Enter or use Set
-                                            or Change value to save the value.
-                                        </p>
-                                    </form>
-                                    {isLoadingAccountSecrets ? (
-                                        <p className="status">
-                                            Loading login secrets...
-                                        </p>
-                                    ) : accountSecrets.length === 0 ? (
-                                        <p className="hint">
-                                            {hasActiveSecretsLogin
-                                                ? 'No secrets stored for this login.'
-                                                : selectedScrapeAccount.length >
-                                                        0 &&
-                                                    selectedLoginMappingError !==
-                                                        null
-                                                  ? 'Resolve login mapping first, or select a login in Login mappings.'
-                                                  : 'Select a login mapping or login to manage secrets.'}
-                                        </p>
-                                    ) : (
-                                        <div className="table-wrap">
-                                            <table className="ledger-table">
-                                                <thead>
-                                                    <tr>
-                                                        <th>Domain</th>
-                                                        <th>Name</th>
-                                                        <th>Actions</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {accountSecrets.map(
-                                                        (entry) => {
-                                                            const key =
-                                                                secretPairKey(
-                                                                    entry.domain,
-                                                                    entry.name,
+                                                <div className="txn-grid">
+                                                    <label className="field">
+                                                        <span>Domain</span>
+                                                        <input
+                                                            type="text"
+                                                            value={secretDomain}
+                                                            placeholder="example.com"
+                                                            onChange={(
+                                                                event,
+                                                            ) => {
+                                                                setSecretDomain(
+                                                                    event.target
+                                                                        .value,
                                                                 );
-                                                            const isBusy =
-                                                                busySecretKey ===
-                                                                key;
-                                                            const isExtra =
-                                                                hasRequiredSecretsSync &&
-                                                                !requiredSecretKeySet.has(
-                                                                    key,
+                                                                setSecretsStatus(
+                                                                    null,
                                                                 );
-                                                            return (
-                                                                <tr key={key}>
-                                                                    <td>
-                                                                        {
-                                                                            entry.domain
-                                                                        }
-                                                                    </td>
-                                                                    <td>
-                                                                        <span>
-                                                                            {
-                                                                                entry.name
-                                                                            }
-                                                                        </span>
-                                                                        {isExtra ? (
-                                                                            <span className="secret-chip">
-                                                                                extra
-                                                                            </span>
-                                                                        ) : null}
-                                                                    </td>
-                                                                    <td>
-                                                                        <div className="txn-actions">
-                                                                            <button
-                                                                                type="button"
-                                                                                className="ghost-button"
-                                                                                onClick={() => {
-                                                                                    void handleReenterPreset(
-                                                                                        entry.domain,
-                                                                                        entry.name,
-                                                                                        entry.hasValue,
-                                                                                    );
-                                                                                }}
-                                                                                disabled={
-                                                                                    isSavingAccountSecret ||
-                                                                                    busySecretKey !==
-                                                                                        null
-                                                                                }
-                                                                            >
-                                                                                {entry.hasValue
-                                                                                    ? 'Change value'
-                                                                                    : 'Set value'}
-                                                                            </button>
-                                                                            <button
-                                                                                type="button"
-                                                                                className="ghost-button"
-                                                                                onClick={() => {
-                                                                                    void handleRemoveAccountSecret(
-                                                                                        entry.domain,
-                                                                                        entry.name,
-                                                                                    );
-                                                                                }}
-                                                                                disabled={
-                                                                                    isSavingAccountSecret ||
-                                                                                    busySecretKey !==
-                                                                                        null
-                                                                                }
-                                                                            >
-                                                                                {isBusy
-                                                                                    ? 'Removing...'
-                                                                                    : 'Remove'}
-                                                                            </button>
-                                                                        </div>
-                                                                    </td>
-                                                                </tr>
+                                                            }}
+                                                            disabled={
+                                                                !hasActiveSecretsLogin ||
+                                                                isSavingAccountSecret ||
+                                                                busySecretKey !==
+                                                                    null
+                                                            }
+                                                        />
+                                                    </label>
+                                                    <label className="field">
+                                                        <span>Name</span>
+                                                        <input
+                                                            type="text"
+                                                            value={secretName}
+                                                            placeholder="password"
+                                                            onChange={(
+                                                                event,
+                                                            ) => {
+                                                                setSecretName(
+                                                                    event.target
+                                                                        .value,
+                                                                );
+                                                                setSecretsStatus(
+                                                                    null,
+                                                                );
+                                                            }}
+                                                            disabled={
+                                                                !hasActiveSecretsLogin ||
+                                                                isSavingAccountSecret ||
+                                                                busySecretKey !==
+                                                                    null
+                                                            }
+                                                        />
+                                                    </label>
+                                                    <label className="field">
+                                                        <span>Value</span>
+                                                        <input
+                                                            type="password"
+                                                            autoComplete="new-password"
+                                                            value={secretValue}
+                                                            placeholder={
+                                                                secretValuePlaceholder
+                                                            }
+                                                            onChange={(
+                                                                event,
+                                                            ) => {
+                                                                setSecretValue(
+                                                                    event.target
+                                                                        .value,
+                                                                );
+                                                                setSecretsStatus(
+                                                                    null,
+                                                                );
+                                                            }}
+                                                            disabled={
+                                                                !hasActiveSecretsLogin ||
+                                                                isSavingAccountSecret ||
+                                                                busySecretKey !==
+                                                                    null
+                                                            }
+                                                        />
+                                                    </label>
+                                                </div>
+                                                <div className="txn-actions">
+                                                    <button
+                                                        type="button"
+                                                        className="ghost-button"
+                                                        onClick={() => {
+                                                            void handleSaveAccountSecret(
+                                                                'add',
                                                             );
-                                                        },
-                                                    )}
-                                                </tbody>
-                                            </table>
+                                                        }}
+                                                        disabled={
+                                                            !hasActiveSecretsLogin ||
+                                                            (trimmedSecretDomain.length >
+                                                                0 &&
+                                                                trimmedSecretName.length >
+                                                                    0 &&
+                                                                currentSecretPairExists) ||
+                                                            isSavingAccountSecret ||
+                                                            busySecretKey !==
+                                                                null
+                                                        }
+                                                    >
+                                                        {isSavingAccountSecret
+                                                            ? 'Saving...'
+                                                            : 'Add new pair'}
+                                                    </button>
+                                                    <button
+                                                        type="submit"
+                                                        className="ghost-button"
+                                                        disabled={
+                                                            !hasActiveSecretsLogin ||
+                                                            !currentSecretPairExists ||
+                                                            isSavingAccountSecret ||
+                                                            busySecretKey !==
+                                                                null
+                                                        }
+                                                    >
+                                                        {isSavingAccountSecret
+                                                            ? 'Saving...'
+                                                            : currentSecretHasValue
+                                                              ? 'Change value'
+                                                              : 'Set value'}
+                                                    </button>
+                                                </div>
+                                                <p className="hint">
+                                                    Add new pair creates a new
+                                                    domain/name. Press Enter or
+                                                    use Set or Change value to
+                                                    save the value.
+                                                </p>
+                                            </form>
+                                            {isLoadingAccountSecrets ? (
+                                                <p className="status">
+                                                    Loading login secrets...
+                                                </p>
+                                            ) : accountSecrets.length === 0 ? (
+                                                <p className="hint">
+                                                    {hasActiveSecretsLogin
+                                                        ? 'No secrets stored for this login.'
+                                                        : selectedScrapeAccount.length >
+                                                                0 &&
+                                                            selectedLoginMappingError !==
+                                                                null
+                                                          ? 'Resolve login mapping first, or select a login in Login mappings.'
+                                                          : 'Select a login mapping or login to manage secrets.'}
+                                                </p>
+                                            ) : (
+                                                <div className="table-wrap">
+                                                    <table className="ledger-table">
+                                                        <thead>
+                                                            <tr>
+                                                                <th>Domain</th>
+                                                                <th>Name</th>
+                                                                <th>Actions</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {accountSecrets.map(
+                                                                (entry) => {
+                                                                    const key =
+                                                                        secretPairKey(
+                                                                            entry.domain,
+                                                                            entry.name,
+                                                                        );
+                                                                    const isBusy =
+                                                                        busySecretKey ===
+                                                                        key;
+                                                                    const isExtra =
+                                                                        hasRequiredSecretsSync &&
+                                                                        !requiredSecretKeySet.has(
+                                                                            key,
+                                                                        );
+                                                                    return (
+                                                                        <tr
+                                                                            key={
+                                                                                key
+                                                                            }
+                                                                        >
+                                                                            <td>
+                                                                                {
+                                                                                    entry.domain
+                                                                                }
+                                                                            </td>
+                                                                            <td>
+                                                                                <span>
+                                                                                    {
+                                                                                        entry.name
+                                                                                    }
+                                                                                </span>
+                                                                                {isExtra ? (
+                                                                                    <span className="secret-chip">
+                                                                                        extra
+                                                                                    </span>
+                                                                                ) : null}
+                                                                            </td>
+                                                                            <td>
+                                                                                <div className="txn-actions">
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        className="ghost-button"
+                                                                                        onClick={() => {
+                                                                                            void handleReenterPreset(
+                                                                                                entry.domain,
+                                                                                                entry.name,
+                                                                                                entry.hasValue,
+                                                                                            );
+                                                                                        }}
+                                                                                        disabled={
+                                                                                            isSavingAccountSecret ||
+                                                                                            busySecretKey !==
+                                                                                                null
+                                                                                        }
+                                                                                    >
+                                                                                        {entry.hasValue
+                                                                                            ? 'Change value'
+                                                                                            : 'Set value'}
+                                                                                    </button>
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        className="ghost-button"
+                                                                                        onClick={() => {
+                                                                                            void handleRemoveAccountSecret(
+                                                                                                entry.domain,
+                                                                                                entry.name,
+                                                                                            );
+                                                                                        }}
+                                                                                        disabled={
+                                                                                            isSavingAccountSecret ||
+                                                                                            busySecretKey !==
+                                                                                                null
+                                                                                        }
+                                                                                    >
+                                                                                        {isBusy
+                                                                                            ? 'Removing...'
+                                                                                            : 'Remove'}
+                                                                                    </button>
+                                                                                </div>
+                                                                            </td>
+                                                                        </tr>
+                                                                    );
+                                                                },
+                                                            )}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            )}
+                                            {hasRequiredSecretsSync &&
+                                            extraSecretCount > 0 ? (
+                                                <p className="hint">
+                                                    {extraSecretCount} secret
+                                                    {extraSecretCount === 1
+                                                        ? ''
+                                                        : 's'}{' '}
+                                                    stored for this login are
+                                                    not declared by the selected
+                                                    extension.
+                                                </p>
+                                            ) : null}
+                                            {secretsStatus === null ? null : (
+                                                <p className="status">
+                                                    {secretsStatus}
+                                                </p>
+                                            )}
                                         </div>
-                                    )}
-                                    {hasRequiredSecretsSync &&
-                                    extraSecretCount > 0 ? (
-                                        <p className="hint">
-                                            {extraSecretCount} secret
-                                            {extraSecretCount === 1
-                                                ? ''
-                                                : 's'}{' '}
-                                            stored for this login are not
-                                            declared by the selected extension.
-                                        </p>
-                                    ) : null}
-                                    {secretsStatus === null ? null : (
-                                        <p className="status">
-                                            {secretsStatus}
-                                        </p>
-                                    )}
+                                    </details>
                                 </section>
                                 <section className="pipeline-panel">
                                     <div className="txn-form-header">
