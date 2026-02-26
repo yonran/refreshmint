@@ -620,7 +620,7 @@ function App() {
     }, []);
 
     useEffect(() => {
-        if (ledger) {
+        if (ledgerPath !== null) {
             setTransactionDraft(createTransactionDraft());
             setRawDraft('');
             setAddStatus(null);
@@ -678,7 +678,7 @@ function App() {
             });
             setIsPostingTransfer(false);
         }
-    }, [ledger]);
+    }, [ledgerPath]);
 
     // Auto-select the first login account whenever the account list changes.
     useEffect(() => {
