@@ -683,15 +683,16 @@ details[open] > .disclosure-summary::before {
     inset: 0;
     background: rgb(0 0 0 / 35%);
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
     z-index: 1000;
     padding: 1rem;
+    padding-top: 5vh;
 }
 
 .modal-dialog {
-    width: min(680px, 100%);
-    max-height: 80vh;
+    width: min(900px, calc(100% - 2rem));
+    max-height: 90vh;
     background: #fff;
     border: 1px solid #e3e3e3;
     border-radius: 0.9rem;
@@ -700,7 +701,8 @@ details[open] > .disclosure-summary::before {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
-    overflow-y: auto;
+    overflow: auto;
+    resize: both;
 }
 
 .modal-header {
