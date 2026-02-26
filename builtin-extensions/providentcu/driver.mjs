@@ -2,6 +2,7 @@
  * Provident Credit Union scraper for Refreshmint.
  * Downloads all available statements and account activity CSVs from Provident Credit Union.
  */
+import { inspect } from '../_shared/refreshmint-util.mjs';
 
 /**
  * @typedef {object} ScrapeContext
@@ -552,7 +553,26 @@ async function main() {
     }
 }
 
-main().catch((err) => {
-    refreshmint.log(`Fatal error: ${err.message}`);
-    if (err.stack) refreshmint.log(err.stack);
-});
+async function run() {
+    try {
+        await main();
+    } catch (e) {
+        refreshmint.log(`Fatal error: ${inspect(e)}`);
+        try {
+            const pages = await browser.pages();
+            if (pages.length > 0) {
+                const p = pages[0];
+                refreshmint.log(`URL at failure: ${await p.url()}`);
+                const snapshot = await p.snapshot();
+                refreshmint.log(`Snapshot at failure: ${snapshot}`);
+            }
+        } catch (innerE) {
+            refreshmint.log(
+                `Failed to capture error snapshot: ${inspect(innerE)}`,
+            );
+        }
+        throw e;
+    }
+}
+
+run().catch(() => {});
