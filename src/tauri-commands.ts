@@ -428,11 +428,13 @@ export async function getUnpostedEntriesForTransfer(
     ledger: string,
     excludeLogin: string,
     excludeLabel: string,
+    sourceEntryId: string,
 ): Promise<UnpostedTransferResult[]> {
     return invoke('get_unposted_entries_for_transfer', {
         ledger,
         excludeLogin,
         excludeLabel,
+        sourceEntryId,
     });
 }
 
