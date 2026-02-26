@@ -654,6 +654,24 @@ function App() {
         }
     }, [ledger]);
 
+    // Auto-select the first login account whenever the account list changes.
+    useEffect(() => {
+        if (loginAccounts.length === 0) return;
+        setSelectedLoginAccount((current) => {
+            if (
+                current !== null &&
+                loginAccounts.some(
+                    (a) =>
+                        a.loginName === current.loginName &&
+                        a.label === current.label,
+                )
+            ) {
+                return current;
+            }
+            return loginAccounts[0] ?? null;
+        });
+    }, [loginAccounts]);
+
     useEffect(() => {
         if (ledgerPath === null) {
             setScrapeExtensions([]);
@@ -2869,6 +2887,7 @@ function App() {
                 ledger.path,
                 loginName,
                 label,
+                entryId,
             );
             setTransferModalResults(results);
         } catch (error) {
