@@ -882,7 +882,7 @@ function App() {
         return () => {
             cancelled = true;
         };
-    }, [ledgerPath, loginConfigsReloadToken]);
+    }, [ledger, ledgerPath, loginConfigsReloadToken]);
 
     useEffect(() => {
         if (ledgerPath === null) {
