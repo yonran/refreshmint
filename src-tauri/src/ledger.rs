@@ -49,11 +49,58 @@ pub fn new_ledger_at_dir(target_dir: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn commit_general_journal(dir: &Path, message: &str) -> io::Result<()> {
+    commit_paths(dir, &[Path::new("general.journal")], message)
+}
+
+/// Commit general.journal plus a login account journal after a single-entry post.
+pub(crate) fn commit_post_changes(
+    dir: &Path,
+    login_name: &str,
+    label: &str,
+    message: &str,
+) -> io::Result<()> {
+    let acct_rel = PathBuf::from("logins")
+        .join(login_name)
+        .join("accounts")
+        .join(label)
+        .join("account.journal");
+    commit_paths(dir, &[Path::new("general.journal"), &acct_rel], message)
+}
+
+/// Commit general.journal plus two login account journals after a transfer post.
+pub(crate) fn commit_transfer_changes(
+    dir: &Path,
+    login_name1: &str,
+    label1: &str,
+    login_name2: &str,
+    label2: &str,
+    message: &str,
+) -> io::Result<()> {
+    let acct_rel1 = PathBuf::from("logins")
+        .join(login_name1)
+        .join("accounts")
+        .join(label1)
+        .join("account.journal");
+    let acct_rel2 = PathBuf::from("logins")
+        .join(login_name2)
+        .join("accounts")
+        .join(label2)
+        .join("account.journal");
+    commit_paths(
+        dir,
+        &[Path::new("general.journal"), &acct_rel1, &acct_rel2],
+        message,
+    )
+}
+
+fn commit_paths(dir: &Path, paths: &[&Path], message: &str) -> io::Result<()> {
     let repo = git2::Repository::open(dir).map_err(|e| io::Error::other(e.to_string()))?;
     let mut index = repo.index().map_err(|e| io::Error::other(e.to_string()))?;
-    index
-        .add_path(Path::new("general.journal"))
-        .map_err(|e| io::Error::other(e.to_string()))?;
+    for path in paths {
+        index
+            .add_path(path)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+    }
     index.write().map_err(|e| io::Error::other(e.to_string()))?;
     let tree_oid = index
         .write_tree()

@@ -449,7 +449,7 @@ fn negate_quantity(quantity: &str) -> String {
     }
 }
 
-fn dates_within_tolerance(date_a: &str, date_b: &str, tolerance_days: i64) -> bool {
+pub(crate) fn dates_within_tolerance(date_a: &str, date_b: &str, tolerance_days: i64) -> bool {
     let Ok(a) = chrono::NaiveDate::parse_from_str(date_a, "%Y-%m-%d") else {
         return false;
     };
@@ -514,7 +514,7 @@ fn amounts_within_tolerance(
     }
 }
 
-fn descriptions_similar(a: &str, b: &str) -> bool {
+pub(crate) fn descriptions_similar(a: &str, b: &str) -> bool {
     let na = normalize_description(a);
     let nb = normalize_description(b);
     if na == nb {

@@ -1234,13 +1234,19 @@ fn get_unposted_entries_for_transfer(
     ledger: String,
     exclude_login: String,
     exclude_label: String,
+    source_entry_id: String,
 ) -> Result<Vec<UnpostedTransferResult>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let exclude_login = require_login_name_input(exclude_login)?;
     let exclude_label = require_label_input(exclude_label)?;
-    let triples =
-        post::get_unposted_entries_for_transfer(&target_dir, &exclude_login, &exclude_label)
-            .map_err(|err| err.to_string())?;
+    let source_entry_id = require_non_empty_input("source_entry_id", source_entry_id)?;
+    let triples = post::get_unposted_entries_for_transfer(
+        &target_dir,
+        &exclude_login,
+        &exclude_label,
+        &source_entry_id,
+    )
+    .map_err(|err| err.to_string())?;
     let results = triples
         .into_iter()
         .flat_map(|(login_name, label, e)| {

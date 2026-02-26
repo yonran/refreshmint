@@ -188,6 +188,12 @@ pub fn post_login_account_entry(
         return Err(err.into());
     }
 
+    let commit_msg = format!("post: {entry_id} → {counterpart_account}");
+    if let Err(err) = crate::ledger::commit_post_changes(ledger_dir, login_name, label, &commit_msg)
+    {
+        eprintln!("warning: git commit failed after post: {err}");
+    }
+
     Ok(gl_txn_id)
 }
 
@@ -589,6 +595,18 @@ pub fn post_login_account_transfer(
         return Err(err.into());
     }
 
+    let commit_msg = format!("post transfer: {entry_id1} ↔ {entry_id2}");
+    if let Err(err) = crate::ledger::commit_transfer_changes(
+        ledger_dir,
+        login_name1,
+        label1,
+        login_name2,
+        label2,
+        &commit_msg,
+    ) {
+        eprintln!("warning: git commit failed after transfer post: {err}");
+    }
+
     Ok(gl_txn_id)
 }
 
@@ -596,12 +614,23 @@ pub fn post_login_account_transfer(
 pub type UnpostedTransferEntry = (String, String, AccountEntry);
 
 /// Get all unposted entries across ALL login accounts except the specified
-/// `(exclude_login, exclude_label)` pair.  Sorted by date descending.
+/// `(exclude_login, exclude_label)` pair.  Sorted by best-match score for
+/// the source entry identified by `source_entry_id`.
 pub fn get_unposted_entries_for_transfer(
     ledger_dir: &Path,
     exclude_login: &str,
     exclude_label: &str,
+    source_entry_id: &str,
 ) -> Result<Vec<UnpostedTransferEntry>, Box<dyn std::error::Error + Send + Sync>> {
+    // Load source entry for scoring.
+    let source_journal_path =
+        account_journal::login_account_journal_path(ledger_dir, exclude_login, exclude_label);
+    let source_entries = account_journal::read_journal_at_path(&source_journal_path)?;
+    let source_entry = source_entries
+        .iter()
+        .find(|e| e.id == source_entry_id)
+        .cloned();
+
     let logins = crate::login_config::list_logins(ledger_dir)?;
     let mut result: Vec<UnpostedTransferEntry> = Vec::new();
 
@@ -622,9 +651,68 @@ pub fn get_unposted_entries_for_transfer(
         }
     }
 
-    // Sort by date descending.
-    result.sort_by(|a, b| b.2.date.cmp(&a.2.date));
+    if let Some(src) = source_entry {
+        let src_date = src.date.clone();
+        let src_desc = src.description.clone();
+        let src_amount: Option<f64> = src
+            .postings
+            .first()
+            .and_then(|p| p.amount.as_ref())
+            .and_then(|a| a.quantity.parse().ok());
+
+        result.sort_by(|a, b| {
+            let score_a = transfer_candidate_score(&a.2, &src_date, &src_desc, src_amount);
+            let score_b = transfer_candidate_score(&b.2, &src_date, &src_desc, src_amount);
+            score_a.cmp(&score_b)
+        });
+    } else {
+        // Fall back to date descending when source entry not found.
+        result.sort_by(|a, b| b.2.date.cmp(&a.2.date));
+    }
+
     Ok(result)
+}
+
+/// Compute a ranking score for a transfer candidate (lower = better match).
+fn transfer_candidate_score(
+    entry: &account_journal::AccountEntry,
+    src_date: &str,
+    src_desc: &str,
+    src_amount: Option<f64>,
+) -> i64 {
+    let mut score: i64 = 0;
+
+    // Penalize entries not labelled as transfers.
+    if !crate::transfer_detector::is_probable_transfer(&entry.description) {
+        score += 1000;
+    }
+
+    // Date proximity (more days away = higher penalty).
+    if let (Ok(a), Ok(b)) = (
+        chrono::NaiveDate::parse_from_str(src_date, "%Y-%m-%d"),
+        chrono::NaiveDate::parse_from_str(&entry.date, "%Y-%m-%d"),
+    ) {
+        score += (a - b).num_days().abs() * 10;
+    }
+
+    // Reward opposite-sign amounts (characteristic of transfers).
+    let entry_amount: Option<f64> = entry
+        .postings
+        .first()
+        .and_then(|p| p.amount.as_ref())
+        .and_then(|a| a.quantity.parse().ok());
+    if let (Some(sa), Some(ea)) = (src_amount, entry_amount) {
+        if (sa + ea).abs() < 0.005 {
+            score -= 50;
+        }
+    }
+
+    // Reward similar descriptions.
+    if crate::dedup::descriptions_similar(src_desc, &entry.description) {
+        score -= 20;
+    }
+
+    score
 }
 
 /// Post two entries across accounts as an inter-account transfer.
