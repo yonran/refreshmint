@@ -2701,6 +2701,14 @@ function App() {
             }
             return next;
         });
+        // Reload full ledger so Transactions tab and GL Rows stay in sync.
+        openLedger(ledger.path)
+            .then((reloaded) => {
+                setLedger(reloaded);
+            })
+            .catch((err: unknown) => {
+                console.error('ledger reload failed:', err);
+            });
         // Non-blocking re-run of suggestCategories to refresh mismatch flags
         const reqId = ++suggestRequestId.current;
         suggestCategories(ledger.path, loginName, label)
