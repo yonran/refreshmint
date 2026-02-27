@@ -137,6 +137,15 @@ impl ExtractedTransaction {
             .map(|(_, v)| v.as_str())
     }
 
+    /// Get attachment linkage keys from tags.
+    pub fn attachment_keys(&self) -> Vec<String> {
+        self.ttags
+            .iter()
+            .filter(|(k, _)| k == "attachmentKey")
+            .map(|(_, v)| v.clone())
+            .collect()
+    }
+
     /// Parse the status string into EntryStatus.
     pub fn status(&self) -> EntryStatus {
         match self.tstatus.as_str() {

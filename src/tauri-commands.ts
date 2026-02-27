@@ -29,6 +29,7 @@ export interface TransactionRow {
     description: string;
     descriptionRaw: string;
     comment: string;
+    evidence: string[];
     accounts: string;
     totals: AmountTotal[] | null;
     postings: PostingRow[];

@@ -30,6 +30,7 @@ pub struct TransactionRow {
     #[serde(rename = "descriptionRaw")]
     pub description_raw: String,
     pub comment: String,
+    pub evidence: Vec<String>,
     pub accounts: String,
     pub totals: Option<Vec<AmountTotal>>,
     pub postings: Vec<PostingRow>,
@@ -200,11 +201,26 @@ fn build_transaction_rows(transactions: &[Transaction]) -> Vec<TransactionRow> {
             description: transaction_description(txn),
             description_raw: txn.tdescription.clone(),
             comment: txn.tcomment.clone(),
+            evidence: transaction_evidence(txn),
             accounts: transaction_accounts(txn),
             totals: transaction_amounts(txn),
             postings: transaction_postings(txn),
         })
         .collect()
+}
+
+fn transaction_evidence(txn: &Transaction) -> Vec<String> {
+    let mut evidence = std::collections::BTreeSet::new();
+    for line in txn.tcomment.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("evidence: ") {
+            let val = rest.trim();
+            if !val.is_empty() {
+                evidence.insert(val.to_string());
+            }
+        }
+    }
+    evidence.into_iter().collect()
 }
 
 fn transaction_description(txn: &Transaction) -> String {
@@ -438,7 +454,7 @@ mod tests {
         SourceSpan(dummy_source_pos(), dummy_source_pos())
     }
 
-    fn make_txn(tindex: i64, ttags: Vec<(String, String)>) -> Transaction {
+    fn make_txn(tindex: i64, ttags: Vec<(String, String)>, tcomment: &str) -> Transaction {
         Transaction {
             tindex,
             tprecedingcomment: String::new(),
@@ -448,7 +464,7 @@ mod tests {
             tstatus: Status::Cleared,
             tcode: String::new(),
             tdescription: "Test".to_string(),
-            tcomment: String::new(),
+            tcomment: tcomment.to_string(),
             ttags,
             tpostings: vec![],
         }
@@ -457,15 +473,29 @@ mod tests {
     #[test]
     fn build_transaction_rows_uses_id_tag_when_present() {
         let uuid = "550e8400-e29b-41d4-a716-446655440000";
-        let txn = make_txn(5, vec![("id".to_string(), uuid.to_string())]);
+        let txn = make_txn(5, vec![("id".to_string(), uuid.to_string())], "");
         let rows = build_transaction_rows(&[txn]);
         assert_eq!(rows[0].id, uuid);
     }
 
     #[test]
     fn build_transaction_rows_falls_back_to_tindex_when_id_absent() {
-        let txn = make_txn(7, vec![]);
+        let txn = make_txn(7, vec![], "");
         let rows = build_transaction_rows(&[txn]);
         assert_eq!(rows[0].id, "7");
+    }
+
+    #[test]
+    fn build_transaction_rows_extracts_evidence_from_comment_lines() {
+        let txn = make_txn(
+            9,
+            vec![],
+            "generated-by: refreshmint-post\nevidence: a.pdf#attachment\nevidence: a.pdf#attachment\nevidence: b.csv:2:1",
+        );
+        let rows = build_transaction_rows(&[txn]);
+        assert_eq!(
+            rows[0].evidence,
+            vec!["a.pdf#attachment".to_string(), "b.csv:2:1".to_string()]
+        );
     }
 }

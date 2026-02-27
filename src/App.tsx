@@ -6459,12 +6459,13 @@ function TransactionsTable({
                     <th>Description</th>
                     <th>Postings</th>
                     <th>Amount</th>
+                    <th>Attachments</th>
                 </tr>
             </thead>
             <tbody>
                 {transactions.length === 0 ? (
                     <tr>
-                        <td colSpan={4} className="table-empty">
+                        <td colSpan={5} className="table-empty">
                             No transactions found.
                         </td>
                     </tr>
@@ -6478,6 +6479,22 @@ function TransactionsTable({
                             </td>
                             <td className="amount">
                                 {formatTotals(txn.totals)}
+                            </td>
+                            <td>
+                                {txn.evidence.length === 0 ? (
+                                    <span className="text-muted">-</span>
+                                ) : (
+                                    <div className="evidence-list">
+                                        {txn.evidence.map((evidenceRef) => (
+                                            <span
+                                                key={`${txn.id}-${evidenceRef}`}
+                                                className="evidence-chip"
+                                            >
+                                                {evidenceRef}
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
                             </td>
                         </tr>
                     ))

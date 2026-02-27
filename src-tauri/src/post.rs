@@ -880,8 +880,17 @@ fn format_gl_transaction(
     };
 
     let status_marker = entry.status.hledger_marker();
+    let mut comment_lines = vec![
+        "    ; generated-by: refreshmint-post".to_string(),
+        format!("    {source_tag}"),
+    ];
+    for evidence_ref in collect_unique_evidence_refs([entry]) {
+        comment_lines.push(format!("    ; evidence: {evidence_ref}"));
+    }
+    let comment_block = comment_lines.join("\n");
+
     format!(
-        "{}  {}{}  ; id: {}\n    ; generated-by: refreshmint-post\n    {source_tag}\n    {real_account}  {amount_str}\n    {counterpart_account}\n",
+        "{}  {}{}  ; id: {}\n{comment_block}\n    {real_account}  {amount_str}\n    {counterpart_account}\n",
         entry.date, status_marker, entry.description, gl_txn_id,
     )
 }
@@ -924,17 +933,38 @@ fn format_transfer_gl_transaction(
         .map(|p| p.account.clone())
         .unwrap_or_default();
 
+    let mut comment_lines = vec![
+        "    ; generated-by: refreshmint-post".to_string(),
+        format!("    ; source: {source1}:{}", entry1.id),
+        format!("    ; source: {source2}:{}", entry2.id),
+    ];
+    for evidence_ref in collect_unique_evidence_refs([entry1, entry2]) {
+        comment_lines.push(format!("    ; evidence: {evidence_ref}"));
+    }
+    let comment_block = comment_lines.join("\n");
+
     format!(
-        "{}  {}{}  ; id: {}\n    ; generated-by: refreshmint-post\n    ; source: {}:{}\n    ; source: {}:{}\n    {real_account1}  {amount1}\n    {real_account2}\n",
+        "{}  {}{}  ; id: {}\n{comment_block}\n    {real_account1}  {amount1}\n    {real_account2}\n",
         entry1.date,
         status_marker,
         entry1.description,
         gl_txn_id,
-        source1,
-        entry1.id,
-        source2,
-        entry2.id,
     )
+}
+
+fn collect_unique_evidence_refs<'a>(
+    entries: impl IntoIterator<Item = &'a AccountEntry>,
+) -> Vec<String> {
+    let mut refs = std::collections::BTreeSet::new();
+    for entry in entries {
+        for ev in &entry.evidence {
+            let trimmed = ev.trim();
+            if !trimmed.is_empty() {
+                refs.insert(trimmed.to_string());
+            }
+        }
+    }
+    refs.into_iter().collect()
 }
 
 fn append_to_journal(journal_path: &Path, text: &str) -> io::Result<()> {
@@ -1231,6 +1261,7 @@ mod tests {
         assert!(gl_content.contains(&format!("id: {gl_id}")));
         assert!(gl_content.contains("generated-by: refreshmint-post"));
         assert!(gl_content.contains("source: accounts/chase:txn-1"));
+        assert!(gl_content.contains("evidence: doc.csv:1:1"));
 
         // Check account journal was updated
         let updated = account_journal::read_journal(&root, "chase").unwrap();
@@ -1408,6 +1439,24 @@ mod tests {
         assert!(text.starts_with("2024-01-15  Transfer"));
         assert!(!text.contains("* Transfer"));
         assert!(!text.contains("! Transfer"));
+    }
+
+    #[test]
+    fn format_transfer_gl_transaction_includes_unique_evidence() {
+        let mut e1 = make_entry("txn-1", "2024-01-15", "Transfer", "-100.00");
+        let mut e2 = make_entry("txn-2", "2024-01-15", "Transfer", "100.00");
+        e1.evidence = vec![
+            "doc-a.csv:1:1".to_string(),
+            "shared.csv:7:1".to_string(),
+            "shared.csv:7:1".to_string(),
+        ];
+        e2.evidence = vec!["doc-b.csv:2:1".to_string(), "shared.csv:7:1".to_string()];
+        let text =
+            format_transfer_gl_transaction(&e1, "accounts/chase", &e2, "accounts/boa", "gl-id");
+        assert!(text.contains("evidence: doc-a.csv:1:1"));
+        assert!(text.contains("evidence: doc-b.csv:2:1"));
+        assert!(text.contains("evidence: shared.csv:7:1"));
+        assert_eq!(text.matches("evidence: shared.csv:7:1").count(), 1);
     }
 
     #[test]
