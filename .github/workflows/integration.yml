@@ -1,0 +1,60 @@
+name: Smoke And Integration Tests
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+    workflow_dispatch:
+
+jobs:
+    smoke-and-integration:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Install Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 20
+
+            - name: Install Linux dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev xvfb
+
+            - name: Install Chrome
+              uses: browser-actions/setup-chrome@v1
+
+            - name: Expose Chrome on PATH
+              run: |
+                  CHROME_BIN="$(command -v google-chrome || command -v google-chrome-stable || command -v chrome || command -v chromium || command -v chromium-browser)"
+                  sudo ln -sf "$CHROME_BIN" /usr/local/bin/google-chrome
+                  google-chrome --version
+
+            - name: Install npm dependencies
+              run: npm ci
+
+            - name: Download hledger sidecar
+              run: bash scripts/download-sidecar.sh x86_64-unknown-linux-gnu
+
+            - name: Run extension load smoke test
+              working-directory: src-tauri
+              run: cargo test --test extension_load_smoke
+
+            - name: Run scrape integration tests
+              working-directory: src-tauri
+              run: xvfb-run -a cargo test --test scrape_integration -- --ignored
+
+            - name: Run debug integration tests
+              working-directory: src-tauri
+              run: xvfb-run -a cargo test --test debug_integration -- --ignored
+
+            - name: Run locator integration tests
+              working-directory: src-tauri
+              run: xvfb-run -a cargo test --test locator_integration -- --ignored
