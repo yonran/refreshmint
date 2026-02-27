@@ -178,6 +178,9 @@ impl SecretStore {
         value: &str,
         require_biometry: bool,
     ) -> Result<(), Box<dyn Error>> {
+        #[cfg(not(target_os = "macos"))]
+        let _ = require_biometry;
+
         #[cfg(target_os = "macos")]
         if require_biometry {
             if let Err(err) = self.set_entry_password_with_biometry(user, value) {
