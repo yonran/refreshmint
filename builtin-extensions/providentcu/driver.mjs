@@ -794,47 +794,6 @@ async function collectCheckAttachmentCandidates(page) {
 async function openAttachmentActionsForRow(page, rowIndex) {
     const resultJson = /** @type {string} */ (
         await page.evaluate(`(function(targetRowIndex) {
-            const host = document.querySelector('.IDS-Banking-Retail-Web-React-TransactionHistoryModule');
-            if (!host) return JSON.stringify({ ok: false, reason: 'history module missing' });
-
-            const rows = Array.from(host.querySelectorAll('tbody tr.item-row'));
-            const row = rows[targetRowIndex];
-            if (!row) return JSON.stringify({ ok: false, reason: 'row missing' });
-
-            const controls = Array.from(row.querySelectorAll('button, a'));
-            const pickByText = function(regex) {
-                return controls.find(el => {
-                    const text = [
-                        el.textContent || '',
-                        el.getAttribute('aria-label') || '',
-                        el.getAttribute('title') || '',
-                        el.getAttribute('data-testid') || ''
-                    ].join(' ').replace(/\\s+/g, ' ').trim();
-                    return regex.test(text);
-                });
-            };
-
-            let target = pickByText(/(view|detail|details|image|check|expand|more)/i);
-            if (!target && controls.length > 0) {
-                target = controls[0];
-            }
-
-            if (target) {
-                target.click();
-                return JSON.stringify({ ok: true, clicked: 'control' });
-            }
-
-            row.click();
-            return JSON.stringify({ ok: true, clicked: 'row' });
-        })(${Math.max(0, Math.floor(rowIndex))})`)
-    );
-    const result = JSON.parse(resultJson || '{}');
-    return result != null && result.ok === true;
-}
-
-async function listVisibleCheckAttachmentActions(page) {
-    const actionsJson = /** @type {string} */ (
-        await page.evaluate(`(function() {
             const isVisible = function(el) {
                 if (!el || !(el instanceof Element)) return false;
                 const style = window.getComputedStyle(el);
@@ -842,69 +801,140 @@ async function listVisibleCheckAttachmentActions(page) {
                 const rect = el.getBoundingClientRect();
                 return rect.width > 0 && rect.height > 0;
             };
-            const overlayRoots = Array.from(document.querySelectorAll(
-                '[role="dialog"], .modal, .dialog, .overlay, .ui-dialog, .IDS-Modal, .modal-content'
-            )).filter(isVisible);
-            const roots = overlayRoots.length > 0 ? overlayRoots : [document];
-            const actions = [];
-            let seq = 0;
-            for (const root of roots) {
-                const nodes = Array.from(root.querySelectorAll('a, button'));
-                for (const node of nodes) {
-                    if (!isVisible(node)) continue;
+            const host = document.querySelector('.IDS-Banking-Retail-Web-React-TransactionHistoryModule');
+            if (!host) return JSON.stringify({ ok: false, reason: 'history module missing' });
+
+            const rows = Array.from(host.querySelectorAll('tbody tr.item-row'));
+            const row = rows[targetRowIndex];
+            if (!row) return JSON.stringify({ ok: false, reason: 'row missing' });
+
+            const expandedRow = row.nextElementSibling;
+            const isExpanded =
+                expandedRow != null &&
+                expandedRow.classList.contains('expanded-details-container') &&
+                isVisible(expandedRow);
+            if (isExpanded) {
+                return JSON.stringify({ ok: true, state: 'already-expanded' });
+            }
+
+            const expandButton = Array.from(row.querySelectorAll('button, a'))
+                .filter(isVisible)
+                .find((el) => {
                     const text = [
+                        el.textContent || '',
+                        el.getAttribute('aria-label') || '',
+                        el.getAttribute('title') || '',
+                    ]
+                        .join(' ')
+                        .replace(/\\s+/g, ' ')
+                        .trim();
+                    return /\\bexpand\\b/i.test(text);
+                });
+            if (expandButton) {
+                expandButton.click();
+                return JSON.stringify({ ok: true, state: 'clicked-expand' });
+            }
+
+            row.click();
+            return JSON.stringify({ ok: true, state: 'clicked-row' });
+        })(${Math.max(0, Math.floor(rowIndex))})`)
+    );
+    const result = JSON.parse(resultJson || '{}');
+    return result != null && result.ok === true;
+}
+
+async function clickViewCheckForRow(page, rowIndex) {
+    const resultJson = /** @type {string} */ (
+        await page.evaluate(`(function(targetRowIndex) {
+            const isVisible = function(el) {
+                if (!el || !(el instanceof Element)) return false;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+
+            const host = document.querySelector('.IDS-Banking-Retail-Web-React-TransactionHistoryModule');
+            if (!host) return JSON.stringify({ ok: false, reason: 'history module missing' });
+
+            const rows = Array.from(host.querySelectorAll('tbody tr.item-row'));
+            const row = rows[targetRowIndex];
+            if (!row) return JSON.stringify({ ok: false, reason: 'row missing' });
+
+            const region =
+                row.nextElementSibling &&
+                row.nextElementSibling.classList.contains('expanded-details-container')
+                    ? row.nextElementSibling
+                    : row;
+            const controls = Array.from(region.querySelectorAll('button, a'))
+                .filter(isVisible)
+                .map((node) => ({
+                    node,
+                    text: [
                         node.textContent || '',
                         node.getAttribute('aria-label') || '',
                         node.getAttribute('title') || '',
-                        node.getAttribute('value') || ''
-                    ].join(' ').replace(/\\s+/g, ' ').trim();
-                    if (!/(check|image|front|back)/i.test(text)) continue;
-                    if (/(spreadsheet|csv|statement list|search\\b|filter\\b|close\\b|cancel\\b|back\\b)/i.test(text)) continue;
+                    ]
+                        .join(' ')
+                        .replace(/\\s+/g, ' ')
+                        .trim(),
+                }));
 
-                    const part = /front/i.test(text)
-                        ? 'front'
-                        : /back/i.test(text)
-                          ? 'back'
-                          : 'single';
-                    const id = 'rm-check-attachment-' + (++seq);
-                    node.setAttribute('data-rm-check-attachment-id', id);
-                    actions.push({
-                        id,
-                        part,
-                        label: text.slice(0, 120),
-                    });
+            const visibleCheckImages = Array.from(host.querySelectorAll('img[src]'))
+                .filter(isVisible)
+                .filter((img) => {
+                    const src = img.getAttribute('src') || '';
+                    const meta = [
+                        img.getAttribute('alt') || '',
+                        img.getAttribute('title') || '',
+                    ]
+                        .join(' ')
+                        .toLowerCase();
+                    return /^data:image\\//i.test(src) || /(front|back|check)/i.test(meta);
+                });
+            if (visibleCheckImages.length > 0) {
+                return JSON.stringify({ ok: true, state: 'images-already-visible' });
+            }
+
+            const viewCheck = controls.find((item) =>
+                /\\bview\\s+check\\b/i.test(item.text),
+            );
+            if (!viewCheck) {
+                const fallbackControls = Array.from(host.querySelectorAll('button, a'))
+                    .filter(isVisible)
+                    .map((node) => ({
+                        node,
+                        text: [
+                            node.textContent || '',
+                            node.getAttribute('aria-label') || '',
+                            node.getAttribute('title') || '',
+                        ]
+                            .join(' ')
+                            .replace(/\\s+/g, ' ')
+                            .trim(),
+                    }));
+                const fallbackViewCheck = fallbackControls.find((item) =>
+                    /\\bview\\s+check\\b/i.test(item.text),
+                );
+                if (fallbackViewCheck) {
+                    fallbackViewCheck.node.click();
+                    return JSON.stringify({ ok: true, state: 'clicked-fallback-view-check' });
                 }
             }
-            const rank = function(action) {
-                if (action.part === 'front') return 0;
-                if (action.part === 'back') return 1;
-                return 2;
-            };
-            actions.sort((a, b) => rank(a) - rank(b));
-            const deduped = [];
-            const seenParts = new Set();
-            for (const action of actions) {
-                if (seenParts.has(action.part)) continue;
-                deduped.push(action);
-                seenParts.add(action.part);
-                if (deduped.length >= 2) break;
+            if (!viewCheck) {
+                return JSON.stringify({
+                    ok: false,
+                    reason: 'view check control missing',
+                    controls: controls.map((item) => item.text).slice(0, 8),
+                });
             }
-            return JSON.stringify(deduped);
-        })()`)
-    );
-    const parsed = JSON.parse(actionsJson || '[]');
-    return Array.isArray(parsed) ? parsed : [];
-}
 
-async function clickCheckAttachmentActionById(page, actionId) {
-    const actionIdJson = JSON.stringify(String(actionId || ''));
-    const clicked = await page.evaluate(`(function(targetId) {
-        const node = document.querySelector('[data-rm-check-attachment-id="' + targetId + '"]');
-        if (!node) return false;
-        node.click();
-        return true;
-    })(${actionIdJson})`);
-    return assertBoolean(clicked);
+            viewCheck.node.click();
+            return JSON.stringify({ ok: true });
+        })(${Math.max(0, Math.floor(rowIndex))})`)
+    );
+    const parsed = JSON.parse(resultJson || '{}');
+    return parsed != null && typeof parsed === 'object' ? parsed : {};
 }
 
 async function dismissAttachmentOverlays(page) {
@@ -936,8 +966,8 @@ async function dismissAttachmentOverlays(page) {
     }
 }
 
-async function findVisibleAttachmentResource(page) {
-    const resourceJson = /** @type {string} */ (
+async function findVisibleAttachmentResources(page) {
+    const resourcesJson = /** @type {string} */ (
         await page.evaluate(`(function() {
             const isVisible = function(el) {
                 if (!el || !(el instanceof Element)) return false;
@@ -948,9 +978,21 @@ async function findVisibleAttachmentResource(page) {
             };
 
             const overlays = Array.from(document.querySelectorAll(
-                '[role="dialog"], .modal, .dialog, .overlay, .ui-dialog, .IDS-Modal, .modal-content'
+                '[role="dialog"], .expanded-details-container, .expanded-details, .modal, .dialog, .overlay, .ui-dialog, .IDS-Modal, .modal-content'
             )).filter(isVisible);
-            const roots = overlays.length > 0 ? overlays : [document];
+            const roots = overlays.length > 0 ? [...overlays, document] : [document];
+            const out = [];
+            const seenUrls = new Set();
+            const pushResource = function(url, mimeType, part) {
+                const normalizedUrl = String(url || '').trim();
+                if (!normalizedUrl || seenUrls.has(normalizedUrl)) return;
+                seenUrls.add(normalizedUrl);
+                out.push({
+                    url: normalizedUrl,
+                    mimeType: String(mimeType || 'application/octet-stream'),
+                    part: String(part || 'single'),
+                });
+            };
 
             const getPartHint = function(root) {
                 const text = (root.textContent || '').toLowerCase();
@@ -962,54 +1004,116 @@ async function findVisibleAttachmentResource(page) {
             for (const root of roots) {
                 const part = getPartHint(root);
 
-                const img = Array.from(root.querySelectorAll('img[src]')).find(isVisible);
-                if (img) {
-                    return JSON.stringify({
-                        found: true,
-                        url: img.getAttribute('src') || '',
-                        mimeType: 'image/png',
-                        part,
-                    });
+                const imgs = Array.from(root.querySelectorAll('img[src]')).filter(isVisible);
+                for (const img of imgs) {
+                    const src = img.getAttribute('src') || '';
+                    const metaText = [
+                        img.getAttribute('alt') || '',
+                        img.getAttribute('title') || '',
+                        img.getAttribute('aria-label') || '',
+                    ]
+                        .join(' ')
+                        .toLowerCase();
+                    const metaPart = /front/.test(metaText)
+                        ? 'front'
+                        : /back/.test(metaText)
+                          ? 'back'
+                          : part;
+                    const isDataImage = /^data:image\\//i.test(src);
+                    const isBlobOrHttp = /^(blob:|https?:|\\/)/i.test(src);
+                    const isLikelyCheckMeta = /(front|back|check)/i.test(metaText);
+                    const isLargeImage =
+                        Number(img.naturalWidth || 0) >= 600 &&
+                        Number(img.naturalHeight || 0) >= 250;
+                    if (
+                        !isDataImage &&
+                        !(isBlobOrHttp && isLikelyCheckMeta) &&
+                        !isLargeImage
+                    ) {
+                        continue;
+                    }
+                    const mimeType = isDataImage
+                        ? src.slice(5, src.indexOf(';') > 5 ? src.indexOf(';') : undefined)
+                        : 'image/png';
+                    pushResource(src, mimeType, metaPart);
                 }
 
                 const frame = Array.from(root.querySelectorAll('iframe[src], embed[src], object[data]')).find(isVisible);
                 if (frame) {
                     const url = frame.getAttribute('src') || frame.getAttribute('data') || '';
-                    return JSON.stringify({
-                        found: true,
-                        url,
-                        mimeType: 'application/pdf',
-                        part,
-                    });
+                    pushResource(url, 'application/pdf', part);
                 }
 
-                const link = Array.from(root.querySelectorAll('a[href]')).find(el => {
-                    if (!isVisible(el)) return false;
-                    const href = el.getAttribute('href') || '';
-                    return /^(data:|blob:|https?:)/i.test(href);
-                });
-                if (link) {
-                    return JSON.stringify({
-                        found: true,
-                        url: link.getAttribute('href') || '',
-                        mimeType: 'application/octet-stream',
-                        part,
-                    });
-                }
             }
 
-            return JSON.stringify({ found: false });
+            const rank = function(resource) {
+                if (resource.part === 'front') return 0;
+                if (resource.part === 'back') return 1;
+                return 2;
+            };
+            out.sort((a, b) => rank(a) - rank(b));
+            return JSON.stringify(out);
         })()`)
     );
-    const parsed = JSON.parse(resourceJson || '{}');
-    if (parsed == null || parsed.found !== true || !parsed.url) {
-        return null;
-    }
-    return {
-        url: String(parsed.url),
-        mimeType: String(parsed.mimeType || 'application/octet-stream'),
-        part: String(parsed.part || 'single'),
+    const parsed = JSON.parse(resourcesJson || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+}
+
+async function waitForVisibleAttachmentResources(page, timeoutMs) {
+    const deadline = Date.now() + Math.max(200, Number(timeoutMs) || 0);
+    /** @type {Map<string, any>} */
+    const byUrl = new Map();
+    let lastGrowth = 0;
+
+    const rank = function (resource) {
+        if (resource.part === 'front') return 0;
+        if (resource.part === 'back') return 1;
+        return 2;
     };
+
+    while (Date.now() < deadline) {
+        const resources = await findVisibleAttachmentResources(page);
+        let grew = false;
+        for (const resource of resources) {
+            const url = String(resource.url || '').trim();
+            if (!url) continue;
+            if (!byUrl.has(url)) {
+                byUrl.set(url, resource);
+                grew = true;
+            }
+        }
+
+        const collected = Array.from(byUrl.values());
+        collected.sort((a, b) => rank(a) - rank(b));
+        const hasFront = collected.some(
+            (resource) =>
+                sanitizeFilenameSegment(resource.part || '') === 'front',
+        );
+        const hasBack = collected.some(
+            (resource) =>
+                sanitizeFilenameSegment(resource.part || '') === 'back',
+        );
+
+        if (grew) {
+            lastGrowth = Date.now();
+        }
+        if (collected.length > 0 && hasFront && hasBack) {
+            return collected;
+        }
+        if (
+            collected.length > 0 &&
+            !grew &&
+            lastGrowth > 0 &&
+            Date.now() - lastGrowth >= 1000
+        ) {
+            return collected;
+        }
+        await waitMs(page, 200);
+    }
+
+    const collected = Array.from(byUrl.values());
+    collected.sort((a, b) => rank(a) - rank(b));
+    return collected;
 }
 
 async function fetchResourceBytesViaPage(page, url) {
@@ -1052,66 +1156,111 @@ async function saveVisibleAttachmentFallback(
     label,
     candidate,
     preferredPart,
+    existingItemKeys,
 ) {
-    const resource = await findVisibleAttachmentResource(page);
-    if (resource == null) {
-        return false;
+    const preferred = sanitizeFilenameSegment(preferredPart || 'single');
+    let resources = await waitForVisibleAttachmentResources(page, 12000);
+    if (resources.length === 0) {
+        return { status: 'missing' };
     }
 
-    const attachmentPart =
-        sanitizeFilenameSegment(resource.part || preferredPart || 'single') ||
-        'single';
-    const itemKey = makeAttachmentItemKey(
-        candidate.attachmentKey,
-        attachmentPart,
-    );
-    const ext = getFileExtensionFromPath(
-        resource.url,
-        resource.mimeType.includes('pdf') ? '.pdf' : '.png',
-    );
-    const filename = makeCheckAttachmentFilename(
-        label,
-        candidate,
-        attachmentPart,
-        `placeholder${ext}`,
-    );
-    try {
-        const fetched = await fetchResourceBytesViaPage(page, resource.url);
-        const mimeType =
-            fetched.mimeType && fetched.mimeType.trim() !== ''
-                ? fetched.mimeType
-                : mimeTypeForAttachmentExtension(ext);
-        await refreshmint.saveResource(filename, fetched.bytes, {
-            mimeType,
-            label,
-            coverageEndDate: candidate.dateIso,
-            attachmentType: ATTACHMENT_TYPE_CHECK_IMAGE,
-            attachmentKey: candidate.attachmentKey,
+    const byPreferredPart = resources.filter((resource) => {
+        const part = sanitizeFilenameSegment(resource.part || 'single');
+        return part === preferred;
+    });
+    if (
+        preferred !== '' &&
+        preferred !== 'single' &&
+        byPreferredPart.length > 0
+    ) {
+        resources = byPreferredPart;
+    }
+
+    const savedItemKeys = [];
+    let skippedExisting = 0;
+    for (const resource of resources) {
+        const attachmentPart =
+            sanitizeFilenameSegment(resource.part || preferred || 'single') ||
+            'single';
+        const itemKey = makeAttachmentItemKey(
+            candidate.attachmentKey,
             attachmentPart,
-        });
-    } catch (fetchErr) {
-        refreshmint.log(
-            `    fallback fetch failed; saving screenshot instead (check ${candidate.checkNumber}, part=${attachmentPart}): ${inspect(fetchErr)}`,
         );
-        const screenshotB64 = /** @type {string} */ (await page.screenshot());
-        const screenshotBytes = base64ToBytes(screenshotB64);
-        const screenshotFilename = makeCheckAttachmentFilename(
+        if (existingItemKeys.has(itemKey)) {
+            skippedExisting++;
+            continue;
+        }
+        const ext = getFileExtensionFromPath(
+            resource.url,
+            resource.mimeType.includes('pdf') ? '.pdf' : '.png',
+        );
+        const filename = makeCheckAttachmentFilename(
             label,
             candidate,
             attachmentPart,
-            'fallback.png',
+            `placeholder${ext}`,
         );
-        await refreshmint.saveResource(screenshotFilename, screenshotBytes, {
-            mimeType: 'image/png',
-            label,
-            coverageEndDate: candidate.dateIso,
-            attachmentType: ATTACHMENT_TYPE_CHECK_IMAGE,
-            attachmentKey: candidate.attachmentKey,
-            attachmentPart,
-            attachmentSource: 'screenshot-fallback',
-        });
+        try {
+            const fetched = await fetchResourceBytesViaPage(page, resource.url);
+            const mimeType =
+                fetched.mimeType && fetched.mimeType.trim() !== ''
+                    ? fetched.mimeType
+                    : mimeTypeForAttachmentExtension(ext);
+            await refreshmint.saveResource(filename, fetched.bytes, {
+                mimeType,
+                label,
+                coverageEndDate: candidate.dateIso,
+                attachmentType: ATTACHMENT_TYPE_CHECK_IMAGE,
+                attachmentKey: candidate.attachmentKey,
+                attachmentPart,
+            });
+        } catch (fetchErr) {
+            refreshmint.log(
+                `    fallback fetch failed; saving screenshot instead (check ${candidate.checkNumber}, part=${attachmentPart}): ${inspect(fetchErr)}`,
+            );
+            const screenshotB64 = /** @type {string} */ (
+                await page.screenshot()
+            );
+            const screenshotBytes = base64ToBytes(screenshotB64);
+            const screenshotFilename = makeCheckAttachmentFilename(
+                label,
+                candidate,
+                attachmentPart,
+                'fallback.png',
+            );
+            await refreshmint.saveResource(
+                screenshotFilename,
+                screenshotBytes,
+                {
+                    mimeType: 'image/png',
+                    label,
+                    coverageEndDate: candidate.dateIso,
+                    attachmentType: ATTACHMENT_TYPE_CHECK_IMAGE,
+                    attachmentKey: candidate.attachmentKey,
+                    attachmentPart,
+                    attachmentSource: 'screenshot-fallback',
+                },
+            );
+        }
+        savedItemKeys.push(itemKey);
     }
-    return itemKey;
+
+    if (savedItemKeys.length > 0) {
+        return {
+            status: 'saved',
+            itemKeys: savedItemKeys,
+            savedCount: savedItemKeys.length,
+        };
+    }
+
+    if (skippedExisting > 0) {
+        return {
+            status: 'skipped-existing',
+            skippedExisting,
+        };
+    }
+
+    return { status: 'missing' };
 }
 
 async function downloadCheckAttachmentsForCandidate(
@@ -1135,81 +1284,45 @@ async function downloadCheckAttachmentsForCandidate(
     await waitMs(page, 500);
     await waitForBusy(page);
 
-    const actions = await listVisibleCheckAttachmentActions(page);
-    if (actions.length === 0) {
+    const viewCheckResult = await clickViewCheckForRow(
+        page,
+        candidate.rowIndex,
+    );
+    if (viewCheckResult.ok !== true) {
+        const reason =
+            getMetadataString(viewCheckResult, 'reason') ||
+            getMetadataString(viewCheckResult, 'state') ||
+            'unknown';
+        refreshmint.log(
+            `    view check unavailable (row=${candidate.rowIndex}, reason=${reason})`,
+        );
         await dismissAttachmentOverlays(page);
         return stats;
     }
 
-    for (const action of actions) {
-        const attachmentPart =
-            sanitizeFilenameSegment(action.part || 'single') || 'single';
-        const itemKey = makeAttachmentItemKey(
-            candidate.attachmentKey,
-            attachmentPart,
+    stats.attempted++;
+    const fallbackItemKey = await saveVisibleAttachmentFallback(
+        page,
+        label,
+        candidate,
+        'single',
+        attachmentState.existingItemKeys,
+    );
+    if (fallbackItemKey != null && fallbackItemKey.status === 'saved') {
+        for (const key of fallbackItemKey.itemKeys || []) {
+            attachmentState.existingItemKeys.add(key);
+        }
+        stats.downloaded += Number(fallbackItemKey.savedCount || 0);
+    } else if (
+        fallbackItemKey != null &&
+        fallbackItemKey.status === 'skipped-existing'
+    ) {
+        stats.skippedExisting += Number(fallbackItemKey.skippedExisting || 1);
+    } else {
+        stats.failed++;
+        refreshmint.log(
+            `    attachment fallback failed (check ${candidate.checkNumber})`,
         );
-        if (attachmentState.existingItemKeys.has(itemKey)) {
-            stats.skippedExisting++;
-            continue;
-        }
-
-        stats.attempted++;
-        try {
-            const downloadPromise = page.waitForDownload(8000);
-            const clicked = await clickCheckAttachmentActionById(
-                page,
-                action.id,
-            );
-            if (!clicked) {
-                stats.failed++;
-                continue;
-            }
-            try {
-                const download = await downloadPromise;
-                const filename = makeCheckAttachmentFilename(
-                    label,
-                    candidate,
-                    attachmentPart,
-                    download.path,
-                );
-                const ext = getFileExtensionFromPath(filename, '.png');
-                await refreshmint.saveDownloadedResource(
-                    download.path,
-                    filename,
-                    {
-                        mimeType: mimeTypeForAttachmentExtension(ext),
-                        label,
-                        coverageEndDate: candidate.dateIso,
-                        attachmentType: ATTACHMENT_TYPE_CHECK_IMAGE,
-                        attachmentKey: candidate.attachmentKey,
-                        attachmentPart,
-                    },
-                );
-                attachmentState.existingItemKeys.add(itemKey);
-                stats.downloaded++;
-            } catch {
-                const fallbackItemKey = await saveVisibleAttachmentFallback(
-                    page,
-                    label,
-                    candidate,
-                    attachmentPart,
-                );
-                if (fallbackItemKey !== false) {
-                    attachmentState.existingItemKeys.add(fallbackItemKey);
-                    stats.downloaded++;
-                } else {
-                    stats.failed++;
-                    refreshmint.log(
-                        `    attachment fallback failed (check ${candidate.checkNumber}, part=${attachmentPart})`,
-                    );
-                }
-            }
-        } catch (e) {
-            stats.failed++;
-            refreshmint.log(
-                `    attachment download failed (check ${candidate.checkNumber}, part=${attachmentPart}): ${inspect(e)}`,
-            );
-        }
     }
 
     await dismissAttachmentOverlays(page);

@@ -34,6 +34,22 @@ Check images are stored as account documents and linked by `attachmentKey`.
 The extractor emits the same `attachmentKey` for check transactions, and core
 dedup logic links matching document attachments as evidence refs.
 
+## Check Capture Strategy
+
+Check image capture is row-scoped to avoid false positives from unrelated page
+controls/links:
+
+- Expand the candidate transaction row.
+- Click `View Check` from that row context (with a guarded host-level fallback).
+- Collect visible check media resources (typically `data:image/jpeg;base64,...`)
+  and wait for resource-set stabilization so sequential `front`/`back` loads are
+  captured in one pass.
+- Save each discovered part as a separate attachment (`front`, `back`, or
+  `single`) under the same `attachmentKey`.
+
+If binary fetch for a discovered resource fails, the scraper falls back to a
+screenshot save for that attachment part.
+
 ## Month-Level Checkpointing
 
 Historical month scans are checkpointed to avoid re-checking old months:
@@ -72,7 +88,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- debug exec ...
 
 - The activity table selectors are centered on
   `.IDS-Banking-Retail-Web-React-TransactionHistoryModule`.
-- Attachment controls are discovered heuristically from visible `a/button`
-  elements containing `check/image/front/back` text.
+- Attachment capture is anchored to the selected check row and visible check
+  media resources; generic page links are intentionally ignored.
 - Keep `ATTACHMENT_CHECKPOINT_VERSION` and `ATTACHMENT_CHECKPOINT_SCOPE`
   stable; bump version when checkpoint semantics/selectors change.
