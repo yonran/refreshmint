@@ -74,6 +74,8 @@ Errors thrown from your script fail the scrape run.
 - **Handle "Busy" states:** Banking sites often use global loading overlays (e.g. `div#busy-div`). Implement a `waitForBusy` helper to ensure the page is interactive before clicking.
 - **Prefer `evaluate` for tricky clicks:** If `page.click()` fails due to visibility or pointer-event interception, use `page.evaluate('document.querySelector(selector).click()')`.
 - **Robust account discovery:** Search for account patterns (e.g., `x\d{4}`) across all relevant tags (`button`, `a`, `span`) to build a pending account list.
+- **Scope attachment interactions tightly:** For statement/check/image scraping, avoid global page-wide control scans. Anchor actions to the selected row/container first, then use guarded fallbacks.
+- **Avoid generic attachment URL capture:** Do not treat broad `a[href]` matches as evidence attachments without contextual checks, or you'll capture unrelated links and miss real artifacts.
 
 ## State management and optimization
 
@@ -224,8 +226,25 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 If the `debug exec` client disconnects before completion, the server cancels the in-flight script.
 This is useful when a run is hung or stuck in a loop: you can disconnect to stop it early, edit the script, and immediately try again.
 
+### Live iteration loop
+
+Use this loop for rapid scraper development:
+
+1. Start `debug start` once.
+2. Edit `driver.mjs`.
+3. Run `debug exec` against the same socket.
+4. Inspect logs and downloaded/finalized resources.
+5. Repeat steps 2-4 until behavior is correct.
+
+Do not restart `debug start` on every edit. Restart only when:
+
+- the debug socket/session is dead
+- browser state is corrupted
+- you intentionally need a fresh login/session baseline
+
 When `debug exec` finishes (success or failure), any resources staged via `refreshmint.saveResource(...)` are finalized into `accounts/<account>/documents/` using the same evidence pipeline used by `scrape`.
 If both the driver and finalization fail, `debug exec` reports both failures in the returned error so partial-output persistence issues are visible immediately.
+An interrupted run may still finalize a subset of resources, so always check existing documents before assuming "nothing was saved".
 
 Stop:
 

@@ -15,6 +15,14 @@ Also read [AGENTS.local.md](./AGENTS.local.md) if it exists for machine-local de
     - For claude: follow the `attribution` in Claude Code settings.
 - As of `codex` v0.101.0, the AI does not have access to the specific model name. If the context does not have this information, then ask the user to run `/model` to get the correct model.
 - Never use `git commit --no-verify` without first confirming with the user.
+- If the user asks to "commit between each change", create a commit after each logically complete fix (not one large batch at the end).
+- Stage only files that belong to the requested change; do not include generated output directories by accident.
+
+## Debug Sessions
+
+- Keep `debug start` running while iterating on scraper code.
+- After script edits, re-run `debug exec`; do not restart `debug start` unless the socket/session is broken or login state must be reset.
+- If a debug run is interrupted/aborted, verify whether partial staged resources were finalized before re-running.
 
 ## Scraping
 

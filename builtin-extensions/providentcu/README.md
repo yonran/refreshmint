@@ -84,6 +84,39 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- debug exec ...
 - per-month attachment scan stats
 - attachment download failures with check number/part context
 
+## Known Quirks / Troubleshooting
+
+- `View Check` can appear in different DOM scopes depending on row state.
+  The scraper first tries row-scoped controls and only then uses guarded fallback.
+- Front/back images may load sequentially after `View Check`; capture waits for the
+  resource set to stabilize so both parts can be collected in one pass.
+- Generic page links are not treated as attachment resources because they produce
+  false positives and hide real check artifacts.
+
+## Success Criteria
+
+For a known check row, a successful run should usually show:
+
+- attachment summary with no failures (`failed=0`)
+- either `downloaded=2` (new front/back) or `existing=2` (already captured)
+- documents including:
+    - `...-<amount>-front.png`
+    - `...-<amount>-back.png`
+- metadata with:
+    - `attachmentType: check-image`
+    - `attachmentKey: check:<checkNumber>|<date>|<amount>`
+    - `attachmentPart: front|back`
+
+## Validation Runbook
+
+1. Run scraper in debug or full scrape mode for `provident-yonran`.
+2. Verify front/back attachment docs exist under the account documents folder.
+3. Run `account extract` for the latest activity CSV if needed.
+4. Confirm account journal check txn has `; evidence: ...#attachment` refs for
+   check image parts.
+5. If GL linkage needs revalidation, `account unpost` then `account post` that
+   entry and confirm the GL txn includes the same attachment evidence refs.
+
 ## Implementation Notes
 
 - The activity table selectors are centered on
