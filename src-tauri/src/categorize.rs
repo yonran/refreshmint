@@ -45,6 +45,28 @@ pub struct TransferMatch {
     pub matched_amount: String,
 }
 
+/// Per-GL-transaction result from `suggest_gl_categories`.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlCategoryResult {
+    /// ML-suggested replacement account for `Expenses:Unknown`, or `None` if
+    /// confidence < 0.5 or a transfer match was found.
+    pub suggested: Option<String>,
+    /// Auto-detected transfer counterpart among other `Expenses:Unknown` GL
+    /// transactions with opposite amount within ±3 days.
+    pub transfer_match: Option<GlTransferMatch>,
+}
+
+/// A matching `Expenses:Unknown` GL transaction that forms a transfer pair.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlTransferMatch {
+    pub txn_id: String,
+    pub description: String,
+    pub date: String,
+    pub matched_amount: String,
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -119,6 +141,218 @@ pub fn suggest_categories(
     }
 
     Ok(results)
+}
+
+/// Suggest categories and detect transfer pairs for all `Expenses:Unknown`
+/// transactions already in `general.journal`.
+///
+/// Returns a `HashMap<txn_id, GlCategoryResult>`.
+pub fn suggest_gl_categories(
+    ledger_dir: &Path,
+) -> Result<HashMap<String, GlCategoryResult>, Box<dyn std::error::Error + Send + Sync>> {
+    let gl_journal_path = ledger_dir.join("general.journal");
+    if !gl_journal_path.exists() {
+        return Ok(HashMap::new());
+    }
+    let gl_txns = crate::ledger_open::run_hledger_print(&gl_journal_path).unwrap_or_default();
+
+    // Find transactions that have an Expenses:Unknown posting.
+    let unknown_txns: Vec<&crate::hledger::Transaction> = gl_txns
+        .iter()
+        .filter(|txn| {
+            txn.tpostings
+                .iter()
+                .any(|p| p.paccount == "Expenses:Unknown")
+        })
+        .collect();
+
+    if unknown_txns.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Build ML model from GL transactions that already have real categories.
+    let training_examples = build_gl_training_examples(&gl_txns);
+    let global_model = MnbModel::fit(&training_examples, 1.0);
+
+    // Build transfer candidates from the Expenses:Unknown set.
+    let transfer_candidates = build_gl_transfer_candidates(&unknown_txns);
+
+    let mut results = HashMap::new();
+    for txn in &unknown_txns {
+        let txn_id = match txn.ttags.iter().find(|(k, _)| k == "id") {
+            Some((_, v)) => v.clone(),
+            None => continue,
+        };
+
+        // Transfer detection has priority over ML suggestion.
+        let transfer_match = find_gl_transfer_match(txn, &txn_id, &transfer_candidates);
+
+        let suggested = if transfer_match.is_some() {
+            None
+        } else if let Some(model) = &global_model {
+            let tokens = tokenize_text(&txn.tdescription);
+            let proba = model.predict_proba(&tokens);
+            let total: f64 = proba.iter().map(|(p, _)| p).sum();
+            if total > 0.0 {
+                proba
+                    .into_iter()
+                    .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                    .and_then(|(prob, class)| {
+                        if prob / total >= CONFIDENCE_THRESHOLD {
+                            Some(class.to_string())
+                        } else {
+                            None
+                        }
+                    })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        results.insert(
+            txn_id,
+            GlCategoryResult {
+                suggested,
+                transfer_match,
+            },
+        );
+    }
+
+    Ok(results)
+}
+
+/// Build training examples from GL transactions that have real (non-Unknown) categories.
+///
+/// Uses `tdescription` tokens and the last posting's account as the label.
+fn build_gl_training_examples(gl_txns: &[crate::hledger::Transaction]) -> Vec<TrainingExample> {
+    let mut examples = seed_examples();
+
+    for txn in gl_txns {
+        // Only refreshmint-post transactions.
+        let is_post = txn
+            .ttags
+            .iter()
+            .any(|(k, v)| k == "generated-by" && v == "refreshmint-post");
+        if !is_post {
+            continue;
+        }
+
+        // Only single-source (not transfers).
+        let source_count = txn.ttags.iter().filter(|(k, _)| k == "source").count();
+        if source_count != 1 {
+            continue;
+        }
+
+        // Counterpart is the last posting.
+        let counterpart = match txn.tpostings.last() {
+            Some(p) => &p.paccount,
+            None => continue,
+        };
+
+        // Skip uncategorized or empty.
+        if counterpart == "Expenses:Unknown" || counterpart.is_empty() {
+            continue;
+        }
+
+        let tokens = tokenize_text(&txn.tdescription);
+        examples.push((tokens, counterpart.clone()));
+    }
+
+    examples
+}
+
+/// Internal transfer candidate for GL-level transfer detection.
+struct GlTransferCandidate {
+    txn_id: String,
+    description: String,
+    date: String,
+    amount_f64: f64,
+    commodity: String,
+}
+
+/// Build a list of transfer candidates from `Expenses:Unknown` GL transactions.
+///
+/// Each candidate's amount is taken from the non-`Expenses:Unknown` posting.
+fn build_gl_transfer_candidates(
+    unknown_txns: &[&crate::hledger::Transaction],
+) -> Vec<GlTransferCandidate> {
+    let mut candidates = Vec::new();
+    for txn in unknown_txns {
+        let txn_id = match txn.ttags.iter().find(|(k, _)| k == "id") {
+            Some((_, v)) => v.clone(),
+            None => continue,
+        };
+        // The explicit (non-Unknown) posting carries the amount.
+        let posting = match txn
+            .tpostings
+            .iter()
+            .find(|p| p.paccount != "Expenses:Unknown")
+        {
+            Some(p) => p,
+            None => continue,
+        };
+        let amount = match posting.pamount.first() {
+            Some(a) => a,
+            None => continue,
+        };
+        candidates.push(GlTransferCandidate {
+            txn_id,
+            description: txn.tdescription.clone(),
+            date: txn.tdate.clone(),
+            amount_f64: amount.aquantity.floating_point,
+            commodity: amount.acommodity.clone(),
+        });
+    }
+    candidates
+}
+
+/// Find a unique transfer match for a GL `Expenses:Unknown` transaction.
+///
+/// Returns `Some(GlTransferMatch)` only when EXACTLY ONE other candidate has
+/// the opposite amount (sum ≈ 0), same commodity, and date within ±3 days.
+fn find_gl_transfer_match(
+    txn: &crate::hledger::Transaction,
+    txn_id: &str,
+    candidates: &[GlTransferCandidate],
+) -> Option<GlTransferMatch> {
+    // Get this transaction's explicit posting amount.
+    let posting = txn
+        .tpostings
+        .iter()
+        .find(|p| p.paccount != "Expenses:Unknown")?;
+    let amount = posting.pamount.first()?;
+    let amount_f64 = amount.aquantity.floating_point;
+    if amount_f64.is_nan() {
+        return None;
+    }
+    let txn_date = parse_date(&txn.tdate)?;
+
+    let matches: Vec<&GlTransferCandidate> = candidates
+        .iter()
+        .filter(|c| {
+            c.txn_id != txn_id
+                && c.commodity == amount.acommodity
+                && !c.amount_f64.is_nan()
+                && (amount_f64 + c.amount_f64).abs() < 0.005
+                && parse_date(&c.date)
+                    .map(|cd| (txn_date - cd).num_days().abs() <= 3)
+                    .unwrap_or(false)
+        })
+        .collect();
+
+    if matches.len() == 1 {
+        let m = matches[0];
+        Some(GlTransferMatch {
+            txn_id: m.txn_id.clone(),
+            description: m.description.clone(),
+            date: m.date.clone(),
+            matched_amount: format!("{} {}", m.amount_f64, m.commodity),
+        })
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

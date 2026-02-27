@@ -63,6 +63,10 @@ import {
     startScrapeDebugSessionForLogin,
     stopScrapeDebugSession,
     suggestCategories,
+    suggestGlCategories,
+    recategorizeGlTransaction,
+    mergeGlTransfer,
+    type GlCategoryResult,
     syncGlTransaction,
     type SecretEntry,
     syncLoginSecretsForExtension,
@@ -164,29 +168,6 @@ function suggestGlAccountName(label: string): string {
         return `Assets:Savings:${name}`;
     }
     return `Assets:Checking:${name}`;
-}
-
-function applyCategoriesToDrafts(
-    suggestions: Record<string, CategoryResult>,
-    setPostDrafts: React.Dispatch<
-        React.SetStateAction<Record<string, PostDraft>>
-    >,
-) {
-    setPostDrafts((current) => {
-        const next = { ...current };
-        for (const [entryId, result] of Object.entries(suggestions)) {
-            if (
-                result.suggested !== null &&
-                !(next[entryId]?.counterpartAccount ?? '').trim()
-            ) {
-                next[entryId] = {
-                    ...(next[entryId] ?? { postingIndex: '' }),
-                    counterpartAccount: result.suggested,
-                };
-            }
-        }
-        return next;
-    });
 }
 
 function secretPairKey(domain: string, name: string): string {
@@ -355,6 +336,9 @@ function App() {
     const [isLoadingTransferModal, setIsLoadingTransferModal] = useState(false);
     const [transactionsSearch, setTransactionsSearch] = useState('');
     const [transferModalSearch, setTransferModalSearch] = useState('');
+    const [glCategorySuggestions, setGlCategorySuggestions] = useState<
+        Record<string, GlCategoryResult>
+    >({});
     const [secretPrompt, setSecretPrompt] = useState<SecretPromptState | null>(
         null,
     );
@@ -1342,7 +1326,6 @@ function App() {
                                 reqId === suggestRequestId.current
                             ) {
                                 setPipelineCategorySuggestions(result);
-                                applyCategoriesToDrafts(result, setPostDrafts);
                             }
                         })
                         .catch((err: unknown) => {
@@ -1376,6 +1359,27 @@ function App() {
             return;
         }
         void setLastActiveTab(activeTab);
+    }, [activeTab, ledger]);
+
+    // Load GL category suggestions whenever the Transactions tab is active.
+    useEffect(() => {
+        if (activeTab !== 'transactions' || !ledger) {
+            return;
+        }
+        const ledgerPath = ledger.path;
+        let cancelled = false;
+        suggestGlCategories(ledgerPath)
+            .then((result) => {
+                if (!cancelled) {
+                    setGlCategorySuggestions(result);
+                }
+            })
+            .catch((err: unknown) => {
+                console.error('suggestGlCategories failed:', err);
+            });
+        return () => {
+            cancelled = true;
+        };
     }, [activeTab, ledger]);
 
     const buildTransactionInput = (
@@ -2768,12 +2772,44 @@ function App() {
             .then((result) => {
                 if (reqId === suggestRequestId.current) {
                     setPipelineCategorySuggestions(result);
-                    applyCategoriesToDrafts(result, setPostDrafts);
                 }
             })
             .catch((err: unknown) => {
                 console.error('suggestCategories failed:', err);
             });
+    }
+
+    async function handleRecategorizeGlTransaction(
+        txnId: string,
+        newAccount: string,
+    ) {
+        if (!ledger) return;
+        try {
+            await recategorizeGlTransaction(ledger.path, txnId, newAccount);
+            const [reloaded, suggestions] = await Promise.all([
+                openLedger(ledger.path),
+                suggestGlCategories(ledger.path),
+            ]);
+            setLedger(reloaded);
+            setGlCategorySuggestions(suggestions);
+        } catch (error) {
+            console.error('recategorize failed:', error);
+        }
+    }
+
+    async function handleMergeGlTransfer(txnId1: string, txnId2: string) {
+        if (!ledger) return;
+        try {
+            await mergeGlTransfer(ledger.path, txnId1, txnId2);
+            const [reloaded, suggestions] = await Promise.all([
+                openLedger(ledger.path),
+                suggestGlCategories(ledger.path),
+            ]);
+            setLedger(reloaded);
+            setGlCategorySuggestions(suggestions);
+        } catch (error) {
+            console.error('merge transfer failed:', error);
+        }
     }
 
     async function handleSavePipelineGlAccount() {
@@ -2833,28 +2869,13 @@ function App() {
             return `Transfer posted: ${entryId} ↔ ${suggestion.transferMatch.entryId} (${glId})`;
         }
 
-        const draft = postDrafts[entryId] ?? {
-            counterpartAccount: '',
-            postingIndex: '',
-        };
-        const counterpartAccount =
-            draft.counterpartAccount.trim() || (suggestion?.suggested ?? '');
-        if (!counterpartAccount) {
-            throw new Error('Counterpart account is required.');
-        }
-
-        const postingIndex = parseOptionalIndex(draft.postingIndex);
-        if (postingIndex.error !== null) {
-            throw new Error(postingIndex.error);
-        }
-
         const glId = await postLoginAccountEntry(
             ledger.path,
             loginName,
             label,
             entryId,
-            counterpartAccount,
-            postingIndex.value,
+            'Expenses:Unknown',
+            null,
         );
         return `Posted ${entryId} to ${glId}`;
     }
@@ -3881,6 +3902,21 @@ function App() {
                                 <TransactionsTable
                                     transactions={filteredTransactions}
                                     ledgerPath={ledgerPath}
+                                    glCategorySuggestions={
+                                        glCategorySuggestions
+                                    }
+                                    onRecategorize={(txnId, newAccount) => {
+                                        void handleRecategorizeGlTransaction(
+                                            txnId,
+                                            newAccount,
+                                        );
+                                    }}
+                                    onMergeTransfer={(txnId1, txnId2) => {
+                                        void handleMergeGlTransfer(
+                                            txnId1,
+                                            txnId2,
+                                        );
+                                    }}
                                 />
                             </div>
                         </div>
@@ -4298,7 +4334,6 @@ function App() {
                                                             <th>Date</th>
                                                             <th>Description</th>
                                                             <th>Amount</th>
-                                                            <th>Counterpart</th>
                                                             <th>Status</th>
                                                             <th>Actions</th>
                                                         </tr>
@@ -4308,7 +4343,7 @@ function App() {
                                                         0 ? (
                                                             <tr>
                                                                 <td
-                                                                    colSpan={7}
+                                                                    colSpan={6}
                                                                     className="table-empty"
                                                                 >
                                                                     No entries
@@ -4408,53 +4443,6 @@ function App() {
                                                                             <td className="mono">
                                                                                 {entry.amount ??
                                                                                     '-'}
-                                                                            </td>
-                                                                            <td>
-                                                                                {isUnposted ? (
-                                                                                    transferMatch !==
-                                                                                    null ? (
-                                                                                        <span className="text-muted">
-                                                                                            Transfer
-                                                                                            ↔{' '}
-                                                                                            {
-                                                                                                transferMatch.accountLocator
-                                                                                            }
-                                                                                        </span>
-                                                                                    ) : (
-                                                                                        <input
-                                                                                            type="text"
-                                                                                            value={
-                                                                                                postDrafts[
-                                                                                                    entry
-                                                                                                        .id
-                                                                                                ]
-                                                                                                    ?.counterpartAccount ??
-                                                                                                ''
-                                                                                            }
-                                                                                            placeholder={
-                                                                                                suggestion?.suggested ??
-                                                                                                'Expenses:...'
-                                                                                            }
-                                                                                            onChange={(
-                                                                                                e,
-                                                                                            ) => {
-                                                                                                handleSetPostDraft(
-                                                                                                    entry.id,
-                                                                                                    {
-                                                                                                        counterpartAccount:
-                                                                                                            e
-                                                                                                                .target
-                                                                                                                .value,
-                                                                                                    },
-                                                                                                );
-                                                                                            }}
-                                                                                        />
-                                                                                    )
-                                                                                ) : (
-                                                                                    <span className="text-muted">
-                                                                                        —
-                                                                                    </span>
-                                                                                )}
                                                                             </td>
                                                                             <td>
                                                                                 {isUnposted ? (
@@ -6466,9 +6454,15 @@ function attachmentFilename(ref: string): string {
 function TransactionsTable({
     transactions,
     ledgerPath,
+    glCategorySuggestions = {},
+    onRecategorize,
+    onMergeTransfer,
 }: {
     transactions: TransactionRow[];
     ledgerPath: string | null;
+    glCategorySuggestions?: Record<string, GlCategoryResult>;
+    onRecategorize?: (txnId: string, newAccount: string) => void;
+    onMergeTransfer?: (txnId1: string, txnId2: string) => void;
 }) {
     const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
     const [lightboxFilename, setLightboxFilename] = useState<string | null>(
@@ -6500,6 +6494,10 @@ function TransactionsTable({
         setLightboxLoading(false);
     }
 
+    const hasActions =
+        onRecategorize !== undefined || onMergeTransfer !== undefined;
+    const colCount = hasActions ? 6 : 5;
+
     return (
         <>
             <table className="ledger-table">
@@ -6510,65 +6508,132 @@ function TransactionsTable({
                         <th>Postings</th>
                         <th>Amount</th>
                         <th>Attachments</th>
+                        {hasActions && <th>Categorize</th>}
                     </tr>
                 </thead>
                 <tbody>
                     {transactions.length === 0 ? (
                         <tr>
-                            <td colSpan={5} className="table-empty">
+                            <td colSpan={colCount} className="table-empty">
                                 No transactions found.
                             </td>
                         </tr>
                     ) : (
-                        transactions.map((txn) => (
-                            <tr key={txn.id}>
-                                <td className="mono">{txn.date}</td>
-                                <td>{txn.description}</td>
-                                <td>
-                                    <PostingsList postings={txn.postings} />
-                                </td>
-                                <td className="amount">
-                                    {formatTotals(txn.totals)}
-                                </td>
-                                <td>
-                                    {txn.evidence.length === 0 ? (
-                                        <span className="text-muted">-</span>
-                                    ) : (
-                                        <div className="evidence-list">
-                                            {txn.evidence.map((evidenceRef) =>
-                                                isImageAttachmentRef(
-                                                    evidenceRef,
-                                                ) ? (
-                                                    <button
-                                                        key={`${txn.id}-${evidenceRef}`}
-                                                        className="evidence-chip evidence-chip-image"
-                                                        type="button"
-                                                        onClick={() => {
-                                                            void handleAttachmentClick(
-                                                                attachmentFilename(
+                        transactions.map((txn) => {
+                            const isUncategorized = txn.postings.some(
+                                (p) => p.account === 'Expenses:Unknown',
+                            );
+                            const glSuggestion = glCategorySuggestions[txn.id];
+                            const transferMatch =
+                                glSuggestion?.transferMatch ?? null;
+                            const suggested = glSuggestion?.suggested ?? null;
+                            return (
+                                <tr
+                                    key={txn.id}
+                                    className={
+                                        isUncategorized
+                                            ? 'row-uncategorized'
+                                            : undefined
+                                    }
+                                >
+                                    <td className="mono">{txn.date}</td>
+                                    <td>{txn.description}</td>
+                                    <td>
+                                        <PostingsList postings={txn.postings} />
+                                    </td>
+                                    <td className="amount">
+                                        {formatTotals(txn.totals)}
+                                    </td>
+                                    <td>
+                                        {txn.evidence.length === 0 ? (
+                                            <span className="text-muted">
+                                                -
+                                            </span>
+                                        ) : (
+                                            <div className="evidence-list">
+                                                {txn.evidence.map(
+                                                    (evidenceRef) =>
+                                                        isImageAttachmentRef(
+                                                            evidenceRef,
+                                                        ) ? (
+                                                            <button
+                                                                key={`${txn.id}-${evidenceRef}`}
+                                                                className="evidence-chip evidence-chip-image"
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    void handleAttachmentClick(
+                                                                        attachmentFilename(
+                                                                            evidenceRef,
+                                                                        ),
+                                                                    );
+                                                                }}
+                                                            >
+                                                                {attachmentFilename(
                                                                     evidenceRef,
-                                                                ),
+                                                                )}
+                                                            </button>
+                                                        ) : (
+                                                            <span
+                                                                key={`${txn.id}-${evidenceRef}`}
+                                                                className="evidence-chip"
+                                                            >
+                                                                {evidenceRef}
+                                                            </span>
+                                                        ),
+                                                )}
+                                            </div>
+                                        )}
+                                    </td>
+                                    {hasActions && (
+                                        <td>
+                                            {transferMatch !== null &&
+                                            onMergeTransfer !== undefined ? (
+                                                <div className="categorize-chip">
+                                                    <span className="text-muted">
+                                                        Transfer ↔{' '}
+                                                        {transferMatch.date}{' '}
+                                                        {
+                                                            transferMatch.description
+                                                        }
+                                                    </span>
+                                                    <button
+                                                        type="button"
+                                                        className="ghost-button"
+                                                        onClick={() => {
+                                                            onMergeTransfer(
+                                                                txn.id,
+                                                                transferMatch.txnId,
                                                             );
                                                         }}
                                                     >
-                                                        {attachmentFilename(
-                                                            evidenceRef,
-                                                        )}
+                                                        Merge
                                                     </button>
-                                                ) : (
-                                                    <span
-                                                        key={`${txn.id}-${evidenceRef}`}
-                                                        className="evidence-chip"
-                                                    >
-                                                        {evidenceRef}
+                                                </div>
+                                            ) : suggested !== null &&
+                                              onRecategorize !== undefined ? (
+                                                <div className="categorize-chip">
+                                                    <span className="text-muted">
+                                                        {suggested}
                                                     </span>
-                                                ),
-                                            )}
-                                        </div>
+                                                    <button
+                                                        type="button"
+                                                        className="ghost-button"
+                                                        onClick={() => {
+                                                            onRecategorize(
+                                                                txn.id,
+                                                                suggested,
+                                                            );
+                                                        }}
+                                                    >
+                                                        Accept
+                                                    </button>
+                                                </div>
+                                            ) : null}
+                                        </td>
                                     )}
-                                </td>
-                            </tr>
-                        ))
+                                </tr>
+                            );
+                        })
                     )}
                 </tbody>
             </table>

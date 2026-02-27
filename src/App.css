@@ -698,6 +698,17 @@ details[open] > .disclosure-summary::before {
     background: #fffdf0;
 }
 
+.row-uncategorized td {
+    background: #fff8e1;
+}
+
+.categorize-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
 .text-muted {
     color: #999;
     font-style: italic;

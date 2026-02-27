@@ -109,6 +109,9 @@ pub fn run_with_context(
             get_unposted_entries_for_transfer,
             sync_gl_transaction,
             suggest_categories,
+            suggest_gl_categories,
+            recategorize_gl_transaction,
+            merge_gl_transfer,
             get_account_config,
             set_account_extension,
             list_logins,
@@ -1326,6 +1329,35 @@ fn suggest_categories(
     let label = require_label_input(label)?;
 
     categorize::suggest_categories(&target_dir, &login_name, &label).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn suggest_gl_categories(
+    ledger: String,
+) -> Result<std::collections::HashMap<String, categorize::GlCategoryResult>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    categorize::suggest_gl_categories(&target_dir).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn recategorize_gl_transaction(
+    ledger: String,
+    txn_id: String,
+    new_account: String,
+) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let txn_id = require_non_empty_input("txn_id", txn_id)?;
+    let new_account = require_non_empty_input("new_account", new_account)?;
+    post::recategorize_gl_transaction(&target_dir, &txn_id, &new_account)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn merge_gl_transfer(ledger: String, txn_id_1: String, txn_id_2: String) -> Result<String, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let txn_id_1 = require_non_empty_input("txn_id_1", txn_id_1)?;
+    let txn_id_2 = require_non_empty_input("txn_id_2", txn_id_2)?;
+    post::merge_gl_transfer(&target_dir, &txn_id_1, &txn_id_2).map_err(|err| err.to_string())
 }
 
 fn map_account_journal_entries(

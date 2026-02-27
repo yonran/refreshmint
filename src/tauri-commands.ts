@@ -500,6 +500,43 @@ export async function suggestCategories(
     return invoke('suggest_categories', { ledger, loginName, label });
 }
 
+export interface GlTransferMatch {
+    /** GL transaction ID of the matched counterpart. */
+    txnId: string;
+    description: string;
+    date: string;
+    matchedAmount: string;
+}
+
+export interface GlCategoryResult {
+    /** ML-suggested replacement for `Expenses:Unknown`, or null. */
+    suggested: string | null;
+    /** Auto-detected transfer pair among other Expenses:Unknown GL txns. */
+    transferMatch: GlTransferMatch | null;
+}
+
+export async function suggestGlCategories(
+    ledger: string,
+): Promise<Record<string, GlCategoryResult>> {
+    return invoke('suggest_gl_categories', { ledger });
+}
+
+export async function recategorizeGlTransaction(
+    ledger: string,
+    txnId: string,
+    newAccount: string,
+): Promise<void> {
+    await invoke('recategorize_gl_transaction', { ledger, txnId, newAccount });
+}
+
+export async function mergeGlTransfer(
+    ledger: string,
+    txnId1: string,
+    txnId2: string,
+): Promise<string> {
+    return invoke('merge_gl_transfer', { ledger, txnId1, txnId2 });
+}
+
 export interface AccountConfig {
     extension?: string;
 }

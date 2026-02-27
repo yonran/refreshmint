@@ -979,6 +979,18 @@ fn append_to_journal(journal_path: &Path, text: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Parse a `logins/{login}/accounts/{label}` locator into `(login, label)`.
+fn locator_to_login_label(locator: &str) -> Option<(&str, &str)> {
+    let rest = locator.strip_prefix("logins/")?;
+    let pos = rest.find("/accounts/")?;
+    let login = &rest[..pos];
+    let label = &rest[pos + "/accounts/".len()..];
+    if login.is_empty() || label.is_empty() {
+        return None;
+    }
+    Some((login, label))
+}
+
 /// Remove a GL transaction from general.journal by its ID.
 ///
 /// Finds the transaction with `; id: <gl_txn_id>` and removes it.
@@ -1192,6 +1204,210 @@ fn split_journal_blocks(content: &str) -> Vec<String> {
     }
 
     blocks
+}
+
+/// Replace `Expenses:Unknown` with `new_account` in an existing GL transaction.
+///
+/// Finds the block by `txn_id`, replaces the auto-balanced `Expenses:Unknown`
+/// posting line (no explicit amount), writes the updated file, and commits.
+pub fn recategorize_gl_transaction(
+    ledger_dir: &Path,
+    txn_id: &str,
+    new_account: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let journal_path = ledger_dir.join("general.journal");
+    let content = fs::read_to_string(&journal_path)?;
+    let marker = format!("id: {txn_id}");
+    let mut found = false;
+
+    let blocks: Vec<String> = split_journal_blocks(&content)
+        .into_iter()
+        .map(|block| {
+            if !found && block.contains(&marker) {
+                found = true;
+                // Replace the bare `Expenses:Unknown` posting line.
+                let new_block: String = block
+                    .lines()
+                    .map(|line| {
+                        let is_indented = line.starts_with(' ') || line.starts_with('\t');
+                        if is_indented && line.trim() == "Expenses:Unknown" {
+                            let indent: String =
+                                line.chars().take_while(|c| c.is_whitespace()).collect();
+                            format!("{indent}{new_account}")
+                        } else {
+                            line.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                new_block.trim_end().to_string()
+            } else {
+                block
+            }
+        })
+        .collect();
+
+    if !found {
+        return Err(format!("GL transaction not found: {txn_id}").into());
+    }
+
+    let mut final_content = blocks.join("\n\n");
+    if !final_content.is_empty() {
+        final_content.push('\n');
+    }
+    fs::write(&journal_path, final_content)?;
+
+    let commit_msg = format!("recategorize: {txn_id} → {new_account}");
+    if let Err(err) = crate::ledger::commit_general_journal(ledger_dir, &commit_msg) {
+        eprintln!("warning: git commit failed after recategorize: {err}");
+    }
+
+    Ok(())
+}
+
+/// Merge two `Expenses:Unknown` GL transactions into a single transfer transaction.
+///
+/// Both transactions must each have exactly one `; source:` tag pointing to a
+/// login account journal entry.  The function:
+/// 1. Removes both old GL blocks
+/// 2. Appends a new two-posting transfer transaction
+/// 3. Updates each source account entry's `posted:` ref to the new ID
+/// 4. Commits all changed files
+///
+/// Returns the new GL transaction ID.
+pub fn merge_gl_transfer(
+    ledger_dir: &Path,
+    txn_id_1: &str,
+    txn_id_2: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if txn_id_1 == txn_id_2 {
+        return Err("cannot merge a transaction with itself".into());
+    }
+
+    // 1. Find both GL blocks.
+    let block1 = find_gl_block(ledger_dir, txn_id_1)?
+        .ok_or_else(|| format!("GL transaction not found: {txn_id_1}"))?;
+    let block2 = find_gl_block(ledger_dir, txn_id_2)?
+        .ok_or_else(|| format!("GL transaction not found: {txn_id_2}"))?;
+
+    // 2. Parse sources (expect exactly one each).
+    let sources1 = parse_sources_from_block(&block1);
+    let sources2 = parse_sources_from_block(&block2);
+    let (locator1, entry_id1) = sources1
+        .into_iter()
+        .next()
+        .ok_or("GL transaction 1 has no source tag")?;
+    let (locator2, entry_id2) = sources2
+        .into_iter()
+        .next()
+        .ok_or("GL transaction 2 has no source tag")?;
+
+    // 3. Resolve journal paths and load entries.
+    let path1 = journal_path_for_locator(ledger_dir, &locator1)
+        .ok_or_else(|| format!("unknown source locator: {locator1}"))?;
+    let path2 = journal_path_for_locator(ledger_dir, &locator2)
+        .ok_or_else(|| format!("unknown source locator: {locator2}"))?;
+
+    let same_file = path1 == path2;
+
+    let mut entries1 = account_journal::read_journal_at_path(&path1)?;
+    let original_entries1 = entries1.clone();
+    let idx1 = entries1
+        .iter()
+        .position(|e| e.id == entry_id1)
+        .ok_or_else(|| format!("entry {entry_id1} not found in {locator1}"))?;
+
+    let mut entries2;
+    let original_entries2;
+    let idx2;
+    if same_file {
+        entries2 = entries1.clone();
+        original_entries2 = original_entries1.clone();
+        idx2 = entries2
+            .iter()
+            .position(|e| e.id == entry_id2)
+            .ok_or_else(|| format!("entry {entry_id2} not found in {locator2}"))?;
+    } else {
+        let loaded = account_journal::read_journal_at_path(&path2)?;
+        original_entries2 = loaded.clone();
+        idx2 = loaded
+            .iter()
+            .position(|e| e.id == entry_id2)
+            .ok_or_else(|| format!("entry {entry_id2} not found in {locator2}"))?;
+        entries2 = loaded;
+    }
+
+    // 4. Generate new UUID.
+    let new_uuid = uuid::Uuid::new_v4().to_string();
+
+    // 5. Build merged transfer GL text using the two account entries.
+    let gl_text = format_transfer_gl_transaction(
+        &entries1[idx1],
+        &locator1,
+        &entries2[idx2],
+        &locator2,
+        &new_uuid,
+    );
+
+    // 6. Compute new GL content: remove both old blocks, append merged.
+    let gl_journal_path = ledger_dir.join("general.journal");
+    let original_gl_content = fs::read_to_string(&gl_journal_path)?;
+    let marker1 = format!("id: {txn_id_1}");
+    let marker2 = format!("id: {txn_id_2}");
+    let kept_blocks: Vec<String> = split_journal_blocks(&original_gl_content)
+        .into_iter()
+        .filter(|block| !block.contains(&marker1) && !block.contains(&marker2))
+        .collect();
+    let mut new_gl_content = kept_blocks.join("\n\n");
+    if !new_gl_content.is_empty() {
+        new_gl_content.push_str("\n\n");
+    }
+    new_gl_content.push_str(&gl_text);
+
+    // 7. Update posted refs in account entries.
+    let new_gl_ref = format!("general.journal:{new_uuid}");
+    entries1[idx1].posted = Some(new_gl_ref.clone());
+    if same_file {
+        entries1[idx2].posted = Some(new_gl_ref);
+    } else {
+        entries2[idx2].posted = Some(new_gl_ref);
+    }
+
+    // 8. Write account journals first, then general.journal.
+    account_journal::write_journal_at_path(&path1, &entries1)?;
+    if !same_file {
+        if let Err(err) = account_journal::write_journal_at_path(&path2, &entries2) {
+            let _ = account_journal::write_journal_at_path(&path1, &original_entries1);
+            return Err(err.into());
+        }
+    }
+    if let Err(err) = fs::write(&gl_journal_path, &new_gl_content) {
+        let _ = account_journal::write_journal_at_path(&path1, &original_entries1);
+        if !same_file {
+            let _ = account_journal::write_journal_at_path(&path2, &original_entries2);
+        }
+        return Err(err.into());
+    }
+
+    // 9. Commit all changed files.
+    let commit_msg = format!("merge transfer: {txn_id_1} + {txn_id_2} → {new_uuid}");
+    let commit_result = match (
+        locator_to_login_label(&locator1),
+        locator_to_login_label(&locator2),
+    ) {
+        (Some((ln1, lb1)), Some((ln2, lb2))) => {
+            crate::ledger::commit_transfer_changes(ledger_dir, ln1, lb1, ln2, lb2, &commit_msg)
+        }
+        (Some((ln1, lb1)), None) => {
+            crate::ledger::commit_post_changes(ledger_dir, ln1, lb1, &commit_msg)
+        }
+        _ => crate::ledger::commit_general_journal(ledger_dir, &commit_msg),
+    };
+    if let Err(err) = commit_result {
+        eprintln!("warning: git commit failed after merge_gl_transfer: {err}");
+    }
+
+    Ok(new_uuid)
 }
 
 #[cfg(test)]
