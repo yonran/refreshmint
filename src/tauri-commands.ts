@@ -265,6 +265,13 @@ export async function listLoginAccountDocuments(
     return invoke('list_login_account_documents', { ledger, loginName, label });
 }
 
+export async function readAttachmentDataUrl(
+    ledger: string,
+    filename: string,
+): Promise<string> {
+    return invoke('read_attachment_data_url', { ledger, filename });
+}
+
 export async function readLoginAccountDocumentRows(
     ledger: string,
     loginName: string,

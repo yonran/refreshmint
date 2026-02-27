@@ -38,6 +38,7 @@ import {
     type LoginConfig,
     listLoginAccountDocuments,
     listLoginSecrets,
+    readAttachmentDataUrl,
     readLoginAccountDocumentRows,
     listLogins,
     listScrapeExtensions,
@@ -3879,6 +3880,7 @@ function App() {
                             <div className="table-wrap">
                                 <TransactionsTable
                                     transactions={filteredTransactions}
+                                    ledgerPath={ledgerPath}
                                 />
                             </div>
                         </div>
@@ -4737,6 +4739,7 @@ function App() {
                                     <div className="table-wrap">
                                         <TransactionsTable
                                             transactions={pipelineGlRows}
+                                            ledgerPath={ledgerPath}
                                         />
                                     </div>
                                 )}
@@ -6446,61 +6449,170 @@ function AccountsTable({
     );
 }
 
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
+
+function isImageAttachmentRef(ref: string): boolean {
+    if (!ref.endsWith('#attachment')) return false;
+    const filename = ref.slice(0, -'#attachment'.length);
+    return IMAGE_EXTENSIONS.some((ext) => filename.toLowerCase().endsWith(ext));
+}
+
+function attachmentFilename(ref: string): string {
+    return ref.endsWith('#attachment')
+        ? ref.slice(0, -'#attachment'.length)
+        : ref;
+}
+
 function TransactionsTable({
     transactions,
+    ledgerPath,
 }: {
     transactions: TransactionRow[];
+    ledgerPath: string | null;
 }) {
+    const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+    const [lightboxFilename, setLightboxFilename] = useState<string | null>(
+        null,
+    );
+    const [lightboxLoading, setLightboxLoading] = useState(false);
+    const [lightboxError, setLightboxError] = useState<string | null>(null);
+
+    async function handleAttachmentClick(filename: string) {
+        if (ledgerPath === null) return;
+        setLightboxFilename(filename);
+        setLightboxSrc(null);
+        setLightboxError(null);
+        setLightboxLoading(true);
+        try {
+            const src = await readAttachmentDataUrl(ledgerPath, filename);
+            setLightboxSrc(src);
+        } catch (e) {
+            setLightboxError(String(e));
+        } finally {
+            setLightboxLoading(false);
+        }
+    }
+
+    function closeLightbox() {
+        setLightboxSrc(null);
+        setLightboxFilename(null);
+        setLightboxError(null);
+        setLightboxLoading(false);
+    }
+
     return (
-        <table className="ledger-table">
-            <thead>
-                <tr>
-                    <th>Date</th>
-                    <th>Description</th>
-                    <th>Postings</th>
-                    <th>Amount</th>
-                    <th>Attachments</th>
-                </tr>
-            </thead>
-            <tbody>
-                {transactions.length === 0 ? (
+        <>
+            <table className="ledger-table">
+                <thead>
                     <tr>
-                        <td colSpan={5} className="table-empty">
-                            No transactions found.
-                        </td>
+                        <th>Date</th>
+                        <th>Description</th>
+                        <th>Postings</th>
+                        <th>Amount</th>
+                        <th>Attachments</th>
                     </tr>
-                ) : (
-                    transactions.map((txn) => (
-                        <tr key={txn.id}>
-                            <td className="mono">{txn.date}</td>
-                            <td>{txn.description}</td>
-                            <td>
-                                <PostingsList postings={txn.postings} />
-                            </td>
-                            <td className="amount">
-                                {formatTotals(txn.totals)}
-                            </td>
-                            <td>
-                                {txn.evidence.length === 0 ? (
-                                    <span className="text-muted">-</span>
-                                ) : (
-                                    <div className="evidence-list">
-                                        {txn.evidence.map((evidenceRef) => (
-                                            <span
-                                                key={`${txn.id}-${evidenceRef}`}
-                                                className="evidence-chip"
-                                            >
-                                                {evidenceRef}
-                                            </span>
-                                        ))}
-                                    </div>
-                                )}
+                </thead>
+                <tbody>
+                    {transactions.length === 0 ? (
+                        <tr>
+                            <td colSpan={5} className="table-empty">
+                                No transactions found.
                             </td>
                         </tr>
-                    ))
-                )}
-            </tbody>
-        </table>
+                    ) : (
+                        transactions.map((txn) => (
+                            <tr key={txn.id}>
+                                <td className="mono">{txn.date}</td>
+                                <td>{txn.description}</td>
+                                <td>
+                                    <PostingsList postings={txn.postings} />
+                                </td>
+                                <td className="amount">
+                                    {formatTotals(txn.totals)}
+                                </td>
+                                <td>
+                                    {txn.evidence.length === 0 ? (
+                                        <span className="text-muted">-</span>
+                                    ) : (
+                                        <div className="evidence-list">
+                                            {txn.evidence.map((evidenceRef) =>
+                                                isImageAttachmentRef(
+                                                    evidenceRef,
+                                                ) ? (
+                                                    <button
+                                                        key={`${txn.id}-${evidenceRef}`}
+                                                        className="evidence-chip evidence-chip-image"
+                                                        type="button"
+                                                        onClick={() => {
+                                                            void handleAttachmentClick(
+                                                                attachmentFilename(
+                                                                    evidenceRef,
+                                                                ),
+                                                            );
+                                                        }}
+                                                    >
+                                                        {attachmentFilename(
+                                                            evidenceRef,
+                                                        )}
+                                                    </button>
+                                                ) : (
+                                                    <span
+                                                        key={`${txn.id}-${evidenceRef}`}
+                                                        className="evidence-chip"
+                                                    >
+                                                        {evidenceRef}
+                                                    </span>
+                                                ),
+                                            )}
+                                        </div>
+                                    )}
+                                </td>
+                            </tr>
+                        ))
+                    )}
+                </tbody>
+            </table>
+            {(lightboxLoading ||
+                lightboxSrc !== null ||
+                lightboxError !== null) && (
+                <div
+                    className="modal-overlay"
+                    onClick={closeLightbox}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label={lightboxFilename ?? 'Attachment'}
+                >
+                    <div
+                        className="modal-dialog attachment-lightbox"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                        }}
+                    >
+                        <div className="modal-header">
+                            <h3>{lightboxFilename}</h3>
+                            <button
+                                type="button"
+                                onClick={closeLightbox}
+                                className="ghost-button"
+                            >
+                                Close
+                            </button>
+                        </div>
+                        {lightboxLoading ? (
+                            <p className="status">Loading…</p>
+                        ) : lightboxError !== null ? (
+                            <p className="status">{lightboxError}</p>
+                        ) : lightboxSrc !== null ? (
+                            <img
+                                src={lightboxSrc}
+                                alt={lightboxFilename ?? 'attachment'}
+                                className="attachment-image"
+                            />
+                        ) : null}
+                    </div>
+                </div>
+            )}
+        </>
     );
 }
 

@@ -612,6 +612,32 @@ details[open] > .disclosure-summary::before {
     white-space: nowrap;
 }
 
+.evidence-chip-image {
+    cursor: pointer;
+    color: #2563eb;
+    text-decoration: underline;
+}
+
+.evidence-chip-image:hover {
+    background: #eff6ff;
+    border-color: #bfdbfe;
+}
+
+.attachment-lightbox {
+    width: min(90vw, 1200px);
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.attachment-image {
+    max-width: 100%;
+    max-height: calc(90vh - 4rem);
+    object-fit: contain;
+    display: block;
+    margin: 0 auto;
+}
+
 .pipeline-subtabs {
     margin-top: 0.5rem;
     margin-bottom: 0.5rem;

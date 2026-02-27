@@ -917,6 +917,93 @@ pub struct DocumentWithInfo {
     pub info: Option<crate::scrape::DocumentInfo>,
 }
 
+/// Return the MIME type for a recognised image filename, or `None` for other files.
+fn image_mime_type(filename: &str) -> Option<&'static str> {
+    let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        Some("image/jpeg")
+    } else if lower.ends_with(".png") {
+        Some("image/png")
+    } else if lower.ends_with(".gif") {
+        Some("image/gif")
+    } else if lower.ends_with(".webp") {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let combined = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[((combined >> 18) & 0x3f) as usize] as char);
+        result.push(CHARS[((combined >> 12) & 0x3f) as usize] as char);
+        result.push(if chunk.len() > 1 {
+            CHARS[((combined >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        result.push(if chunk.len() > 2 {
+            CHARS[(combined & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    result
+}
+
+/// Search for an attachment file by bare filename across all login-account and
+/// legacy account document directories within the ledger.
+pub fn find_attachment_path(ledger_dir: &Path, filename: &str) -> Option<std::path::PathBuf> {
+    // logins/<login>/accounts/<label>/documents/<filename>
+    let logins_dir = ledger_dir.join("logins");
+    if let Ok(logins) = std::fs::read_dir(&logins_dir) {
+        for login_entry in logins.flatten() {
+            let accounts_dir = login_entry.path().join("accounts");
+            if let Ok(accounts) = std::fs::read_dir(&accounts_dir) {
+                for account_entry in accounts.flatten() {
+                    let candidate = account_entry.path().join("documents").join(filename);
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+    // accounts/<account>/documents/<filename>  (legacy layout)
+    let accounts_dir = ledger_dir.join("accounts");
+    if let Ok(accounts) = std::fs::read_dir(&accounts_dir) {
+        for account_entry in accounts.flatten() {
+            let candidate = account_entry.path().join("documents").join(filename);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Read an image attachment and return it as a `data:<mime>;base64,...` URL.
+///
+/// Returns an error if the filename extension is not a recognised image type or
+/// the file cannot be found in the ledger's document directories.
+pub fn read_attachment_data_url(
+    ledger_dir: &Path,
+    filename: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mime = image_mime_type(filename)
+        .ok_or_else(|| format!("unsupported attachment type: {filename}"))?;
+    let path = find_attachment_path(ledger_dir, filename)
+        .ok_or_else(|| format!("attachment not found: {filename}"))?;
+    let bytes = std::fs::read(&path)?;
+    Ok(format!("data:{mime};base64,{}", base64_encode(&bytes)))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
