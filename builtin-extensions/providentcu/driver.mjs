@@ -2,7 +2,6 @@
  * Provident Credit Union scraper for Refreshmint.
  * Downloads all available statements and account activity CSVs from Provident Credit Union.
  */
-import { inspect } from '../_shared/refreshmint-util.mjs';
 
 /**
  * @typedef {object} ScrapeContext
@@ -29,6 +28,20 @@ const SUMMARY_URL = `${BASE_URL}/ProvidentOnlineBanking/Accounts/AccountSummary.
 // Configuration for efficient scraping and debugging
 const DOWNLOAD_LIMIT = null; // Set to number to limit downloads per run
 const SKIP_BEFORE_DATE = null; // Format: YYYY-MM-DD e.g. "2026-01-01"
+
+function inspect(value) {
+    if (value instanceof Error) {
+        if (typeof value.stack === 'string' && value.stack.length > 0) {
+            return value.stack;
+        }
+        return `${value.name || 'Error'}: ${value.message || ''}`;
+    }
+    try {
+        return JSON.stringify(value);
+    } catch {
+        return String(value);
+    }
+}
 
 async function waitMs(page, ms) {
     await page.evaluate(`new Promise(r => setTimeout(r, ${ms}))`);
@@ -62,6 +75,14 @@ async function humanPace(page, minMs, maxMs) {
     const delta = maxMs - minMs;
     const ms = minMs + Math.floor(Math.random() * (delta + 1));
     await waitMs(page, ms);
+}
+
+async function navigateToSignIn(page) {
+    await page.goto(SIGN_IN_URL, {
+        waitUntil: 'domcontentloaded',
+        timeout: 90000,
+    });
+    await page.waitForSelector('input[id$="txtLoginName"]', 90000);
 }
 
 /**
@@ -226,12 +247,266 @@ async function handleAccountSummary(context) {
 }
 
 function getLabel(accountMatch) {
-    // e.g. "Super Reward Checking x6590" -> "super_reward_checking_6590"
-    return accountMatch
+    const raw = String(accountMatch || '');
+    const compact = raw.replace(/\s+/g, ' ').trim();
+    const last4Match = compact.match(/x\s*(\d{4})/i);
+    const last4 = last4Match == null ? null : last4Match[1];
+
+    const withoutAvailability = compact.replace(/available.*$/i, ' ');
+    const withoutAmounts = withoutAvailability.replace(
+        /\$[\d,]+(?:\.\d{2})?/g,
+        ' ',
+    );
+    const withoutAccountNumber = withoutAmounts.replace(
+        /x\s*\d{4}[a-z]*/gi,
+        ' ',
+    );
+    const normalizedName = withoutAccountNumber
+        .replace(/[-–—]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const base = slugify(normalizedName || compact || 'account');
+    if (last4 == null) {
+        return base;
+    }
+    return `${base}_${last4}`;
+}
+
+function slugify(value) {
+    return value
         .toLowerCase()
-        .replace(/x(\d{4})/, '$1')
         .replace(/[^a-z0-9]+/g, '_')
         .replace(/^_+|_+$/g, '');
+}
+
+function makeActivityFilename(
+    accountKey,
+    dateRange,
+    coverageStartDate,
+    coverageEndDate,
+) {
+    const safeAccount = slugify(accountKey);
+    const safeRange = slugify(dateRange);
+    const safeStart = coverageStartDate || 'unknown_start';
+    const safeEnd = coverageEndDate || 'unknown_end';
+    return `activity-${safeAccount}-${safeRange}-${safeStart}-to-${safeEnd}.csv`;
+}
+
+function hasSavedDocument(existingFilenames, coverageEndDate, filename) {
+    if (
+        coverageEndDate == null ||
+        coverageEndDate.trim() === '' ||
+        filename.trim() === ''
+    ) {
+        return false;
+    }
+    const datedName = `${coverageEndDate}-${filename}`;
+    if (existingFilenames.has(datedName)) {
+        return true;
+    }
+
+    const dot = filename.lastIndexOf('.');
+    const stem = dot >= 0 ? filename.slice(0, dot) : filename;
+    const ext = dot >= 0 ? filename.slice(dot) : '';
+    const collisionPrefix = `${coverageEndDate}-${stem}-`;
+
+    for (const existing of existingFilenames) {
+        if (
+            existing.startsWith(collisionPrefix) &&
+            existing.endsWith(ext) &&
+            existing.length > collisionPrefix.length + ext.length
+        ) {
+            const suffix = existing.slice(
+                collisionPrefix.length,
+                existing.length - ext.length,
+            );
+            if (/^\d+$/.test(suffix)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+async function getHistoryDateRangeOptions(page) {
+    for (let attempt = 0; attempt < 10; attempt++) {
+        const optionsJson = /** @type {string} */ (
+            await page.evaluate(`(function() {
+                const host = document.querySelector('.IDS-Banking-Retail-Web-React-TransactionHistoryModule');
+                if (!host) return "[]";
+
+                const searchBtn = Array.from(host.querySelectorAll('button')).find(btn =>
+                    btn.classList.contains('icon-search') && (btn.textContent || '').trim() === 'Search'
+                );
+                if (!searchBtn) return "[]";
+                if (searchBtn.getAttribute('aria-expanded') !== 'true') {
+                    searchBtn.click();
+                }
+
+                const section = host.querySelector('.expandable-container-section');
+                if (!section) return "[]";
+                const dateGroup = Array.from(section.querySelectorAll('.field-group')).find(group =>
+                    /Date Range/i.test(group.textContent || '')
+                );
+                if (!dateGroup) return "[]";
+                const dateButton = dateGroup.querySelector('button[role="combobox"]');
+                if (!dateButton) return "[]";
+
+                if (dateButton.getAttribute('aria-expanded') !== 'true') {
+                    dateButton.click();
+                }
+
+                const optionButtons = Array.from(dateGroup.querySelectorAll('button[role="option"]'));
+                const options = optionButtons
+                    .map(btn => (btn.textContent || '').trim())
+                    .filter(Boolean);
+
+                if (dateButton.getAttribute('aria-expanded') === 'true') {
+                    dateButton.click();
+                }
+
+                return JSON.stringify([...new Set(options)]);
+            })()`)
+        );
+        const parsed = JSON.parse(optionsJson);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+            return parsed;
+        }
+        await waitMs(page, 300);
+    }
+    return [];
+}
+
+async function setHistoryDateRange(page, dateRange) {
+    for (let attempt = 0; attempt < 10; attempt++) {
+        const resultJson = /** @type {string} */ (
+            await page.evaluate(`(function(targetRange) {
+                const host = document.querySelector('.IDS-Banking-Retail-Web-React-TransactionHistoryModule');
+                if (!host) return JSON.stringify({ ok: false, reason: 'history module missing' });
+
+                const searchBtn = Array.from(host.querySelectorAll('button')).find(btn =>
+                    btn.classList.contains('icon-search') && (btn.textContent || '').trim() === 'Search'
+                );
+                if (!searchBtn) return JSON.stringify({ ok: false, reason: 'search button missing' });
+                if (searchBtn.getAttribute('aria-expanded') !== 'true') {
+                    searchBtn.click();
+                }
+
+                const section = host.querySelector('.expandable-container-section');
+                if (!section) return JSON.stringify({ ok: false, reason: 'search section missing' });
+
+                const dateGroup = Array.from(section.querySelectorAll('.field-group')).find(group =>
+                    /Date Range/i.test(group.textContent || '')
+                );
+                if (!dateGroup) return JSON.stringify({ ok: false, reason: 'date range group missing' });
+
+                const dateButton = dateGroup.querySelector('button[role="combobox"]');
+                if (!dateButton) return JSON.stringify({ ok: false, reason: 'date range button missing' });
+
+                if (dateButton.getAttribute('aria-expanded') !== 'true') {
+                    dateButton.click();
+                }
+
+                const optionButtons = Array.from(dateGroup.querySelectorAll('button[role="option"]'));
+                const targetOption = optionButtons.find(btn => (btn.textContent || '').trim() === targetRange);
+                if (!targetOption) {
+                    if (dateButton.getAttribute('aria-expanded') === 'true') {
+                        dateButton.click();
+                    }
+                    return JSON.stringify({ ok: false, reason: 'target date range missing' });
+                }
+                targetOption.click();
+
+                const searchSubmit = Array.from(section.querySelectorAll('button')).find(btn =>
+                    btn.classList.contains('btn-primary') && (btn.textContent || '').trim() === 'Search'
+                );
+                if (!searchSubmit) {
+                    return JSON.stringify({ ok: false, reason: 'search submit missing' });
+                }
+                searchSubmit.click();
+                return JSON.stringify({ ok: true });
+            })(${JSON.stringify(dateRange)})`)
+        );
+        const result = JSON.parse(resultJson);
+        if (result.ok) {
+            return true;
+        }
+        await waitMs(page, 300);
+    }
+    return false;
+}
+
+async function getHistoryCoverage(page) {
+    const infoJson = /** @type {string} */ (
+        await page.evaluate(`(function() {
+            const host = document.querySelector('.IDS-Banking-Retail-Web-React-TransactionHistoryModule');
+            if (!host) return JSON.stringify({
+                criteria: '',
+                rowCount: 0,
+                coverageStartDate: null,
+                coverageEndDate: null
+            });
+
+            const toIso = function(usDate) {
+                const m = usDate.match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);
+                if (!m) return null;
+                return m[3] + '-' + m[1] + '-' + m[2];
+            };
+
+            const rows = Array.from(host.querySelectorAll('tbody tr.item-row'));
+            const isoDates = [];
+            for (const row of rows) {
+                const dateCell = row.cells[1];
+                if (!dateCell) continue;
+                const matches = (dateCell.textContent || '').match(/\\d{2}\\/\\d{2}\\/\\d{4}/g) || [];
+                for (const m of matches) {
+                    const iso = toIso(m);
+                    if (iso) isoDates.push(iso);
+                }
+            }
+            isoDates.sort();
+
+            return JSON.stringify({
+                criteria: (host.querySelector('.search-criteria-text')?.textContent || '').trim(),
+                rowCount: rows.length,
+                coverageStartDate: isoDates.length > 0 ? isoDates[0] : null,
+                coverageEndDate: isoDates.length > 0 ? isoDates[isoDates.length - 1] : null
+            });
+        })()`)
+    );
+    return JSON.parse(infoJson);
+}
+
+async function downloadHistoryCsv(page) {
+    const clickedDownload = await page.evaluate(`(function() {
+        const host = document.querySelector('.IDS-Banking-Retail-Web-React-TransactionHistoryModule');
+        if (!host) return false;
+        const btn = host.querySelector('.module-actions-container button.icon-download');
+        if (!btn) return false;
+        btn.click();
+        return true;
+    })()`);
+    if (!assertBoolean(clickedDownload)) {
+        throw new Error('history download button not found');
+    }
+
+    await waitMs(page, 300);
+    const downloadPromise = page.waitForDownload(15000);
+    const clickedSpreadsheet = await page.evaluate(`(function() {
+        const host = document.querySelector('.IDS-Banking-Retail-Web-React-TransactionHistoryModule');
+        if (!host) return false;
+        const buttons = Array.from(host.querySelectorAll('button'));
+        const btn = buttons.find(b => (b.textContent || '').trim() === 'Spreadsheet');
+        if (!btn) return false;
+        btn.click();
+        return true;
+    })()`);
+    if (!assertBoolean(clickedSpreadsheet)) {
+        throw new Error('spreadsheet option not found');
+    }
+    return downloadPromise;
 }
 
 /**
@@ -247,48 +522,110 @@ async function handleAccountActivity(context) {
     );
 
     await waitForBusy(page);
-    await page.waitForSelector('button.icon-download', undefined);
-    await page.click('button.icon-download');
-    await waitMs(page, 1000);
+    const existingDocsJson = await refreshmint.listAccountDocuments({ label });
+    const existingDocs = JSON.parse(existingDocsJson || '[]');
+    const existingFilenames = new Set(existingDocs.map((d) => d.filename));
 
-    refreshmint.log('  Clicking Spreadsheet button...');
-    const clickedSpreadsheet = await page.evaluate(`(function() {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const btn = buttons.find(b => b.textContent.trim() === "Spreadsheet");
-            if (btn) {
-                btn.click();
-                return true;
-            }
-            return false;
-        })()`);
+    const availableDateRanges = await getHistoryDateRangeOptions(page);
+    const preferredDateRanges = [
+        'Last 30 Days',
+        'Last 60 Days',
+        'Last 90 Days',
+        'Last 120 Days',
+        'All',
+    ];
+    const targetDateRanges = preferredDateRanges.filter((range) =>
+        availableDateRanges.includes(range),
+    );
 
-    if (assertBoolean(clickedSpreadsheet)) {
-        try {
-            refreshmint.log('  Waiting for CSV download...');
-            const dl = await page.waitForDownload(15000);
-            const date = new Date().toISOString().split('T')[0];
-            const sanitizedAcc = accountMatch.replace(/[^a-zA-Z0-9]/g, '_');
-            const filename = `activity-${sanitizedAcc}-${date}.csv`;
+    if (targetDateRanges.length === 0) {
+        refreshmint.log(
+            `  No supported date ranges found for ${accountMatch}; available=${inspect(availableDateRanges)}`,
+        );
+    }
 
-            await refreshmint.saveDownloadedResource(
-                dl.path,
-                'transactions/' + filename,
-                {
-                    mimeType: 'text/csv',
-                    label,
-                },
+    const activityStats = {
+        attempted: targetDateRanges.length,
+        downloaded: 0,
+        skippedExisting: 0,
+        skippedNoRows: 0,
+        setRangeFailed: 0,
+        downloadFailed: 0,
+    };
+
+    for (const dateRange of targetDateRanges) {
+        refreshmint.log(`  Processing activity range: ${dateRange}`);
+        const setRangeOk = await setHistoryDateRange(page, dateRange);
+        if (!setRangeOk) {
+            activityStats.setRangeFailed++;
+            refreshmint.log(`  Failed to set range: ${dateRange}`);
+            continue;
+        }
+
+        await waitForBusy(page);
+        await waitMs(page, 1000);
+
+        const coverage = await getHistoryCoverage(page);
+        const filename = makeActivityFilename(
+            label,
+            dateRange,
+            coverage.coverageStartDate,
+            coverage.coverageEndDate,
+        );
+
+        if (coverage.rowCount === 0) {
+            activityStats.skippedNoRows++;
+            refreshmint.log(
+                `  No rows for range ${dateRange}; skipping export.`,
             );
+            continue;
+        }
+
+        if (
+            hasSavedDocument(
+                existingFilenames,
+                coverage.coverageEndDate,
+                filename,
+            )
+        ) {
+            activityStats.skippedExisting++;
+            refreshmint.log(
+                `  CSV already exists for range ${dateRange}: ${filename}`,
+            );
+            continue;
+        }
+
+        try {
+            refreshmint.log(
+                `  Downloading CSV for range ${dateRange} (criteria: ${coverage.criteria})...`,
+            );
+            const dl = await downloadHistoryCsv(page);
+            await refreshmint.saveDownloadedResource(dl.path, filename, {
+                mimeType: 'text/csv',
+                label,
+                coverageStartDate: coverage.coverageStartDate,
+                coverageEndDate: coverage.coverageEndDate,
+            });
+            activityStats.downloaded++;
+            if (coverage.coverageEndDate != null) {
+                existingFilenames.add(
+                    `${coverage.coverageEndDate}-${filename}`,
+                );
+            }
             refreshmint.log(
                 `  Downloaded and saved: ${filename} to label ${label}`,
             );
         } catch (e) {
+            activityStats.downloadFailed++;
             refreshmint.log(
-                `  Failed to download CSV for ${accountMatch}: ${String(e)}`,
+                `  Failed CSV download for range ${dateRange}: ${String(e)}`,
             );
         }
-    } else {
-        refreshmint.log('  Spreadsheet button not found!');
     }
+
+    refreshmint.log(
+        `  Activity summary (${label}): attempted=${activityStats.attempted}, downloaded=${activityStats.downloaded}, existing=${activityStats.skippedExisting}, noRows=${activityStats.skippedNoRows}, setRangeFailed=${activityStats.setRangeFailed}, downloadFailed=${activityStats.downloadFailed}`,
+    );
 
     context.completedAccounts.add(context.pendingAccounts.shift());
     refreshmint.log('Navigating back to Account Summary...');
@@ -337,18 +674,29 @@ async function handleStatements(context) {
     const sections = JSON.parse(linksJson);
     refreshmint.log(`Found ${sections.length} statement sections`);
 
-    const existingDocsJson = await refreshmint.listAccountDocuments();
-    const existingDocs = JSON.parse(existingDocsJson || '[]');
-    const existingFilenames = new Set(existingDocs.map((d) => d.filename));
-
     let totalDownloaded = 0;
 
     for (const section of sections) {
+        const sectionAccountLast4Match = String(
+            section.accountNumber || '',
+        ).match(/(\d{4})$/);
+        const sectionAccountLast4 =
+            sectionAccountLast4Match == null
+                ? null
+                : sectionAccountLast4Match[1];
         const label = getLabel(
             `${section.name} x${section.accountNumber.slice(-4)}`,
         );
         refreshmint.log(
             `Processing section: ${section.name} ${section.accountNumber} (label: ${label})`,
+        );
+
+        const sectionExistingDocsJson = await refreshmint.listAccountDocuments({
+            label,
+        });
+        const sectionExistingDocs = JSON.parse(sectionExistingDocsJson || '[]');
+        const existingFilenames = new Set(
+            sectionExistingDocs.map((d) => d.filename),
         );
 
         await page.evaluate(`(function(dialogId) {
@@ -377,22 +725,74 @@ async function handleStatements(context) {
         const rows = JSON.parse(rowsJson);
         refreshmint.log(`  Found ${rows.length} statements in dialog`);
 
-        for (const row of rows) {
-            const filename = makeFilename(
-                row.accountNumber,
-                row.name,
-                row.date,
-            );
-            if (existingFilenames.has(filename)) continue;
+        const sectionStats = {
+            totalRows: rows.length,
+            downloaded: 0,
+            skippedExisting: 0,
+            skippedBeforeDate: 0,
+            skippedLimit: 0,
+            clickFailed: 0,
+            downloadFailed: 0,
+            invalidRow: 0,
+        };
+        let loggedAccountMismatch = false;
+        let limitReached = false;
 
-            const [mm, dd, yyyy] = row.date.split('/');
+        for (const row of rows) {
+            let accountNumberForFilename = String(
+                row.accountNumber || '',
+            ).trim();
+            const rowAccountLast4Match =
+                accountNumberForFilename.match(/(\d{4})$/);
+            const rowAccountLast4 =
+                rowAccountLast4Match == null ? null : rowAccountLast4Match[1];
+            if (
+                sectionAccountLast4 != null &&
+                rowAccountLast4 !== sectionAccountLast4
+            ) {
+                if (!loggedAccountMismatch) {
+                    refreshmint.log(
+                        `  Row account mismatch in ${label}; expected *${sectionAccountLast4}, saw ${accountNumberForFilename || '(missing)'}. Falling back to section account number for filenames.`,
+                    );
+                    loggedAccountMismatch = true;
+                }
+                accountNumberForFilename = section.accountNumber;
+            } else if (
+                rowAccountLast4 == null &&
+                section.accountNumber != null
+            ) {
+                accountNumberForFilename = section.accountNumber;
+            }
+
+            const rowDate = String(row.date || '').trim();
+            const dateMatch = rowDate.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+            if (dateMatch == null) {
+                sectionStats.invalidRow++;
+                refreshmint.log(
+                    `  Invalid statement row date for ${label}; row=${inspect(row)}`,
+                );
+                continue;
+            }
+
+            const filename = makeFilename(
+                accountNumberForFilename,
+                row.name,
+                rowDate,
+            );
+            const [, mm, dd, yyyy] = dateMatch;
             const coverageEndDate = `${yyyy}-${mm}-${dd}`;
+            if (
+                hasSavedDocument(existingFilenames, coverageEndDate, filename)
+            ) {
+                sectionStats.skippedExisting++;
+                continue;
+            }
 
             if (
                 SKIP_BEFORE_DATE != null &&
                 coverageEndDate < SKIP_BEFORE_DATE
             ) {
-                // refreshmint.log(`  Skipping (before ${SKIP_BEFORE_DATE}): ${filename}`);
+                sectionStats.skippedBeforeDate++;
                 continue;
             }
 
@@ -400,6 +800,8 @@ async function handleStatements(context) {
                 refreshmint.log(
                     `  Download limit (${DOWNLOAD_LIMIT}) reached.`,
                 );
+                sectionStats.skippedLimit++;
+                limitReached = true;
                 break;
             }
 
@@ -433,7 +835,7 @@ async function handleStatements(context) {
                     const download = await downloadPromise;
                     await refreshmint.saveDownloadedResource(
                         download.path,
-                        'statements/' + filename,
+                        filename,
                         {
                             coverageEndDate,
                             mimeType: 'application/pdf',
@@ -444,11 +846,19 @@ async function handleStatements(context) {
                         `  Downloaded and saved: ${filename} to label ${label}`,
                     );
                     totalDownloaded++;
+                    sectionStats.downloaded++;
+                    existingFilenames.add(`${coverageEndDate}-${filename}`);
                 } catch (e) {
+                    sectionStats.downloadFailed++;
                     refreshmint.log(
                         `  Failed to download ${filename}: ${String(e)}`,
                     );
                 }
+            } else {
+                sectionStats.clickFailed++;
+                refreshmint.log(
+                    `  Failed to click statement link: ${filename}`,
+                );
             }
             await humanPace(page, 500, 1000);
         }
@@ -458,6 +868,31 @@ async function handleStatements(context) {
             if (dialog) dialog.style.display = 'none';
         })("${section.dialogId}")`);
         await waitMs(page, 500);
+
+        refreshmint.log(
+            `  Section summary (${label}): rows=${sectionStats.totalRows}, downloaded=${sectionStats.downloaded}, existing=${sectionStats.skippedExisting}, beforeDate=${sectionStats.skippedBeforeDate}, limit=${sectionStats.skippedLimit}, invalid=${sectionStats.invalidRow}, clickFailed=${sectionStats.clickFailed}, downloadFailed=${sectionStats.downloadFailed}`,
+        );
+
+        if (
+            sectionStats.totalRows > 0 &&
+            sectionStats.downloaded === 0 &&
+            sectionStats.skippedExisting === sectionStats.totalRows
+        ) {
+            refreshmint.log(
+                `  Section ${label}: all rows already exist; no new statements downloaded.`,
+            );
+        }
+
+        if (
+            sectionStats.totalRows > 0 &&
+            sectionStats.downloaded === 0 &&
+            sectionStats.skippedExisting !== sectionStats.totalRows &&
+            !limitReached
+        ) {
+            throw new Error(
+                `statement section anomaly (${label}): rows=${sectionStats.totalRows}, downloaded=0, existing=${sectionStats.skippedExisting}, beforeDate=${sectionStats.skippedBeforeDate}, invalid=${sectionStats.invalidRow}, clickFailed=${sectionStats.clickFailed}, downloadFailed=${sectionStats.downloadFailed}`,
+            );
+        }
     }
 
     refreshmint.log(`Finished downloading ${totalDownloaded} statements.`);
@@ -527,11 +962,11 @@ async function main() {
             urlWithoutFragment === 'chrome://new-tab-page/'
         ) {
             refreshmint.log('Navigating to login page...');
-            await context.mainPage.goto(SIGN_IN_URL);
+            await navigateToSignIn(context.mainPage);
             stepReturn = { progressName: 'navigating to login' };
         } else {
             refreshmint.log(`Unexpected URL: ${url}`);
-            await context.mainPage.goto(SIGN_IN_URL);
+            await navigateToSignIn(context.mainPage);
             stepReturn = { progressName: 'lost, navigating to login' };
         }
 
