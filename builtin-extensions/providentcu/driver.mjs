@@ -661,6 +661,28 @@ function stringToUtf8Bytes(text) {
     return bytes;
 }
 
+function base64ToBytes(base64) {
+    const alphabet =
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    const clean = String(base64 || '').replace(/[^A-Za-z0-9+/=]/g, '');
+    const out = [];
+    let buffer = 0;
+    let bits = 0;
+    for (let i = 0; i < clean.length; i++) {
+        const ch = clean[i];
+        if (ch === '=') break;
+        const val = alphabet.indexOf(ch);
+        if (val < 0) continue;
+        buffer = (buffer << 6) | val;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push((buffer >> bits) & 0xff);
+        }
+    }
+    return out;
+}
+
 async function collectCheckAttachmentCandidates(page) {
     const candidatesJson = /** @type {string} */ (
         await page.evaluate(`(function() {
@@ -687,6 +709,8 @@ async function collectCheckAttachmentCandidates(page) {
 
             const headers = Array.from(host.querySelectorAll('thead th')).map(th => (th.textContent || '').trim());
             const checkColIndex = headers.findIndex(h => /check/i.test(h));
+            const amountColIndex = headers.findIndex(h => /amount/i.test(h) && !/balance/i.test(h));
+            const dateColIndex = headers.findIndex(h => /date/i.test(h));
             const rows = Array.from(host.querySelectorAll('tbody tr.item-row'));
             const out = [];
             for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
@@ -705,14 +729,28 @@ async function collectCheckAttachmentCandidates(page) {
                 }
                 if (!checkNumber) continue;
 
-                const dateMatch = rowText.match(/\\b\\d{2}\\/\\d{2}\\/\\d{4}\\b/);
-                if (!dateMatch) continue;
-                const dateIso = toIso(dateMatch[0]);
+                let dateIso = null;
+                if (dateColIndex >= 0 && row.cells[dateColIndex]) {
+                    const dateText = String(row.cells[dateColIndex].textContent || '').trim();
+                    dateIso = toIso(dateText);
+                }
+                if (!dateIso) {
+                    const dateMatch = rowText.match(/\\b\\d{2}\\/\\d{2}\\/\\d{4}\\b/);
+                    dateIso = dateMatch ? toIso(dateMatch[0]) : null;
+                }                
                 if (!dateIso) continue;
 
-                const amountMatches = rowText.match(/(?:-?\\$[\\d,]+\\.\\d{2}|\\(\\$?[\\d,]+\\.\\d{2}\\))/g) || [];
-                if (amountMatches.length === 0) continue;
-                const amount = normalizeAmount(amountMatches[amountMatches.length - 1]);
+                let amountText = '';
+                if (amountColIndex >= 0 && row.cells[amountColIndex]) {
+                    amountText = String(row.cells[amountColIndex].textContent || '').trim();
+                }
+                if (!amountText) {
+                    const amountMatches = rowText.match(/(?:-?\\$[\\d,]+\\.\\d{2}|\\(\\$?[\\d,]+\\.\\d{2}\\))/g) || [];
+                    if (amountMatches.length > 0) {
+                        amountText = amountMatches[0];
+                    }
+                }
+                const amount = normalizeAmount(amountText);
                 if (!amount) continue;
 
                 out.push({
@@ -804,34 +842,54 @@ async function listVisibleCheckAttachmentActions(page) {
                 const rect = el.getBoundingClientRect();
                 return rect.width > 0 && rect.height > 0;
             };
-            const nodes = Array.from(document.querySelectorAll('a, button'));
+            const overlayRoots = Array.from(document.querySelectorAll(
+                '[role="dialog"], .modal, .dialog, .overlay, .ui-dialog, .IDS-Modal, .modal-content'
+            )).filter(isVisible);
+            const roots = overlayRoots.length > 0 ? overlayRoots : [document];
             const actions = [];
             let seq = 0;
-            for (const node of nodes) {
-                if (!isVisible(node)) continue;
-                const text = [
-                    node.textContent || '',
-                    node.getAttribute('aria-label') || '',
-                    node.getAttribute('title') || '',
-                    node.getAttribute('value') || ''
-                ].join(' ').replace(/\\s+/g, ' ').trim();
-                if (!/(check|image|front|back)/i.test(text)) continue;
-                if (/(spreadsheet|csv|statement list|search\\b|filter\\b)/i.test(text)) continue;
+            for (const root of roots) {
+                const nodes = Array.from(root.querySelectorAll('a, button'));
+                for (const node of nodes) {
+                    if (!isVisible(node)) continue;
+                    const text = [
+                        node.textContent || '',
+                        node.getAttribute('aria-label') || '',
+                        node.getAttribute('title') || '',
+                        node.getAttribute('value') || ''
+                    ].join(' ').replace(/\\s+/g, ' ').trim();
+                    if (!/(check|image|front|back)/i.test(text)) continue;
+                    if (/(spreadsheet|csv|statement list|search\\b|filter\\b|close\\b|cancel\\b|back\\b)/i.test(text)) continue;
 
-                const part = /front/i.test(text)
-                    ? 'front'
-                    : /back/i.test(text)
-                      ? 'back'
-                      : 'single';
-                const id = 'rm-check-attachment-' + (++seq);
-                node.setAttribute('data-rm-check-attachment-id', id);
-                actions.push({
-                    id,
-                    part,
-                    label: text.slice(0, 120),
-                });
+                    const part = /front/i.test(text)
+                        ? 'front'
+                        : /back/i.test(text)
+                          ? 'back'
+                          : 'single';
+                    const id = 'rm-check-attachment-' + (++seq);
+                    node.setAttribute('data-rm-check-attachment-id', id);
+                    actions.push({
+                        id,
+                        part,
+                        label: text.slice(0, 120),
+                    });
+                }
             }
-            return JSON.stringify(actions);
+            const rank = function(action) {
+                if (action.part === 'front') return 0;
+                if (action.part === 'back') return 1;
+                return 2;
+            };
+            actions.sort((a, b) => rank(a) - rank(b));
+            const deduped = [];
+            const seenParts = new Set();
+            for (const action of actions) {
+                if (seenParts.has(action.part)) continue;
+                deduped.push(action);
+                seenParts.add(action.part);
+                if (deduped.length >= 2) break;
+            }
+            return JSON.stringify(deduped);
         })()`)
     );
     const parsed = JSON.parse(actionsJson || '[]');
@@ -878,6 +936,184 @@ async function dismissAttachmentOverlays(page) {
     }
 }
 
+async function findVisibleAttachmentResource(page) {
+    const resourceJson = /** @type {string} */ (
+        await page.evaluate(`(function() {
+            const isVisible = function(el) {
+                if (!el || !(el instanceof Element)) return false;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+
+            const overlays = Array.from(document.querySelectorAll(
+                '[role="dialog"], .modal, .dialog, .overlay, .ui-dialog, .IDS-Modal, .modal-content'
+            )).filter(isVisible);
+            const roots = overlays.length > 0 ? overlays : [document];
+
+            const getPartHint = function(root) {
+                const text = (root.textContent || '').toLowerCase();
+                if (/front/.test(text)) return 'front';
+                if (/back/.test(text)) return 'back';
+                return 'single';
+            };
+
+            for (const root of roots) {
+                const part = getPartHint(root);
+
+                const img = Array.from(root.querySelectorAll('img[src]')).find(isVisible);
+                if (img) {
+                    return JSON.stringify({
+                        found: true,
+                        url: img.getAttribute('src') || '',
+                        mimeType: 'image/png',
+                        part,
+                    });
+                }
+
+                const frame = Array.from(root.querySelectorAll('iframe[src], embed[src], object[data]')).find(isVisible);
+                if (frame) {
+                    const url = frame.getAttribute('src') || frame.getAttribute('data') || '';
+                    return JSON.stringify({
+                        found: true,
+                        url,
+                        mimeType: 'application/pdf',
+                        part,
+                    });
+                }
+
+                const link = Array.from(root.querySelectorAll('a[href]')).find(el => {
+                    if (!isVisible(el)) return false;
+                    const href = el.getAttribute('href') || '';
+                    return /^(data:|blob:|https?:)/i.test(href);
+                });
+                if (link) {
+                    return JSON.stringify({
+                        found: true,
+                        url: link.getAttribute('href') || '',
+                        mimeType: 'application/octet-stream',
+                        part,
+                    });
+                }
+            }
+
+            return JSON.stringify({ found: false });
+        })()`)
+    );
+    const parsed = JSON.parse(resourceJson || '{}');
+    if (parsed == null || parsed.found !== true || !parsed.url) {
+        return null;
+    }
+    return {
+        url: String(parsed.url),
+        mimeType: String(parsed.mimeType || 'application/octet-stream'),
+        part: String(parsed.part || 'single'),
+    };
+}
+
+async function fetchResourceBytesViaPage(page, url) {
+    const urlJson = JSON.stringify(String(url || ''));
+    const fetchJson = /** @type {string} */ (
+        await page.evaluate(`(async function(resourceUrl) {
+            try {
+                const response = await fetch(resourceUrl, { credentials: 'include' });
+                if (!response.ok) {
+                    return JSON.stringify({ ok: false, error: 'HTTP ' + response.status });
+                }
+                const mimeType = response.headers.get('content-type') || '';
+                const buffer = await response.arrayBuffer();
+                const bytes = Array.from(new Uint8Array(buffer));
+                return JSON.stringify({ ok: true, mimeType, bytes });
+            } catch (err) {
+                return JSON.stringify({
+                    ok: false,
+                    error: String(err && err.message ? err.message : err),
+                });
+            }
+        })(${urlJson})`)
+    );
+    const parsed = JSON.parse(fetchJson || '{}');
+    if (parsed == null || parsed.ok !== true || !Array.isArray(parsed.bytes)) {
+        const error =
+            parsed != null && typeof parsed.error === 'string'
+                ? parsed.error
+                : 'unknown fetch error';
+        throw new Error(`fetchResourceBytesViaPage failed: ${error}`);
+    }
+    return {
+        mimeType: String(parsed.mimeType || ''),
+        bytes: parsed.bytes,
+    };
+}
+
+async function saveVisibleAttachmentFallback(
+    page,
+    label,
+    candidate,
+    preferredPart,
+) {
+    const resource = await findVisibleAttachmentResource(page);
+    if (resource == null) {
+        return false;
+    }
+
+    const attachmentPart =
+        sanitizeFilenameSegment(resource.part || preferredPart || 'single') ||
+        'single';
+    const itemKey = makeAttachmentItemKey(
+        candidate.attachmentKey,
+        attachmentPart,
+    );
+    const ext = getFileExtensionFromPath(
+        resource.url,
+        resource.mimeType.includes('pdf') ? '.pdf' : '.png',
+    );
+    const filename = makeCheckAttachmentFilename(
+        label,
+        candidate,
+        attachmentPart,
+        `placeholder${ext}`,
+    );
+    try {
+        const fetched = await fetchResourceBytesViaPage(page, resource.url);
+        const mimeType =
+            fetched.mimeType && fetched.mimeType.trim() !== ''
+                ? fetched.mimeType
+                : mimeTypeForAttachmentExtension(ext);
+        await refreshmint.saveResource(filename, fetched.bytes, {
+            mimeType,
+            label,
+            coverageEndDate: candidate.dateIso,
+            attachmentType: ATTACHMENT_TYPE_CHECK_IMAGE,
+            attachmentKey: candidate.attachmentKey,
+            attachmentPart,
+        });
+    } catch (fetchErr) {
+        refreshmint.log(
+            `    fallback fetch failed; saving screenshot instead (check ${candidate.checkNumber}, part=${attachmentPart}): ${inspect(fetchErr)}`,
+        );
+        const screenshotB64 = /** @type {string} */ (await page.screenshot());
+        const screenshotBytes = base64ToBytes(screenshotB64);
+        const screenshotFilename = makeCheckAttachmentFilename(
+            label,
+            candidate,
+            attachmentPart,
+            'fallback.png',
+        );
+        await refreshmint.saveResource(screenshotFilename, screenshotBytes, {
+            mimeType: 'image/png',
+            label,
+            coverageEndDate: candidate.dateIso,
+            attachmentType: ATTACHMENT_TYPE_CHECK_IMAGE,
+            attachmentKey: candidate.attachmentKey,
+            attachmentPart,
+            attachmentSource: 'screenshot-fallback',
+        });
+    }
+    return itemKey;
+}
+
 async function downloadCheckAttachmentsForCandidate(
     page,
     label,
@@ -919,7 +1155,7 @@ async function downloadCheckAttachmentsForCandidate(
 
         stats.attempted++;
         try {
-            const downloadPromise = page.waitForDownload(10000);
+            const downloadPromise = page.waitForDownload(8000);
             const clicked = await clickCheckAttachmentActionById(
                 page,
                 action.id,
@@ -928,24 +1164,46 @@ async function downloadCheckAttachmentsForCandidate(
                 stats.failed++;
                 continue;
             }
-            const download = await downloadPromise;
-            const filename = makeCheckAttachmentFilename(
-                label,
-                candidate,
-                attachmentPart,
-                download.path,
-            );
-            const ext = getFileExtensionFromPath(filename, '.png');
-            await refreshmint.saveDownloadedResource(download.path, filename, {
-                mimeType: mimeTypeForAttachmentExtension(ext),
-                label,
-                coverageEndDate: candidate.dateIso,
-                attachmentType: ATTACHMENT_TYPE_CHECK_IMAGE,
-                attachmentKey: candidate.attachmentKey,
-                attachmentPart,
-            });
-            attachmentState.existingItemKeys.add(itemKey);
-            stats.downloaded++;
+            try {
+                const download = await downloadPromise;
+                const filename = makeCheckAttachmentFilename(
+                    label,
+                    candidate,
+                    attachmentPart,
+                    download.path,
+                );
+                const ext = getFileExtensionFromPath(filename, '.png');
+                await refreshmint.saveDownloadedResource(
+                    download.path,
+                    filename,
+                    {
+                        mimeType: mimeTypeForAttachmentExtension(ext),
+                        label,
+                        coverageEndDate: candidate.dateIso,
+                        attachmentType: ATTACHMENT_TYPE_CHECK_IMAGE,
+                        attachmentKey: candidate.attachmentKey,
+                        attachmentPart,
+                    },
+                );
+                attachmentState.existingItemKeys.add(itemKey);
+                stats.downloaded++;
+            } catch {
+                const fallbackItemKey = await saveVisibleAttachmentFallback(
+                    page,
+                    label,
+                    candidate,
+                    attachmentPart,
+                );
+                if (fallbackItemKey !== false) {
+                    attachmentState.existingItemKeys.add(fallbackItemKey);
+                    stats.downloaded++;
+                } else {
+                    stats.failed++;
+                    refreshmint.log(
+                        `    attachment fallback failed (check ${candidate.checkNumber}, part=${attachmentPart})`,
+                    );
+                }
+            }
         } catch (e) {
             stats.failed++;
             refreshmint.log(

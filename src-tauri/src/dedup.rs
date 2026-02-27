@@ -65,13 +65,7 @@ fn add_attachment_evidence_refs(
     txn: &ExtractedTransaction,
     index: &AttachmentIndex,
 ) {
-    let mut keys = BTreeSet::new();
-    for key in txn.attachment_keys() {
-        let trimmed = key.trim();
-        if !trimmed.is_empty() {
-            keys.insert(trimmed.to_string());
-        }
-    }
+    let keys = attachment_keys_with_variants(txn);
 
     for key in keys {
         let Some(files) = index.by_key.get(&key) else {
@@ -81,6 +75,44 @@ fn add_attachment_evidence_refs(
             entry.add_evidence(format!("{filename}#attachment"));
         }
     }
+}
+
+fn attachment_keys_with_variants(txn: &ExtractedTransaction) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    for key in txn.attachment_keys() {
+        let trimmed = key.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        keys.insert(trimmed.to_string());
+        if let Some(flip) = check_key_sign_flip(trimmed) {
+            keys.insert(flip);
+        }
+    }
+    keys
+}
+
+fn check_key_sign_flip(key: &str) -> Option<String> {
+    // check:<checkNumber>|<YYYY-MM-DD>|<amount>
+    if !key.starts_with("check:") {
+        return None;
+    }
+    let mut parts = key.split('|');
+    let left = parts.next()?;
+    let middle = parts.next()?;
+    let amount = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if amount.trim().is_empty() {
+        return None;
+    }
+    let flipped = if let Some(stripped) = amount.strip_prefix('-') {
+        stripped.to_string()
+    } else {
+        format!("-{amount}")
+    };
+    Some(format!("{left}|{middle}|{flipped}"))
 }
 
 /// Result of processing a single proposed transaction through the dedup engine.
@@ -929,6 +961,71 @@ mod tests {
                 .iter()
                 .any(|ev| ev == "2026-02-01-check-123-front.png#attachment"),
             "attachment evidence should be linked from attachmentKey"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_dedup_actions_for_login_account_links_check_attachment_with_sign_mismatch() {
+        let root = temp_dir("attachment-link-sign-mismatch");
+        let docs_dir = root
+            .join("logins")
+            .join("chase")
+            .join("accounts")
+            .join("checking")
+            .join("documents");
+        fs::create_dir_all(&docs_dir).expect("create docs dir");
+
+        let attachment_file = "2026-02-01-check-123-single.png";
+        let sidecar_path = docs_dir.join(format!("{attachment_file}-info.json"));
+        let info = crate::scrape::DocumentInfo {
+            mime_type: "image/png".to_string(),
+            original_url: None,
+            scraped_at: "2026-02-01T00:00:00Z".to_string(),
+            extension_name: "providentcu".to_string(),
+            login_name: "chase".to_string(),
+            label: "checking".to_string(),
+            scrape_session_id: "sess-1".to_string(),
+            coverage_end_date: "2026-02-01".to_string(),
+            date_range_start: None,
+            date_range_end: None,
+            metadata: std::collections::BTreeMap::from([(
+                "attachmentKey".to_string(),
+                serde_json::Value::String("check:123|2026-02-01|25.00".to_string()),
+            )]),
+        };
+        fs::write(docs_dir.join(attachment_file), b"img").expect("write attachment doc");
+        fs::write(
+            sidecar_path,
+            serde_json::to_string_pretty(&info).expect("serialize sidecar"),
+        )
+        .expect("write sidecar");
+
+        let mut proposed = make_txn("2026-02-01", "CHECK 123", "Cleared", "activity.csv:2:1");
+        proposed.ttags.push((
+            "attachmentKey".to_string(),
+            "check:123|2026-02-01|-25.00".to_string(),
+        ));
+        let actions = run_dedup(&[], &[proposed], "activity.csv", &DedupConfig::default());
+        let updated = apply_dedup_actions_for_login_account(
+            &root,
+            ("chase", "checking"),
+            vec![],
+            &actions,
+            "Assets:Checking",
+            "Equity:Unreconciled:Checking",
+            Some("providentcu:latest"),
+        )
+        .expect("apply login dedup actions");
+
+        assert_eq!(updated.len(), 1);
+        assert!(
+            updated[0]
+                .evidence
+                .iter()
+                .any(|ev| ev == "2026-02-01-check-123-single.png#attachment"),
+            "attachment evidence should be linked when only sign differs in check attachmentKey"
         );
 
         let _ = fs::remove_dir_all(&root);
