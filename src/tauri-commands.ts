@@ -692,3 +692,10 @@ export async function migrateLedger(
 ): Promise<MigrationOutcome> {
     return invoke('migrate_ledger', { ledger, dryRun });
 }
+
+export async function queryTransactions(
+    ledger: string,
+    query: string,
+): Promise<TransactionRow[]> {
+    return invoke<TransactionRow[]>('query_transactions', { ledger, query });
+}

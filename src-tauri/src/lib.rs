@@ -129,6 +129,7 @@ pub fn run_with_context(
             remove_login_secret,
             clear_login_profile,
             migrate_ledger,
+            query_transactions,
         ])
         .setup(|app| {
             binpath::init_from_app(app.handle());
@@ -1060,6 +1061,19 @@ fn migrate_ledger(ledger: String, dry_run: bool) -> Result<migration::MigrationO
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
     migration::migrate_ledger(&target_dir, dry_run).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn query_transactions(
+    ledger: String,
+    query: String,
+) -> Result<Vec<ledger_open::TransactionRow>, String> {
+    let dir = std::path::PathBuf::from(&ledger);
+    let journal_path = dir.join("general.journal");
+    let tokens = ledger_open::tokenize_query(&query);
+    ledger_open::run_hledger_print_with_query(&journal_path, &tokens)
+        .map(|txns| ledger_open::build_transaction_rows(&txns))
+        .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]

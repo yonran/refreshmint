@@ -105,24 +105,61 @@ pub fn open_ledger_dir(path: &Path) -> Result<LedgerView, Box<dyn std::error::Er
 }
 
 pub(crate) fn run_hledger_print(journal_path: &Path) -> io::Result<Vec<Transaction>> {
-    let output = Command::new(crate::binpath::hledger_path())
-        .arg("print")
+    run_hledger_print_with_query(journal_path, &[])
+}
+
+pub(crate) fn run_hledger_print_with_query(
+    journal_path: &Path,
+    query_tokens: &[String],
+) -> io::Result<Vec<Transaction>> {
+    let mut cmd = Command::new(crate::binpath::hledger_path());
+    cmd.arg("print")
         .arg("--output-format=json")
         .arg("-f")
         .arg(journal_path)
         .env("GIT_CONFIG_GLOBAL", crate::ledger::NULL_DEVICE)
         .env("GIT_CONFIG_SYSTEM", crate::ledger::NULL_DEVICE)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()?;
-
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    for token in query_tokens {
+        cmd.arg(token);
+    }
+    let output = cmd.output()?;
     if output.status.success() {
         serde_json::from_slice(&output.stdout).map_err(io::Error::other)
     } else {
-        Err(io::Error::other(format!(
-            "hledger print failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )))
+        Err(io::Error::other(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ))
     }
+}
+
+pub(crate) fn tokenize_query(query: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut chars = query.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            ' ' | '\t' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            '"' | '\'' => {
+                let q = ch;
+                for inner in chars.by_ref() {
+                    if inner == q {
+                        break;
+                    }
+                    current.push(inner);
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
 }
 
 fn build_account_rows(
@@ -187,7 +224,7 @@ fn build_account_rows(
     Ok(rows)
 }
 
-fn build_transaction_rows(transactions: &[Transaction]) -> Vec<TransactionRow> {
+pub(crate) fn build_transaction_rows(transactions: &[Transaction]) -> Vec<TransactionRow> {
     transactions
         .iter()
         .map(|txn| TransactionRow {
@@ -468,6 +505,46 @@ mod tests {
             ttags,
             tpostings: vec![],
         }
+    }
+
+    #[test]
+    fn tokenize_simple() {
+        assert_eq!(
+            tokenize_query("desc:amazon date:2024"),
+            vec!["desc:amazon", "date:2024"]
+        );
+    }
+
+    #[test]
+    fn tokenize_double_quoted() {
+        assert_eq!(
+            tokenize_query(r#"desc:"amazon prime" date:2024"#),
+            vec!["desc:amazon prime", "date:2024"]
+        );
+    }
+
+    #[test]
+    fn tokenize_single_quoted() {
+        assert_eq!(
+            tokenize_query("acct:'Expenses:Food & Drink'"),
+            vec!["acct:Expenses:Food & Drink"]
+        );
+    }
+
+    #[test]
+    fn tokenize_empty() {
+        assert_eq!(tokenize_query(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn tokenize_whitespace_only() {
+        assert_eq!(tokenize_query("   "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn tokenize_unclosed_quote() {
+        // Unclosed quote consumes rest of string
+        assert_eq!(tokenize_query(r#"desc:"amazon"#), vec!["desc:amazon"]);
     }
 
     #[test]
