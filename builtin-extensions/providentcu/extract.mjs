@@ -35,7 +35,7 @@ async function extractCsv(context) {
             if (!tdate) return null;
 
             // Clean up amount: "$1,037.00" -> "1037.00", "-$50.00" -> "-50.00"
-            const tamount = amount.replace(/[$,]/g, '').trim();
+            const tamount = normalizeCurrencyAmount(amount);
 
             // Build description
             let tdescription = description.trim();
@@ -50,6 +50,18 @@ async function extractCsv(context) {
                 ['evidence', `${context.document.name}:${i + 2}:1`],
                 ['amount', `${tamount} USD`],
             ];
+            const normalizedCheckNumber = (checkNumber || '').trim();
+            if (normalizedCheckNumber !== '') {
+                ttags.push(['checkNumber', normalizedCheckNumber]);
+                ttags.push([
+                    'attachmentKey',
+                    buildCheckAttachmentKey(
+                        normalizedCheckNumber,
+                        tdate,
+                        tamount,
+                    ),
+                ]);
+            }
 
             const tcomment = comments ? comments.trim() : '';
 
@@ -191,4 +203,21 @@ function parseDate(dateStr) {
         return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
     }
     return null;
+}
+
+function normalizeCurrencyAmount(amount) {
+    const raw = String(amount || '').trim();
+    if (!raw) return '';
+    const negative = raw.includes('-') || /^\(.*\)$/.test(raw);
+    const unsigned = raw
+        .replace(/[()]/g, '')
+        .replace(/[$,]/g, '')
+        .replace(/-/g, '')
+        .trim();
+    if (unsigned === '') return '';
+    return negative ? `-${unsigned}` : unsigned;
+}
+
+function buildCheckAttachmentKey(checkNumber, dateIso, amount) {
+    return `check:${checkNumber}|${dateIso}|${amount}`;
 }

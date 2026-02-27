@@ -28,6 +28,9 @@ const SUMMARY_URL = `${BASE_URL}/ProvidentOnlineBanking/Accounts/AccountSummary.
 // Configuration for efficient scraping and debugging
 const DOWNLOAD_LIMIT = null; // Set to number to limit downloads per run
 const SKIP_BEFORE_DATE = null; // Format: YYYY-MM-DD e.g. "2026-01-01"
+const ATTACHMENT_TYPE_CHECK_IMAGE = 'check-image';
+const ATTACHMENT_CHECKPOINT_VERSION = 'v1';
+const ATTACHMENT_CHECKPOINT_SCOPE = 'providentcu-history-module';
 
 function inspect(value) {
     if (value instanceof Error) {
@@ -41,6 +44,54 @@ function inspect(value) {
     } catch {
         return String(value);
     }
+}
+
+function normalizeCurrencyAmount(amount) {
+    const raw = String(amount || '').trim();
+    if (!raw) return '';
+    const negative = raw.includes('-') || /^\(.*\)$/.test(raw);
+    const unsigned = raw
+        .replace(/[()]/g, '')
+        .replace(/[$,]/g, '')
+        .replace(/-/g, '')
+        .trim();
+    if (unsigned === '') return '';
+    return negative ? `-${unsigned}` : unsigned;
+}
+
+function buildCheckAttachmentKey(checkNumber, dateIso, amount) {
+    return `check:${checkNumber}|${dateIso}|${amount}`;
+}
+
+function monthFromIsoDate(dateIso) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateIso || ''))) return null;
+    return dateIso.slice(0, 7);
+}
+
+function currentMonthIso() {
+    const now = new Date();
+    const y = String(now.getFullYear());
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    return `${y}-${m}`;
+}
+
+function sanitizeFilenameSegment(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+}
+
+function makeAttachmentItemKey(attachmentKey, attachmentPart) {
+    return `${attachmentKey}|${attachmentPart || 'single'}`;
+}
+
+function getMetadataString(metadata, key) {
+    if (metadata == null || typeof metadata !== 'object') return null;
+    const value = metadata[key];
+    return typeof value === 'string' && value.trim() !== ''
+        ? value.trim()
+        : null;
 }
 
 async function waitMs(page, ms) {
@@ -509,6 +560,525 @@ async function downloadHistoryCsv(page) {
     return downloadPromise;
 }
 
+function buildExistingAttachmentState(existingDocs) {
+    const existingItemKeys = new Set();
+    const finalizedHistoricalMonths = new Set();
+
+    for (const doc of existingDocs) {
+        const metadata =
+            doc == null || typeof doc !== 'object' ? null : doc.metadata;
+        const attachmentKey = getMetadataString(metadata, 'attachmentKey');
+        if (attachmentKey != null) {
+            const attachmentPart =
+                getMetadataString(metadata, 'attachmentPart') || 'single';
+            existingItemKeys.add(
+                makeAttachmentItemKey(attachmentKey, attachmentPart),
+            );
+        }
+
+        const isCheckpoint =
+            metadata != null &&
+            metadata.attachmentCheckpoint === true &&
+            getMetadataString(metadata, 'attachmentType') ===
+                ATTACHMENT_TYPE_CHECK_IMAGE &&
+            getMetadataString(metadata, 'checkpointVersion') ===
+                ATTACHMENT_CHECKPOINT_VERSION &&
+            getMetadataString(metadata, 'checkpointScope') ===
+                ATTACHMENT_CHECKPOINT_SCOPE &&
+            metadata.checkpointFinal === true;
+        if (!isCheckpoint) continue;
+
+        const checkpointMonth = getMetadataString(metadata, 'checkpointMonth');
+        if (checkpointMonth != null) {
+            finalizedHistoricalMonths.add(checkpointMonth);
+        }
+    }
+
+    return { existingItemKeys, finalizedHistoricalMonths };
+}
+
+function getFileExtensionFromPath(path, fallbackExt) {
+    const raw = String(path || '');
+    const slashPos = Math.max(raw.lastIndexOf('/'), raw.lastIndexOf('\\'));
+    const filename = slashPos >= 0 ? raw.slice(slashPos + 1) : raw;
+    const dotPos = filename.lastIndexOf('.');
+    if (dotPos > 0 && dotPos < filename.length - 1) {
+        const ext = filename.slice(dotPos).toLowerCase();
+        if (/^\.[a-z0-9]{2,8}$/.test(ext)) {
+            return ext;
+        }
+    }
+    return fallbackExt;
+}
+
+function mimeTypeForAttachmentExtension(extension) {
+    switch (extension) {
+        case '.png':
+            return 'image/png';
+        case '.jpg':
+        case '.jpeg':
+            return 'image/jpeg';
+        case '.pdf':
+            return 'application/pdf';
+        case '.gif':
+            return 'image/gif';
+        default:
+            return 'application/octet-stream';
+    }
+}
+
+function makeCheckAttachmentFilename(label, candidate, attachmentPart, dlPath) {
+    const safeLabel = sanitizeFilenameSegment(label || 'account');
+    const safeCheck = sanitizeFilenameSegment(candidate.checkNumber || 'check');
+    const safeDate = sanitizeFilenameSegment(
+        candidate.dateIso || 'unknown_date',
+    );
+    const safeAmount = sanitizeFilenameSegment(
+        String(candidate.amount || '').replace(/^-/, 'neg_'),
+    );
+    const safePart = sanitizeFilenameSegment(attachmentPart || 'single');
+    const ext = getFileExtensionFromPath(dlPath, '.png');
+    return `check-${safeLabel}-${safeCheck}-${safeDate}-${safeAmount}-${safePart}${ext}`;
+}
+
+function stringToUtf8Bytes(text) {
+    const s = String(text || '');
+    /** @type {number[]} */
+    const bytes = [];
+    for (let i = 0; i < s.length; i++) {
+        const code = s.charCodeAt(i);
+        if (code < 0x80) {
+            bytes.push(code);
+        } else if (code < 0x800) {
+            bytes.push(0xc0 | (code >> 6));
+            bytes.push(0x80 | (code & 0x3f));
+        } else {
+            bytes.push(0xe0 | (code >> 12));
+            bytes.push(0x80 | ((code >> 6) & 0x3f));
+            bytes.push(0x80 | (code & 0x3f));
+        }
+    }
+    return bytes;
+}
+
+async function collectCheckAttachmentCandidates(page) {
+    const candidatesJson = /** @type {string} */ (
+        await page.evaluate(`(function() {
+            const host = document.querySelector('.IDS-Banking-Retail-Web-React-TransactionHistoryModule');
+            if (!host) return "[]";
+
+            const toIso = function(usDate) {
+                const m = String(usDate || '').match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);
+                if (!m) return null;
+                return m[3] + '-' + m[1] + '-' + m[2];
+            };
+            const normalizeAmount = function(raw) {
+                const text = String(raw || '').trim();
+                if (!text) return '';
+                const negative = text.includes('-') || /^\\(.*\\)$/.test(text);
+                const unsigned = text
+                    .replace(/[()]/g, '')
+                    .replace(/[$,]/g, '')
+                    .replace(/-/g, '')
+                    .trim();
+                if (!unsigned) return '';
+                return negative ? '-' + unsigned : unsigned;
+            };
+
+            const headers = Array.from(host.querySelectorAll('thead th')).map(th => (th.textContent || '').trim());
+            const checkColIndex = headers.findIndex(h => /check/i.test(h));
+            const rows = Array.from(host.querySelectorAll('tbody tr.item-row'));
+            const out = [];
+            for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+                const row = rows[rowIndex];
+                const rowText = (row.textContent || '').replace(/\\s+/g, ' ').trim();
+                const cellTexts = Array.from(row.cells).map(c => (c.textContent || '').replace(/\\s+/g, ' ').trim());
+
+                let checkNumber = '';
+                if (checkColIndex >= 0 && row.cells[checkColIndex]) {
+                    const m = String(row.cells[checkColIndex].textContent || '').match(/(\\d{3,})/);
+                    if (m) checkNumber = m[1];
+                }
+                if (!checkNumber) {
+                    const m = rowText.match(/check(?:\\s*#|\\s+number)?\\s*[:#]?\\s*(\\d{3,})/i);
+                    if (m) checkNumber = m[1];
+                }
+                if (!checkNumber) continue;
+
+                const dateMatch = rowText.match(/\\b\\d{2}\\/\\d{2}\\/\\d{4}\\b/);
+                if (!dateMatch) continue;
+                const dateIso = toIso(dateMatch[0]);
+                if (!dateIso) continue;
+
+                const amountMatches = rowText.match(/(?:-?\\$[\\d,]+\\.\\d{2}|\\(\\$?[\\d,]+\\.\\d{2}\\))/g) || [];
+                if (amountMatches.length === 0) continue;
+                const amount = normalizeAmount(amountMatches[amountMatches.length - 1]);
+                if (!amount) continue;
+
+                out.push({
+                    rowIndex,
+                    dateIso,
+                    month: dateIso.slice(0, 7),
+                    checkNumber,
+                    amount,
+                    rowText,
+                    cellTexts
+                });
+            }
+            return JSON.stringify(out);
+        })()`)
+    );
+
+    const parsed = JSON.parse(candidatesJson || '[]');
+    if (!Array.isArray(parsed)) {
+        return [];
+    }
+    return parsed.map((candidate) => {
+        const checkNumber = String(candidate.checkNumber || '').trim();
+        const dateIso = String(candidate.dateIso || '').trim();
+        const amount = normalizeCurrencyAmount(candidate.amount);
+        const month = monthFromIsoDate(dateIso);
+        return {
+            rowIndex: Number(candidate.rowIndex),
+            checkNumber,
+            dateIso,
+            month,
+            amount,
+            attachmentKey: buildCheckAttachmentKey(
+                checkNumber,
+                dateIso,
+                amount,
+            ),
+        };
+    });
+}
+
+async function openAttachmentActionsForRow(page, rowIndex) {
+    const resultJson = /** @type {string} */ (
+        await page.evaluate(`(function(targetRowIndex) {
+            const host = document.querySelector('.IDS-Banking-Retail-Web-React-TransactionHistoryModule');
+            if (!host) return JSON.stringify({ ok: false, reason: 'history module missing' });
+
+            const rows = Array.from(host.querySelectorAll('tbody tr.item-row'));
+            const row = rows[targetRowIndex];
+            if (!row) return JSON.stringify({ ok: false, reason: 'row missing' });
+
+            const controls = Array.from(row.querySelectorAll('button, a'));
+            const pickByText = function(regex) {
+                return controls.find(el => {
+                    const text = [
+                        el.textContent || '',
+                        el.getAttribute('aria-label') || '',
+                        el.getAttribute('title') || '',
+                        el.getAttribute('data-testid') || ''
+                    ].join(' ').replace(/\\s+/g, ' ').trim();
+                    return regex.test(text);
+                });
+            };
+
+            let target = pickByText(/(view|detail|details|image|check|expand|more)/i);
+            if (!target && controls.length > 0) {
+                target = controls[0];
+            }
+
+            if (target) {
+                target.click();
+                return JSON.stringify({ ok: true, clicked: 'control' });
+            }
+
+            row.click();
+            return JSON.stringify({ ok: true, clicked: 'row' });
+        })(${Math.max(0, Math.floor(rowIndex))})`)
+    );
+    const result = JSON.parse(resultJson || '{}');
+    return result != null && result.ok === true;
+}
+
+async function listVisibleCheckAttachmentActions(page) {
+    const actionsJson = /** @type {string} */ (
+        await page.evaluate(`(function() {
+            const isVisible = function(el) {
+                if (!el || !(el instanceof Element)) return false;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+            const nodes = Array.from(document.querySelectorAll('a, button'));
+            const actions = [];
+            let seq = 0;
+            for (const node of nodes) {
+                if (!isVisible(node)) continue;
+                const text = [
+                    node.textContent || '',
+                    node.getAttribute('aria-label') || '',
+                    node.getAttribute('title') || '',
+                    node.getAttribute('value') || ''
+                ].join(' ').replace(/\\s+/g, ' ').trim();
+                if (!/(check|image|front|back)/i.test(text)) continue;
+                if (/(spreadsheet|csv|statement list|search\\b|filter\\b)/i.test(text)) continue;
+
+                const part = /front/i.test(text)
+                    ? 'front'
+                    : /back/i.test(text)
+                      ? 'back'
+                      : 'single';
+                const id = 'rm-check-attachment-' + (++seq);
+                node.setAttribute('data-rm-check-attachment-id', id);
+                actions.push({
+                    id,
+                    part,
+                    label: text.slice(0, 120),
+                });
+            }
+            return JSON.stringify(actions);
+        })()`)
+    );
+    const parsed = JSON.parse(actionsJson || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+}
+
+async function clickCheckAttachmentActionById(page, actionId) {
+    const actionIdJson = JSON.stringify(String(actionId || ''));
+    const clicked = await page.evaluate(`(function(targetId) {
+        const node = document.querySelector('[data-rm-check-attachment-id="' + targetId + '"]');
+        if (!node) return false;
+        node.click();
+        return true;
+    })(${actionIdJson})`);
+    return assertBoolean(clicked);
+}
+
+async function dismissAttachmentOverlays(page) {
+    try {
+        await page.evaluate(`(function() {
+            const isVisible = function(el) {
+                if (!el || !(el instanceof Element)) return false;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+            const closeControls = Array.from(document.querySelectorAll('button, a'))
+                .filter(el => {
+                    if (!isVisible(el)) return false;
+                    const text = [
+                        el.textContent || '',
+                        el.getAttribute('aria-label') || '',
+                        el.getAttribute('title') || ''
+                    ].join(' ').replace(/\\s+/g, ' ').trim();
+                    return /^(close|done|cancel|back)$/i.test(text) || /(close|dismiss)/i.test(text);
+                });
+            if (closeControls.length > 0) {
+                closeControls[0].click();
+            }
+        })()`);
+    } catch {
+        // best effort
+    }
+}
+
+async function downloadCheckAttachmentsForCandidate(
+    page,
+    label,
+    candidate,
+    attachmentState,
+) {
+    const stats = {
+        attempted: 0,
+        downloaded: 0,
+        skippedExisting: 0,
+        failed: 0,
+    };
+
+    const opened = await openAttachmentActionsForRow(page, candidate.rowIndex);
+    if (!opened) {
+        return stats;
+    }
+
+    await waitMs(page, 500);
+    await waitForBusy(page);
+
+    const actions = await listVisibleCheckAttachmentActions(page);
+    if (actions.length === 0) {
+        await dismissAttachmentOverlays(page);
+        return stats;
+    }
+
+    for (const action of actions) {
+        const attachmentPart =
+            sanitizeFilenameSegment(action.part || 'single') || 'single';
+        const itemKey = makeAttachmentItemKey(
+            candidate.attachmentKey,
+            attachmentPart,
+        );
+        if (attachmentState.existingItemKeys.has(itemKey)) {
+            stats.skippedExisting++;
+            continue;
+        }
+
+        stats.attempted++;
+        try {
+            const downloadPromise = page.waitForDownload(10000);
+            const clicked = await clickCheckAttachmentActionById(
+                page,
+                action.id,
+            );
+            if (!clicked) {
+                stats.failed++;
+                continue;
+            }
+            const download = await downloadPromise;
+            const filename = makeCheckAttachmentFilename(
+                label,
+                candidate,
+                attachmentPart,
+                download.path,
+            );
+            const ext = getFileExtensionFromPath(filename, '.png');
+            await refreshmint.saveDownloadedResource(download.path, filename, {
+                mimeType: mimeTypeForAttachmentExtension(ext),
+                label,
+                coverageEndDate: candidate.dateIso,
+                attachmentType: ATTACHMENT_TYPE_CHECK_IMAGE,
+                attachmentKey: candidate.attachmentKey,
+                attachmentPart,
+            });
+            attachmentState.existingItemKeys.add(itemKey);
+            stats.downloaded++;
+        } catch (e) {
+            stats.failed++;
+            refreshmint.log(
+                `    attachment download failed (check ${candidate.checkNumber}, part=${attachmentPart}): ${inspect(e)}`,
+            );
+        }
+    }
+
+    await dismissAttachmentOverlays(page);
+    return stats;
+}
+
+async function writeHistoricalMonthCheckpoint(label, month, checkpointResult) {
+    const filename = `_attachment-checkpoint-${ATTACHMENT_TYPE_CHECK_IMAGE}-${month}.json`;
+    const payload = JSON.stringify(
+        {
+            attachmentType: ATTACHMENT_TYPE_CHECK_IMAGE,
+            checkpointMonth: month,
+            checkpointResult,
+            checkpointVersion: ATTACHMENT_CHECKPOINT_VERSION,
+            checkpointScope: ATTACHMENT_CHECKPOINT_SCOPE,
+            checkpointFinal: true,
+        },
+        null,
+        2,
+    );
+    await refreshmint.saveResource(filename, stringToUtf8Bytes(payload), {
+        mimeType: 'application/json',
+        label,
+        coverageEndDate: `${month}-01`,
+        attachmentCheckpoint: true,
+        attachmentType: ATTACHMENT_TYPE_CHECK_IMAGE,
+        checkpointMonth: month,
+        checkpointResult,
+        checkpointVersion: ATTACHMENT_CHECKPOINT_VERSION,
+        checkpointScope: ATTACHMENT_CHECKPOINT_SCOPE,
+        checkpointFinal: true,
+    });
+}
+
+async function scanCheckAttachmentsOnHistoryTable(
+    page,
+    label,
+    attachmentState,
+    processedMonths,
+) {
+    const stats = {
+        candidates: 0,
+        attempted: 0,
+        downloaded: 0,
+        skippedExisting: 0,
+        failed: 0,
+        monthsChecked: 0,
+        monthsSkippedCheckpoint: 0,
+    };
+
+    const candidates = await collectCheckAttachmentCandidates(page);
+    if (candidates.length === 0) {
+        return stats;
+    }
+
+    /** @type {Map<string, any[]>} */
+    const byMonth = new Map();
+    for (const candidate of candidates) {
+        if (
+            !Number.isInteger(candidate.rowIndex) ||
+            candidate.rowIndex < 0 ||
+            candidate.month == null ||
+            candidate.checkNumber === '' ||
+            candidate.dateIso === '' ||
+            candidate.amount === ''
+        ) {
+            continue;
+        }
+        if (!byMonth.has(candidate.month)) {
+            byMonth.set(candidate.month, []);
+        }
+        byMonth.get(candidate.month).push(candidate);
+    }
+
+    const currentMonth = currentMonthIso();
+    const months = Array.from(byMonth.keys()).sort();
+    for (const month of months) {
+        if (processedMonths.has(month)) {
+            continue;
+        }
+        processedMonths.add(month);
+
+        const isCurrent = month === currentMonth;
+        if (
+            !isCurrent &&
+            attachmentState.finalizedHistoricalMonths.has(month)
+        ) {
+            stats.monthsSkippedCheckpoint++;
+            continue;
+        }
+
+        const monthCandidates = byMonth.get(month) || [];
+        stats.monthsChecked++;
+        stats.candidates += monthCandidates.length;
+        refreshmint.log(
+            `  Attachment scan month ${month}: ${monthCandidates.length} check candidate(s)`,
+        );
+
+        let monthDownloaded = 0;
+        for (const candidate of monthCandidates) {
+            const result = await downloadCheckAttachmentsForCandidate(
+                page,
+                label,
+                candidate,
+                attachmentState,
+            );
+            stats.attempted += result.attempted;
+            stats.downloaded += result.downloaded;
+            stats.skippedExisting += result.skippedExisting;
+            stats.failed += result.failed;
+            monthDownloaded += result.downloaded;
+        }
+
+        if (!isCurrent) {
+            const checkpointResult = monthDownloaded > 0 ? 'found' : 'none';
+            await writeHistoricalMonthCheckpoint(
+                label,
+                month,
+                checkpointResult,
+            );
+            attachmentState.finalizedHistoricalMonths.add(month);
+        }
+    }
+
+    return stats;
+}
+
 /**
  * @param {ScrapeContext} context
  * @returns {Promise<StepReturn>}
@@ -525,6 +1095,7 @@ async function handleAccountActivity(context) {
     const existingDocsJson = await refreshmint.listAccountDocuments({ label });
     const existingDocs = JSON.parse(existingDocsJson || '[]');
     const existingFilenames = new Set(existingDocs.map((d) => d.filename));
+    const attachmentState = buildExistingAttachmentState(existingDocs);
 
     const availableDateRanges = await getHistoryDateRangeOptions(page);
     const preferredDateRanges = [
@@ -551,7 +1122,21 @@ async function handleAccountActivity(context) {
         skippedNoRows: 0,
         setRangeFailed: 0,
         downloadFailed: 0,
+        attachmentCandidates: 0,
+        attachmentAttempted: 0,
+        attachmentDownloaded: 0,
+        attachmentSkippedExisting: 0,
+        attachmentFailed: 0,
+        attachmentMonthsChecked: 0,
+        attachmentMonthsSkippedCheckpoint: 0,
     };
+    const processedAttachmentMonths = new Set();
+    const attachmentScanRange = targetDateRanges.includes('All')
+        ? 'All'
+        : targetDateRanges.length > 0
+          ? targetDateRanges[targetDateRanges.length - 1]
+          : null;
+    let didAttachmentScan = false;
 
     for (const dateRange of targetDateRanges) {
         refreshmint.log(`  Processing activity range: ${dateRange}`);
@@ -572,6 +1157,31 @@ async function handleAccountActivity(context) {
             coverage.coverageStartDate,
             coverage.coverageEndDate,
         );
+
+        const isLastRange =
+            dateRange === targetDateRanges[targetDateRanges.length - 1];
+        if (
+            !didAttachmentScan &&
+            (dateRange === attachmentScanRange || isLastRange)
+        ) {
+            const attachmentStats = await scanCheckAttachmentsOnHistoryTable(
+                page,
+                label,
+                attachmentState,
+                processedAttachmentMonths,
+            );
+            activityStats.attachmentCandidates += attachmentStats.candidates;
+            activityStats.attachmentAttempted += attachmentStats.attempted;
+            activityStats.attachmentDownloaded += attachmentStats.downloaded;
+            activityStats.attachmentSkippedExisting +=
+                attachmentStats.skippedExisting;
+            activityStats.attachmentFailed += attachmentStats.failed;
+            activityStats.attachmentMonthsChecked +=
+                attachmentStats.monthsChecked;
+            activityStats.attachmentMonthsSkippedCheckpoint +=
+                attachmentStats.monthsSkippedCheckpoint;
+            didAttachmentScan = true;
+        }
 
         if (coverage.rowCount === 0) {
             activityStats.skippedNoRows++;
@@ -625,6 +1235,9 @@ async function handleAccountActivity(context) {
 
     refreshmint.log(
         `  Activity summary (${label}): attempted=${activityStats.attempted}, downloaded=${activityStats.downloaded}, existing=${activityStats.skippedExisting}, noRows=${activityStats.skippedNoRows}, setRangeFailed=${activityStats.setRangeFailed}, downloadFailed=${activityStats.downloadFailed}`,
+    );
+    refreshmint.log(
+        `  Attachment summary (${label}): candidates=${activityStats.attachmentCandidates}, attempted=${activityStats.attachmentAttempted}, downloaded=${activityStats.attachmentDownloaded}, existing=${activityStats.attachmentSkippedExisting}, failed=${activityStats.attachmentFailed}, monthsChecked=${activityStats.attachmentMonthsChecked}, monthsSkippedCheckpoint=${activityStats.attachmentMonthsSkippedCheckpoint}`,
     );
 
     context.completedAccounts.add(context.pendingAccounts.shift());
