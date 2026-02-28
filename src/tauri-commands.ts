@@ -117,6 +117,29 @@ export interface AccountJournalEntry {
     tags: [string, string][];
 }
 
+export type LockMetadataResource =
+    | { kind: 'login'; loginName: string }
+    | { kind: 'gl' };
+
+export interface LockMetadata {
+    version: number;
+    owner: string;
+    purpose: string;
+    startedAt: string;
+    pid?: number | null;
+    resource: LockMetadataResource;
+}
+
+export interface LockStatus {
+    locked: boolean;
+    metadata: LockMetadata | null;
+}
+
+export interface LockStatusSnapshot {
+    gl: LockStatus;
+    logins: Record<string, LockStatus>;
+}
+
 export interface NewTransactionInput {
     date: string;
     description: string;
@@ -241,6 +264,21 @@ export async function stopScrapeDebugSession(): Promise<void> {
 
 export async function getScrapeDebugSessionSocket(): Promise<string | null> {
     return invoke('get_scrape_debug_session_socket');
+}
+
+export async function startLockMetadataWatch(ledger: string): Promise<void> {
+    await invoke('start_lock_metadata_watch', { ledger });
+}
+
+export async function stopLockMetadataWatch(): Promise<void> {
+    await invoke('stop_lock_metadata_watch');
+}
+
+export async function getLockStatusSnapshot(
+    ledger: string,
+    loginNames: string[],
+): Promise<LockStatusSnapshot> {
+    return invoke('get_lock_status_snapshot', { ledger, loginNames });
 }
 
 export async function runScrape(

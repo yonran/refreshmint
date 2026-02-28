@@ -3,6 +3,7 @@
 This document covers running scrapers, scraper runtime behavior, and scraper JS APIs.
 
 For extension structure and manifest details, see `docs/extension.md`.
+For GUI/CLI lock coordination, see `docs/locking.md`.
 
 ## Run a scraper
 

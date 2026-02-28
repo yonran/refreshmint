@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { Menu, MenuItem, Submenu } from '@tauri-apps/api/menu';
 import { documentDir, join } from '@tauri-apps/api/path';
 import {
@@ -32,10 +33,13 @@ import {
     getLoginAccountJournal,
     getLoginConfig,
     getLoginAccountUnposted,
+    getLockStatusSnapshot,
     getUnpostedEntriesForTransfer,
     getScrapeDebugSessionSocket,
     type LoginAccountConfig,
     type LoginConfig,
+    type LockStatus,
+    type LockStatusSnapshot,
     listLoginAccountDocuments,
     listLoginSecrets,
     readAttachmentDataUrl,
@@ -61,6 +65,8 @@ import {
     setLoginAccount,
     setLoginExtension,
     startScrapeDebugSessionForLogin,
+    startLockMetadataWatch,
+    stopLockMetadataWatch,
     stopScrapeDebugSession,
     suggestCategories,
     suggestGlCategories,
@@ -122,6 +128,44 @@ type LoginAccountMapping = {
 type LoginAccountRef = {
     loginName: string;
     label: string;
+};
+
+type PipelineBulkAccountStat = {
+    loginName: string;
+    label: string;
+    extract: {
+        eligible: boolean;
+        documentCount: number;
+        skipReason: 'missing-extension' | 'no-documents' | null;
+        inspectError: string | null;
+        locked: boolean;
+    };
+    post: {
+        eligible: boolean;
+        unpostedCount: number;
+        skipReason: 'missing-gl-account' | 'no-unposted' | null;
+        inspectError: string | null;
+        locked: boolean;
+    };
+};
+
+type PipelineBulkSummary = {
+    eligibleAccounts: number;
+    totalDocuments: number;
+    totalUnpostedEntries: number;
+    skippedMissingExtension: number;
+    skippedNoDocuments: number;
+    skippedMissingGlAccount: number;
+    skippedNoUnposted: number;
+    inspectFailures: number;
+    lockedAccounts: number;
+};
+
+type PipelineBulkStats = {
+    accounts: PipelineBulkAccountStat[];
+    gl: LockStatus;
+    extract: PipelineBulkSummary;
+    post: PipelineBulkSummary;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -191,6 +235,20 @@ function createTransactionDraft(): TransactionDraft {
             { account: '', amount: '', comment: '' },
             { account: '', amount: '', comment: '' },
         ],
+    };
+}
+
+function createEmptyPipelineBulkSummary(): PipelineBulkSummary {
+    return {
+        eligibleAccounts: 0,
+        totalDocuments: 0,
+        totalUnpostedEntries: 0,
+        skippedMissingExtension: 0,
+        skippedNoDocuments: 0,
+        skippedMissingGlAccount: 0,
+        skippedNoUnposted: 0,
+        inspectFailures: 0,
+        lockedAccounts: 0,
     };
 }
 
@@ -329,6 +387,16 @@ function App() {
     const [isSavingPipelineGlAccount, setIsSavingPipelineGlAccount] =
         useState(false);
     const [isPipelinePosting, setIsPipelinePosting] = useState(false);
+    const [isPipelineExtractingAllLedger, setIsPipelineExtractingAllLedger] =
+        useState(false);
+    const [isPipelinePostingAllLedger, setIsPipelinePostingAllLedger] =
+        useState(false);
+    const [lockStatusSnapshot, setLockStatusSnapshot] =
+        useState<LockStatusSnapshot | null>(null);
+    const [pipelineBulkStats, setPipelineBulkStats] =
+        useState<PipelineBulkStats | null>(null);
+    const [isLoadingPipelineBulkStats, setIsLoadingPipelineBulkStats] =
+        useState(false);
     const [transferModalEntryId, setTransferModalEntryId] = useState<
         string | null
     >(null);
@@ -520,6 +588,159 @@ function App() {
     const requestLoginConfigReload = useCallback(() => {
         setLoginConfigsReloadToken((current) => current + 1);
     }, []);
+    const refreshPipelineBulkStats = useCallback(async () => {
+        if (ledgerPath === null) {
+            setPipelineBulkStats(null);
+            setLockStatusSnapshot(null);
+            return null;
+        }
+
+        setIsLoadingPipelineBulkStats(true);
+        try {
+            const uniqueLoginNames = Array.from(
+                new Set(loginAccounts.map((account) => account.loginName)),
+            );
+            const snapshot = await getLockStatusSnapshot(
+                ledgerPath,
+                uniqueLoginNames,
+            );
+            const accountStats = await Promise.all(
+                loginAccounts.map(async ({ loginName, label }) => {
+                    const normalizedConfig = normalizeLoginConfig(
+                        loginConfigsByName[loginName] ?? null,
+                    );
+                    const extension = normalizedConfig.extension?.trim() ?? '';
+                    const glAccount =
+                        normalizedConfig.accounts[label]?.glAccount?.trim() ??
+                        '';
+                    const locked = snapshot.logins[loginName]?.locked ?? false;
+
+                    let documentCount = 0;
+                    let extractSkipReason:
+                        | 'missing-extension'
+                        | 'no-documents'
+                        | null = null;
+                    let extractInspectError: string | null = null;
+                    if (extension.length === 0) {
+                        extractSkipReason = 'missing-extension';
+                    } else {
+                        try {
+                            const docs = await listLoginAccountDocuments(
+                                ledgerPath,
+                                loginName,
+                                label,
+                            );
+                            documentCount = docs.length;
+                            if (documentCount === 0) {
+                                extractSkipReason = 'no-documents';
+                            }
+                        } catch (error) {
+                            extractInspectError = String(error);
+                        }
+                    }
+
+                    let unpostedCount = 0;
+                    let postSkipReason:
+                        | 'missing-gl-account'
+                        | 'no-unposted'
+                        | null = null;
+                    let postInspectError: string | null = null;
+                    if (glAccount.length === 0) {
+                        postSkipReason = 'missing-gl-account';
+                    } else {
+                        try {
+                            const unposted = await getLoginAccountUnposted(
+                                ledgerPath,
+                                loginName,
+                                label,
+                            );
+                            unpostedCount = unposted.length;
+                            if (unpostedCount === 0) {
+                                postSkipReason = 'no-unposted';
+                            }
+                        } catch (error) {
+                            postInspectError = String(error);
+                        }
+                    }
+
+                    return {
+                        loginName,
+                        label,
+                        extract: {
+                            eligible:
+                                extractSkipReason === null &&
+                                extractInspectError === null &&
+                                documentCount > 0,
+                            documentCount,
+                            skipReason: extractSkipReason,
+                            inspectError: extractInspectError,
+                            locked,
+                        },
+                        post: {
+                            eligible:
+                                postSkipReason === null &&
+                                postInspectError === null &&
+                                unpostedCount > 0,
+                            unpostedCount,
+                            skipReason: postSkipReason,
+                            inspectError: postInspectError,
+                            locked,
+                        },
+                    } satisfies PipelineBulkAccountStat;
+                }),
+            );
+
+            const extract = createEmptyPipelineBulkSummary();
+            const post = createEmptyPipelineBulkSummary();
+            for (const account of accountStats) {
+                if (account.extract.eligible) {
+                    extract.eligibleAccounts += 1;
+                    extract.totalDocuments += account.extract.documentCount;
+                }
+                if (account.extract.skipReason === 'missing-extension') {
+                    extract.skippedMissingExtension += 1;
+                }
+                if (account.extract.skipReason === 'no-documents') {
+                    extract.skippedNoDocuments += 1;
+                }
+                if (account.extract.inspectError !== null) {
+                    extract.inspectFailures += 1;
+                }
+                if (account.extract.locked) {
+                    extract.lockedAccounts += 1;
+                }
+
+                if (account.post.eligible) {
+                    post.eligibleAccounts += 1;
+                    post.totalUnpostedEntries += account.post.unpostedCount;
+                }
+                if (account.post.skipReason === 'missing-gl-account') {
+                    post.skippedMissingGlAccount += 1;
+                }
+                if (account.post.skipReason === 'no-unposted') {
+                    post.skippedNoUnposted += 1;
+                }
+                if (account.post.inspectError !== null) {
+                    post.inspectFailures += 1;
+                }
+                if (account.post.locked) {
+                    post.lockedAccounts += 1;
+                }
+            }
+
+            const stats = {
+                accounts: accountStats,
+                gl: snapshot.gl,
+                extract,
+                post,
+            } satisfies PipelineBulkStats;
+            setLockStatusSnapshot(snapshot);
+            setPipelineBulkStats(stats);
+            return stats;
+        } finally {
+            setIsLoadingPipelineBulkStats(false);
+        }
+    }, [ledgerPath, loginAccounts, loginConfigsByName]);
     const requiredSecretKeySet = new Set(
         requiredSecretsForExtension.map((entry) =>
             secretPairKey(entry.domain, entry.name),
@@ -564,6 +785,16 @@ function App() {
             ]?.glAccount ?? null
         );
     }, [selectedLoginAccount, loginConfigsByName]);
+    const glLockStatus = lockStatusSnapshot?.gl ?? {
+        locked: false,
+        metadata: null,
+    };
+    const selectedLoginLockStatus =
+        selectedLoginAccount === null
+            ? null
+            : (lockStatusSnapshot?.logins[selectedLoginAccount.loginName] ??
+              null);
+    const selectedLoginLocked = selectedLoginLockStatus?.locked ?? false;
 
     const visibleTransferResults = useMemo(() => {
         const q = transferModalSearch.trim().toLowerCase();
@@ -1336,6 +1567,63 @@ function App() {
         );
         setTransferModalEntryId(null);
     }, [selectedLoginAccount]);
+
+    useEffect(() => {
+        if (ledgerPath === null) {
+            setLockStatusSnapshot(null);
+            return;
+        }
+
+        let cancelled = false;
+        let unlisten: (() => void) | null = null;
+
+        void startLockMetadataWatch(ledgerPath)
+            .then(() =>
+                listen('refreshmint://lock-status-changed', () => {
+                    if (!cancelled) {
+                        void refreshPipelineBulkStats();
+                    }
+                }),
+            )
+            .then((listener) => {
+                if (!cancelled) {
+                    unlisten = listener;
+                } else {
+                    listener();
+                }
+            })
+            .catch((error: unknown) => {
+                console.error('lock metadata watcher failed:', error);
+            });
+
+        return () => {
+            cancelled = true;
+            if (unlisten !== null) {
+                unlisten();
+            }
+            void stopLockMetadataWatch();
+        };
+    }, [ledgerPath, refreshPipelineBulkStats]);
+
+    useEffect(() => {
+        if (
+            activeTab !== 'pipeline' ||
+            ledgerPath === null ||
+            !hasLoadedLoginConfigs
+        ) {
+            return;
+        }
+        void refreshPipelineBulkStats().catch((error: unknown) => {
+            console.error('pipeline bulk stats failed:', error);
+        });
+    }, [
+        activeTab,
+        hasLoadedLoginConfigs,
+        ledgerPath,
+        loginAccounts,
+        loginConfigsByName,
+        refreshPipelineBulkStats,
+    ]);
 
     useEffect(() => {
         if (ledgerPath === null || selectedLoginAccount === null) {
@@ -2560,6 +2848,7 @@ function App() {
             setPipelineStatus(
                 `Extraction complete. ${newCount} new entr${newCount === 1 ? 'y' : 'ies'} added.`,
             );
+            void refreshPipelineBulkStats();
         } catch (error) {
             setPipelineStatus(`Extraction failed: ${String(error)}`);
         } finally {
@@ -2879,6 +3168,7 @@ function App() {
             );
             requestLoginConfigReload();
             setPipelineGlAccountDraft('');
+            void refreshPipelineBulkStats();
         } catch (error) {
             setPipelineStatus(`Failed to save GL account: ${String(error)}`);
         } finally {
@@ -2886,21 +3176,18 @@ function App() {
         }
     }
 
-    /**
-     * Core posting logic that throws on error. Used by both the single-entry
-     * handler (which catches) and the bulk handlers (which stop on throw).
-     * Returns the GL transaction ID string on success.
-     */
-    async function doPipelinePost(entryId: string): Promise<string> {
-        if (!ledger || !selectedLoginAccount) {
-            throw new Error('No ledger or account selected.');
+    async function doPipelinePostForAccount(
+        loginName: string,
+        label: string,
+        entryId: string,
+        suggestions: Record<string, CategoryResult>,
+    ): Promise<string> {
+        if (!ledger) {
+            throw new Error('No ledger selected.');
         }
-        const { loginName, label } = selectedLoginAccount;
-        const suggestion = pipelineCategorySuggestions[entryId];
+        const suggestion = suggestions[entryId];
 
         if (suggestion?.transferMatch) {
-            // Auto-matched transfer: extract the other side's login/label from the locator
-            // locator format: logins/{loginName}/accounts/{label}
             const locator = suggestion.transferMatch.accountLocator;
             const parts = locator.split('/');
             const otherLoginName = parts[1] ?? '';
@@ -2933,12 +3220,29 @@ function App() {
         return `Posted ${entryId} to ${glId}`;
     }
 
+    /**
+     * Core posting logic that throws on error. Used by both the single-entry
+     * handler (which catches) and the bulk handlers.
+     */
+    async function doPipelinePost(entryId: string): Promise<string> {
+        if (!selectedLoginAccount) {
+            throw new Error('No account selected.');
+        }
+        return doPipelinePostForAccount(
+            selectedLoginAccount.loginName,
+            selectedLoginAccount.label,
+            entryId,
+            pipelineCategorySuggestions,
+        );
+    }
+
     async function handlePipelinePostEntry(entryId: string) {
         setBusyPostEntryId(entryId);
         try {
             const message = await doPipelinePost(entryId);
             await refreshPipelineLoginAccountData();
             setPipelineStatus(message);
+            void refreshPipelineBulkStats();
         } catch (error) {
             setPipelineStatus(`Post failed: ${String(error)}`);
         } finally {
@@ -2965,6 +3269,7 @@ function App() {
             }
         } finally {
             setIsPipelinePosting(false);
+            void refreshPipelineBulkStats();
         }
     }
 
@@ -2989,6 +3294,186 @@ function App() {
         } finally {
             setIsPipelinePosting(false);
             setPipelineSelectedEntryIds(new Set());
+            void refreshPipelineBulkStats();
+        }
+    }
+
+    async function handlePipelineExtractAllLedger() {
+        if (!ledger) return;
+        setIsPipelineExtractingAllLedger(true);
+        try {
+            const stats =
+                pipelineBulkStats ?? (await refreshPipelineBulkStats());
+            if (!stats) return;
+            const candidates = stats.accounts.filter(
+                (account) =>
+                    account.extract.eligible && !account.extract.locked,
+            );
+            if (candidates.length === 0) {
+                setPipelineStatus(
+                    'No unlocked accounts are ready for extraction.',
+                );
+                return;
+            }
+
+            let succeeded = 0;
+            let failed = 0;
+            let locked = 0;
+            let totalNew = 0;
+            let refreshSelected = false;
+            const selectedKey =
+                selectedLoginAccount === null
+                    ? null
+                    : `${selectedLoginAccount.loginName}/${selectedLoginAccount.label}`;
+
+            for (const [index, account] of candidates.entries()) {
+                const accountKey = `${account.loginName}/${account.label}`;
+                setPipelineStatus(
+                    `Extract All: ${accountKey} (${index + 1}/${candidates.length})`,
+                );
+                try {
+                    const docs = await listLoginAccountDocuments(
+                        ledger.path,
+                        account.loginName,
+                        account.label,
+                    );
+                    if (docs.length === 0) {
+                        continue;
+                    }
+                    const newCount = await runLoginAccountExtraction(
+                        ledger.path,
+                        account.loginName,
+                        account.label,
+                        docs.map((doc) => doc.filename),
+                    );
+                    totalNew += newCount;
+                    succeeded += 1;
+                    if (selectedKey === accountKey) {
+                        refreshSelected = true;
+                    }
+                } catch (error) {
+                    if (String(error).includes('currently in use')) {
+                        locked += 1;
+                    } else {
+                        failed += 1;
+                    }
+                }
+            }
+
+            if (
+                refreshSelected &&
+                selectedLoginAccount !== null &&
+                selectedKey ===
+                    `${selectedLoginAccount.loginName}/${selectedLoginAccount.label}`
+            ) {
+                await refreshPipelineLoginAccountData();
+            }
+            await refreshPipelineBulkStats();
+            setPipelineStatus(
+                `Extract All complete. ${succeeded} account(s) extracted, ${failed} failed, ${locked} locked, ${totalNew} new entr${totalNew === 1 ? 'y' : 'ies'} added.`,
+            );
+        } finally {
+            setIsPipelineExtractingAllLedger(false);
+        }
+    }
+
+    async function handlePipelinePostAllLedger() {
+        if (!ledger) return;
+        setIsPipelinePostingAllLedger(true);
+        try {
+            const stats =
+                pipelineBulkStats ?? (await refreshPipelineBulkStats());
+            if (!stats) return;
+            if (stats.gl.locked) {
+                setPipelineStatus('General journal is currently locked.');
+                return;
+            }
+            const candidates = stats.accounts.filter(
+                (account) => account.post.eligible && !account.post.locked,
+            );
+            if (candidates.length === 0) {
+                setPipelineStatus(
+                    'No unlocked accounts are ready for posting.',
+                );
+                return;
+            }
+
+            let postedCount = 0;
+            let failed = 0;
+            let locked = 0;
+            let refreshSelected = false;
+            let reloadLedgerAfter = false;
+            const selectedKey =
+                selectedLoginAccount === null
+                    ? null
+                    : `${selectedLoginAccount.loginName}/${selectedLoginAccount.label}`;
+
+            for (const [index, account] of candidates.entries()) {
+                const accountKey = `${account.loginName}/${account.label}`;
+                setPipelineStatus(
+                    `Post All: ${accountKey} (${index + 1}/${candidates.length})`,
+                );
+                try {
+                    const [unposted, suggestions] = await Promise.all([
+                        getLoginAccountUnposted(
+                            ledger.path,
+                            account.loginName,
+                            account.label,
+                        ),
+                        suggestCategories(
+                            ledger.path,
+                            account.loginName,
+                            account.label,
+                        ),
+                    ]);
+                    for (const entry of unposted) {
+                        try {
+                            await doPipelinePostForAccount(
+                                account.loginName,
+                                account.label,
+                                entry.id,
+                                suggestions,
+                            );
+                            postedCount += 1;
+                            reloadLedgerAfter = true;
+                        } catch (error) {
+                            if (String(error).includes('currently in use')) {
+                                locked += 1;
+                            } else {
+                                failed += 1;
+                            }
+                        }
+                    }
+                    if (selectedKey === accountKey) {
+                        refreshSelected = true;
+                    }
+                } catch (error) {
+                    if (String(error).includes('currently in use')) {
+                        locked += 1;
+                    } else {
+                        failed += 1;
+                    }
+                }
+            }
+
+            if (reloadLedgerAfter) {
+                const reloaded = await openLedger(ledger.path);
+                setLedger(reloaded);
+            }
+            if (
+                refreshSelected &&
+                selectedLoginAccount !== null &&
+                selectedKey ===
+                    `${selectedLoginAccount.loginName}/${selectedLoginAccount.label}`
+            ) {
+                await refreshPipelineLoginAccountData();
+            }
+            await refreshPipelineBulkStats();
+            setPipelineStatus(
+                `Post All complete. ${postedCount} entr${postedCount === 1 ? 'y' : 'ies'} posted, ${failed} failed, ${locked} locked.`,
+            );
+        } finally {
+            setIsPipelinePostingAllLedger(false);
         }
     }
 
@@ -3005,6 +3490,7 @@ function App() {
             );
             await refreshPipelineLoginAccountData();
             setPipelineStatus(`Synced ${entryId} → ${glId}`);
+            void refreshPipelineBulkStats();
         } catch (error) {
             setPipelineStatus(`Sync failed: ${String(error)}`);
         } finally {
@@ -4214,6 +4700,10 @@ function App() {
                                                     ? `${selectedLoginAccount.loginName}/${selectedLoginAccount.label}`
                                                     : ''
                                             }
+                                            disabled={
+                                                isPipelineExtractingAllLedger ||
+                                                isPipelinePostingAllLedger
+                                            }
                                             onChange={(event) => {
                                                 const value =
                                                     event.target.value;
@@ -4254,6 +4744,93 @@ function App() {
                                             })}
                                         </select>
                                     </label>
+                                </div>
+                                <div className="pipeline-panel">
+                                    <div className="pipeline-actions">
+                                        <button
+                                            type="button"
+                                            className="primary-button"
+                                            disabled={
+                                                isLoadingPipelineBulkStats ||
+                                                isPipelineExtractingAllLedger ||
+                                                (pipelineBulkStats?.extract
+                                                    .eligibleAccounts ?? 0) ===
+                                                    0
+                                            }
+                                            onClick={() => {
+                                                void handlePipelineExtractAllLedger();
+                                            }}
+                                        >
+                                            {isPipelineExtractingAllLedger
+                                                ? 'Extracting...'
+                                                : `Extract All (${pipelineBulkStats?.extract.totalDocuments ?? 0})`}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="primary-button"
+                                            disabled={
+                                                isLoadingPipelineBulkStats ||
+                                                isPipelinePostingAllLedger ||
+                                                glLockStatus.locked ||
+                                                (pipelineBulkStats?.post
+                                                    .eligibleAccounts ?? 0) ===
+                                                    0
+                                            }
+                                            onClick={() => {
+                                                void handlePipelinePostAllLedger();
+                                            }}
+                                        >
+                                            {isPipelinePostingAllLedger
+                                                ? 'Posting...'
+                                                : `Post All (${pipelineBulkStats?.post.totalUnpostedEntries ?? 0})`}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            disabled={
+                                                isLoadingPipelineBulkStats
+                                            }
+                                            onClick={() => {
+                                                void refreshPipelineBulkStats();
+                                            }}
+                                        >
+                                            {isLoadingPipelineBulkStats
+                                                ? 'Refreshing stats...'
+                                                : 'Refresh Stats'}
+                                        </button>
+                                    </div>
+                                    {pipelineBulkStats !== null && (
+                                        <div className="hint">
+                                            <div>
+                                                {`Extract All: ${pipelineBulkStats.extract.totalDocuments} document(s) across ${pipelineBulkStats.extract.eligibleAccounts} eligible account(s).`}
+                                            </div>
+                                            <div>
+                                                {`${pipelineBulkStats.extract.skippedMissingExtension} missing extension, ${pipelineBulkStats.extract.skippedNoDocuments} no documents, ${pipelineBulkStats.extract.inspectFailures} inspect failures, ${pipelineBulkStats.extract.lockedAccounts} locked.`}
+                                            </div>
+                                            <div>
+                                                {`Post All: ${pipelineBulkStats.post.totalUnpostedEntries} entr${pipelineBulkStats.post.totalUnpostedEntries === 1 ? 'y' : 'ies'} across ${pipelineBulkStats.post.eligibleAccounts} eligible account(s).`}
+                                            </div>
+                                            <div>
+                                                {`${pipelineBulkStats.post.skippedMissingGlAccount} missing GL mapping, ${pipelineBulkStats.post.skippedNoUnposted} no unposted, ${pipelineBulkStats.post.inspectFailures} inspect failures, ${pipelineBulkStats.post.lockedAccounts} locked, GL ${pipelineBulkStats.gl.locked ? 'locked' : 'unlocked'}.`}
+                                            </div>
+                                        </div>
+                                    )}
+                                    {selectedLoginLockStatus?.locked ===
+                                        true && (
+                                        <p className="status">
+                                            {selectedLoginLockStatus.metadata ===
+                                            null
+                                                ? 'Selected login is currently in use by another operation.'
+                                                : `Selected login locked by ${selectedLoginLockStatus.metadata.owner}/${selectedLoginLockStatus.metadata.purpose}.`}
+                                        </p>
+                                    )}
+                                    {glLockStatus.locked && (
+                                        <p className="status">
+                                            {glLockStatus.metadata === null
+                                                ? 'General journal is currently in use by another operation.'
+                                                : `General journal locked by ${glLockStatus.metadata.owner}/${glLockStatus.metadata.purpose}.`}
+                                        </p>
+                                    )}
                                 </div>
                                 <div className="tabs pipeline-subtabs">
                                     <button
@@ -4416,7 +4993,9 @@ function App() {
                                                     disabled={
                                                         !evidenceRowsDocument ||
                                                         isRunningExtraction ||
-                                                        !hasExtension
+                                                        !hasExtension ||
+                                                        selectedLoginLocked ||
+                                                        isPipelineExtractingAllLedger
                                                     }
                                                 >
                                                     {isRunningExtraction
@@ -4549,6 +5128,7 @@ function App() {
                                                                 className="primary-button"
                                                                 disabled={
                                                                     isSavingPipelineGlAccount ||
+                                                                    selectedLoginLocked ||
                                                                     pipelineGlAccountDraft.trim()
                                                                         .length ===
                                                                         0
@@ -4570,6 +5150,9 @@ function App() {
                                                         className="primary-button"
                                                         disabled={
                                                             isPipelinePosting ||
+                                                            isPipelinePostingAllLedger ||
+                                                            glLockStatus.locked ||
+                                                            selectedLoginLocked ||
                                                             unpostedEntries.length ===
                                                                 0
                                                         }
@@ -4586,6 +5169,9 @@ function App() {
                                                         className="ghost-button"
                                                         disabled={
                                                             isPipelinePosting ||
+                                                            isPipelinePostingAllLedger ||
+                                                            glLockStatus.locked ||
+                                                            selectedLoginLocked ||
                                                             pipelineSelectedEntryIds.size ===
                                                                 0
                                                         }
@@ -4741,7 +5327,10 @@ function App() {
                                                                                                 className="primary-button"
                                                                                                 disabled={
                                                                                                     isBusy ||
-                                                                                                    isPipelinePosting
+                                                                                                    isPipelinePosting ||
+                                                                                                    isPipelinePostingAllLedger ||
+                                                                                                    glLockStatus.locked ||
+                                                                                                    selectedLoginLocked
                                                                                                 }
                                                                                                 onClick={() => {
                                                                                                     void handlePipelinePostEntry(
@@ -4761,7 +5350,10 @@ function App() {
                                                                                                     className="ghost-button"
                                                                                                     disabled={
                                                                                                         isBusy ||
-                                                                                                        isPipelinePosting
+                                                                                                        isPipelinePosting ||
+                                                                                                        isPipelinePostingAllLedger ||
+                                                                                                        glLockStatus.locked ||
+                                                                                                        selectedLoginLocked
                                                                                                     }
                                                                                                     onClick={() => {
                                                                                                         void handleOpenTransferModal(
@@ -4782,7 +5374,10 @@ function App() {
                                                                                                     className="ghost-button"
                                                                                                     disabled={
                                                                                                         isBusy ||
-                                                                                                        isPipelinePosting
+                                                                                                        isPipelinePosting ||
+                                                                                                        isPipelinePostingAllLedger ||
+                                                                                                        glLockStatus.locked ||
+                                                                                                        selectedLoginLocked
                                                                                                     }
                                                                                                     onClick={() => {
                                                                                                         void handlePipelineSyncEntry(
