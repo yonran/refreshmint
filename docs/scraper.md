@@ -98,6 +98,17 @@ Avoid downloading everything every time by tracking progress and checking existi
 - **Debugging limits:** Use a `DOWNLOAD_LIMIT` variable during development to only fetch 1-2 items per run.
 - **Track progress across subflows, not just pages:** A scraper may need to complete rewards, activity, and statements in separate branches before it is actually "done."
 
+## Date semantics
+
+- **Treat dates as domain-specific fields, not a generic `date`:** Banking sites usually expose multiple date models at once, such as statement closing dates, transaction posting dates, pending dates, payment due dates, rewards statement dates, certificate issue dates, and scrape timestamps.
+- **Name dates by meaning:** Prefer fields like `coverageEndDate`, `statementClosingDate`, `paymentDueDate`, `certificateIssuedDate`, and `scrapedAt` instead of overloading one catch-all date field.
+- **Keep scrape time separate from data coverage:** The time a scraper ran is often different from the period the artifact represents.
+- **Use bank-native boundary dates for artifact naming when possible:** Statement PDFs and statement-period CSVs should usually key off the statement closing date rather than the scrape date.
+- **Treat relative dashboard periods as query modes first:** Labels like `Last year` and `Year to date` are not concrete dates until you map them to a real range.
+- **Do not invent start dates unless the site actually gives them:** End dates are often explicit while start dates are implied and easier to get wrong.
+- **Expect different pages to lag differently:** Rewards, balances, statements, and activity may each be current through different cutoffs.
+- **Parse missing timezones consistently:** If the site omits a timezone, use one explicit assumption throughout the scraper instead of letting runtime defaults vary.
+
 Example of optimized loop:
 
 ```js
