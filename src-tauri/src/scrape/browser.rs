@@ -75,14 +75,25 @@ pub async fn launch_browser(
 ) -> Result<(Browser, tokio::task::JoinHandle<()>), Box<dyn Error>> {
     std::fs::create_dir_all(profile_dir)?;
 
-    let config = BrowserConfig::builder()
+    let mut builder = BrowserConfig::builder()
         .chrome_executable(chrome_path)
         .user_data_dir(profile_dir)
-        .with_head()
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg("--disable-extensions")
-        .launch_timeout(std::time::Duration::from_secs(30))
+        .launch_timeout(std::time::Duration::from_secs(30));
+
+    let is_linux_ci = cfg!(target_os = "linux") && std::env::var_os("CI").is_some();
+    if is_linux_ci {
+        builder = builder
+            .no_sandbox()
+            .arg("--disable-dev-shm-usage")
+            .arg("--disable-gpu");
+    } else {
+        builder = builder.with_head();
+    }
+
+    let config = builder
         .build()
         .map_err(|e| format!("failed to build browser config: {e}"))?;
 
@@ -136,14 +147,22 @@ pub async fn launch_browser(
 pub async fn open_start_page(
     browser: &mut Browser,
 ) -> Result<chromiumoxide::Page, Box<dyn Error + Send + Sync>> {
-    browser.fetch_targets().await?;
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let existing_page_timeout = std::time::Duration::from_secs(10);
+    let poll_interval = std::time::Duration::from_millis(250);
+    let start = std::time::Instant::now();
 
-    if let Some(page) = browser.pages().await?.into_iter().next() {
-        return Ok(page);
+    loop {
+        browser.fetch_targets().await?;
+        if let Some(page) = browser.pages().await?.into_iter().next() {
+            return Ok(page);
+        }
+        if start.elapsed() >= existing_page_timeout {
+            break;
+        }
+        tokio::time::sleep(poll_interval).await;
     }
 
-    let create_timeout = std::time::Duration::from_secs(10);
+    let create_timeout = std::time::Duration::from_secs(30);
     match tokio::time::timeout(create_timeout, browser.new_page("about:blank")).await {
         Ok(Ok(page)) => Ok(page),
         Ok(Err(err)) => Err(format!("failed to create initial page: {err}").into()),
