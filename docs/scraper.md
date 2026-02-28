@@ -78,13 +78,25 @@ Errors thrown from your script fail the scrape run.
 - **Scope attachment interactions tightly:** For statement/check/image scraping, avoid global page-wide control scans. Anchor actions to the selected row/container first, then use guarded fallbacks.
 - **Avoid generic attachment URL capture:** Do not treat broad `a[href]` matches as evidence attachments without contextual checks, or you'll capture unrelated links and miss real artifacts.
 
+## Cross-bank lessons
+
+- **Make resumed sessions deterministic:** Live debug sessions often resume on the last visited page, not the login page. Handlers should recover cleanly from statements, rewards, stale shells, and other mid-flow states.
+- **Treat account labels as first-class data:** Attach `label` whenever saving resources so account-scoped outputs do not fall back to `_default`.
+- **Save lightweight account snapshots early:** A small per-account JSON summary for balances, limits, due dates, and rewards is often more stable than inferring the same data later from PDFs or transaction pages.
+- **Separate extraction from native downloads:** If a site's official export is hidden or unavailable, save structured data from visible tables first. Generated CSVs are still useful and keep the scraper moving.
+- **Expect multiple sub-apps after one login:** Banking sites often split activity, statements, rewards, and servicing into separate apps with different DOM conventions and state markers.
+- **Assume mobile layout may win:** Even in desktop browser sessions, the actionable controls may be the mobile variants while desktop controls remain hidden in the DOM.
+- **Document verified behavior next to the scraper:** Keep selectors, URLs, page markers, and known gaps in extension notes so future iterations can build from observed behavior instead of re-discovery.
+
 ## State management and optimization
 
 Avoid downloading everything every time by tracking progress and checking existing files.
 
 - **Deduplicate downloads:** Use `await refreshmint.listAccountDocuments()` to get a list of already saved files. Compare filenames before initiating a download.
+- **Deduplicate per account label when applicable:** If a login can expose multiple accounts, query and compare existing documents within the account label you are currently scraping.
 - **Filter by date:** Implement a "since" date check (e.g., `skip before 2026-01-01`).
 - **Debugging limits:** Use a `DOWNLOAD_LIMIT` variable during development to only fetch 1-2 items per run.
+- **Track progress across subflows, not just pages:** A scraper may need to complete rewards, activity, and statements in separate branches before it is actually "done."
 
 Example of optimized loop:
 
