@@ -1,0 +1,7 @@
+{
+    "name": "citi",
+    "secrets": {
+        "www.citi.com": ["citi_username", "citi_password"],
+        "online.citi.com": ["citi_username", "citi_password"]
+    }
+}
