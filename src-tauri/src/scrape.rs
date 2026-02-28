@@ -414,11 +414,15 @@ pub async fn run_scrape_async(
     eprintln!("Page opened.");
 
     // 7. Set up shared state
+    let ext_cache_key = std::path::Path::new(&config.extension_name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&config.extension_name);
     let output_dir = config
         .ledger_dir
         .join("cache")
         .join("extensions")
-        .join(&config.extension_name)
+        .join(ext_cache_key)
         .join("output");
     std::fs::create_dir_all(&output_dir)?;
 
