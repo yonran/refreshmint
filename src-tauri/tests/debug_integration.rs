@@ -40,6 +40,25 @@ mod unix_only {
     type DebugSessionJoin = std::thread::JoinHandle<Result<(), String>>;
     type DebugFixture = (PathBuf, PathBuf, DebugSessionJoin);
 
+    fn resolve_app_binary() -> Result<PathBuf, Box<dyn Error>> {
+        if let Some(path) = option_env!("CARGO_BIN_EXE_app") {
+            return Ok(PathBuf::from(path));
+        }
+        if let Some(path) = std::env::var_os("CARGO_BIN_EXE_app") {
+            return Ok(PathBuf::from(path));
+        }
+
+        let current_exe = std::env::current_exe()?;
+        let deps_dir = current_exe
+            .parent()
+            .ok_or("test executable has no parent directory")?;
+        let target_dir = deps_dir
+            .parent()
+            .ok_or("test executable has no target directory")?;
+        let binary_name = if cfg!(windows) { "app.exe" } else { "app" };
+        Ok(target_dir.join(binary_name))
+    }
+
     fn create_debug_fixture(sandbox: &TestSandbox) -> Result<DebugFixture, Box<dyn Error>> {
         let ledger_dir = sandbox.path().join("ledger.refreshmint");
         fs::create_dir_all(&ledger_dir)?;
@@ -115,6 +134,7 @@ await refreshmint.saveResource("debug-smoke.bin", [111, 107]);
         session_result?;
 
         let output_file = ledger_dir
+            .join("cache")
             .join("extensions")
             .join("smoke-ext")
             .join("output")
@@ -146,8 +166,7 @@ refreshmint.reportValue("stream_key", "stream_value");
 "#,
         )?;
 
-        let app_binary = std::env::var("CARGO_BIN_EXE_app")
-            .map_err(|_| "missing CARGO_BIN_EXE_app for debug exec stream test")?;
+        let app_binary = resolve_app_binary()?;
         let exec_output = Command::new(app_binary)
             .arg("debug")
             .arg("exec")

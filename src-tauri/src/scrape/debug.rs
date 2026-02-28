@@ -124,7 +124,8 @@ fn exec_debug_script_with_options_unix(
         prompt_requires_override,
     };
 
-    let mut stream = UnixStream::connect(socket_path)?;
+    let connect_path = resolve_socket_bind_path(socket_path);
+    let mut stream = UnixStream::connect(&connect_path)?;
     serde_json::to_writer(&mut stream, &request)?;
     stream.write_all(b"\n")?;
 
@@ -270,6 +271,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
         Some(path) => path,
         None => default_debug_socket_path(&config.login_name)?,
     };
+    let bind_socket_path = resolve_socket_bind_path(&socket_path);
 
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -277,8 +279,15 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
     if socket_path.exists() {
         std::fs::remove_file(&socket_path)?;
     }
+    if bind_socket_path.exists() {
+        std::fs::remove_file(&bind_socket_path)?;
+    }
     let _cleanup = SocketCleanup {
-        path: socket_path.clone(),
+        paths: if bind_socket_path == socket_path {
+            vec![socket_path.clone()]
+        } else {
+            vec![socket_path.clone(), bind_socket_path.clone()]
+        },
     };
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -355,7 +364,10 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
         })?;
 
     rt.block_on(async move {
-        let listener = UnixListener::bind(&socket_path)?;
+        let listener = UnixListener::bind(&bind_socket_path)?;
+        if bind_socket_path != socket_path {
+            std::os::unix::fs::symlink(&bind_socket_path, &socket_path)?;
+        }
         println!("Debug session socket: {}", socket_path.display());
         eprintln!("Debug session started. Press Ctrl+C to stop.");
 
@@ -442,10 +454,11 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
         }
 
         drop(listener);
-        {
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
             let guard = browser_instance.lock().await;
-            let _ = guard.close().await;
-        }
+            let _ = tokio::time::timeout(Duration::from_secs(5), guard.close()).await;
+        })
+        .await;
         drop(browser_instance);
         let _ = tokio::time::timeout(Duration::from_secs(5), handler_handle).await;
         Ok::<(), Box<dyn Error>>(())
@@ -582,19 +595,17 @@ async fn handle_exec_request_async(
                     refreshmint.debug_output_sink = None;
                 }
 
-                if output_receiver.is_closed() {
-                    while let Ok(event) = output_receiver.try_recv() {
-                        let frame = ExecStreamFrame::Output {
-                            stream: event.stream.into(),
-                            line: event.line,
-                        };
-                        if let Err(err) = write_exec_stream_frame_async(stream, &frame).await {
-                            eprintln!("debug exec client disconnected while draining output: {err}");
-                            return Ok(());
-                        }
+                while let Ok(event) = output_receiver.try_recv() {
+                    let frame = ExecStreamFrame::Output {
+                        stream: event.stream.into(),
+                        line: event.line,
+                    };
+                    if let Err(err) = write_exec_stream_frame_async(stream, &frame).await {
+                        eprintln!("debug exec client disconnected while draining output: {err}");
+                        return Ok(());
                     }
-                    break;
                 }
+                break;
             }
         }
     }
@@ -646,7 +657,8 @@ fn send_request(socket_path: &Path, request: Request) -> Result<Response, Box<dy
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
 
-    let mut stream = UnixStream::connect(socket_path)?;
+    let connect_path = resolve_socket_bind_path(socket_path);
+    let mut stream = UnixStream::connect(&connect_path)?;
     serde_json::to_writer(&mut stream, &request)?;
     stream.write_all(b"\n")?;
     stream.shutdown(Shutdown::Write)?;
@@ -704,14 +716,44 @@ fn sanitize_segment(input: &str) -> String {
 
 #[cfg(unix)]
 struct SocketCleanup {
-    path: PathBuf,
+    paths: Vec<PathBuf>,
 }
 
 #[cfg(unix)]
 impl Drop for SocketCleanup {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
+}
+
+#[cfg(unix)]
+fn unix_socket_path_len(path: &Path) -> usize {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().len()
+}
+
+#[cfg(unix)]
+fn resolve_socket_bind_path(requested_path: &Path) -> PathBuf {
+    if unix_socket_path_len(requested_path) < 100 {
+        return requested_path.to_path_buf();
+    }
+
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let stem = requested_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(sanitize_segment)
+        .unwrap_or_else(|| "debug".to_string());
+    let mut hasher = DefaultHasher::new();
+    requested_path.hash(&mut hasher);
+    let suffix = format!("{:08x}", hasher.finish() as u32);
+    let shortened = stem.chars().take(24).collect::<String>();
+    std::env::temp_dir().join(format!("rm-{}-{}.sock", shortened, suffix))
 }
 
 #[cfg(test)]
