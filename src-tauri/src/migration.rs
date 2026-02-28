@@ -492,10 +492,11 @@ mod tests {
     #[test]
     fn migrate_moves_account_documents_and_updates_config() {
         let ledger_dir = temp_dir("moves");
-        fs::create_dir_all(ledger_dir.join("accounts").join("Assets:Chase:Checking")).unwrap();
+        let account_name = "Checking";
+        fs::create_dir_all(ledger_dir.join("accounts").join(account_name)).unwrap();
         crate::account_config::write_account_config(
             &ledger_dir,
-            "Assets:Chase:Checking",
+            account_name,
             &crate::account_config::AccountConfig {
                 extension: Some("chase-driver".to_string()),
             },
@@ -504,21 +505,21 @@ mod tests {
 
         let src_docs = ledger_dir
             .join("accounts")
-            .join("Assets:Chase:Checking")
+            .join(account_name)
             .join("documents");
         fs::create_dir_all(&src_docs).unwrap();
         fs::write(src_docs.join("statement.pdf"), b"pdf").unwrap();
         fs::write(
             src_docs.join("statement.pdf-info.json"),
-            r#"{"accountName":"Assets:Chase:Checking","mimeType":"application/pdf"}"#,
+            r#"{"accountName":"Checking","mimeType":"application/pdf"}"#,
         )
         .unwrap();
         fs::write(
             ledger_dir
                 .join("accounts")
-                .join("Assets:Chase:Checking")
+                .join(account_name)
                 .join("account.journal"),
-            "2026-01-01 Test\n    Assets:Chase:Checking  1 USD\n    Equity:Test\n",
+            "2026-01-01 Test\n    Assets:Checking  1 USD\n    Equity:Test\n",
         )
         .unwrap();
 
@@ -531,7 +532,7 @@ mod tests {
         assert_eq!(login_config.extension.as_deref(), Some("chase-driver"));
         assert_eq!(
             login_config.accounts["checking"].gl_account.as_deref(),
-            Some("Assets:Chase:Checking")
+            Some("Checking")
         );
 
         let target_docs = ledger_dir
@@ -544,10 +545,7 @@ mod tests {
         let sidecar = fs::read_to_string(target_docs.join("statement.pdf-info.json")).unwrap();
         assert!(sidecar.contains("\"loginName\": \"chase-driver\""));
         assert!(sidecar.contains("\"label\": \"checking\""));
-        assert!(!ledger_dir
-            .join("accounts")
-            .join("Assets:Chase:Checking")
-            .exists());
+        assert!(!ledger_dir.join("accounts").join(account_name).exists());
 
         let _ = fs::remove_dir_all(&ledger_dir);
     }
@@ -555,10 +553,11 @@ mod tests {
     #[test]
     fn migrate_dry_run_does_not_change_filesystem() {
         let ledger_dir = temp_dir("dry-run");
-        fs::create_dir_all(ledger_dir.join("accounts").join("Assets:Chase:Savings")).unwrap();
+        let account_name = "Savings";
+        fs::create_dir_all(ledger_dir.join("accounts").join(account_name)).unwrap();
         crate::account_config::write_account_config(
             &ledger_dir,
-            "Assets:Chase:Savings",
+            account_name,
             &crate::account_config::AccountConfig {
                 extension: Some("chase-driver".to_string()),
             },
@@ -567,10 +566,7 @@ mod tests {
 
         let outcome = migrate_ledger(&ledger_dir, true).unwrap();
         assert_eq!(outcome.migrated.len(), 1);
-        assert!(ledger_dir
-            .join("accounts")
-            .join("Assets:Chase:Savings")
-            .exists());
+        assert!(ledger_dir.join("accounts").join(account_name).exists());
         assert!(!ledger_dir.join("logins").join("chase-driver").exists());
 
         let _ = fs::remove_dir_all(&ledger_dir);
