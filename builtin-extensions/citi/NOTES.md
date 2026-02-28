@@ -244,3 +244,17 @@ Verified against live Citi sessions while developing the `citi` Refreshmint exte
 - Multi-account behavior has not been exercised yet
 - Annual account summary download has not been automated yet
 - Citi-native activity export / CSV download has not been exercised yet
+
+## TODO
+
+- Exercise and implement the live MFA branch
+- Remove the temporary statement PDF download limit and iterate all visible statement rows
+- Automate the statements year selector for `2025`, `2024`, and older available years
+- Probe `Request Older Statements` and capture how requested statements are surfaced for download
+- Automate the rewards-page `Statement Date` selector for historical rewards snapshots
+- Probe `Access Certificate` and determine whether the certificate can be downloaded or saved as an artifact
+- Determine whether Citi exposes a native activity CSV export in a desktop or alternate layout
+- Investigate custom date-range activity for pre-2025 transaction coverage
+- Implement pagination or another path beyond the visible first page of `Last year (2025)` activity
+- Exercise multi-account logins and ensure labels, rewards, activity, and statements stay account-scoped
+- Automate annual account summary downloads from the visible `View 2025 Annual Account Summary` link
