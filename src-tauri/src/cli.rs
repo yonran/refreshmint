@@ -816,8 +816,13 @@ fn run_login_set_extension(
     require_cli_existing_login(&ledger_dir, &login_name)?;
     let extension = args.extension.trim().to_string();
 
-    let _lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
-        .map_err(std::io::Error::other)?;
+    let _lock = crate::login_config::acquire_login_lock_with_metadata(
+        &ledger_dir,
+        &login_name,
+        "cli",
+        "set-login-extension",
+    )
+    .map_err(std::io::Error::other)?;
     let mut config = crate::login_config::read_login_config(&ledger_dir, &login_name);
     config.extension = if extension.is_empty() {
         None
@@ -837,6 +842,13 @@ fn run_login_delete(
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
     let login_name = require_cli_login_name("name", &args.name)?;
+    let _lock = crate::login_config::acquire_login_lock_with_metadata(
+        &ledger_dir,
+        &login_name,
+        "cli",
+        "delete-login",
+    )
+    .map_err(std::io::Error::other)?;
     crate::login_config::delete_login(&ledger_dir, &login_name).map_err(std::io::Error::other)?;
     println!("Deleted login '{login_name}'.");
     Ok(())
@@ -859,8 +871,13 @@ fn run_login_set_account(
         .filter(|v| !v.is_empty())
         .map(ToOwned::to_owned);
 
-    let _lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
-        .map_err(std::io::Error::other)?;
+    let _lock = crate::login_config::acquire_login_lock_with_metadata(
+        &ledger_dir,
+        &login_name,
+        "cli",
+        "set-login-account",
+    )
+    .map_err(std::io::Error::other)?;
     if let Some(ref gl) = gl_account {
         crate::login_config::check_gl_account_uniqueness(&ledger_dir, &login_name, &label, gl)
             .map_err(std::io::Error::other)?;
@@ -886,8 +903,13 @@ fn run_login_delete_account(
     let login_name = require_cli_login_name("name", &args.name)?;
     require_cli_existing_login(&ledger_dir, &login_name)?;
     let label = require_cli_label(&args.label)?;
-    let _lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
-        .map_err(std::io::Error::other)?;
+    let _lock = crate::login_config::acquire_login_lock_with_metadata(
+        &ledger_dir,
+        &login_name,
+        "cli",
+        "delete-login-account",
+    )
+    .map_err(std::io::Error::other)?;
     crate::login_config::remove_login_account(&ledger_dir, &login_name, &label)
         .map_err(std::io::Error::other)?;
     println!("Removed label '{label}' from login '{login_name}'.");
@@ -903,8 +925,13 @@ fn run_login_clear_profile(
     let login_name = require_cli_login_name("name", &args.name)?;
     require_cli_existing_login(&ledger_dir, &login_name)?;
 
-    let lock = crate::login_config::acquire_login_lock(&ledger_dir, &login_name)
-        .map_err(std::io::Error::other)?;
+    let lock = crate::login_config::acquire_login_lock_with_metadata(
+        &ledger_dir,
+        &login_name,
+        "cli",
+        "clear-login-profile",
+    )
+    .map_err(std::io::Error::other)?;
     crate::scrape::profile::clear_login_profile(&ledger_dir, &login_name, &lock)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     println!("Cleared browser profile for login '{login_name}'.");
@@ -1133,6 +1160,7 @@ fn run_account_post(
         &entry_id,
         &counterpart_account,
         args.posting_index,
+        "cli",
     )
     .map_err(|err| std::io::Error::other(err.to_string()))?;
     println!("{gl_txn_id}");
@@ -1154,6 +1182,7 @@ fn run_account_unpost(
         &label,
         &entry_id,
         args.posting_index,
+        "cli",
     )
     .map_err(|err| std::io::Error::other(err.to_string()))?;
     println!("ok");

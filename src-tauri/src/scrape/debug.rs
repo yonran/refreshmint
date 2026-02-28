@@ -263,9 +263,13 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
         Arc<Mutex<super::js_api::RefreshmintInner>>,
     );
 
-    let _login_lock =
-        crate::login_config::acquire_login_lock(&config.ledger_dir, &config.login_name)
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let _login_lock = crate::login_config::acquire_login_lock_with_metadata(
+        &config.ledger_dir,
+        &config.login_name,
+        "scrape-debug",
+        "debug-session",
+    )
+    .map_err(|err| std::io::Error::other(err.to_string()))?;
 
     let socket_path = match config.socket_path {
         Some(path) => path,

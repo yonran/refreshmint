@@ -21,11 +21,16 @@ mod ledger_add;
 mod ledger_open;
 mod version;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 struct UiDebugSession {
     socket_path: std::path::PathBuf,
     join_handle: std::thread::JoinHandle<()>,
+}
+
+struct LockMetadataWatcher {
+    ledger_path: std::path::PathBuf,
+    _watcher: notify::RecommendedWatcher,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -51,11 +56,29 @@ struct SecretSyncResult {
     extras: Vec<SecretEntry>,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LockStatusChangedEvent {
+    ledger_path: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct LockStatusSnapshot {
+    gl: login_config::LockStatus,
+    logins: std::collections::BTreeMap<String, login_config::LockStatus>,
+}
+
 static UI_DEBUG_SESSION: std::sync::OnceLock<std::sync::Mutex<Option<UiDebugSession>>> =
+    std::sync::OnceLock::new();
+static LOCK_METADATA_WATCHER: std::sync::OnceLock<std::sync::Mutex<Option<LockMetadataWatcher>>> =
     std::sync::OnceLock::new();
 
 fn ui_debug_session_state() -> &'static std::sync::Mutex<Option<UiDebugSession>> {
     UI_DEBUG_SESSION.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn lock_metadata_watcher_state() -> &'static std::sync::Mutex<Option<LockMetadataWatcher>> {
+    LOCK_METADATA_WATCHER.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -88,6 +111,9 @@ pub fn run_with_context(
             start_scrape_debug_session,
             stop_scrape_debug_session,
             get_scrape_debug_session_socket,
+            start_lock_metadata_watch,
+            stop_lock_metadata_watch,
+            get_lock_status_snapshot,
             run_scrape_for_login,
             run_scrape,
             list_documents,
@@ -504,6 +530,92 @@ fn get_scrape_debug_session_socket() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+fn start_lock_metadata_watch(app: tauri::AppHandle, ledger: String) -> Result<(), String> {
+    use notify::Watcher;
+
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+
+    let state = lock_metadata_watcher_state();
+    let mut guard = state
+        .lock()
+        .map_err(|_| "failed to acquire lock metadata watcher state".to_string())?;
+
+    if let Some(existing) = guard.as_ref() {
+        if existing.ledger_path == target_dir {
+            return Ok(());
+        }
+    }
+
+    guard.take();
+
+    let app_handle = app.clone();
+    let ledger_path = target_dir.clone();
+    let watcher =
+        notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
+            let Ok(event) = result else {
+                return;
+            };
+            let should_emit = event.paths.iter().any(|path| {
+                matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some(".lock.meta.json" | ".gl.lock.meta.json")
+                )
+            });
+            if should_emit {
+                let _ = app_handle.emit(
+                    "refreshmint://lock-status-changed",
+                    LockStatusChangedEvent {
+                        ledger_path: ledger_path.to_string_lossy().to_string(),
+                    },
+                );
+            }
+        })
+        .map_err(|err| err.to_string())?;
+
+    let mut watcher = watcher;
+    watcher
+        .watch(&target_dir, notify::RecursiveMode::Recursive)
+        .map_err(|err| err.to_string())?;
+
+    *guard = Some(LockMetadataWatcher {
+        ledger_path: target_dir,
+        _watcher: watcher,
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_lock_metadata_watch() -> Result<(), String> {
+    let state = lock_metadata_watcher_state();
+    let mut guard = state
+        .lock()
+        .map_err(|_| "failed to acquire lock metadata watcher state".to_string())?;
+    guard.take();
+    Ok(())
+}
+
+#[tauri::command]
+fn get_lock_status_snapshot(
+    ledger: String,
+    login_names: Vec<String>,
+) -> Result<LockStatusSnapshot, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+
+    let mut logins = std::collections::BTreeMap::new();
+    for login_name in login_names {
+        let login_name = require_login_name_input(login_name)?;
+        let status = login_config::get_login_lock_status(&target_dir, &login_name)
+            .map_err(|err| err.to_string())?;
+        logins.insert(login_name, status);
+    }
+
+    let gl = login_config::get_gl_lock_status(&target_dir).map_err(|err| err.to_string())?;
+    Ok(LockStatusSnapshot { gl, logins })
+}
+
+#[tauri::command]
 async fn run_scrape_for_login(ledger: String, login_name: String) -> Result<(), String> {
     let login_name = require_login_name_input(login_name)?;
 
@@ -871,8 +983,13 @@ fn set_login_extension(
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
     require_existing_login(&target_dir, &login_name)?;
-    let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
-        .map_err(|err| err.to_string())?;
+    let _lock = login_config::acquire_login_lock_with_metadata(
+        &target_dir,
+        &login_name,
+        "gui",
+        "set-login-extension",
+    )
+    .map_err(|err| err.to_string())?;
 
     let mut config = login_config::read_login_config(&target_dir, &login_name);
     let extension = extension.trim().to_string();
@@ -889,6 +1006,13 @@ fn set_login_extension(
 fn delete_login(ledger: String, login_name: String) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
+    let _lock = login_config::acquire_login_lock_with_metadata(
+        &target_dir,
+        &login_name,
+        "gui",
+        "delete-login",
+    )
+    .map_err(|err| err.to_string())?;
     login_config::delete_login(&target_dir, &login_name).map_err(|err| err.to_string())
 }
 
@@ -904,8 +1028,13 @@ fn set_login_account(
     require_existing_login(&target_dir, &login_name)?;
     let label = require_label_input(label)?;
 
-    let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
-        .map_err(|err| err.to_string())?;
+    let _lock = login_config::acquire_login_lock_with_metadata(
+        &target_dir,
+        &login_name,
+        "gui",
+        "set-login-account",
+    )
+    .map_err(|err| err.to_string())?;
 
     // Check GL account uniqueness if setting a non-null GL account
     let gl_account = gl_account
@@ -930,8 +1059,13 @@ fn remove_login_account(ledger: String, login_name: String, label: String) -> Re
     require_existing_login(&target_dir, &login_name)?;
     let label = require_label_input(label)?;
 
-    let _lock = login_config::acquire_login_lock(&target_dir, &login_name)
-        .map_err(|err| err.to_string())?;
+    let _lock = login_config::acquire_login_lock_with_metadata(
+        &target_dir,
+        &login_name,
+        "gui",
+        "remove-login-account",
+    )
+    .map_err(|err| err.to_string())?;
 
     login_config::remove_login_account(&target_dir, &login_name, &label)
         .map_err(|err| err.to_string())
@@ -1050,8 +1184,13 @@ fn clear_login_profile(ledger: String, login_name: String) -> Result<(), String>
     let login_name = require_login_name_input(login_name)?;
     require_existing_login(&target_dir, &login_name)?;
 
-    let lock = login_config::acquire_login_lock(&target_dir, &login_name)
-        .map_err(|err| err.to_string())?;
+    let lock = login_config::acquire_login_lock_with_metadata(
+        &target_dir,
+        &login_name,
+        "gui",
+        "clear-login-profile",
+    )
+    .map_err(|err| err.to_string())?;
     scrape::profile::clear_login_profile(&target_dir, &login_name, &lock)
         .map_err(|err| err.to_string())
 }
@@ -1191,6 +1330,7 @@ fn post_login_account_entry(
         &entry_id,
         &counterpart_account,
         posting_index,
+        "gui",
     )
     .map_err(|err| err.to_string())
 }
@@ -1223,8 +1363,15 @@ fn unpost_login_account_entry(
     let label = require_label_input(label)?;
     let entry_id = require_non_empty_input("entry_id", entry_id)?;
 
-    post::unpost_login_account_entry(&target_dir, &login_name, &label, &entry_id, posting_index)
-        .map_err(|err| err.to_string())
+    post::unpost_login_account_entry(
+        &target_dir,
+        &login_name,
+        &label,
+        &entry_id,
+        posting_index,
+        "gui",
+    )
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -1312,6 +1459,7 @@ fn post_login_account_transfer(
         &login_name2,
         &label2,
         &entry_id2,
+        "gui",
     )
     .map_err(|err| err.to_string())
 }
@@ -1328,7 +1476,7 @@ fn sync_gl_transaction(
     let label = require_label_input(label)?;
     let entry_id = require_non_empty_input("entry_id", entry_id)?;
 
-    post::sync_gl_transaction(&target_dir, &login_name, &label, &entry_id)
+    post::sync_gl_transaction(&target_dir, &login_name, &label, &entry_id, "gui")
         .map_err(|err| err.to_string())
 }
 
@@ -1362,7 +1510,7 @@ fn recategorize_gl_transaction(
     let target_dir = std::path::PathBuf::from(ledger);
     let txn_id = require_non_empty_input("txn_id", txn_id)?;
     let new_account = require_non_empty_input("new_account", new_account)?;
-    post::recategorize_gl_transaction(&target_dir, &txn_id, &new_account)
+    post::recategorize_gl_transaction(&target_dir, &txn_id, &new_account, "gui")
         .map_err(|err| err.to_string())
 }
 
@@ -1371,7 +1519,7 @@ fn merge_gl_transfer(ledger: String, txn_id_1: String, txn_id_2: String) -> Resu
     let target_dir = std::path::PathBuf::from(ledger);
     let txn_id_1 = require_non_empty_input("txn_id_1", txn_id_1)?;
     let txn_id_2 = require_non_empty_input("txn_id_2", txn_id_2)?;
-    post::merge_gl_transfer(&target_dir, &txn_id_1, &txn_id_2).map_err(|err| err.to_string())
+    post::merge_gl_transfer(&target_dir, &txn_id_1, &txn_id_2, "gui").map_err(|err| err.to_string())
 }
 
 fn map_account_journal_entries(

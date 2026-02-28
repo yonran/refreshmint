@@ -113,7 +113,12 @@ pub fn migrate_ledger(
             continue;
         }
 
-        let _lock = crate::login_config::acquire_login_lock(ledger_dir, &login_name)?;
+        let _lock = crate::login_config::acquire_login_lock_with_metadata(
+            ledger_dir,
+            &login_name,
+            "migration",
+            "migrate-ledger",
+        )?;
         crate::login_config::write_login_config(ledger_dir, &login_name, &config)?;
 
         if let Some((source_account, _)) = plans.first() {

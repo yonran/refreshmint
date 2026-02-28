@@ -351,8 +351,13 @@ pub async fn run_scrape_async(
     config: ScrapeConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let login_name = config.login_name.clone();
-    let _login_lock = crate::login_config::acquire_login_lock(&config.ledger_dir, &login_name)
-        .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { err })?;
+    let _login_lock = crate::login_config::acquire_login_lock_with_metadata(
+        &config.ledger_dir,
+        &login_name,
+        "scrape",
+        "run-scrape",
+    )
+    .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { err })?;
 
     let extension_dir =
         crate::account_config::resolve_extension_dir(&config.ledger_dir, &config.extension_name);

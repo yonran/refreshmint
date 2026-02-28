@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use crate::account_journal::{self, AccountEntry};
+use crate::login_config;
 use crate::operations;
 
 /// Post a single account journal entry to the GL by assigning a counterpart account.
@@ -111,7 +112,16 @@ pub fn post_login_account_entry(
     entry_id: &str,
     counterpart_account: &str,
     posting_index: Option<usize>,
+    lock_owner: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let _gl_lock =
+        login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "post-login-entry")?;
+    let _login_lock = login_config::acquire_login_lock_with_metadata(
+        ledger_dir,
+        login_name,
+        lock_owner,
+        "post-login-entry",
+    )?;
     let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
     let mut entries = account_journal::read_journal_at_path(&journal_path)?;
     let original_entries = entries.clone();
@@ -421,25 +431,27 @@ pub fn unpost_login_account_entry(
     label: &str,
     entry_id: &str,
     posting_index: Option<usize>,
+    lock_owner: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
-    let mut entries = account_journal::read_journal_at_path(&journal_path)?;
-    let original_entries = entries.clone();
-    let entry_idx = entries
+    let _gl_lock =
+        login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "unpost-login-entry")?;
+    let preview_journal_path =
+        account_journal::login_account_journal_path(ledger_dir, login_name, label);
+    let preview_entries = account_journal::read_journal_at_path(&preview_journal_path)?;
+    let preview_entry = preview_entries
         .iter()
-        .position(|e| e.id == entry_id)
+        .find(|e| e.id == entry_id)
         .ok_or_else(|| format!("entry not found: {entry_id}"))?;
-
     let gl_ref = if let Some(posting_idx) = posting_index {
-        let pos = original_entries[entry_idx]
+        let pos = preview_entry
             .posted_postings
             .iter()
             .position(|(idx, _)| *idx == posting_idx)
             .ok_or_else(|| format!("posting {posting_idx} of entry {entry_id} is not posted"))?;
-        let (_, ref_str) = original_entries[entry_idx].posted_postings[pos].clone();
+        let (_, ref_str) = preview_entry.posted_postings[pos].clone();
         ref_str
     } else {
-        original_entries[entry_idx]
+        preview_entry
             .posted
             .clone()
             .ok_or_else(|| format!("entry {entry_id} is not posted"))?
@@ -447,6 +459,22 @@ pub fn unpost_login_account_entry(
 
     let gl_txn_id = gl_ref.strip_prefix("general.journal:").unwrap_or(&gl_ref);
     let source_locator = format!("logins/{login_name}/accounts/{label}");
+    let gl_block = find_gl_block(ledger_dir, gl_txn_id)?
+        .ok_or_else(|| format!("GL transaction not found: {gl_txn_id}"))?;
+    let source_logins = source_login_names_from_block(&gl_block);
+    let _login_locks = acquire_login_locks_for_names(
+        ledger_dir,
+        &source_logins,
+        lock_owner,
+        "unpost-login-entry",
+    )?;
+    let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
+    let mut entries = account_journal::read_journal_at_path(&journal_path)?;
+    let original_entries = entries.clone();
+    let entry_idx = entries
+        .iter()
+        .position(|e| e.id == entry_id)
+        .ok_or_else(|| format!("entry not found: {entry_id}"))?;
 
     // Pre-load other-side journals before any mutation (fail fast).
     let other_sides = preload_other_sides(ledger_dir, gl_txn_id, &source_locator, entry_id)?;
@@ -506,6 +534,7 @@ pub fn unpost_login_account_entry(
 ///
 /// Uses the new `logins/{login_name}/accounts/{label}` journal paths, unlike
 /// `post_transfer` which uses the legacy `accounts/{name}` paths.
+#[allow(clippy::too_many_arguments)]
 pub fn post_login_account_transfer(
     ledger_dir: &Path,
     login_name1: &str,
@@ -514,7 +543,16 @@ pub fn post_login_account_transfer(
     login_name2: &str,
     label2: &str,
     entry_id2: &str,
+    lock_owner: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let _gl_lock =
+        login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "post-login-transfer")?;
+    let _login_locks = acquire_login_locks_for_names(
+        ledger_dir,
+        &[login_name1.to_string(), login_name2.to_string()],
+        lock_owner,
+        "post-login-transfer",
+    )?;
     let journal_path1 =
         account_journal::login_account_journal_path(ledger_dir, login_name1, label1);
     let journal_path2 =
@@ -991,6 +1029,45 @@ fn locator_to_login_label(locator: &str) -> Option<(&str, &str)> {
     Some((login, label))
 }
 
+fn source_login_names_from_sources(sources: &[(String, String)]) -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for (locator, _) in sources {
+        if let Some((login_name, _)) = locator_to_login_label(locator) {
+            names.insert(login_name.to_string());
+        }
+    }
+    names.into_iter().collect()
+}
+
+fn source_login_names_from_block(block: &str) -> Vec<String> {
+    source_login_names_from_sources(&parse_sources_from_block(block))
+}
+
+fn acquire_login_locks_for_names(
+    ledger_dir: &Path,
+    login_names: &[String],
+    owner: &str,
+    purpose: &str,
+) -> Result<Vec<login_config::LoginLock>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut sorted = std::collections::BTreeSet::new();
+    for login_name in login_names {
+        if !login_name.is_empty() {
+            sorted.insert(login_name.clone());
+        }
+    }
+
+    let mut locks = Vec::new();
+    for login_name in sorted {
+        locks.push(login_config::acquire_login_lock_with_metadata(
+            ledger_dir,
+            &login_name,
+            owner,
+            purpose,
+        )?);
+    }
+    Ok(locks)
+}
+
 /// Remove a GL transaction from general.journal by its ID.
 ///
 /// Finds the transaction with `; id: <gl_txn_id>` and removes it.
@@ -1101,7 +1178,10 @@ pub fn sync_gl_transaction(
     login_name: &str,
     label: &str,
     entry_id: &str,
+    lock_owner: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let _gl_lock =
+        login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "sync-gl-transaction")?;
     // 1. Load the triggering entry and get its GL ref.
     let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
     let entries = account_journal::read_journal_at_path(&journal_path)?;
@@ -1121,6 +1201,13 @@ pub fn sync_gl_transaction(
     // 2. Find the existing GL block.
     let gl_block = find_gl_block(ledger_dir, &gl_txn_id)?
         .ok_or_else(|| format!("GL transaction not found: {gl_txn_id}"))?;
+    let source_logins = source_login_names_from_block(&gl_block);
+    let _login_locks = acquire_login_locks_for_names(
+        ledger_dir,
+        &source_logins,
+        lock_owner,
+        "sync-gl-transaction",
+    )?;
 
     // 3. Parse sources and load their current entries (fail fast before any writes).
     let raw_sources = parse_sources_from_block(&gl_block);
@@ -1214,7 +1301,10 @@ pub fn recategorize_gl_transaction(
     ledger_dir: &Path,
     txn_id: &str,
     new_account: &str,
+    lock_owner: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _gl_lock =
+        login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "recategorize-gl")?;
     let journal_path = ledger_dir.join("general.journal");
     let content = fs::read_to_string(&journal_path)?;
     let marker = format!("id: {txn_id}");
@@ -1279,16 +1369,31 @@ pub fn merge_gl_transfer(
     ledger_dir: &Path,
     txn_id_1: &str,
     txn_id_2: &str,
+    lock_owner: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     if txn_id_1 == txn_id_2 {
         return Err("cannot merge a transaction with itself".into());
     }
+    let _gl_lock =
+        login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "merge-gl-transfer")?;
 
     // 1. Find both GL blocks.
     let block1 = find_gl_block(ledger_dir, txn_id_1)?
         .ok_or_else(|| format!("GL transaction not found: {txn_id_1}"))?;
     let block2 = find_gl_block(ledger_dir, txn_id_2)?
         .ok_or_else(|| format!("GL transaction not found: {txn_id_2}"))?;
+    let source_logins = source_login_names_from_sources(&[
+        parse_sources_from_block(&block1)
+            .into_iter()
+            .next()
+            .ok_or("GL transaction 1 has no source tag")?,
+        parse_sources_from_block(&block2)
+            .into_iter()
+            .next()
+            .ok_or("GL transaction 2 has no source tag")?,
+    ]);
+    let _login_locks =
+        acquire_login_locks_for_names(ledger_dir, &source_logins, lock_owner, "merge-gl-transfer")?;
 
     // 2. Parse sources (expect exactly one each).
     let sources1 = parse_sources_from_block(&block1);
@@ -1727,9 +1832,16 @@ mod tests {
         let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
         account_journal::write_journal_at_path(&journal_path, &[entry]).unwrap();
 
-        let gl_id =
-            post_login_account_entry(&root, "chase", "checking", "txn-1", "Expenses:Gas", None)
-                .unwrap();
+        let gl_id = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Gas",
+            None,
+            "test",
+        )
+        .unwrap();
 
         // Mutate the entry: change amount and set status to Pending.
         let mut entries = account_journal::read_journal_at_path(&journal_path).unwrap();
@@ -1741,7 +1853,7 @@ mod tests {
         account_journal::write_journal_at_path(&journal_path, &entries).unwrap();
 
         // Sync the GL transaction.
-        let returned_id = sync_gl_transaction(&root, "chase", "checking", "txn-1").unwrap();
+        let returned_id = sync_gl_transaction(&root, "chase", "checking", "txn-1", "test").unwrap();
         assert_eq!(
             returned_id, gl_id,
             "returned ID must match original GL txn ID"
