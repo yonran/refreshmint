@@ -882,17 +882,47 @@ fn list_documents_in_dir(documents_dir: &Path) -> io::Result<Vec<DocumentWithInf
     }
 
     let mut documents = Vec::new();
-    for entry in std::fs::read_dir(documents_dir)? {
+    collect_documents_in_dir(documents_dir, documents_dir, "", &mut documents)?;
+    documents.sort_by(|a, b| a.filename.cmp(&b.filename));
+    Ok(documents)
+}
+
+fn collect_documents_in_dir(
+    base_dir: &Path,
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<DocumentWithInfo>,
+) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        if file_name.ends_with("-info.json") {
-            continue;
-        }
-        if !entry.file_type()?.is_file() {
+        let file_type = entry.file_type()?;
+        let os_name = entry.file_name();
+        let name = os_name.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("non-UTF-8 filename in {}", dir.display()),
+            )
+        })?;
+        let relative = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+
+        if file_type.is_dir() {
+            collect_documents_in_dir(base_dir, &entry.path(), &relative, out)?;
             continue;
         }
 
-        let sidecar_path = documents_dir.join(format!("{file_name}-info.json"));
+        if !file_type.is_file() {
+            continue;
+        }
+
+        if relative.ends_with("-info.json") {
+            continue;
+        }
+
+        let sidecar_path = base_dir.join(format!("{relative}-info.json"));
         let info = if sidecar_path.exists() {
             let content = std::fs::read_to_string(&sidecar_path)?;
             serde_json::from_str(&content).ok()
@@ -900,14 +930,12 @@ fn list_documents_in_dir(documents_dir: &Path) -> io::Result<Vec<DocumentWithInf
             None
         };
 
-        documents.push(DocumentWithInfo {
-            filename: file_name,
+        out.push(DocumentWithInfo {
+            filename: relative,
             info,
         });
     }
-
-    documents.sort_by(|a, b| a.filename.cmp(&b.filename));
-    Ok(documents)
+    Ok(())
 }
 
 /// A document file with its optional info sidecar.

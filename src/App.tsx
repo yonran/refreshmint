@@ -609,13 +609,11 @@ function App() {
                     const normalizedConfig = normalizeLoginConfig(
                         loginConfigsByName[loginName] ?? null,
                     );
-                    const extension =
-                        normalizedConfig.extension?.trim() ?? '';
+                    const extension = normalizedConfig.extension?.trim() ?? '';
                     const glAccount =
                         normalizedConfig.accounts[label]?.glAccount?.trim() ??
                         '';
-                    const locked =
-                        snapshot.logins[loginName]?.locked ?? false;
+                    const locked = snapshot.logins[loginName]?.locked ?? false;
 
                     let documentCount = 0;
                     let extractSkipReason:
@@ -1577,9 +1575,7 @@ function App() {
         }
 
         let cancelled = false;
-        let unlisten:
-            | (() => void)
-            | null = null;
+        let unlisten: (() => void) | null = null;
 
         void startLockMetadataWatch(ledgerPath)
             .then(() =>
@@ -3306,13 +3302,17 @@ function App() {
         if (!ledger) return;
         setIsPipelineExtractingAllLedger(true);
         try {
-            const stats = pipelineBulkStats ?? (await refreshPipelineBulkStats());
+            const stats =
+                pipelineBulkStats ?? (await refreshPipelineBulkStats());
             if (!stats) return;
             const candidates = stats.accounts.filter(
-                (account) => account.extract.eligible && !account.extract.locked,
+                (account) =>
+                    account.extract.eligible && !account.extract.locked,
             );
             if (candidates.length === 0) {
-                setPipelineStatus('No unlocked accounts are ready for extraction.');
+                setPipelineStatus(
+                    'No unlocked accounts are ready for extraction.',
+                );
                 return;
             }
 
@@ -3381,7 +3381,8 @@ function App() {
         if (!ledger) return;
         setIsPipelinePostingAllLedger(true);
         try {
-            const stats = pipelineBulkStats ?? (await refreshPipelineBulkStats());
+            const stats =
+                pipelineBulkStats ?? (await refreshPipelineBulkStats());
             if (!stats) return;
             if (stats.gl.locked) {
                 setPipelineStatus('General journal is currently locked.');
@@ -3391,7 +3392,9 @@ function App() {
                 (account) => account.post.eligible && !account.post.locked,
             );
             if (candidates.length === 0) {
-                setPipelineStatus('No unlocked accounts are ready for posting.');
+                setPipelineStatus(
+                    'No unlocked accounts are ready for posting.',
+                );
                 return;
             }
 
@@ -4784,7 +4787,9 @@ function App() {
                                         <button
                                             type="button"
                                             className="ghost-button"
-                                            disabled={isLoadingPipelineBulkStats}
+                                            disabled={
+                                                isLoadingPipelineBulkStats
+                                            }
                                             onClick={() => {
                                                 void refreshPipelineBulkStats();
                                             }}
@@ -4810,7 +4815,8 @@ function App() {
                                             </div>
                                         </div>
                                     )}
-                                    {selectedLoginLockStatus?.locked === true && (
+                                    {selectedLoginLockStatus?.locked ===
+                                        true && (
                                         <p className="status">
                                             {selectedLoginLockStatus.metadata ===
                                             null
@@ -5147,7 +5153,8 @@ function App() {
                                                             isPipelinePostingAllLedger ||
                                                             glLockStatus.locked ||
                                                             selectedLoginLocked ||
-                                                            unpostedEntries.length === 0
+                                                            unpostedEntries.length ===
+                                                                0
                                                         }
                                                         onClick={() => {
                                                             void handlePipelinePostAll();
@@ -5165,7 +5172,8 @@ function App() {
                                                             isPipelinePostingAllLedger ||
                                                             glLockStatus.locked ||
                                                             selectedLoginLocked ||
-                                                            pipelineSelectedEntryIds.size === 0
+                                                            pipelineSelectedEntryIds.size ===
+                                                                0
                                                         }
                                                         onClick={() => {
                                                             void handlePipelinePostSelected();
