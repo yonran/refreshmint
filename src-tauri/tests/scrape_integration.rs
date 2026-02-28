@@ -25,22 +25,20 @@ try {
 const POPUP_DRIVER_SOURCE: &str = r##"
 try {
   refreshmint.log("integration popup start");
-  const popupHtml = encodeURIComponent("<div id='popup-marker'>popup</div>");
-  const openerHtml = encodeURIComponent(`
-    <button id="open">Open Popup</button>
-    <script>
-      document.getElementById("open").addEventListener("click", () => {
-        window.open("data:text/html,${popupHtml}", "_blank");
-      });
-    </script>
-  `);
-  await page.goto(`data:text/html,${openerHtml}`);
+  await page.goto(__OPENER_URL__);
   const opener = page;
   const openerBefore = await opener.url();
   const popupPromise = opener.waitForEvent("popup", 10000);
-  await page.click("#open");
+  await page.evaluate(`(() => {
+    document.getElementById('open').click();
+    return "clicked";
+  })()`);
   const popup = await popupPromise;
   await popup.waitForLoadState("domcontentloaded", 10000);
+  const pages = await browser.pages();
+  if (!Array.isArray(pages) || pages.length < 2) {
+    throw new Error(`expected at least 2 pages, got ${Array.isArray(pages) ? pages.length : 'non-array'}`);
+  }
   const marker = await popup.evaluate("document.getElementById('popup-marker') ? 'yes' : 'no'");
   if (marker !== "yes") {
     throw new Error("popup page did not contain expected marker");
@@ -48,10 +46,6 @@ try {
   const openerAfter = await opener.url();
   if (openerAfter !== openerBefore) {
     throw new Error(`opener page changed unexpectedly: ${openerAfter}`);
-  }
-  const pages = await browser.pages();
-  if (!Array.isArray(pages) || pages.length < 2) {
-    throw new Error(`expected at least 2 pages, got ${Array.isArray(pages) ? pages.length : 'non-array'}`);
   }
   await refreshmint.saveResource("popup.bin", [111, 107]);
   refreshmint.log("integration popup done");
@@ -108,13 +102,8 @@ try {
 const FRAME_DRIVER_SOURCE: &str = r##"
 try {
   refreshmint.log("frame test start");
-
-  // Build a page with a named srcdoc iframe.
-  const pageHtml = "<html><body><div id=main>Main</div>"
-    + "<iframe name=logonbox srcdoc='<input id=user><input id=pass><button id=submit>OK</button>'>"
-    + "</iframe></body></html>";
-  await page.goto("data:text/html," + encodeURIComponent(pageHtml));
-  await page.waitForLoadState("domcontentloaded");
+  await page.goto(__FRAME_URL__);
+  await page.waitForLoadState("domcontentloaded", undefined);
 
   // 1. frames() should return the main frame and the iframe.
   const framesJson = await page.frames();
@@ -184,8 +173,7 @@ try {
 const GOTO_DRIVER_SOURCE: &str = r##"
 try {
   refreshmint.log("integration goto start");
-  const html = encodeURIComponent("<!doctype html><title>goto</title><h1>ok</h1>");
-  const baseUrl = `data:text/html,${html}`;
+  const baseUrl = __GOTO_URL__;
 
   await page.goto(baseUrl);
   await page.goto(baseUrl);
@@ -234,6 +222,29 @@ impl TestSandbox {
 
     fn path(&self) -> &Path {
         &self.root
+    }
+}
+
+fn write_fixture_file(
+    sandbox: &TestSandbox,
+    name: &str,
+    contents: &str,
+) -> Result<String, Box<dyn Error>> {
+    let path = sandbox.path().join(name);
+    fs::write(&path, contents)?;
+    file_url(&path)
+}
+
+fn file_url(path: &Path) -> Result<String, Box<dyn Error>> {
+    let absolute = path.canonicalize()?;
+    #[cfg(windows)]
+    {
+        let normalized = absolute.to_string_lossy().replace('\\', "/");
+        Ok(format!("file:///{normalized}"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(format!("file://{}", absolute.to_string_lossy()))
     }
 }
 
@@ -311,11 +322,23 @@ fn scrape_popup_wait_for_event_switches_tab() -> Result<(), Box<dyn Error>> {
         None => return Err("driver path has no parent".into()),
     };
     fs::create_dir_all(driver_parent)?;
+    let popup_url = write_fixture_file(
+        &sandbox,
+        "popup.html",
+        "<!doctype html><html><body><div id=\"popup-marker\">popup</div></body></html>",
+    )?;
+    let opener_html = format!(
+        "<!doctype html><html><body><button id=\"open\" type=\"button\">Open Popup</button><script>document.getElementById('open').addEventListener('click', () => window.open({}, '_blank'));</script></body></html>",
+        serde_json::to_string(&popup_url)?,
+    );
+    let opener_url = write_fixture_file(&sandbox, "popup-opener.html", &opener_html)?;
     fs::write(
         driver_parent.join("manifest.json"),
         format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
     )?;
-    fs::write(&driver_path, POPUP_DRIVER_SOURCE)?;
+    let popup_driver =
+        POPUP_DRIVER_SOURCE.replace("__OPENER_URL__", &serde_json::to_string(&opener_url)?);
+    fs::write(&driver_path, popup_driver)?;
 
     let profile_dir = sandbox.path().join("profile");
     let config = ScrapeConfig {
@@ -409,11 +432,19 @@ fn scrape_goto_handles_same_url_and_hash_navigation() -> Result<(), Box<dyn Erro
         None => return Err("driver path has no parent".into()),
     };
     fs::create_dir_all(driver_parent)?;
+    let goto_url = write_fixture_file(
+        &sandbox,
+        "goto.html",
+        "<!doctype html><title>goto</title><h1>ok</h1>",
+    )?;
     fs::write(
         driver_parent.join("manifest.json"),
         format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
     )?;
-    fs::write(&driver_path, GOTO_DRIVER_SOURCE)?;
+    fs::write(
+        &driver_path,
+        GOTO_DRIVER_SOURCE.replace("__GOTO_URL__", &serde_json::to_string(&goto_url)?),
+    )?;
 
     let profile_dir = sandbox.path().join("profile");
     let config = ScrapeConfig {
@@ -458,11 +489,24 @@ fn scrape_frame_methods_switch_context() -> Result<(), Box<dyn Error>> {
         None => return Err("driver path has no parent".into()),
     };
     fs::create_dir_all(driver_parent)?;
+    let frame_child_url = write_fixture_file(
+        &sandbox,
+        "frame-child.html",
+        "<!doctype html><html><body><input id=\"user\"><input id=\"pass\"><button id=\"submit\">OK</button></body></html>",
+    )?;
+    let frame_html = format!(
+        "<!doctype html><html><body><div id=\"main\">Main</div><iframe name=\"logonbox\" src={}></iframe></body></html>",
+        serde_json::to_string(&frame_child_url)?,
+    );
+    let frame_url = write_fixture_file(&sandbox, "frame.html", &frame_html)?;
     fs::write(
         driver_parent.join("manifest.json"),
         format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
     )?;
-    fs::write(&driver_path, FRAME_DRIVER_SOURCE)?;
+    fs::write(
+        &driver_path,
+        FRAME_DRIVER_SOURCE.replace("__FRAME_URL__", &serde_json::to_string(&frame_url)?),
+    )?;
 
     let profile_dir = sandbox.path().join("profile");
     let config = ScrapeConfig {

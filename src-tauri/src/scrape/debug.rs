@@ -340,6 +340,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
             };
 
             let page_inner = Arc::new(Mutex::new(super::js_api::PageInner {
+                target_id: page.target_id().as_ref().to_string(),
                 page,
                 browser: browser.clone(),
                 secret_store: Arc::new(secret_store),

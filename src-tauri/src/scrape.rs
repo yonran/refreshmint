@@ -418,6 +418,7 @@ pub async fn run_scrape_async(
     std::fs::create_dir_all(&output_dir)?;
 
     let page_inner = Arc::new(Mutex::new(js_api::PageInner {
+        target_id: page.target_id().as_ref().to_string(),
         page,
         browser: browser.clone(),
         secret_store: Arc::new(secret_store),

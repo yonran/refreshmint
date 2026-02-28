@@ -201,6 +201,7 @@ pub struct DebugOutputEvent {
 /// Shared state backing the `page` JS object.
 pub struct PageInner {
     pub page: chromiumoxide::Page,
+    pub target_id: String,
     pub browser: Arc<Mutex<chromiumoxide::browser::Browser>>,
     pub secret_store: Arc<SecretStore>,
     pub declared_secrets: Arc<SecretDeclarations>,
@@ -242,6 +243,26 @@ unsafe impl<'js> JsLifetime<'js> for BrowserApi {
 }
 
 impl PageApi {
+    async fn refresh_page_handle(&self) -> Result<chromiumoxide::Page, String> {
+        let (browser, target_id) = {
+            let inner = self.inner.lock().await;
+            (inner.browser.clone(), inner.target_id.clone())
+        };
+
+        let pages = {
+            let guard = browser.lock().await;
+            guard.pages().await.map_err(|e| e.to_string())?
+        };
+        let refreshed = pages
+            .into_iter()
+            .find(|page| page.target_id().as_ref() == target_id.as_str())
+            .ok_or_else(|| format!("page target {target_id} not found during refresh"))?;
+
+        let mut inner = self.inner.lock().await;
+        inner.page = refreshed.clone();
+        Ok(refreshed)
+    }
+
     pub fn new(inner: Arc<Mutex<PageInner>>) -> Self {
         Self {
             inner,
@@ -833,19 +854,32 @@ impl PageApi {
 
     /// Get the current page URL.
     pub async fn url(&self) -> JsResult<String> {
-        eprintln!("[js_api] page.url enter");
-        let inner = self.inner.lock().await;
-        let url = inner
-            .page
-            .url()
-            .await
-            .map_err(|e| {
-                let err_text = e.to_string();
-                eprintln!("[js_api] page.url error: {err_text}");
-                js_err(format_browser_error("url() failed", &err_text))
-            })?
-            .unwrap_or_default();
-        eprintln!("[js_api] page.url ok");
+        let page = {
+            let inner = self.inner.lock().await;
+            inner.page.clone()
+        };
+        let url = match page.url().await {
+            Ok(url) => url.unwrap_or_default(),
+            Err(err) => {
+                let err_text = err.to_string();
+                if !is_transport_disconnected_error(&err_text) {
+                    return Err(js_err(format_browser_error("url() failed", &err_text)));
+                }
+                let refreshed = self.refresh_page_handle().await.map_err(|refresh_err| {
+                    js_err(format_browser_error(
+                        "url() page refresh failed",
+                        &refresh_err,
+                    ))
+                })?;
+                refreshed
+                    .url()
+                    .await
+                    .map_err(|retry_err| {
+                        js_err(format_browser_error("url() failed", &retry_err.to_string()))
+                    })?
+                    .unwrap_or_default()
+            }
+        };
         Ok(url.to_string())
     }
 
@@ -1247,6 +1281,9 @@ impl PageApi {
                         window.location.href = popupEvent.url;
                         return null;
                     }}
+                    if (state.mode === 'ignore') {{
+                        return null;
+                    }}
                     if (typeof state.originalOpen === 'function') {{
                         return state.originalOpen.call(window, url, target, features);
                     }}
@@ -1362,19 +1399,11 @@ impl PageApi {
                 .await
                 .map_err(|e| js_err(format!("click failed: {e}")))?;
         } else {
-            // Main frame: use CDP element interaction for reliable pointer events.
-            let element = inner
-                .page
-                .find_element(selector)
-                .await
-                .map_err(|e| js_err(format!("click find failed: {e}")))?;
-            ensure_element_receives_pointer_events(&element)
-                .await
-                .map_err(|e| js_err(format!("click failed: {e}")))?;
-            element
-                .click()
-                .await
-                .map_err(|e| js_err(format!("click failed: {e}")))?;
+            drop(inner);
+            Locator::new(self.inner.clone(), selector)
+                .click_with_timeout(DEFAULT_TIMEOUT_MS)
+                .await?;
+            return Ok(());
         }
         Ok(())
     }
@@ -2147,49 +2176,13 @@ impl PageApi {
 impl BrowserApi {
     /// Return all currently open pages in this browser context.
     pub async fn pages(&self) -> JsResult<Vec<PageApi>> {
-        eprintln!("[js_api] browser.pages enter");
         let page = PageApi::new(self.page_inner.clone());
         let tabs = page.fetch_open_tabs().await?;
-        eprintln!("[js_api] browser.pages tabs={}", tabs.len());
         let mut out = Vec::with_capacity(tabs.len());
         for tab in tabs {
             out.push(build_page_api_from_template(&self.page_inner, tab.page).await);
         }
-        eprintln!("[js_api] browser.pages return={}", out.len());
         Ok(out)
-    }
-
-    #[qjs(rename = "__debugPing")]
-    pub async fn debug_ping(&self) -> JsResult<i32> {
-        eprintln!("[js_api] browser.__debugPing");
-        Ok(42)
-    }
-
-    #[qjs(rename = "__debugVec")]
-    pub async fn debug_vec(&self) -> JsResult<Vec<i32>> {
-        eprintln!("[js_api] browser.__debugVec");
-        Ok(vec![1, 2, 3])
-    }
-
-    #[qjs(rename = "__debugPage")]
-    pub async fn debug_page(&self) -> JsResult<PageApi> {
-        eprintln!("[js_api] browser.__debugPage");
-        Ok(PageApi::new(self.page_inner.clone()))
-    }
-
-    #[qjs(rename = "__debugPages")]
-    pub async fn debug_pages(&self) -> JsResult<Vec<PageApi>> {
-        eprintln!("[js_api] browser.__debugPages");
-        Ok(vec![PageApi::new(self.page_inner.clone())])
-    }
-
-    #[qjs(rename = "__debugTabsCount")]
-    pub async fn debug_tabs_count(&self) -> JsResult<i32> {
-        eprintln!("[js_api] browser.__debugTabsCount enter");
-        let page = PageApi::new(self.page_inner.clone());
-        let tabs = page.fetch_open_tabs().await?;
-        eprintln!("[js_api] browser.__debugTabsCount tabs={}", tabs.len());
-        Ok(tabs.len() as i32)
     }
 
     /// Playwright-style event waiter for Browser.
@@ -2220,53 +2213,118 @@ impl PageApi {
     /// Secret string values in the result are scrubbed to `[REDACTED]`.
     async fn evaluate_in_active_context(&self, expression: String) -> JsResult<JsEvalResult> {
         use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
-        let inner = self.inner.lock().await;
+        let (page, frame_id, secret_store) = {
+            let inner = self.inner.lock().await;
+            (
+                inner.page.clone(),
+                inner.target_frame_id.clone(),
+                inner.secret_store.clone(),
+            )
+        };
         let page_inner_arc = self.inner.clone();
-        if let Some(frame_id) = &inner.target_frame_id {
-            let context_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
+        if let Some(frame_id) = frame_id {
+            let context_id = wait_for_frame_execution_context(&page, frame_id.clone())
                 .await
                 .map_err(|e| js_err(format!("failed to get frame context: {e}")))?;
             let eval = EvaluateParams::builder()
-                .expression(expression)
+                .expression(expression.clone())
                 .context_id(context_id)
                 .await_promise(true)
                 .return_by_value(false)
                 .build()
                 .map_err(|e| js_err(format!("evaluate invalid params: {e}")))?;
-            let result = inner
-                .page
-                .evaluate_expression(eval)
-                .await
-                .map_err(|e| js_err(format!("evaluate failed: {e}")))?;
+            let result = match page.evaluate_expression(eval).await {
+                Ok(result) => result,
+                Err(err) => {
+                    let err_text = err.to_string();
+                    if !is_transport_disconnected_error(&err_text) {
+                        return Err(js_err(format!("evaluate failed: {err_text}")));
+                    }
+                    let refreshed = self.refresh_page_handle().await.map_err(|refresh_err| {
+                        js_err(format_browser_error(
+                            "evaluate page refresh failed",
+                            &refresh_err,
+                        ))
+                    })?;
+                    let refreshed_context_id =
+                        wait_for_frame_execution_context(&refreshed, frame_id.clone())
+                            .await
+                            .map_err(|e| {
+                                js_err(format!(
+                                    "failed to get frame context after page refresh: {e}"
+                                ))
+                            })?;
+                    let retry_eval = EvaluateParams::builder()
+                        .expression(expression)
+                        .context_id(refreshed_context_id)
+                        .await_promise(true)
+                        .return_by_value(false)
+                        .build()
+                        .map_err(|e| js_err(format!("evaluate invalid params: {e}")))?;
+                    refreshed
+                        .evaluate_expression(retry_eval)
+                        .await
+                        .map_err(|retry_err| {
+                            js_err(format_browser_error(
+                                "evaluate failed",
+                                &retry_err.to_string(),
+                            ))
+                        })?
+                }
+            };
             let mut eval_result =
                 remote_object_to_eval_result(result.object().clone(), page_inner_arc);
             if let JsEvalResult::Str(ref mut s) = eval_result {
-                scrub_known_secrets(&inner.secret_store, s);
+                scrub_known_secrets(&secret_store, s);
             }
             Ok(eval_result)
         } else {
             let eval = EvaluateParams::builder()
-                .expression(expression)
+                .expression(expression.clone())
                 .await_promise(true)
                 .return_by_value(false)
                 .build()
                 .map_err(|e| js_err(format!("evaluate invalid params: {e}")))?;
-            let result = inner
-                .page
-                .evaluate_expression(eval)
-                .await
-                .map_err(|e| js_err(format!("evaluate failed: {e}")))?;
+            let result = match page.evaluate_expression(eval).await {
+                Ok(result) => result,
+                Err(err) => {
+                    let err_text = err.to_string();
+                    if !is_transport_disconnected_error(&err_text) {
+                        return Err(js_err(format!("evaluate failed: {err_text}")));
+                    }
+                    let refreshed = self.refresh_page_handle().await.map_err(|refresh_err| {
+                        js_err(format_browser_error(
+                            "evaluate page refresh failed",
+                            &refresh_err,
+                        ))
+                    })?;
+                    let retry_eval = EvaluateParams::builder()
+                        .expression(expression)
+                        .await_promise(true)
+                        .return_by_value(false)
+                        .build()
+                        .map_err(|e| js_err(format!("evaluate invalid params: {e}")))?;
+                    refreshed
+                        .evaluate_expression(retry_eval)
+                        .await
+                        .map_err(|retry_err| {
+                            js_err(format_browser_error(
+                                "evaluate failed",
+                                &retry_err.to_string(),
+                            ))
+                        })?
+                }
+            };
             let mut eval_result =
                 remote_object_to_eval_result(result.object().clone(), page_inner_arc);
             if let JsEvalResult::Str(ref mut s) = eval_result {
-                scrub_known_secrets(&inner.secret_store, s);
+                scrub_known_secrets(&secret_store, s);
             }
             Ok(eval_result)
         }
     }
 
     async fn fetch_open_tabs(&self) -> JsResult<Vec<OpenTab>> {
-        eprintln!("[js_api] fetch_open_tabs enter");
         let (browser, current_page) = {
             let inner = self.inner.lock().await;
             (inner.browser.clone(), inner.page.clone())
@@ -2285,7 +2343,6 @@ impl PageApi {
             Ok(Err(err)) => {
                 let err_text = err.to_string();
                 if is_transport_disconnected_error(&err_text) {
-                    eprintln!("[js_api] fetch_open_tabs disconnect on fetch_targets: {err_text}");
                     return Err(js_err(format_browser_error(
                         "browser.pages() fetch_targets failed",
                         &err_text,
@@ -2333,7 +2390,6 @@ impl PageApi {
             Ok(Err(err)) => {
                 let err_text = err.to_string();
                 if is_transport_disconnected_error(&err_text) {
-                    eprintln!("[js_api] fetch_open_tabs disconnect on pages listing: {err_text}");
                     return Err(js_err(format_browser_error(
                         "browser.pages() pages listing failed",
                         &err_text,
@@ -2418,19 +2474,17 @@ impl PageApi {
             let inner = self.inner.lock().await;
             inner.page.target_id().as_ref().to_string()
         };
-        let baseline_tabs = self.fetch_open_tabs().await?;
-        let baseline_ids = baseline_tabs
-            .into_iter()
-            .map(|tab| tab.target_id)
-            .collect::<BTreeSet<_>>();
 
         loop {
             let tabs = self.fetch_open_tabs().await?;
-            if let Some(popup_tab) = tabs.into_iter().find(|tab| {
-                !baseline_ids.contains(&tab.target_id)
+            if let Some(popup_tab) = tabs.iter().find(|tab| {
+                tab.target_id != opener_target
                     && tab.opener_target_id.as_deref() == Some(opener_target.as_str())
             }) {
-                return Ok(build_page_api_from_template(&self.inner, popup_tab.page).await);
+                return Ok(build_page_api_from_template(&self.inner, popup_tab.page.clone()).await);
+            }
+            if let Some(popup_tab) = tabs.iter().find(|tab| tab.target_id != opener_target) {
+                return Ok(build_page_api_from_template(&self.inner, popup_tab.page.clone()).await);
             }
 
             if tokio::time::Instant::now() >= deadline {
@@ -2658,6 +2712,7 @@ async fn build_page_api_from_template(
 ) -> PageApi {
     let template = template.lock().await;
     let page_inner = PageInner {
+        target_id: page.target_id().as_ref().to_string(),
         page,
         browser: template.browser.clone(),
         secret_store: template.secret_store.clone(),
@@ -3011,6 +3066,12 @@ pub(crate) async fn wait_for_frame_execution_context(
     page: &chromiumoxide::Page,
     frame_id: chromiumoxide::cdp::browser_protocol::page::FrameId,
 ) -> Result<chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId, String> {
+    use chromiumoxide::cdp::js_protocol::runtime::EnableParams;
+
+    page.execute(EnableParams::default())
+        .await
+        .map_err(|e| format!("failed to enable runtime for frame context lookup: {e}"))?;
+
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS);
 

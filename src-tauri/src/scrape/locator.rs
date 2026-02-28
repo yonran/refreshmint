@@ -620,12 +620,7 @@ impl Locator {
         Ok(count)
     }
 
-    /// Click the element using a trusted CDP mouse click (Input.dispatchMouseEvent).
-    ///
-    /// Unlike `el.click()` via Runtime.evaluate, this produces `isTrusted: true` events,
-    /// which is required for sites that check event.isTrusted (e.g. login flows).
-    pub async fn click(&self, options: Opt<Value<'_>>) -> JsResult<()> {
-        let timeout_ms = parse_timeout(options.0);
+    pub(crate) async fn click_with_timeout(&self, timeout_ms: u64) -> JsResult<()> {
         self.ensure_element_state("visible", timeout_ms).await?;
 
         // Hold the lock for the entire click sequence.
@@ -773,6 +768,15 @@ impl Locator {
             .map_err(|e| js_err(format!("click: dispatch: {e}")))?;
 
         Ok(())
+    }
+
+    /// Click the element using a trusted CDP mouse click (Input.dispatchMouseEvent).
+    ///
+    /// Unlike `el.click()` via Runtime.evaluate, this produces `isTrusted: true` events,
+    /// which is required for sites that check event.isTrusted (e.g. login flows).
+    pub async fn click(&self, options: Opt<Value<'_>>) -> JsResult<()> {
+        let timeout_ms = parse_timeout(options.0);
+        self.click_with_timeout(timeout_ms).await
     }
 
     /// Fill the input.
