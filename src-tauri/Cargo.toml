@@ -46,6 +46,7 @@ zip = { version = "2.4", default-features = false, features = ["deflate"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 fs2 = "0.4"
+notify = "8.2"
 
 [lints.rust]
 unsafe_code = "deny"

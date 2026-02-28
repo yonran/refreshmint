@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -77,6 +78,29 @@ pub fn login_account_journal_path(ledger_dir: &Path, login_name: &str, label: &s
         .join("accounts")
         .join(label)
         .join("account.journal")
+}
+
+/// Return the path to the per-login lock file.
+pub fn login_lock_path(ledger_dir: &Path, login_name: &str) -> PathBuf {
+    ledger_dir.join("logins").join(login_name).join(".lock")
+}
+
+/// Return the path to the per-login lock metadata file.
+pub fn login_lock_metadata_path(ledger_dir: &Path, login_name: &str) -> PathBuf {
+    ledger_dir
+        .join("logins")
+        .join(login_name)
+        .join(".lock.meta.json")
+}
+
+/// Return the path to the ledger-wide GL mutation lock file.
+pub fn gl_lock_path(ledger_dir: &Path) -> PathBuf {
+    ledger_dir.join(".gl.lock")
+}
+
+/// Return the path to the ledger-wide GL mutation lock metadata file.
+pub fn gl_lock_metadata_path(ledger_dir: &Path) -> PathBuf {
+    ledger_dir.join(".gl.lock.meta.json")
 }
 
 /// Read the login config, returning defaults if the file is missing.
@@ -249,37 +273,235 @@ pub fn find_gl_account_conflicts(ledger_dir: &Path) -> Vec<GlAccountConflict> {
         .collect()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum LockResource {
+    Login { login_name: String },
+    Gl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LockMetadata {
+    pub version: u8,
+    pub owner: String,
+    pub purpose: String,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    pub resource: LockResource,
+}
+
+impl LockMetadata {
+    fn new_login(login_name: &str, owner: &str, purpose: &str) -> Self {
+        Self {
+            version: 1,
+            owner: owner.to_string(),
+            purpose: purpose.to_string(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            pid: Some(std::process::id()),
+            resource: LockResource::Login {
+                login_name: login_name.to_string(),
+            },
+        }
+    }
+
+    fn new_gl(owner: &str, purpose: &str) -> Self {
+        Self {
+            version: 1,
+            owner: owner.to_string(),
+            purpose: purpose.to_string(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            pid: Some(std::process::id()),
+            resource: LockResource::Gl,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LockStatus {
+    pub locked: bool,
+    pub metadata: Option<LockMetadata>,
+}
+
 /// A per-login file lock guard. The lock is released when this is dropped.
 #[derive(Debug)]
 pub struct LoginLock {
     _file: std::fs::File,
+    metadata_path: PathBuf,
+}
+
+impl Drop for LoginLock {
+    fn drop(&mut self) {
+        let _ = cleanup_stale_metadata(&self.metadata_path);
+    }
+}
+
+/// A ledger-wide GL lock guard. The lock is released when this is dropped.
+#[derive(Debug)]
+pub struct LedgerGlLock {
+    _file: std::fs::File,
+    metadata_path: PathBuf,
+}
+
+impl Drop for LedgerGlLock {
+    fn drop(&mut self) {
+        let _ = cleanup_stale_metadata(&self.metadata_path);
+    }
+}
+
+fn write_metadata_file(
+    metadata_path: &Path,
+    metadata: &LockMetadata,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let parent = metadata_path
+        .parent()
+        .ok_or_else(|| io::Error::other("metadata path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let json = serde_json::to_vec_pretty(metadata)?;
+    fs::write(metadata_path, json)?;
+    Ok(())
+}
+
+fn cleanup_stale_metadata(
+    metadata_path: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match fs::remove_file(metadata_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+pub fn read_lock_metadata(
+    metadata_path: &Path,
+) -> Result<Option<LockMetadata>, Box<dyn std::error::Error + Send + Sync>> {
+    match fs::read_to_string(metadata_path) {
+        Ok(text) => {
+            let parsed = serde_json::from_str(&text)?;
+            Ok(Some(parsed))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn read_lock_metadata_best_effort(metadata_path: &Path) -> Option<LockMetadata> {
+    match fs::read_to_string(metadata_path) {
+        Ok(text) => serde_json::from_str(&text).ok(),
+        Err(_) => None,
+    }
+}
+
+fn acquire_lock_file(
+    lock_path: &Path,
+) -> Result<std::fs::File, Box<dyn std::error::Error + Send + Sync>> {
+    use fs2::FileExt;
+
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)?;
+
+    file.try_lock_exclusive()?;
+
+    Ok(file)
 }
 
 /// Acquire an exclusive file lock on `logins/<login_name>/.lock`.
 ///
-/// Returns a guard that releases the lock on drop.
-/// If the lock is already held, returns an error immediately.
+/// Returns a guard that removes metadata before releasing the real lock.
+pub fn acquire_login_lock_with_metadata(
+    ledger_dir: &Path,
+    login_name: &str,
+    owner: &str,
+    purpose: &str,
+) -> Result<LoginLock, Box<dyn std::error::Error + Send + Sync>> {
+    let lock_path = login_lock_path(ledger_dir, login_name);
+    let metadata_path = login_lock_metadata_path(ledger_dir, login_name);
+    let file = acquire_lock_file(&lock_path)
+        .map_err(|_| format!("login '{login_name}' is currently in use by another operation"))?;
+    cleanup_stale_metadata(&metadata_path)?;
+    write_metadata_file(
+        &metadata_path,
+        &LockMetadata::new_login(login_name, owner, purpose),
+    )?;
+
+    Ok(LoginLock {
+        _file: file,
+        metadata_path,
+    })
+}
+
+/// Acquire a metadata-aware per-login lock with generic metadata.
 pub fn acquire_login_lock(
     ledger_dir: &Path,
     login_name: &str,
 ) -> Result<LoginLock, Box<dyn std::error::Error + Send + Sync>> {
-    use fs2::FileExt;
+    acquire_login_lock_with_metadata(ledger_dir, login_name, "unknown", "unspecified")
+}
 
-    let lock_path = ledger_dir.join("logins").join(login_name).join(".lock");
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// Acquire the ledger-wide GL mutation lock.
+pub fn acquire_gl_lock_with_metadata(
+    ledger_dir: &Path,
+    owner: &str,
+    purpose: &str,
+) -> Result<LedgerGlLock, Box<dyn std::error::Error + Send + Sync>> {
+    let lock_path = gl_lock_path(ledger_dir);
+    let metadata_path = gl_lock_metadata_path(ledger_dir);
+    let file = acquire_lock_file(&lock_path)
+        .map_err(|_| "general journal is currently in use by another operation")?;
+    cleanup_stale_metadata(&metadata_path)?;
+    write_metadata_file(&metadata_path, &LockMetadata::new_gl(owner, purpose))?;
+
+    Ok(LedgerGlLock {
+        _file: file,
+        metadata_path,
+    })
+}
+
+fn probe_lock_status(
+    lock_path: &Path,
+    metadata_path: &Path,
+) -> Result<LockStatus, Box<dyn std::error::Error + Send + Sync>> {
+    match acquire_lock_file(lock_path) {
+        Ok(_file) => {
+            cleanup_stale_metadata(metadata_path)?;
+            Ok(LockStatus {
+                locked: false,
+                metadata: None,
+            })
+        }
+        Err(_) => Ok(LockStatus {
+            locked: true,
+            metadata: read_lock_metadata_best_effort(metadata_path),
+        }),
     }
+}
 
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)?;
+pub fn get_login_lock_status(
+    ledger_dir: &Path,
+    login_name: &str,
+) -> Result<LockStatus, Box<dyn std::error::Error + Send + Sync>> {
+    probe_lock_status(
+        &login_lock_path(ledger_dir, login_name),
+        &login_lock_metadata_path(ledger_dir, login_name),
+    )
+}
 
-    file.try_lock_exclusive()
-        .map_err(|_| format!("login '{login_name}' is currently in use by another operation"))?;
-
-    Ok(LoginLock { _file: file })
+pub fn get_gl_lock_status(
+    ledger_dir: &Path,
+) -> Result<LockStatus, Box<dyn std::error::Error + Send + Sync>> {
+    probe_lock_status(
+        &gl_lock_path(ledger_dir),
+        &gl_lock_metadata_path(ledger_dir),
+    )
 }
 
 /// Resolve the extension to use for a login from the login config.
@@ -548,6 +770,85 @@ mod tests {
         assert!(lock2.is_err());
         let err = lock2.unwrap_err().to_string();
         assert!(err.contains("currently in use"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn login_lock_writes_and_removes_metadata() {
+        let dir = create_temp_dir("login-lock-meta");
+        let metadata_path = login_lock_metadata_path(&dir, "chase");
+        {
+            let _lock =
+                acquire_login_lock_with_metadata(&dir, "chase", "gui", "pipeline-extract-all")
+                    .unwrap();
+            let metadata = read_lock_metadata(&metadata_path).unwrap().unwrap();
+            assert_eq!(metadata.owner, "gui");
+            assert_eq!(metadata.purpose, "pipeline-extract-all");
+            assert_eq!(
+                metadata.resource,
+                LockResource::Login {
+                    login_name: "chase".to_string()
+                }
+            );
+        }
+        assert!(!metadata_path.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn acquire_login_lock_cleans_stale_metadata() {
+        let dir = create_temp_dir("login-lock-stale-meta");
+        let metadata_path = login_lock_metadata_path(&dir, "chase");
+        fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+        fs::write(
+            &metadata_path,
+            serde_json::to_vec_pretty(&LockMetadata {
+                version: 1,
+                owner: "stale".to_string(),
+                purpose: "old".to_string(),
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                pid: None,
+                resource: LockResource::Login {
+                    login_name: "chase".to_string(),
+                },
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        {
+            let _lock = acquire_login_lock_with_metadata(&dir, "chase", "cli", "set-login-account")
+                .unwrap();
+            let metadata = read_lock_metadata(&metadata_path).unwrap().unwrap();
+            assert_eq!(metadata.owner, "cli");
+            assert_eq!(metadata.purpose, "set-login-account");
+        }
+        assert!(!metadata_path.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gl_lock_writes_and_removes_metadata() {
+        let dir = create_temp_dir("gl-lock-meta");
+        let metadata_path = gl_lock_metadata_path(&dir);
+        {
+            let _lock = acquire_gl_lock_with_metadata(&dir, "gui", "pipeline-post-all").unwrap();
+            let metadata = read_lock_metadata(&metadata_path).unwrap().unwrap();
+            assert_eq!(metadata.owner, "gui");
+            assert_eq!(metadata.purpose, "pipeline-post-all");
+            assert_eq!(metadata.resource, LockResource::Gl);
+        }
+        assert!(!metadata_path.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn acquire_gl_lock_fails_when_held() {
+        let dir = create_temp_dir("gl-lock-held");
+        let _lock1 = acquire_gl_lock_with_metadata(&dir, "gui", "pipeline-post-all").unwrap();
+        let lock2 = acquire_gl_lock_with_metadata(&dir, "cli", "recategorize-gl");
+        assert!(lock2.is_err());
+        assert!(lock2.unwrap_err().to_string().contains("general journal"));
         let _ = fs::remove_dir_all(&dir);
     }
 
