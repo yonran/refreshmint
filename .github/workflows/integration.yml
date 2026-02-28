@@ -58,12 +58,12 @@ jobs:
 
             - name: Run scrape integration tests
               working-directory: src-tauri
-              run: xvfb-run -a cargo test --test scrape_integration -- --ignored
+              run: xvfb-run -a cargo test --test scrape_integration -- --ignored --test-threads=1
 
             - name: Run debug integration tests
               working-directory: src-tauri
-              run: xvfb-run -a cargo test --test debug_integration -- --ignored
+              run: xvfb-run -a cargo test --test debug_integration -- --ignored --test-threads=1
 
             - name: Run locator integration tests
               working-directory: src-tauri
-              run: xvfb-run -a cargo test --test locator_integration -- --ignored
+              run: xvfb-run -a cargo test --test locator_integration -- --ignored --test-threads=1
