@@ -99,13 +99,16 @@ fn is_extension_path(value: &str) -> bool {
 /// Resolve an extension value to a directory path.
 ///
 /// If the value looks like a path, return it directly as a `PathBuf`.
-/// Otherwise treat it as an extension name under `extensions/` in the ledger.
+/// Otherwise treat it as an extension name: built-in extensions take priority
+/// over ledger-local copies under `extensions/`.
 pub fn resolve_extension_dir(ledger_dir: &Path, extension_value: &str) -> PathBuf {
     if is_extension_path(extension_value) {
-        PathBuf::from(extension_value)
-    } else {
-        ledger_dir.join("extensions").join(extension_value)
+        return PathBuf::from(extension_value);
     }
+    if let Some(dir) = crate::builtin_extensions::resolve_dir(extension_value) {
+        return dir;
+    }
+    ledger_dir.join("extensions").join(extension_value)
 }
 
 /// Resolve the extension to use for an account.
@@ -202,6 +205,7 @@ mod tests {
     #[test]
     fn resolve_extension_dir_name_vs_path() {
         let ledger = PathBuf::from("/ledger.refreshmint");
+        // Non-builtin plain name → ledger extensions dir
         assert_eq!(
             resolve_extension_dir(&ledger, "chase-driver"),
             PathBuf::from("/ledger.refreshmint/extensions/chase-driver")
@@ -213,6 +217,24 @@ mod tests {
         assert_eq!(
             resolve_extension_dir(&ledger, "./local-ext"),
             PathBuf::from("./local-ext")
+        );
+    }
+
+    #[test]
+    fn resolve_extension_dir_builtin_preferred() {
+        let ledger = PathBuf::from("/ledger.refreshmint");
+        // A known builtin name should NOT resolve to the ledger extensions dir
+        let dir = resolve_extension_dir(&ledger, "paypal");
+        assert!(
+            !dir.starts_with("/ledger.refreshmint/extensions"),
+            "expected builtin dir, got ledger-local path: {}",
+            dir.display()
+        );
+        // The returned directory should contain driver.mjs
+        assert!(
+            dir.join("driver.mjs").exists(),
+            "builtin paypal dir missing driver.mjs: {}",
+            dir.display()
         );
     }
 

@@ -15,6 +15,7 @@ pub mod post;
 pub mod transfer_detector;
 
 mod binpath;
+mod builtin_extensions;
 mod extension;
 mod ledger;
 mod ledger_add;

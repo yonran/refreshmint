@@ -316,32 +316,40 @@ fn normalize_manifest_domain(input: &str) -> String {
 }
 
 /// List extension names that have a runnable `driver.mjs` script.
+///
+/// Built-in extensions are always included. Ledger-local extensions under
+/// `extensions/` are merged in; duplicates (same name as a built-in) are
+/// deduplicated so the built-in takes effect via `resolve_extension_dir`.
 pub fn list_runnable_extensions(
     ledger_dir: &std::path::Path,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    // Built-in extensions are always available
+    for name in crate::builtin_extensions::names() {
+        names.insert(name.to_string());
+    }
+
+    // Ledger-local extensions that have a driver.mjs
     let extensions_dir = ledger_dir.join("extensions");
-    if !extensions_dir.exists() {
-        return Ok(Vec::new());
+    if extensions_dir.exists() {
+        for entry in std::fs::read_dir(&extensions_dir)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+            if !entry_path.is_dir() {
+                continue;
+            }
+            if !entry_path.join("driver.mjs").is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+                continue;
+            };
+            names.insert(name);
+        }
     }
 
-    let mut extensions = Vec::new();
-    for entry in std::fs::read_dir(&extensions_dir)? {
-        let entry = entry?;
-        let entry_path = entry.path();
-        if !entry_path.is_dir() {
-            continue;
-        }
-        if !entry_path.join("driver.mjs").is_file() {
-            continue;
-        }
-        let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
-            continue;
-        };
-        extensions.push(name);
-    }
-
-    extensions.sort();
-    Ok(extensions)
+    Ok(names.into_iter().collect())
 }
 
 /// Run the full scrape orchestration.
@@ -568,7 +576,32 @@ mod tests {
             panic!("unexpected list_runnable_extensions error: {err}");
         });
 
-        assert_eq!(found, vec!["alpha".to_string(), "beta".to_string()]);
+        // Ledger-local extensions with driver.mjs must be present
+        assert!(
+            found.contains(&"alpha".to_string()),
+            "missing alpha: {found:?}"
+        );
+        assert!(
+            found.contains(&"beta".to_string()),
+            "missing beta: {found:?}"
+        );
+        // Ledger-local extension without driver.mjs must be absent
+        assert!(
+            !found.contains(&"empty".to_string()),
+            "empty should be excluded: {found:?}"
+        );
+        // All built-in extensions must be present
+        for name in crate::builtin_extensions::names() {
+            assert!(
+                found.contains(&name.to_string()),
+                "missing builtin '{name}': {found:?}"
+            );
+        }
+        // Result must be sorted
+        let mut sorted = found.clone();
+        sorted.sort();
+        assert_eq!(found, sorted, "result is not sorted");
+
         let _ = fs::remove_dir_all(&root);
     }
 

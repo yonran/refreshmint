@@ -86,13 +86,36 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 
 Use `--replace` to overwrite an existing extension with the same manifest `name`.
 
+## Built-in extensions
+
+The following extensions are bundled with the app and available automatically
+without a prior `extension load` step:
+
+- `bankofamerica`
+- `chase`
+- `citi`
+- `paypal`
+- `providentcu`
+- `target`
+
+In **release builds** the extension files are embedded in the binary. In **debug
+builds** the app reads directly from the `builtin-extensions/` source tree (via
+the compile-time `CARGO_MANIFEST_DIR` constant), so edits to those files are
+reflected immediately without recompiling.
+
 ## Extension resolution order
 
-For scrape and extract commands:
+For scrape and extract commands, a plain extension name (e.g. `"paypal"`) is
+resolved in this order:
 
 1. Explicit `--extension` (if provided)
 2. Account config value in `accounts/<account>/config.json`
 3. Error
+
+Once a name is selected it is resolved to a directory:
+
+1. Built-in extension with that name (see list above)
+2. Ledger-local copy under `extensions/<name>/`
 
 Account config example:
 
@@ -102,7 +125,8 @@ Account config example:
 }
 ```
 
-`extension` may also be a path to an unpacked extension directory.
+`extension` may also be a path to an unpacked extension directory, which bypasses
+built-in resolution entirely.
 
 ## Type checking and linting
 
