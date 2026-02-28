@@ -1,5 +1,13 @@
 # Target.com Order Scraping
 
+## Note
+
+This file is research and implementation guidance, not a description of the
+current shipped Target extension behavior.
+
+Current implementation status lives in
+`builtin-extensions/target/README.md`.
+
 ## Regulatory Status
 
 **Regulation:** None — retail chain, not a financial institution. Online and in-store order history are voluntary services, not regulated documents.
