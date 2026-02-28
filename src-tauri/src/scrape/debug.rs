@@ -199,6 +199,7 @@ struct Response {
     error: Option<String>,
 }
 
+#[cfg(any(unix, test))]
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ExecOutputStream {
@@ -206,6 +207,7 @@ enum ExecOutputStream {
     Stderr,
 }
 
+#[cfg(any(unix, test))]
 impl From<super::js_api::DebugOutputStream> for ExecOutputStream {
     fn from(value: super::js_api::DebugOutputStream) -> Self {
         match value {
@@ -215,6 +217,7 @@ impl From<super::js_api::DebugOutputStream> for ExecOutputStream {
     }
 }
 
+#[cfg(any(unix, test))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ExecStreamFrame {
@@ -228,6 +231,7 @@ enum ExecStreamFrame {
     },
 }
 
+#[cfg(any(unix, test))]
 fn finalize_debug_exec_resources(
     refreshmint: &mut super::js_api::RefreshmintInner,
 ) -> Result<Vec<String>, String> {
@@ -705,6 +709,7 @@ async fn write_exec_stream_frame_async(
     tokio::io::AsyncWriteExt::flush(stream).await
 }
 
+#[cfg(any(unix, test))]
 fn sanitize_segment(input: &str) -> String {
     let cleaned: String = input
         .chars()
