@@ -84,6 +84,7 @@ import {
     queryTransactions,
 } from './tauri-commands.ts';
 import { getCurrentToken, getSearchSuggestions } from './search-utils.ts';
+import { ReportsTab } from './ReportsTab.tsx';
 
 type TransactionDraft = {
     date: string;
@@ -3950,6 +3951,17 @@ function App() {
                         </button>
                         <button
                             className={
+                                activeTab === 'reports' ? 'tab active' : 'tab'
+                            }
+                            onClick={() => {
+                                setActiveTab('reports');
+                            }}
+                            type="button"
+                        >
+                            Reports
+                        </button>
+                        <button
+                            className={
                                 activeTab === 'scrape' ? 'tab active' : 'tab'
                             }
                             onClick={() => {
@@ -5602,6 +5614,11 @@ function App() {
                                 )}
                             </section>
                         </div>
+                    ) : activeTab === 'reports' ? (
+                        <ReportsTab
+                            ledger={ledger.path}
+                            accounts={ledger.accounts}
+                        />
                     ) : (
                         <div className="transactions-panel">
                             <section className="txn-form">

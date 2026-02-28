@@ -4,7 +4,12 @@ const STORE_NAME = 'settings.json';
 const RECENT_LEDGER_KEY = 'recentLedgerPaths';
 const ACTIVE_TAB_KEY = 'recentActiveTab';
 
-export type ActiveTab = 'accounts' | 'transactions' | 'scrape' | 'pipeline';
+export type ActiveTab =
+    | 'accounts'
+    | 'transactions'
+    | 'scrape'
+    | 'pipeline'
+    | 'reports';
 
 async function getStore() {
     return await load(STORE_NAME, { autoSave: true, defaults: {} });
@@ -69,7 +74,8 @@ export async function getLastActiveTab(): Promise<ActiveTab | null> {
         value === 'accounts' ||
         value === 'transactions' ||
         value === 'scrape' ||
-        value === 'pipeline'
+        value === 'pipeline' ||
+        value === 'reports'
     ) {
         return value;
     }

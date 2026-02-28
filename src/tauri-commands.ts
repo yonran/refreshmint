@@ -737,3 +737,16 @@ export async function queryTransactions(
 ): Promise<TransactionRow[]> {
     return invoke<TransactionRow[]>('query_transactions', { ledger, query });
 }
+
+export interface HledgerReportResult {
+    rows: string[][]; // all rows including header; empty for text commands
+    text: string | null; // plain text output for stats/activity
+}
+
+export async function runHledgerReport(
+    ledger: string,
+    command: string,
+    args: string[],
+): Promise<HledgerReportResult> {
+    return invoke('run_hledger_report', { ledger, command, args });
+}

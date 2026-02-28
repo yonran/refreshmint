@@ -43,6 +43,15 @@ jobs:
             - name: Download hledger sidecar
               run: bash scripts/download-sidecar.sh x86_64-unknown-linux-gnu
 
+            - name: Expose hledger sidecar on PATH
+              run: |
+                  sudo ln -sf "$(pwd)/src-tauri/binaries/hledger-x86_64-unknown-linux-gnu" /usr/local/bin/hledger
+                  hledger --version
+
+            - name: Run report integration tests
+              working-directory: src-tauri
+              run: cargo test "report::tests::integration" -- --ignored
+
             - name: Run extension load smoke test
               working-directory: src-tauri
               run: cargo test --test extension_load_smoke

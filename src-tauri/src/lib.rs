@@ -12,6 +12,7 @@ pub mod login_config;
 pub mod migration;
 pub mod operations;
 pub mod post;
+pub mod report;
 pub mod transfer_detector;
 
 mod binpath;
@@ -157,6 +158,7 @@ pub fn run_with_context(
             clear_login_profile,
             migrate_ledger,
             query_transactions,
+            run_hledger_report,
         ])
         .setup(|app| {
             binpath::init_from_app(app.handle());
@@ -1214,6 +1216,16 @@ fn query_transactions(
     ledger_open::run_hledger_print_with_query(&journal_path, &tokens)
         .map(|txns| ledger_open::build_transaction_rows(&txns))
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn run_hledger_report(
+    ledger: String,
+    command: String,
+    args: Vec<String>,
+) -> Result<report::ReportResult, String> {
+    let journal_path = std::path::PathBuf::from(&ledger).join("general.journal");
+    report::run_report(&journal_path, &command, &args).map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
