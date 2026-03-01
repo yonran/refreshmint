@@ -1171,6 +1171,8 @@ fn repair_login_account_labels(
                 "signature_cash_back_4569",
             ),
         ],
+        "bankofamerica" => &[("_default", "bankofamerica")],
+        "citi" => &[("_default", "costco_anywhere_visa_card_by_citi_3743")],
         _ => &[],
     };
 

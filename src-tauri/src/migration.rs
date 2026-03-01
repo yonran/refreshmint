@@ -775,4 +775,60 @@ mod tests {
 
         let _ = fs::remove_dir_all(&ledger_dir);
     }
+
+    #[test]
+    fn repair_login_account_labels_moves_default_bucket_into_named_target() {
+        let ledger_dir = temp_dir("repair-default-bucket");
+        let login_name = "bankofamerica";
+        let mut config = crate::login_config::LoginConfig {
+            extension: Some("bankofamerica".to_string()),
+            accounts: BTreeMap::new(),
+        };
+        config.accounts.insert(
+            "_default".to_string(),
+            crate::login_config::LoginAccountConfig { gl_account: None },
+        );
+        config.accounts.insert(
+            "bankofamerica".to_string(),
+            crate::login_config::LoginAccountConfig {
+                gl_account: Some("Bankofamerica".to_string()),
+            },
+        );
+        crate::login_config::write_login_config(&ledger_dir, login_name, &config).unwrap();
+
+        let source_docs = ledger_dir
+            .join("logins")
+            .join(login_name)
+            .join("accounts")
+            .join("_default")
+            .join("documents");
+        fs::create_dir_all(&source_docs).unwrap();
+        fs::write(source_docs.join("December.csv"), b"csv").unwrap();
+        fs::write(
+            source_docs.join("December.csv-info.json"),
+            r#"{"loginName":"bankofamerica","label":"_default","mimeType":"text/csv"}"#,
+        )
+        .unwrap();
+
+        let outcome =
+            repair_login_account_labels(&ledger_dir, login_name, &[("_default", "bankofamerica")])
+                .unwrap();
+        assert_eq!(outcome.migrated.len(), 1);
+
+        let repaired_docs = ledger_dir
+            .join("logins")
+            .join(login_name)
+            .join("accounts")
+            .join("bankofamerica")
+            .join("documents");
+        assert!(repaired_docs.join("December.csv").exists());
+        let sidecar = fs::read_to_string(repaired_docs.join("December.csv-info.json")).unwrap();
+        assert!(sidecar.contains("\"label\": \"bankofamerica\""));
+
+        let updated = crate::login_config::read_login_config(&ledger_dir, login_name);
+        assert!(!updated.accounts.contains_key("_default"));
+        assert!(updated.accounts.contains_key("bankofamerica"));
+
+        let _ = fs::remove_dir_all(&ledger_dir);
+    }
 }
