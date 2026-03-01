@@ -13,6 +13,10 @@ export async function extract(context) {
     return [];
 }
 
+function isSignatureCashBackLabel(context) {
+    return context?.label === 'signature_cash_back_4569';
+}
+
 async function extractCsv(context) {
     if (!context.csv || context.csv.length < 2) {
         return [];
@@ -36,6 +40,9 @@ async function extractCsv(context) {
 
             // Clean up amount: "$1,037.00" -> "1037.00", "-$50.00" -> "-50.00"
             const tamount = normalizeCurrencyAmount(amount);
+            const normalizedAmount = isSignatureCashBackLabel(context)
+                ? invertAmount(tamount)
+                : tamount;
 
             // Build description
             let tdescription = description.trim();
@@ -48,7 +55,7 @@ async function extractCsv(context) {
 
             const ttags = [
                 ['evidence', `${context.document.name}:${i + 2}:1`],
-                ['amount', `${tamount} USD`],
+                ['amount', `${normalizedAmount} USD`],
             ];
             const normalizedCheckNumber = (checkNumber || '').trim();
             if (normalizedCheckNumber !== '') {
@@ -58,7 +65,7 @@ async function extractCsv(context) {
                     buildCheckAttachmentKey(
                         normalizedCheckNumber,
                         tdate,
-                        tamount,
+                        normalizedAmount,
                     ),
                 ]);
             }
@@ -173,6 +180,9 @@ async function extractPdf(context) {
 
                 const tdate = `${txnYear}-${m}-${d}`;
                 const tamount = amount.replace(/[$,]/g, '').trim();
+                const normalizedAmount = isSignatureCashBackLabel(context)
+                    ? invertAmount(tamount)
+                    : tamount;
 
                 transactions.push({
                     tdate,
@@ -184,7 +194,7 @@ async function extractPdf(context) {
                             'evidence',
                             `${context.document.name}#page=${page.pageNumber}`,
                         ],
-                        ['amount', `${tamount} USD`],
+                        ['amount', `${normalizedAmount} USD`],
                         ['bankId', reference],
                     ],
                 });
@@ -216,6 +226,15 @@ function normalizeCurrencyAmount(amount) {
         .trim();
     if (unsigned === '') return '';
     return negative ? `-${unsigned}` : unsigned;
+}
+
+function invertAmount(amount) {
+    const raw = String(amount || '').trim();
+    if (!raw) return '';
+    if (raw.startsWith('-')) {
+        return raw.slice(1);
+    }
+    return `-${raw}`;
 }
 
 function buildCheckAttachmentKey(checkNumber, dateIso, amount) {
