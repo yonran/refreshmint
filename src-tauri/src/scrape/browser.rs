@@ -7,26 +7,79 @@ use futures::StreamExt;
 
 /// Find the Chrome or Edge binary on the system.
 pub fn find_chrome_binary() -> Result<PathBuf, Box<dyn Error>> {
-    // Check well-known paths first
-    let candidates = chrome_candidates();
-    for candidate in &candidates {
-        if candidate.exists() {
-            return Ok(candidate.clone());
+    // Respect explicit overrides first so CI can force the browser installed by
+    // the workflow instead of falling back to a system path that may behave
+    // differently.
+    for env_name in ["CHROME", "CHROME_BIN", "GOOGLE_CHROME_BIN"] {
+        if let Some(path) = std::env::var_os(env_name) {
+            let candidate = PathBuf::from(path);
+            if candidate.exists() {
+                eprintln!(
+                    "[browser] Using browser from ${env_name}: {}",
+                    candidate.display()
+                );
+                return Ok(candidate);
+            }
+            eprintln!(
+                "[browser] Ignoring browser path from ${env_name} because it does not exist: {}",
+                candidate.display()
+            );
         }
     }
 
-    // Fallback to PATH search
-    if let Ok(path) = which::which("google-chrome-stable") {
+    // Prefer PATH before hard-coded locations so workflow-provided shims win.
+    if let Ok(path) = which::which("google-chrome") {
+        eprintln!(
+            "[browser] Using browser from PATH lookup google-chrome: {}",
+            path.display()
+        );
         return Ok(path);
     }
-    if let Ok(path) = which::which("google-chrome") {
+    if let Ok(path) = which::which("google-chrome-stable") {
+        eprintln!(
+            "[browser] Using browser from PATH lookup google-chrome-stable: {}",
+            path.display()
+        );
+        return Ok(path);
+    }
+    if let Ok(path) = which::which("google-chrome-beta") {
+        eprintln!(
+            "[browser] Using browser from PATH lookup google-chrome-beta: {}",
+            path.display()
+        );
         return Ok(path);
     }
     if let Ok(path) = which::which("chromium") {
+        eprintln!(
+            "[browser] Using browser from PATH lookup chromium: {}",
+            path.display()
+        );
+        return Ok(path);
+    }
+    if let Ok(path) = which::which("chromium-browser") {
+        eprintln!(
+            "[browser] Using browser from PATH lookup chromium-browser: {}",
+            path.display()
+        );
         return Ok(path);
     }
     if let Ok(path) = which::which("microsoft-edge") {
+        eprintln!(
+            "[browser] Using browser from PATH lookup microsoft-edge: {}",
+            path.display()
+        );
         return Ok(path);
+    }
+
+    // Fallback to well-known installation paths.
+    for candidate in chrome_candidates() {
+        if candidate.exists() {
+            eprintln!(
+                "[browser] Using browser from well-known path: {}",
+                candidate.display()
+            );
+            return Ok(candidate);
+        }
     }
 
     Err("could not find Chrome or Edge binary; install Chrome or set PATH".into())
@@ -84,12 +137,20 @@ pub async fn launch_browser(
         .launch_timeout(std::time::Duration::from_secs(30));
 
     let is_linux_ci = cfg!(target_os = "linux") && std::env::var_os("CI").is_some();
+    eprintln!(
+        "[browser] Launch config: chrome={}, profile={}, linux_ci={is_linux_ci}",
+        chrome_path.display(),
+        profile_dir.display()
+    );
     if is_linux_ci {
+        eprintln!("[browser] Launch mode: headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu");
         builder = builder
+            .new_headless_mode()
             .no_sandbox()
             .arg("--disable-dev-shm-usage")
             .arg("--disable-gpu");
     } else {
+        eprintln!("[browser] Launch mode: headed");
         builder = builder.with_head();
     }
 
@@ -150,13 +211,32 @@ pub async fn open_start_page(
     let existing_page_timeout = std::time::Duration::from_secs(10);
     let poll_interval = std::time::Duration::from_millis(250);
     let start = std::time::Instant::now();
+    let mut poll_count = 0u64;
 
     loop {
-        browser.fetch_targets().await?;
-        if let Some(page) = browser.pages().await?.into_iter().next() {
+        let targets = browser.fetch_targets().await?;
+        let pages = browser.pages().await?;
+        poll_count += 1;
+        if poll_count <= 5 || poll_count % 10 == 0 {
+            eprintln!(
+                "[browser] Startup poll #{poll_count}: targets={}, pages={}, elapsed={}ms",
+                targets.len(),
+                pages.len(),
+                start.elapsed().as_millis()
+            );
+        }
+        if let Some(page) = pages.into_iter().next() {
+            eprintln!(
+                "[browser] Reusing existing startup page after {}ms",
+                start.elapsed().as_millis()
+            );
             return Ok(page);
         }
         if start.elapsed() >= existing_page_timeout {
+            eprintln!(
+                "[browser] No startup page after {}ms; creating about:blank target",
+                start.elapsed().as_millis()
+            );
             break;
         }
         tokio::time::sleep(poll_interval).await;
@@ -164,13 +244,32 @@ pub async fn open_start_page(
 
     let create_timeout = std::time::Duration::from_secs(30);
     match tokio::time::timeout(create_timeout, browser.new_page("about:blank")).await {
-        Ok(Ok(page)) => Ok(page),
-        Ok(Err(err)) => Err(format!("failed to create initial page: {err}").into()),
-        Err(_) => Err(format!(
-            "timed out after {}s creating initial page (about:blank)",
-            create_timeout.as_secs()
-        )
-        .into()),
+        Ok(Ok(page)) => {
+            eprintln!(
+                "[browser] Created initial about:blank page after {}ms",
+                start.elapsed().as_millis()
+            );
+            Ok(page)
+        }
+        Ok(Err(err)) => {
+            eprintln!("[browser] Failed to create initial about:blank page: {err}");
+            Err(format!("failed to create initial page: {err}").into())
+        }
+        Err(_) => {
+            let targets = browser.fetch_targets().await?;
+            let pages = browser.pages().await?;
+            eprintln!(
+                "[browser] Timed out creating about:blank after {}s; final targets={}, final pages={}",
+                create_timeout.as_secs(),
+                targets.len(),
+                pages.len()
+            );
+            Err(format!(
+                "timed out after {}s creating initial page (about:blank)",
+                create_timeout.as_secs()
+            )
+            .into())
+        }
     }
 }
 

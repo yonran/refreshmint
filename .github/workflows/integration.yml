@@ -34,6 +34,7 @@ jobs:
             - name: Expose Chrome on PATH
               run: |
                   CHROME_BIN="$(command -v google-chrome || command -v google-chrome-stable || command -v chrome || command -v chromium || command -v chromium-browser)"
+                  echo "CHROME=$CHROME_BIN" >> "$GITHUB_ENV"
                   sudo ln -sf "$CHROME_BIN" /usr/local/bin/google-chrome
                   google-chrome --version
 
