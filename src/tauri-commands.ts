@@ -747,6 +747,13 @@ export async function migrateLedger(
     return invoke('migrate_ledger', { ledger, dryRun });
 }
 
+export async function repairLoginAccountLabels(
+    ledger: string,
+    loginName: string,
+): Promise<MigrationOutcome> {
+    return invoke('repair_login_account_labels', { ledger, loginName });
+}
+
 export async function queryTransactions(
     ledger: string,
     query: string,

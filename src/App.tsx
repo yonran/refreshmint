@@ -61,6 +61,7 @@ import {
     postLoginAccountTransfer,
     postTransfer,
     reenterLoginSecret,
+    repairLoginAccountLabels,
     removeLoginSecret,
     runLoginAccountExtraction,
     runScrapeForLogin,
@@ -2646,6 +2647,39 @@ function App() {
             requestLoginConfigReload();
         } catch (error) {
             setLoginConfigStatus(`Failed to remove mapping: ${String(error)}`);
+        } finally {
+            setIsSavingLoginConfig(false);
+        }
+    }
+
+    async function handleRepairSelectedLoginLabels() {
+        if (!ledger) {
+            return;
+        }
+        const loginName = selectedLoginName.trim();
+        if (loginName.length === 0) {
+            setLoginConfigStatus('Select a login first.');
+            return;
+        }
+
+        setIsSavingLoginConfig(true);
+        try {
+            const outcome = await repairLoginAccountLabels(
+                ledger.path,
+                loginName,
+            );
+            const migratedCount = outcome.migrated.length;
+            const skippedCount = outcome.skipped.length;
+            const warningSummary =
+                outcome.warnings.length === 0
+                    ? ''
+                    : ` Warnings: ${outcome.warnings.join(' ')}`;
+            setLoginConfigStatus(
+                `Repaired ${migratedCount} label${migratedCount === 1 ? '' : 's'} for '${loginName}'. Skipped ${skippedCount}.${warningSummary}`,
+            );
+            requestLoginConfigReload();
+        } catch (error) {
+            setLoginConfigStatus(`Failed to repair labels: ${String(error)}`);
         } finally {
             setIsSavingLoginConfig(false);
         }
@@ -6014,6 +6048,22 @@ function App() {
                                                     {isSavingLoginConfig
                                                         ? 'Saving...'
                                                         : 'Save login extension'}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="ghost-button"
+                                                    onClick={() => {
+                                                        void handleRepairSelectedLoginLabels();
+                                                    }}
+                                                    disabled={
+                                                        selectedLoginName.length ===
+                                                            0 ||
+                                                        isSavingLoginConfig
+                                                    }
+                                                >
+                                                    {isSavingLoginConfig
+                                                        ? 'Saving...'
+                                                        : 'Repair labels'}
                                                 </button>
                                                 <button
                                                     type="button"

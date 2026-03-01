@@ -152,12 +152,41 @@ pub fn repair_login_account_labels(
         if source_label == target_label {
             continue;
         }
+        let source_gl = config
+            .accounts
+            .get(*source_label)
+            .and_then(|account| account.gl_account.clone());
+        let target_gl = config
+            .accounts
+            .get(*target_label)
+            .and_then(|account| account.gl_account.clone());
+        let source_exists_in_config = config.accounts.contains_key(*source_label);
+        config
+            .accounts
+            .entry((*target_label).to_string())
+            .or_default();
+        if target_gl.is_none() && source_gl.is_some() {
+            config
+                .accounts
+                .entry((*target_label).to_string())
+                .or_default()
+                .gl_account = source_gl.clone();
+        }
+
         let source_dir = ledger_dir
             .join("logins")
             .join(login_name)
             .join("accounts")
             .join(source_label);
         if !source_dir.exists() {
+            if source_exists_in_config {
+                config.accounts.remove(*source_label);
+                outcome.migrated.push(MigratedAccount {
+                    account_name: (*source_label).to_string(),
+                    login_name: login_name.to_string(),
+                    label: (*target_label).to_string(),
+                });
+            }
             continue;
         }
 
@@ -176,26 +205,6 @@ pub fn repair_login_account_labels(
             .join("accounts")
             .join(target_label);
         fs::create_dir_all(&target_dir)?;
-
-        let source_gl = config
-            .accounts
-            .get(*source_label)
-            .and_then(|account| account.gl_account.clone());
-        let target_gl = config
-            .accounts
-            .get(*target_label)
-            .and_then(|account| account.gl_account.clone());
-        config
-            .accounts
-            .entry((*target_label).to_string())
-            .or_default();
-        if target_gl.is_none() && source_gl.is_some() {
-            config
-                .accounts
-                .entry((*target_label).to_string())
-                .or_default()
-                .gl_account = source_gl;
-        }
         config.accounts.remove(*source_label);
 
         let source_documents_dir = source_dir.join("documents");
@@ -828,6 +837,41 @@ mod tests {
         let updated = crate::login_config::read_login_config(&ledger_dir, login_name);
         assert!(!updated.accounts.contains_key("_default"));
         assert!(updated.accounts.contains_key("bankofamerica"));
+
+        let _ = fs::remove_dir_all(&ledger_dir);
+    }
+
+    #[test]
+    fn repair_login_account_labels_removes_stale_config_alias_without_directory() {
+        let ledger_dir = temp_dir("repair-stale-config-alias");
+        let login_name = "provident-yonran";
+        let mut config = crate::login_config::LoginConfig {
+            extension: Some("providentcu".to_string()),
+            accounts: BTreeMap::new(),
+        };
+        config.accounts.insert(
+            "4569_signature_cash_back".to_string(),
+            crate::login_config::LoginAccountConfig { gl_account: None },
+        );
+        config.accounts.insert(
+            "signature_cash_back_4569".to_string(),
+            crate::login_config::LoginAccountConfig {
+                gl_account: Some("Liabilities:Card:Provident".to_string()),
+            },
+        );
+        crate::login_config::write_login_config(&ledger_dir, login_name, &config).unwrap();
+
+        let outcome = repair_login_account_labels(
+            &ledger_dir,
+            login_name,
+            &[("4569_signature_cash_back", "signature_cash_back_4569")],
+        )
+        .unwrap();
+        assert_eq!(outcome.migrated.len(), 1);
+
+        let updated = crate::login_config::read_login_config(&ledger_dir, login_name);
+        assert!(!updated.accounts.contains_key("4569_signature_cash_back"));
+        assert!(updated.accounts.contains_key("signature_cash_back_4569"));
 
         let _ = fs::remove_dir_all(&ledger_dir);
     }
