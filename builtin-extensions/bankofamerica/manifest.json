@@ -1,5 +1,6 @@
 {
     "name": "bankofamerica",
+    "extract": "extract.mjs",
     "secrets": {
         "secure.bankofamerica.com": ["bofa_username", "bofa_password"]
     }
