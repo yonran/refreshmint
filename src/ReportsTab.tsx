@@ -158,15 +158,15 @@ export function ReportsTab({ ledger, accounts }: Props) {
             if (noTotal) args.push('-N');
             if (sortAmount) args.push('-S');
             if (percent) args.push('-%');
-            if (invert) args.push('--invert');
-            if (transpose) args.push('--transpose');
+            if (command === 'balance' && invert) args.push('--invert');
+            if (command === 'balance' && transpose) args.push('--transpose');
             if (drop.trim()) args.push(`--drop=${drop.trim()}`);
         }
 
         if (isRegisterFamily) {
             if (regAccumulation) args.push(regAccumulation);
-            if (regAverage) args.push('-A');
-            if (regRelated) args.push('-r');
+            if (command !== 'aregister' && regAverage) args.push('-A');
+            if (command !== 'aregister' && regRelated) args.push('-r');
             if (regInvert) args.push('--invert');
         }
 
@@ -333,374 +333,6 @@ export function ReportsTab({ ledger, accounts }: Props) {
                     </div>
                 </div>
 
-                {/* Filters */}
-                <div className="field-group">
-                    <label className="field-label">Filters</label>
-                    <div className="field-row checkbox-row">
-                        <label className="checkbox-field">
-                            <input
-                                type="checkbox"
-                                checked={statusCleared}
-                                onChange={(e) => {
-                                    setStatusCleared(e.target.checked);
-                                }}
-                            />
-                            <span>Cleared (-C)</span>
-                        </label>
-                        <label className="checkbox-field">
-                            <input
-                                type="checkbox"
-                                checked={statusPending}
-                                onChange={(e) => {
-                                    setStatusPending(e.target.checked);
-                                }}
-                            />
-                            <span>Pending (-P)</span>
-                        </label>
-                        <label className="checkbox-field">
-                            <input
-                                type="checkbox"
-                                checked={statusUnmarked}
-                                onChange={(e) => {
-                                    setStatusUnmarked(e.target.checked);
-                                }}
-                            />
-                            <span>Unmarked (-U)</span>
-                        </label>
-                        <label className="checkbox-field">
-                            <input
-                                type="checkbox"
-                                checked={realOnly}
-                                onChange={(e) => {
-                                    setRealOnly(e.target.checked);
-                                }}
-                            />
-                            <span>Real only (-R)</span>
-                        </label>
-                        <label className="checkbox-field">
-                            <input
-                                type="checkbox"
-                                checked={showEmpty}
-                                onChange={(e) => {
-                                    setShowEmpty(e.target.checked);
-                                }}
-                            />
-                            <span>Show empty (-E)</span>
-                        </label>
-                        <label className="checkbox-field">
-                            <span>Depth</span>
-                            <input
-                                type="number"
-                                className="small-number-input"
-                                min="1"
-                                value={depth}
-                                onChange={(e) => {
-                                    setDepth(e.target.value);
-                                }}
-                                placeholder="N"
-                            />
-                        </label>
-                    </div>
-                </div>
-
-                {/* Valuation */}
-                <div className="field-group">
-                    <label className="field-label">Valuation</label>
-                    <div className="field-row checkbox-row">
-                        <label className="checkbox-field">
-                            <input
-                                type="checkbox"
-                                checked={valueCost}
-                                onChange={(e) => {
-                                    setValueCost(e.target.checked);
-                                }}
-                            />
-                            <span>Cost basis (-B)</span>
-                        </label>
-                        <label className="checkbox-field">
-                            <input
-                                type="checkbox"
-                                checked={valueMarket}
-                                onChange={(e) => {
-                                    setValueMarket(e.target.checked);
-                                }}
-                            />
-                            <span>Market value (-V)</span>
-                        </label>
-                        <label className="checkbox-field">
-                            <span>Exchange</span>
-                            <input
-                                type="text"
-                                className="small-text-input"
-                                placeholder="COMM"
-                                value={exchangeCommodity}
-                                onChange={(e) => {
-                                    setExchangeCommodity(e.target.value);
-                                }}
-                            />
-                        </label>
-                    </div>
-                </div>
-
-                {/* Balance-family options */}
-                {isBalanceFamily && (
-                    <>
-                        <div className="field-group">
-                            <label className="field-label">Calculation</label>
-                            <div className="field-row">
-                                <div className="tabs">
-                                    {(
-                                        [
-                                            ['', 'Sum'],
-                                            ['--valuechange', 'Value Change'],
-                                            ['--gain', 'Gain'],
-                                            ['--count', 'Count'],
-                                        ] as [BalanceMode, string][]
-                                    ).map(([flag, label]) => (
-                                        <button
-                                            key={flag || 'sum'}
-                                            type="button"
-                                            className={
-                                                balanceMode === flag
-                                                    ? 'tab active'
-                                                    : 'tab'
-                                            }
-                                            onClick={() => {
-                                                setBalanceMode(flag);
-                                            }}
-                                        >
-                                            {label}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-                        <div className="field-group">
-                            <label className="field-label">Accumulation</label>
-                            <div className="field-row">
-                                <div className="tabs">
-                                    {(
-                                        [
-                                            ['', 'Change'],
-                                            ['--cumulative', 'Cumulative'],
-                                            ['-H', 'Historical'],
-                                        ] as [Accumulation, string][]
-                                    ).map(([flag, label]) => (
-                                        <button
-                                            key={flag || 'change'}
-                                            type="button"
-                                            className={
-                                                accumulation === flag
-                                                    ? 'tab active'
-                                                    : 'tab'
-                                            }
-                                            onClick={() => {
-                                                setAccumulation(flag);
-                                            }}
-                                        >
-                                            {label}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-                        <div className="field-group">
-                            <label className="field-label">View</label>
-                            <div className="field-row">
-                                <div className="tabs">
-                                    {(
-                                        [
-                                            ['', 'Default'],
-                                            ['-l', 'Flat'],
-                                            ['-t', 'Tree'],
-                                        ] as [BalanceView, string][]
-                                    ).map(([flag, label]) => (
-                                        <button
-                                            key={flag || 'default'}
-                                            type="button"
-                                            className={
-                                                balanceView === flag
-                                                    ? 'tab active'
-                                                    : 'tab'
-                                            }
-                                            onClick={() => {
-                                                setBalanceView(flag);
-                                            }}
-                                        >
-                                            {label}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-                        <div className="field-group">
-                            <label className="field-label">
-                                Columns &amp; Display
-                            </label>
-                            <div className="field-row checkbox-row">
-                                <label className="checkbox-field">
-                                    <input
-                                        type="checkbox"
-                                        checked={showAverage}
-                                        onChange={(e) => {
-                                            setShowAverage(e.target.checked);
-                                        }}
-                                    />
-                                    <span>Average (-A)</span>
-                                </label>
-                                <label className="checkbox-field">
-                                    <input
-                                        type="checkbox"
-                                        checked={showRowTotal}
-                                        onChange={(e) => {
-                                            setShowRowTotal(e.target.checked);
-                                        }}
-                                    />
-                                    <span>Row total (-T)</span>
-                                </label>
-                                <label className="checkbox-field">
-                                    <input
-                                        type="checkbox"
-                                        checked={summaryOnly}
-                                        onChange={(e) => {
-                                            setSummaryOnly(e.target.checked);
-                                        }}
-                                    />
-                                    <span>Summary only</span>
-                                </label>
-                                <label className="checkbox-field">
-                                    <input
-                                        type="checkbox"
-                                        checked={noTotal}
-                                        onChange={(e) => {
-                                            setNoTotal(e.target.checked);
-                                        }}
-                                    />
-                                    <span>No total (-N)</span>
-                                </label>
-                                <label className="checkbox-field">
-                                    <input
-                                        type="checkbox"
-                                        checked={sortAmount}
-                                        onChange={(e) => {
-                                            setSortAmount(e.target.checked);
-                                        }}
-                                    />
-                                    <span>Sort by amount (-S)</span>
-                                </label>
-                                <label className="checkbox-field">
-                                    <input
-                                        type="checkbox"
-                                        checked={percent}
-                                        onChange={(e) => {
-                                            setPercent(e.target.checked);
-                                        }}
-                                    />
-                                    <span>Percent (-%)</span>
-                                </label>
-                                <label className="checkbox-field">
-                                    <input
-                                        type="checkbox"
-                                        checked={invert}
-                                        onChange={(e) => {
-                                            setInvert(e.target.checked);
-                                        }}
-                                    />
-                                    <span>Invert</span>
-                                </label>
-                                <label className="checkbox-field">
-                                    <input
-                                        type="checkbox"
-                                        checked={transpose}
-                                        onChange={(e) => {
-                                            setTranspose(e.target.checked);
-                                        }}
-                                    />
-                                    <span>Transpose</span>
-                                </label>
-                                <label className="checkbox-field">
-                                    <span>Drop</span>
-                                    <input
-                                        type="number"
-                                        className="small-number-input"
-                                        min="0"
-                                        value={drop}
-                                        onChange={(e) => {
-                                            setDrop(e.target.value);
-                                        }}
-                                        placeholder="N"
-                                    />
-                                </label>
-                            </div>
-                        </div>
-                    </>
-                )}
-
-                {/* Register-family options */}
-                {isRegisterFamily && (
-                    <div className="field-group">
-                        <label className="field-label">Register Options</label>
-                        <div className="field-row">
-                            <div className="tabs">
-                                {(
-                                    [
-                                        ['', 'Change'],
-                                        ['--cumulative', 'Cumulative'],
-                                        ['-H', 'Historical'],
-                                    ] as [RegisterAccumulation, string][]
-                                ).map(([flag, label]) => (
-                                    <button
-                                        key={flag || 'change'}
-                                        type="button"
-                                        className={
-                                            regAccumulation === flag
-                                                ? 'tab active'
-                                                : 'tab'
-                                        }
-                                        onClick={() => {
-                                            setRegAccumulation(flag);
-                                        }}
-                                    >
-                                        {label}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-                        <div className="field-row checkbox-row">
-                            <label className="checkbox-field">
-                                <input
-                                    type="checkbox"
-                                    checked={regAverage}
-                                    onChange={(e) => {
-                                        setRegAverage(e.target.checked);
-                                    }}
-                                />
-                                <span>Average (-A)</span>
-                            </label>
-                            <label className="checkbox-field">
-                                <input
-                                    type="checkbox"
-                                    checked={regRelated}
-                                    onChange={(e) => {
-                                        setRegRelated(e.target.checked);
-                                    }}
-                                />
-                                <span>Related (-r)</span>
-                            </label>
-                            <label className="checkbox-field">
-                                <input
-                                    type="checkbox"
-                                    checked={regInvert}
-                                    onChange={(e) => {
-                                        setRegInvert(e.target.checked);
-                                    }}
-                                />
-                                <span>Invert</span>
-                            </label>
-                        </div>
-                    </div>
-                )}
-
                 {/* Query input */}
                 <div className="field-group">
                     <label className="field-label">Query</label>
@@ -793,6 +425,404 @@ export function ReportsTab({ ledger, accounts }: Props) {
                         {running ? 'Running…' : 'Run'}
                     </button>
                 </div>
+
+                {/* Options (collapsible) */}
+                <details className="field-group">
+                    <summary className="field-label">Options</summary>
+
+                    {/* Filters */}
+                    <div className="field-group">
+                        <label className="field-label">Filters</label>
+                        <div className="field-row checkbox-row">
+                            <label className="checkbox-field">
+                                <input
+                                    type="checkbox"
+                                    checked={statusCleared}
+                                    onChange={(e) => {
+                                        setStatusCleared(e.target.checked);
+                                    }}
+                                />
+                                <span>Cleared (-C)</span>
+                            </label>
+                            <label className="checkbox-field">
+                                <input
+                                    type="checkbox"
+                                    checked={statusPending}
+                                    onChange={(e) => {
+                                        setStatusPending(e.target.checked);
+                                    }}
+                                />
+                                <span>Pending (-P)</span>
+                            </label>
+                            <label className="checkbox-field">
+                                <input
+                                    type="checkbox"
+                                    checked={statusUnmarked}
+                                    onChange={(e) => {
+                                        setStatusUnmarked(e.target.checked);
+                                    }}
+                                />
+                                <span>Unmarked (-U)</span>
+                            </label>
+                            <label className="checkbox-field">
+                                <input
+                                    type="checkbox"
+                                    checked={realOnly}
+                                    onChange={(e) => {
+                                        setRealOnly(e.target.checked);
+                                    }}
+                                />
+                                <span>Real only (-R)</span>
+                            </label>
+                            <label className="checkbox-field">
+                                <input
+                                    type="checkbox"
+                                    checked={showEmpty}
+                                    onChange={(e) => {
+                                        setShowEmpty(e.target.checked);
+                                    }}
+                                />
+                                <span>Show empty (-E)</span>
+                            </label>
+                            <label className="checkbox-field">
+                                <span>Depth</span>
+                                <input
+                                    type="number"
+                                    className="small-number-input"
+                                    min="1"
+                                    value={depth}
+                                    onChange={(e) => {
+                                        setDepth(e.target.value);
+                                    }}
+                                    placeholder="N"
+                                />
+                            </label>
+                        </div>
+                    </div>
+
+                    {/* Valuation */}
+                    <div className="field-group">
+                        <label className="field-label">Valuation</label>
+                        <div className="field-row checkbox-row">
+                            <label className="checkbox-field">
+                                <input
+                                    type="checkbox"
+                                    checked={valueCost}
+                                    onChange={(e) => {
+                                        setValueCost(e.target.checked);
+                                    }}
+                                />
+                                <span>Cost basis (-B)</span>
+                            </label>
+                            <label className="checkbox-field">
+                                <input
+                                    type="checkbox"
+                                    checked={valueMarket}
+                                    onChange={(e) => {
+                                        setValueMarket(e.target.checked);
+                                    }}
+                                />
+                                <span>Market value (-V)</span>
+                            </label>
+                            <label className="checkbox-field">
+                                <span>Exchange</span>
+                                <input
+                                    type="text"
+                                    className="small-text-input"
+                                    placeholder="COMM"
+                                    value={exchangeCommodity}
+                                    onChange={(e) => {
+                                        setExchangeCommodity(e.target.value);
+                                    }}
+                                />
+                            </label>
+                        </div>
+                    </div>
+
+                    {/* Balance-family options */}
+                    {isBalanceFamily && (
+                        <>
+                            <div className="field-group">
+                                <label className="field-label">
+                                    Calculation
+                                </label>
+                                <div className="field-row">
+                                    <div className="tabs">
+                                        {(
+                                            [
+                                                ['', 'Sum'],
+                                                [
+                                                    '--valuechange',
+                                                    'Value Change',
+                                                ],
+                                                ['--gain', 'Gain'],
+                                                ['--count', 'Count'],
+                                            ] as [BalanceMode, string][]
+                                        ).map(([flag, label]) => (
+                                            <button
+                                                key={flag || 'sum'}
+                                                type="button"
+                                                className={
+                                                    balanceMode === flag
+                                                        ? 'tab active'
+                                                        : 'tab'
+                                                }
+                                                onClick={() => {
+                                                    setBalanceMode(flag);
+                                                }}
+                                            >
+                                                {label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="field-group">
+                                <label className="field-label">
+                                    Accumulation
+                                </label>
+                                <div className="field-row">
+                                    <div className="tabs">
+                                        {(
+                                            [
+                                                ['', 'Change'],
+                                                ['--cumulative', 'Cumulative'],
+                                                ['-H', 'Historical'],
+                                            ] as [Accumulation, string][]
+                                        ).map(([flag, label]) => (
+                                            <button
+                                                key={flag || 'change'}
+                                                type="button"
+                                                className={
+                                                    accumulation === flag
+                                                        ? 'tab active'
+                                                        : 'tab'
+                                                }
+                                                onClick={() => {
+                                                    setAccumulation(flag);
+                                                }}
+                                            >
+                                                {label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="field-group">
+                                <label className="field-label">View</label>
+                                <div className="field-row">
+                                    <div className="tabs">
+                                        {(
+                                            [
+                                                ['', 'Default'],
+                                                ['-l', 'Flat'],
+                                                ['-t', 'Tree'],
+                                            ] as [BalanceView, string][]
+                                        ).map(([flag, label]) => (
+                                            <button
+                                                key={flag || 'default'}
+                                                type="button"
+                                                className={
+                                                    balanceView === flag
+                                                        ? 'tab active'
+                                                        : 'tab'
+                                                }
+                                                onClick={() => {
+                                                    setBalanceView(flag);
+                                                }}
+                                            >
+                                                {label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="field-group">
+                                <label className="field-label">
+                                    Columns &amp; Display
+                                </label>
+                                <div className="field-row checkbox-row">
+                                    <label className="checkbox-field">
+                                        <input
+                                            type="checkbox"
+                                            checked={showAverage}
+                                            onChange={(e) => {
+                                                setShowAverage(
+                                                    e.target.checked,
+                                                );
+                                            }}
+                                        />
+                                        <span>Average (-A)</span>
+                                    </label>
+                                    <label className="checkbox-field">
+                                        <input
+                                            type="checkbox"
+                                            checked={showRowTotal}
+                                            onChange={(e) => {
+                                                setShowRowTotal(
+                                                    e.target.checked,
+                                                );
+                                            }}
+                                        />
+                                        <span>Row total (-T)</span>
+                                    </label>
+                                    <label className="checkbox-field">
+                                        <input
+                                            type="checkbox"
+                                            checked={summaryOnly}
+                                            onChange={(e) => {
+                                                setSummaryOnly(
+                                                    e.target.checked,
+                                                );
+                                            }}
+                                        />
+                                        <span>Summary only</span>
+                                    </label>
+                                    <label className="checkbox-field">
+                                        <input
+                                            type="checkbox"
+                                            checked={noTotal}
+                                            onChange={(e) => {
+                                                setNoTotal(e.target.checked);
+                                            }}
+                                        />
+                                        <span>No total (-N)</span>
+                                    </label>
+                                    <label className="checkbox-field">
+                                        <input
+                                            type="checkbox"
+                                            checked={sortAmount}
+                                            onChange={(e) => {
+                                                setSortAmount(e.target.checked);
+                                            }}
+                                        />
+                                        <span>Sort by amount (-S)</span>
+                                    </label>
+                                    <label className="checkbox-field">
+                                        <input
+                                            type="checkbox"
+                                            checked={percent}
+                                            onChange={(e) => {
+                                                setPercent(e.target.checked);
+                                            }}
+                                        />
+                                        <span>Percent (-%)</span>
+                                    </label>
+                                    {command === 'balance' && (
+                                        <label className="checkbox-field">
+                                            <input
+                                                type="checkbox"
+                                                checked={invert}
+                                                onChange={(e) => {
+                                                    setInvert(e.target.checked);
+                                                }}
+                                            />
+                                            <span>Invert</span>
+                                        </label>
+                                    )}
+                                    {command === 'balance' && (
+                                        <label className="checkbox-field">
+                                            <input
+                                                type="checkbox"
+                                                checked={transpose}
+                                                onChange={(e) => {
+                                                    setTranspose(
+                                                        e.target.checked,
+                                                    );
+                                                }}
+                                            />
+                                            <span>Transpose</span>
+                                        </label>
+                                    )}
+                                    <label className="checkbox-field">
+                                        <span>Drop</span>
+                                        <input
+                                            type="number"
+                                            className="small-number-input"
+                                            min="0"
+                                            value={drop}
+                                            onChange={(e) => {
+                                                setDrop(e.target.value);
+                                            }}
+                                            placeholder="N"
+                                        />
+                                    </label>
+                                </div>
+                            </div>
+                        </>
+                    )}
+
+                    {/* Register-family options */}
+                    {isRegisterFamily && (
+                        <div className="field-group">
+                            <label className="field-label">
+                                Register Options
+                            </label>
+                            <div className="field-row">
+                                <div className="tabs">
+                                    {(
+                                        [
+                                            ['', 'Change'],
+                                            ['--cumulative', 'Cumulative'],
+                                            ['-H', 'Historical'],
+                                        ] as [RegisterAccumulation, string][]
+                                    ).map(([flag, label]) => (
+                                        <button
+                                            key={flag || 'change'}
+                                            type="button"
+                                            className={
+                                                regAccumulation === flag
+                                                    ? 'tab active'
+                                                    : 'tab'
+                                            }
+                                            onClick={() => {
+                                                setRegAccumulation(flag);
+                                            }}
+                                        >
+                                            {label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                            <div className="field-row checkbox-row">
+                                {command !== 'aregister' && (
+                                    <label className="checkbox-field">
+                                        <input
+                                            type="checkbox"
+                                            checked={regAverage}
+                                            onChange={(e) => {
+                                                setRegAverage(e.target.checked);
+                                            }}
+                                        />
+                                        <span>Average (-A)</span>
+                                    </label>
+                                )}
+                                {command !== 'aregister' && (
+                                    <label className="checkbox-field">
+                                        <input
+                                            type="checkbox"
+                                            checked={regRelated}
+                                            onChange={(e) => {
+                                                setRegRelated(e.target.checked);
+                                            }}
+                                        />
+                                        <span>Related (-r)</span>
+                                    </label>
+                                )}
+                                <label className="checkbox-field">
+                                    <input
+                                        type="checkbox"
+                                        checked={regInvert}
+                                        onChange={(e) => {
+                                            setRegInvert(e.target.checked);
+                                        }}
+                                    />
+                                    <span>Invert</span>
+                                </label>
+                            </div>
+                        </div>
+                    )}
+                </details>
 
                 {/* Error */}
                 {error !== null && (
