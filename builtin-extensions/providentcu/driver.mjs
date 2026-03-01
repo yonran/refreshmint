@@ -300,19 +300,22 @@ async function handleAccountSummary(context) {
 function getLabel(accountMatch) {
     const raw = String(accountMatch || '');
     const compact = raw.replace(/\s+/g, ' ').trim();
-    const last4Match = compact.match(/x\s*(\d{4})/i);
+    const last4Match =
+        compact.match(/x\s*(\d{4})/i) ||
+        compact.match(/\b(\d{4})\b(?=\s)/) ||
+        compact.match(/\b(\d{4})\b$/);
     const last4 = last4Match == null ? null : last4Match[1];
 
-    const withoutAvailability = compact.replace(/available.*$/i, ' ');
+    const withoutAvailability = compact.replace(/\bavailable\b.*$/i, ' ');
     const withoutAmounts = withoutAvailability.replace(
-        /\$[\d,]+(?:\.\d{2})?/g,
+        /-?\$[\d,]+(?:\.\d{2})?/g,
         ' ',
     );
-    const withoutAccountNumber = withoutAmounts.replace(
-        /x\s*\d{4}[a-z]*/gi,
-        ' ',
-    );
-    const normalizedName = withoutAccountNumber
+    const withoutAccountNumberMarkers = withoutAmounts
+        .replace(/x\s*\d{4}[a-z]*/gi, ' ')
+        .replace(/\b\d{4}\b/g, ' ');
+    const normalizedName = withoutAccountNumberMarkers
+        .replace(/\bstatement\b/gi, ' ')
         .replace(/[-–—]+/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
