@@ -158,6 +158,7 @@ pub fn run_with_context(
             set_login_account,
             remove_login_account,
             delete_login_account,
+            repair_login_account_labels,
             list_login_secrets,
             sync_login_secrets_for_extension,
             add_login_secret,
@@ -1140,6 +1141,41 @@ fn remove_login_account(ledger: String, login_name: String, label: String) -> Re
 #[tauri::command]
 fn delete_login_account(ledger: String, login_name: String, label: String) -> Result<(), String> {
     remove_login_account(ledger, login_name, label)
+}
+
+#[tauri::command]
+fn repair_login_account_labels(
+    ledger: String,
+    login_name: String,
+) -> Result<migration::MigrationOutcome, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_login_name_input(login_name)?;
+    require_existing_login(&target_dir, &login_name)?;
+
+    let aliases: &[(&str, &str)] = match login_name.as_str() {
+        "provident-yonran" => &[
+            ("4569_signature_cash_back", "signature_cash_back_4569"),
+            ("6500_membership_savings", "membership_savings_6500"),
+            ("6590_super_reward_checking", "super_reward_checking_6590"),
+            ("7000_savings_plus_00", "savings_plus_00_7000"),
+            (
+                "savings_plus_00_x7000available_7000",
+                "savings_plus_00_7000",
+            ),
+            (
+                "super_reward_checking_6590available_61_131_92",
+                "super_reward_checking_6590",
+            ),
+            (
+                "signature_cash_back_statement_4569",
+                "signature_cash_back_4569",
+            ),
+        ],
+        _ => &[],
+    };
+
+    migration::repair_login_account_labels(&target_dir, &login_name, aliases)
+        .map_err(|err| err.to_string())
 }
 
 // --- Login-keyed secret commands ---

@@ -140,6 +140,94 @@ pub fn migrate_ledger(
     Ok(outcome)
 }
 
+pub fn repair_login_account_labels(
+    ledger_dir: &Path,
+    login_name: &str,
+    alias_to_target: &[(&str, &str)],
+) -> Result<MigrationOutcome, Box<dyn std::error::Error + Send + Sync>> {
+    let mut outcome = MigrationOutcome::default();
+    let mut config = crate::login_config::read_login_config(ledger_dir, login_name);
+
+    for (source_label, target_label) in alias_to_target {
+        if source_label == target_label {
+            continue;
+        }
+        let source_dir = ledger_dir
+            .join("logins")
+            .join(login_name)
+            .join("accounts")
+            .join(source_label);
+        if !source_dir.exists() {
+            continue;
+        }
+
+        let source_journal = source_dir.join("account.journal");
+        if file_has_non_whitespace(&source_journal)? {
+            outcome.skipped.push((*source_label).to_string());
+            outcome.warnings.push(format!(
+                "login '{login_name}' label '{source_label}' has journal data; skipping automatic repair"
+            ));
+            continue;
+        }
+
+        let target_dir = ledger_dir
+            .join("logins")
+            .join(login_name)
+            .join("accounts")
+            .join(target_label);
+        fs::create_dir_all(&target_dir)?;
+
+        let source_gl = config
+            .accounts
+            .get(*source_label)
+            .and_then(|account| account.gl_account.clone());
+        let target_gl = config
+            .accounts
+            .get(*target_label)
+            .and_then(|account| account.gl_account.clone());
+        config
+            .accounts
+            .entry((*target_label).to_string())
+            .or_default();
+        if target_gl.is_none() && source_gl.is_some() {
+            config
+                .accounts
+                .entry((*target_label).to_string())
+                .or_default()
+                .gl_account = source_gl;
+        }
+        config.accounts.remove(*source_label);
+
+        let source_documents_dir = source_dir.join("documents");
+        let target_documents_dir = target_dir.join("documents");
+        move_directory_contents(&source_documents_dir, &target_documents_dir)?;
+        rewrite_document_sidecars(
+            &target_documents_dir,
+            login_name,
+            target_label,
+            &mut outcome,
+        )?;
+
+        let source_operations = source_dir.join("operations.jsonl");
+        let target_operations = target_dir.join("operations.jsonl");
+        move_file_if_exists(&source_operations, &target_operations)?;
+
+        remove_dir_if_empty(&source_dir)?;
+        if source_dir.exists() {
+            fs::remove_dir_all(&source_dir)?;
+        }
+
+        outcome.migrated.push(MigratedAccount {
+            account_name: (*source_label).to_string(),
+            login_name: login_name.to_string(),
+            label: (*target_label).to_string(),
+        });
+    }
+
+    crate::login_config::write_login_config(ledger_dir, login_name, &config)?;
+    Ok(outcome)
+}
+
 fn list_old_accounts(accounts_dir: &Path) -> io::Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in fs::read_dir(accounts_dir)? {
@@ -366,6 +454,14 @@ fn remove_dir_if_empty(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn file_has_non_whitespace(path: &Path) -> io::Result<bool> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(!content.trim().is_empty()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 fn rewrite_document_sidecars(
     documents_dir: &Path,
     login_name: &str,
@@ -568,6 +664,114 @@ mod tests {
         assert_eq!(outcome.migrated.len(), 1);
         assert!(ledger_dir.join("accounts").join(account_name).exists());
         assert!(!ledger_dir.join("logins").join("chase-driver").exists());
+
+        let _ = fs::remove_dir_all(&ledger_dir);
+    }
+
+    #[test]
+    fn repair_login_account_labels_moves_doc_only_alias() {
+        let ledger_dir = temp_dir("repair-doc-only");
+        let login_name = "provident-yonran";
+        let mut config = crate::login_config::LoginConfig {
+            extension: Some("providentcu".to_string()),
+            accounts: BTreeMap::new(),
+        };
+        config.accounts.insert(
+            "4569_signature_cash_back".to_string(),
+            crate::login_config::LoginAccountConfig { gl_account: None },
+        );
+        config.accounts.insert(
+            "signature_cash_back_4569".to_string(),
+            crate::login_config::LoginAccountConfig {
+                gl_account: Some("Liabilities:Provident:Visa".to_string()),
+            },
+        );
+        crate::login_config::write_login_config(&ledger_dir, login_name, &config).unwrap();
+
+        let source_docs = ledger_dir
+            .join("logins")
+            .join(login_name)
+            .join("accounts")
+            .join("4569_signature_cash_back")
+            .join("documents");
+        fs::create_dir_all(&source_docs).unwrap();
+        fs::write(source_docs.join("activity.csv"), b"csv").unwrap();
+        fs::write(
+            source_docs.join("activity.csv-info.json"),
+            r#"{"loginName":"provident-yonran","label":"4569_signature_cash_back","mimeType":"text/csv"}"#,
+        )
+        .unwrap();
+
+        let outcome = repair_login_account_labels(
+            &ledger_dir,
+            login_name,
+            &[("4569_signature_cash_back", "signature_cash_back_4569")],
+        )
+        .unwrap();
+        assert_eq!(outcome.migrated.len(), 1);
+        assert!(outcome.skipped.is_empty());
+
+        let repaired_docs = ledger_dir
+            .join("logins")
+            .join(login_name)
+            .join("accounts")
+            .join("signature_cash_back_4569")
+            .join("documents");
+        assert!(repaired_docs.join("activity.csv").exists());
+        let sidecar = fs::read_to_string(repaired_docs.join("activity.csv-info.json")).unwrap();
+        assert!(sidecar.contains("\"label\": \"signature_cash_back_4569\""));
+
+        let updated = crate::login_config::read_login_config(&ledger_dir, login_name);
+        assert!(!updated.accounts.contains_key("4569_signature_cash_back"));
+        assert!(updated.accounts.contains_key("signature_cash_back_4569"));
+
+        let _ = fs::remove_dir_all(&ledger_dir);
+    }
+
+    #[test]
+    fn repair_login_account_labels_skips_non_empty_journal() {
+        let ledger_dir = temp_dir("repair-skip-journal");
+        let login_name = "provident-yonran";
+        let mut config = crate::login_config::LoginConfig {
+            extension: Some("providentcu".to_string()),
+            accounts: BTreeMap::new(),
+        };
+        config.accounts.insert(
+            "4569_signature_cash_back".to_string(),
+            crate::login_config::LoginAccountConfig { gl_account: None },
+        );
+        config.accounts.insert(
+            "signature_cash_back_4569".to_string(),
+            crate::login_config::LoginAccountConfig {
+                gl_account: Some("Liabilities:Provident:Visa".to_string()),
+            },
+        );
+        crate::login_config::write_login_config(&ledger_dir, login_name, &config).unwrap();
+
+        let source_dir = ledger_dir
+            .join("logins")
+            .join(login_name)
+            .join("accounts")
+            .join("4569_signature_cash_back");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("account.journal"),
+            "2026-01-01 Test\n    Assets:Cash  1 USD\n    Equity:Test\n",
+        )
+        .unwrap();
+
+        let outcome = repair_login_account_labels(
+            &ledger_dir,
+            login_name,
+            &[("4569_signature_cash_back", "signature_cash_back_4569")],
+        )
+        .unwrap();
+        assert!(outcome.migrated.is_empty());
+        assert_eq!(outcome.skipped, vec!["4569_signature_cash_back"]);
+        assert!(source_dir.exists());
+
+        let updated = crate::login_config::read_login_config(&ledger_dir, login_name);
+        assert!(updated.accounts.contains_key("4569_signature_cash_back"));
 
         let _ = fs::remove_dir_all(&ledger_dir);
     }
