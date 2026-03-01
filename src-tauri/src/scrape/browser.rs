@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::browser::{Browser, BrowserConfig, HeadlessMode};
 use chromiumoxide::error::CdpError;
 use futures::StreamExt;
 
@@ -136,19 +136,24 @@ pub async fn launch_browser(
         .arg("--disable-extensions")
         .launch_timeout(std::time::Duration::from_secs(30));
 
+    let force_headless = std::env::var_os("REFRESHMINT_BROWSER_HEADLESS").is_some();
     let is_linux_ci = cfg!(target_os = "linux") && std::env::var_os("CI").is_some();
+    let use_headless = force_headless || is_linux_ci;
     eprintln!(
-        "[browser] Launch config: chrome={}, profile={}, linux_ci={is_linux_ci}",
+        "[browser] Launch config: chrome={}, profile={}, linux_ci={is_linux_ci}, force_headless={force_headless}",
         chrome_path.display(),
         profile_dir.display()
     );
-    if is_linux_ci {
-        eprintln!("[browser] Launch mode: headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu");
-        builder = builder
-            .new_headless_mode()
-            .no_sandbox()
-            .arg("--disable-dev-shm-usage")
-            .arg("--disable-gpu");
+    if use_headless {
+        eprintln!("[browser] Launch mode: headless=old");
+        builder = builder.headless_mode(HeadlessMode::True);
+        if cfg!(target_os = "linux") {
+            eprintln!("[browser] Launch flags: --no-sandbox --disable-dev-shm-usage --disable-gpu");
+            builder = builder
+                .no_sandbox()
+                .arg("--disable-dev-shm-usage")
+                .arg("--disable-gpu");
+        }
     } else {
         eprintln!("[browser] Launch mode: headed");
         builder = builder.with_head();
@@ -208,69 +213,40 @@ pub async fn launch_browser(
 pub async fn open_start_page(
     browser: &mut Browser,
 ) -> Result<chromiumoxide::Page, Box<dyn Error + Send + Sync>> {
-    let existing_page_timeout = std::time::Duration::from_secs(10);
-    let poll_interval = std::time::Duration::from_millis(250);
-    let start = std::time::Instant::now();
-    let mut poll_count = 0u64;
-
-    loop {
-        let targets = browser.fetch_targets().await?;
-        let pages = browser.pages().await?;
-        poll_count += 1;
-        if poll_count <= 5 || poll_count % 10 == 0 {
-            eprintln!(
-                "[browser] Startup poll #{poll_count}: targets={}, pages={}, elapsed={}ms",
-                targets.len(),
-                pages.len(),
-                start.elapsed().as_millis()
-            );
-        }
-        if let Some(page) = pages.into_iter().next() {
-            eprintln!(
-                "[browser] Reusing existing startup page after {}ms",
-                start.elapsed().as_millis()
-            );
-            return Ok(page);
-        }
-        if start.elapsed() >= existing_page_timeout {
-            eprintln!(
-                "[browser] No startup page after {}ms; creating about:blank target",
-                start.elapsed().as_millis()
-            );
-            break;
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
-
     let create_timeout = std::time::Duration::from_secs(30);
-    match tokio::time::timeout(create_timeout, browser.new_page("about:blank")).await {
-        Ok(Ok(page)) => {
-            eprintln!(
-                "[browser] Created initial about:blank page after {}ms",
-                start.elapsed().as_millis()
-            );
-            Ok(page)
+    for attempt in 1..=2 {
+        eprintln!("[browser] Creating initial about:blank page (attempt {attempt}/2)");
+        match tokio::time::timeout(create_timeout, browser.new_page("about:blank")).await {
+            Ok(Ok(page)) => {
+                eprintln!("[browser] Created initial about:blank page on attempt {attempt}");
+                return Ok(page);
+            }
+            Ok(Err(err)) => {
+                eprintln!(
+                    "[browser] Failed to create initial about:blank page on attempt {attempt}: {err}"
+                );
+                if attempt == 2 {
+                    return Err(format!("failed to create initial page: {err}").into());
+                }
+            }
+            Err(_) => {
+                eprintln!(
+                    "[browser] Timed out creating about:blank after {}s on attempt {attempt}",
+                    create_timeout.as_secs()
+                );
+                if attempt == 2 {
+                    return Err(format!(
+                        "timed out after {}s creating initial page (about:blank)",
+                        create_timeout.as_secs()
+                    )
+                    .into());
+                }
+            }
         }
-        Ok(Err(err)) => {
-            eprintln!("[browser] Failed to create initial about:blank page: {err}");
-            Err(format!("failed to create initial page: {err}").into())
-        }
-        Err(_) => {
-            let targets = browser.fetch_targets().await?;
-            let pages = browser.pages().await?;
-            eprintln!(
-                "[browser] Timed out creating about:blank after {}s; final targets={}, final pages={}",
-                create_timeout.as_secs(),
-                targets.len(),
-                pages.len()
-            );
-            Err(format!(
-                "timed out after {}s creating initial page (about:blank)",
-                create_timeout.as_secs()
-            )
-            .into())
-        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
+
+    Err("unreachable: initial page retry loop exhausted".into())
 }
 
 #[cfg(test)]
