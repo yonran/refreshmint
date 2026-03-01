@@ -835,3 +835,46 @@ details[open] > .disclosure-summary::before {
 .txn-form-body {
     margin-top: 0.75rem;
 }
+
+.report-chart {
+    width: 100%;
+    display: block;
+    padding: 0.75rem;
+    box-sizing: border-box;
+    border-bottom: 1px solid #e3e3e3;
+}
+
+.report-chart-tooltip {
+    position: fixed;
+    background: rgba(0, 0, 0, 0.8);
+    color: #fff;
+    border-radius: 0.4rem;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.8rem;
+    pointer-events: none;
+    white-space: pre;
+    z-index: 100;
+}
+
+.report-chart-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 1rem;
+    padding: 0.35rem 0 0;
+    font-size: 0.78rem;
+    color: #444;
+}
+
+.report-chart-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.report-chart-legend-swatch {
+    display: inline-block;
+    width: 1em;
+    height: 0.7em;
+    border-radius: 2px;
+    flex-shrink: 0;
+}

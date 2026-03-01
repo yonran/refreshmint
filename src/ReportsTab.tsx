@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
+import { ReportChart } from './ReportChart.tsx';
 import { getCurrentToken, getSearchSuggestions } from './search-utils.ts';
 import {
     type AccountRow,
@@ -226,6 +227,16 @@ export function ReportsTab({ ledger, accounts }: Props) {
 
     const isBalanceFamily = BALANCE_FAMILY.includes(command);
     const isRegisterFamily = REGISTER_FAMILY.includes(command);
+
+    const showChart =
+        result !== null &&
+        result.rows.length > 1 &&
+        result.text === null &&
+        (command === 'register' ||
+            (BALANCE_FAMILY.includes(command) && interval !== ''));
+
+    const chartKind: 'register' | 'balance-interval' =
+        command === 'register' ? 'register' : 'balance-interval';
 
     return (
         <div className="transactions-panel">
@@ -794,6 +805,9 @@ export function ReportsTab({ ledger, accounts }: Props) {
             {/* Results */}
             {result !== null && (
                 <div className="table-wrap">
+                    {showChart && (
+                        <ReportChart rows={result.rows} kind={chartKind} />
+                    )}
                     {result.text !== null ? (
                         <pre className="report-text">{result.text}</pre>
                     ) : result.rows.length === 0 ? (
