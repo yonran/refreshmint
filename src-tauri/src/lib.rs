@@ -70,6 +70,13 @@ struct LockStatusSnapshot {
     logins: std::collections::BTreeMap<String, login_config::LockStatus>,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginExtractionSupport {
+    supported: bool,
+    reason: Option<&'static str>,
+}
+
 static UI_DEBUG_SESSION: std::sync::OnceLock<std::sync::Mutex<Option<UiDebugSession>>> =
     std::sync::OnceLock::new();
 static LOCK_METADATA_WATCHER: std::sync::OnceLock<std::sync::Mutex<Option<LockMetadataWatcher>>> =
@@ -116,6 +123,7 @@ pub fn run_with_context(
             start_lock_metadata_watch,
             stop_lock_metadata_watch,
             get_lock_status_snapshot,
+            get_login_extraction_support,
             run_scrape_for_login,
             run_scrape,
             list_documents,
@@ -424,6 +432,61 @@ fn require_existing_login(ledger_dir: &std::path::Path, login_name: &str) -> Res
     } else {
         Err(format!("login '{login_name}' does not exist"))
     }
+}
+
+fn inspect_login_extraction_support(
+    ledger_dir: &std::path::Path,
+    login_name: &str,
+) -> Result<LoginExtractionSupport, String> {
+    let extension_name = match login_config::resolve_login_extension(ledger_dir, login_name) {
+        Ok(extension_name) => extension_name,
+        Err(err) if err.contains("no extension configured") => {
+            return Ok(LoginExtractionSupport {
+                supported: false,
+                reason: Some("missing-extension"),
+            });
+        }
+        Err(err) => return Err(err),
+    };
+    let extension_dir = account_config::resolve_extension_dir(ledger_dir, &extension_name);
+    let manifest = scrape::load_manifest(&extension_dir).map_err(|err| err.to_string())?;
+    match (manifest.extract.as_deref(), manifest.rules.as_deref()) {
+        (None, None) => Ok(LoginExtractionSupport {
+            supported: false,
+            reason: Some("missing-extractor"),
+        }),
+        (Some(path), None) => Ok(LoginExtractionSupport {
+            supported: extension_dir.join(path).exists(),
+            reason: if extension_dir.join(path).exists() {
+                None
+            } else {
+                Some("broken-extractor")
+            },
+        }),
+        (None, Some(path)) => Ok(LoginExtractionSupport {
+            supported: extension_dir.join(path).exists(),
+            reason: if extension_dir.join(path).exists() {
+                None
+            } else {
+                Some("broken-extractor")
+            },
+        }),
+        (Some(_), Some(_)) => Ok(LoginExtractionSupport {
+            supported: false,
+            reason: Some("broken-extractor"),
+        }),
+    }
+}
+
+#[tauri::command]
+fn get_login_extraction_support(
+    ledger: String,
+    login_name: String,
+) -> Result<LoginExtractionSupport, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_login_name_input(login_name)?;
+    require_existing_login(&target_dir, &login_name)?;
+    inspect_login_extraction_support(&target_dir, &login_name)
 }
 
 #[tauri::command]
@@ -1570,11 +1633,12 @@ fn map_account_journal_entries(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::{
         classify_secret_entries, delete_login_account, evidence_ref_matches_document,
-        flatten_declared_secret_entries, require_existing_login, require_label_input,
-        require_login_name_input, require_non_empty_input, SecretEntry,
+        flatten_declared_secret_entries, inspect_login_extraction_support, require_existing_login,
+        require_label_input, require_login_name_input, require_non_empty_input, SecretEntry,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -1672,6 +1736,103 @@ mod tests {
 
         let result = require_existing_login(&dir, "chase");
         assert!(result.is_ok(), "expected existing login, got: {result:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inspect_login_extraction_support_reports_missing_extension() {
+        let dir = create_temp_dir("missing-extractor-extension");
+        let login_dir = dir.join("logins").join("chase");
+        fs::create_dir_all(&login_dir).expect("create login dir");
+        fs::write(login_dir.join("config.json"), "{}").expect("write config");
+
+        let support =
+            inspect_login_extraction_support(&dir, "chase").expect("inspect extraction support");
+        assert!(!support.supported);
+        assert_eq!(support.reason, Some("missing-extension"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inspect_login_extraction_support_reports_missing_extractor() {
+        let dir = create_temp_dir("missing-extractor");
+        let extension_dir = dir.join("extensions").join("testbank");
+        fs::create_dir_all(&extension_dir).expect("create extension dir");
+        fs::write(
+            extension_dir.join("manifest.json"),
+            "{\n  \"name\": \"testbank\",\n  \"secrets\": {}\n}\n",
+        )
+        .expect("write manifest");
+
+        let login_dir = dir.join("logins").join("testbank");
+        fs::create_dir_all(&login_dir).expect("create login dir");
+        fs::write(
+            login_dir.join("config.json"),
+            "{\n  \"extension\": \"testbank\"\n}\n",
+        )
+        .expect("write config");
+
+        let support =
+            inspect_login_extraction_support(&dir, "testbank").expect("inspect extraction support");
+        assert!(!support.supported);
+        assert_eq!(support.reason, Some("missing-extractor"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inspect_login_extraction_support_reports_broken_extractor() {
+        let dir = create_temp_dir("broken-extractor");
+        let extension_dir = dir.join("extensions").join("testbank");
+        fs::create_dir_all(&extension_dir).expect("create extension dir");
+        fs::write(
+            extension_dir.join("manifest.json"),
+            "{\n  \"name\": \"testbank\",\n  \"extract\": \"extract.mjs\",\n  \"secrets\": {}\n}\n",
+        )
+        .expect("write manifest");
+
+        let login_dir = dir.join("logins").join("testbank");
+        fs::create_dir_all(&login_dir).expect("create login dir");
+        fs::write(
+            login_dir.join("config.json"),
+            "{\n  \"extension\": \"testbank\"\n}\n",
+        )
+        .expect("write config");
+
+        let support =
+            inspect_login_extraction_support(&dir, "testbank").expect("inspect extraction support");
+        assert!(!support.supported);
+        assert_eq!(support.reason, Some("broken-extractor"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inspect_login_extraction_support_reports_supported_extractor() {
+        let dir = create_temp_dir("supported-extractor");
+        let extension_dir = dir.join("extensions").join("testbank");
+        fs::create_dir_all(&extension_dir).expect("create extension dir");
+        fs::write(
+            extension_dir.join("manifest.json"),
+            "{\n  \"name\": \"testbank\",\n  \"extract\": \"extract.mjs\",\n  \"secrets\": {}\n}\n",
+        )
+        .expect("write manifest");
+        fs::write(
+            extension_dir.join("extract.mjs"),
+            "export async function extract() { return []; }\n",
+        )
+        .expect("write extract script");
+
+        let login_dir = dir.join("logins").join("testbank");
+        fs::create_dir_all(&login_dir).expect("create login dir");
+        fs::write(
+            login_dir.join("config.json"),
+            "{\n  \"extension\": \"testbank\"\n}\n",
+        )
+        .expect("write config");
+
+        let support =
+            inspect_login_extraction_support(&dir, "testbank").expect("inspect extraction support");
+        assert!(support.supported);
+        assert_eq!(support.reason, None);
         let _ = fs::remove_dir_all(&dir);
     }
 

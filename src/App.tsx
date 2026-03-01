@@ -33,10 +33,12 @@ import {
     getLoginAccountJournal,
     getLoginConfig,
     getLoginAccountUnposted,
+    getLoginExtractionSupport,
     getLockStatusSnapshot,
     getUnpostedEntriesForTransfer,
     getScrapeDebugSessionSocket,
     type LoginAccountConfig,
+    type LoginExtractionSupport,
     type LoginConfig,
     type LockStatus,
     type LockStatusSnapshot,
@@ -137,7 +139,12 @@ type PipelineBulkAccountStat = {
     extract: {
         eligible: boolean;
         documentCount: number;
-        skipReason: 'missing-extension' | 'no-documents' | null;
+        skipReason:
+            | 'missing-extension'
+            | 'missing-extractor'
+            | 'broken-extractor'
+            | 'no-documents'
+            | null;
         inspectError: string | null;
         locked: boolean;
     };
@@ -155,6 +162,7 @@ type PipelineBulkSummary = {
     totalDocuments: number;
     totalUnpostedEntries: number;
     skippedMissingExtension: number;
+    skippedMissingExtractor: number;
     skippedNoDocuments: number;
     skippedMissingGlAccount: number;
     skippedNoUnposted: number;
@@ -245,6 +253,7 @@ function createEmptyPipelineBulkSummary(): PipelineBulkSummary {
         totalDocuments: 0,
         totalUnpostedEntries: 0,
         skippedMissingExtension: 0,
+        skippedMissingExtractor: 0,
         skippedNoDocuments: 0,
         skippedMissingGlAccount: 0,
         skippedNoUnposted: 0,
@@ -605,12 +614,30 @@ function App() {
                 ledgerPath,
                 uniqueLoginNames,
             );
+            const extractionSupportEntries = await Promise.all(
+                uniqueLoginNames.map(
+                    async (loginName) =>
+                        [
+                            loginName,
+                            await getLoginExtractionSupport(
+                                ledgerPath,
+                                loginName,
+                            ),
+                        ] as const,
+                ),
+            );
+            const extractionSupportByLogin = new Map<
+                string,
+                LoginExtractionSupport
+            >(extractionSupportEntries);
             const accountStats = await Promise.all(
                 loginAccounts.map(async ({ loginName, label }) => {
                     const normalizedConfig = normalizeLoginConfig(
                         loginConfigsByName[loginName] ?? null,
                     );
                     const extension = normalizedConfig.extension?.trim() ?? '';
+                    const extractionSupport =
+                        extractionSupportByLogin.get(loginName) ?? null;
                     const glAccount =
                         normalizedConfig.accounts[label]?.glAccount?.trim() ??
                         '';
@@ -619,11 +646,24 @@ function App() {
                     let documentCount = 0;
                     let extractSkipReason:
                         | 'missing-extension'
+                        | 'missing-extractor'
+                        | 'broken-extractor'
                         | 'no-documents'
                         | null = null;
                     let extractInspectError: string | null = null;
-                    if (extension.length === 0) {
+                    if (
+                        extension.length === 0 ||
+                        extractionSupport?.reason === 'missing-extension'
+                    ) {
                         extractSkipReason = 'missing-extension';
+                    } else if (
+                        extractionSupport?.reason === 'missing-extractor'
+                    ) {
+                        extractSkipReason = 'missing-extractor';
+                    } else if (
+                        extractionSupport?.reason === 'broken-extractor'
+                    ) {
+                        extractSkipReason = 'broken-extractor';
                     } else {
                         try {
                             const docs = await listLoginAccountDocuments(
@@ -700,6 +740,12 @@ function App() {
                 }
                 if (account.extract.skipReason === 'missing-extension') {
                     extract.skippedMissingExtension += 1;
+                }
+                if (
+                    account.extract.skipReason === 'missing-extractor' ||
+                    account.extract.skipReason === 'broken-extractor'
+                ) {
+                    extract.skippedMissingExtractor += 1;
                 }
                 if (account.extract.skipReason === 'no-documents') {
                     extract.skippedNoDocuments += 1;
@@ -4817,7 +4863,7 @@ function App() {
                                                 {`Extract All: ${pipelineBulkStats.extract.totalDocuments} document(s) across ${pipelineBulkStats.extract.eligibleAccounts} eligible account(s).`}
                                             </div>
                                             <div>
-                                                {`${pipelineBulkStats.extract.skippedMissingExtension} missing extension, ${pipelineBulkStats.extract.skippedNoDocuments} no documents, ${pipelineBulkStats.extract.inspectFailures} inspect failures, ${pipelineBulkStats.extract.lockedAccounts} locked.`}
+                                                {`${pipelineBulkStats.extract.skippedMissingExtension} missing extension, ${pipelineBulkStats.extract.skippedMissingExtractor} missing extractor, ${pipelineBulkStats.extract.skippedNoDocuments} no documents, ${pipelineBulkStats.extract.inspectFailures} inspect failures, ${pipelineBulkStats.extract.lockedAccounts} locked.`}
                                             </div>
                                             <div>
                                                 {`Post All: ${pipelineBulkStats.post.totalUnpostedEntries} entr${pipelineBulkStats.post.totalUnpostedEntries === 1 ? 'y' : 'ies'} across ${pipelineBulkStats.post.eligibleAccounts} eligible account(s).`}

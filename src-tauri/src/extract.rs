@@ -32,6 +32,8 @@ fn default_status_string() -> String {
 struct ExtractScriptContext {
     ledger_dir: String,
     account_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
     extension_name: String,
     document: ExtractDocumentContext,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -312,6 +314,7 @@ pub fn run_extraction(
         ledger_dir,
         &documents_dir,
         account_name,
+        None,
         extension_name,
         document_names,
     )
@@ -331,6 +334,7 @@ pub fn run_extraction_for_login_account(
         ledger_dir,
         &documents_dir,
         account_name,
+        Some(label),
         extension_name,
         document_names,
     )
@@ -340,6 +344,7 @@ fn run_extraction_with_documents_dir(
     ledger_dir: &Path,
     documents_dir: &Path,
     account_name: &str,
+    label: Option<&str>,
     extension_name: &str,
     document_names: &[String],
 ) -> Result<ExtractionResult, Box<dyn std::error::Error + Send + Sync>> {
@@ -375,6 +380,7 @@ fn run_extraction_with_documents_dir(
                     documents_dir,
                     ledger_dir,
                     account_name,
+                    label,
                     extension_name,
                 )?;
                 all_proposed.extend(proposed);
@@ -416,6 +422,7 @@ fn run_extraction_with_documents_dir(
 }
 
 /// Run extract.mjs on a document using QuickJS sandbox.
+#[allow(clippy::too_many_arguments)]
 fn run_extract_script(
     script_path: &Path,
     doc_path: &Path,
@@ -423,6 +430,7 @@ fn run_extract_script(
     documents_dir: &Path,
     ledger_dir: &Path,
     account_name: &str,
+    label: Option<&str>,
     extension_name: &str,
 ) -> Result<Vec<ExtractedTransaction>, Box<dyn std::error::Error + Send + Sync>> {
     let script_source = std::fs::read_to_string(script_path)?;
@@ -432,6 +440,7 @@ fn run_extract_script(
         documents_dir,
         ledger_dir,
         account_name,
+        label,
         extension_name,
     )?;
     let context_json = serde_json::to_string(&context)?;
@@ -527,6 +536,7 @@ fn build_extract_script_context(
     documents_dir: &Path,
     ledger_dir: &Path,
     account_name: &str,
+    label: Option<&str>,
     extension_name: &str,
 ) -> Result<ExtractScriptContext, Box<dyn std::error::Error + Send + Sync>> {
     let document_info = read_document_info(documents_dir, doc_name)?;
@@ -544,6 +554,7 @@ fn build_extract_script_context(
     Ok(ExtractScriptContext {
         ledger_dir: ledger_dir.display().to_string(),
         account_name: account_name.to_string(),
+        label: label.map(str::to_string),
         extension_name: extension_name.to_string(),
         document: ExtractDocumentContext {
             name: doc_name.to_string(),
@@ -1224,6 +1235,7 @@ export async function extract(context) {
             &documents_dir,
             &root,
             "Assets:Checking",
+            None,
             "example-extension",
         )
         .expect("extract script should succeed");
@@ -1255,6 +1267,7 @@ export async function extract(context) {
             &documents_dir,
             &root,
             "Assets:Checking",
+            None,
             "example-extension",
         )
         .expect_err("expected missing export error");
@@ -1293,6 +1306,7 @@ export function extract(_context) {
             &documents_dir,
             &root,
             "Assets:Checking",
+            None,
             "example-extension",
         )
         .expect_err("expected non-array result error");

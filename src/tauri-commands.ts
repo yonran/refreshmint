@@ -140,6 +140,15 @@ export interface LockStatusSnapshot {
     logins: Record<string, LockStatus>;
 }
 
+export interface LoginExtractionSupport {
+    supported: boolean;
+    reason:
+        | 'missing-extension'
+        | 'missing-extractor'
+        | 'broken-extractor'
+        | null;
+}
+
 export interface NewTransactionInput {
     date: string;
     description: string;
@@ -279,6 +288,13 @@ export async function getLockStatusSnapshot(
     loginNames: string[],
 ): Promise<LockStatusSnapshot> {
     return invoke('get_lock_status_snapshot', { ledger, loginNames });
+}
+
+export async function getLoginExtractionSupport(
+    ledger: string,
+    loginName: string,
+): Promise<LoginExtractionSupport> {
+    return invoke('get_login_extraction_support', { ledger, loginName });
 }
 
 export async function runScrape(
