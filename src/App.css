@@ -694,6 +694,30 @@ details[open] > .disclosure-summary::before {
     color: #7a5500;
 }
 
+.pipeline-status-table {
+    font-size: 0.82rem;
+    border-collapse: collapse;
+    width: 100%;
+}
+.pipeline-status-table td {
+    padding: 0.15rem 0.5rem;
+    vertical-align: middle;
+}
+.pipeline-status-table .login-group-header td {
+    font-weight: 600;
+    padding-top: 0.6rem;
+    color: #444;
+}
+.pipeline-status-table .account-row {
+    cursor: pointer;
+}
+.pipeline-status-table .account-row:hover td {
+    background: #f5f5f5;
+}
+.pipeline-status-table .account-row.selected td {
+    background: #eef4ff;
+}
+
 .row-needs-sync td {
     background: #fffdf0;
 }

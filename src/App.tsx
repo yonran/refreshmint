@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+    Fragment,
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from 'react';
+import type { SyntheticEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Menu, MenuItem, Submenu } from '@tauri-apps/api/menu';
@@ -2738,9 +2746,7 @@ function App() {
         }
     }
 
-    function handleSubmitSecretForm(
-        event: React.SyntheticEvent<HTMLFormElement>,
-    ) {
+    function handleSubmitSecretForm(event: SyntheticEvent<HTMLFormElement>) {
         event.preventDefault();
         const mode: 'add' | 'reenter' = currentSecretPairExists
             ? 'reenter'
@@ -4891,6 +4897,11 @@ function App() {
                                                 : 'Refresh Stats'}
                                         </button>
                                     </div>
+                                    {pipelineStatus !== null && (
+                                        <p className="status">
+                                            {pipelineStatus}
+                                        </p>
+                                    )}
                                     {pipelineBulkStats !== null && (
                                         <div className="hint">
                                             <div>
@@ -4906,6 +4917,153 @@ function App() {
                                                 {`${pipelineBulkStats.post.skippedMissingGlAccount} missing GL mapping, ${pipelineBulkStats.post.skippedNoUnposted} no unposted, ${pipelineBulkStats.post.inspectFailures} inspect failures, ${pipelineBulkStats.post.lockedAccounts} locked, GL ${pipelineBulkStats.gl.locked ? 'locked' : 'unlocked'}.`}
                                             </div>
                                         </div>
+                                    )}
+                                    {pipelineBulkStats !== null && (
+                                        <table className="pipeline-status-table">
+                                            <tbody>
+                                                {pipelineBulkStats.accounts.map(
+                                                    (acct, i) => {
+                                                        const prevLogin =
+                                                            i > 0
+                                                                ? pipelineBulkStats
+                                                                      .accounts[
+                                                                      i - 1
+                                                                  ]?.loginName
+                                                                : null;
+                                                        const isSelected =
+                                                            selectedLoginAccount?.loginName ===
+                                                                acct.loginName &&
+                                                            selectedLoginAccount.label ===
+                                                                acct.label;
+                                                        const extractChip =
+                                                            acct.extract
+                                                                .inspectError !==
+                                                            null ? (
+                                                                <span className="status-chip status-chip-warning">
+                                                                    {acct.extract.inspectError.slice(
+                                                                        0,
+                                                                        40,
+                                                                    )}
+                                                                </span>
+                                                            ) : acct.extract
+                                                                  .skipReason ===
+                                                              'missing-extension' ? (
+                                                                <span className="status-chip status-chip-warning">
+                                                                    no extension
+                                                                </span>
+                                                            ) : acct.extract
+                                                                  .skipReason ===
+                                                                  'missing-extractor' ||
+                                                              acct.extract
+                                                                  .skipReason ===
+                                                                  'broken-extractor' ? (
+                                                                <span className="status-chip status-chip-warning">
+                                                                    {
+                                                                        acct
+                                                                            .extract
+                                                                            .skipReason
+                                                                    }
+                                                                </span>
+                                                            ) : acct.extract
+                                                                  .skipReason ===
+                                                              'no-documents' ? (
+                                                                <span className="status-chip">
+                                                                    no docs
+                                                                </span>
+                                                            ) : (
+                                                                <span className="status-chip status-chip-ok">
+                                                                    {`${acct.extract.documentCount} doc${acct.extract.documentCount === 1 ? '' : 's'}`}
+                                                                    {acct
+                                                                        .extract
+                                                                        .locked
+                                                                        ? ' 🔒'
+                                                                        : ''}
+                                                                </span>
+                                                            );
+                                                        const postChip =
+                                                            acct.post
+                                                                .inspectError !==
+                                                            null ? (
+                                                                <span className="status-chip status-chip-warning">
+                                                                    {acct.post.inspectError.slice(
+                                                                        0,
+                                                                        40,
+                                                                    )}
+                                                                </span>
+                                                            ) : acct.post
+                                                                  .skipReason ===
+                                                              'missing-gl-account' ? (
+                                                                <span className="status-chip status-chip-warning">
+                                                                    no GL
+                                                                    account
+                                                                </span>
+                                                            ) : acct.post
+                                                                  .skipReason ===
+                                                              'no-unposted' ? (
+                                                                <span className="status-chip">
+                                                                    up to date
+                                                                </span>
+                                                            ) : (
+                                                                <span className="status-chip status-chip-ok">
+                                                                    {`${acct.post.unpostedCount} unposted`}
+                                                                    {acct.post
+                                                                        .locked
+                                                                        ? ' 🔒'
+                                                                        : ''}
+                                                                </span>
+                                                            );
+                                                        return (
+                                                            <Fragment
+                                                                key={`${acct.loginName}/${acct.label}`}
+                                                            >
+                                                                {acct.loginName !==
+                                                                    prevLogin && (
+                                                                    <tr className="login-group-header">
+                                                                        <td
+                                                                            colSpan={
+                                                                                3
+                                                                            }
+                                                                        >
+                                                                            {
+                                                                                acct.loginName
+                                                                            }
+                                                                        </td>
+                                                                    </tr>
+                                                                )}
+                                                                <tr
+                                                                    className={`account-row${isSelected ? ' selected' : ''}`}
+                                                                    onClick={() => {
+                                                                        setSelectedLoginAccount(
+                                                                            {
+                                                                                loginName:
+                                                                                    acct.loginName,
+                                                                                label: acct.label,
+                                                                            },
+                                                                        );
+                                                                    }}
+                                                                >
+                                                                    <td>
+                                                                        {
+                                                                            acct.label
+                                                                        }
+                                                                    </td>
+                                                                    <td>
+                                                                        {
+                                                                            extractChip
+                                                                        }
+                                                                    </td>
+                                                                    <td>
+                                                                        {
+                                                                            postChip
+                                                                        }
+                                                                    </td>
+                                                                </tr>
+                                                            </Fragment>
+                                                        );
+                                                    },
+                                                )}
+                                            </tbody>
+                                        </table>
                                     )}
                                     {selectedLoginLockStatus?.locked ===
                                         true && (
