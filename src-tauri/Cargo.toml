@@ -33,11 +33,11 @@ lopdf = "0.35"
 # Compatibility notes (verified with minimal repro crates in /tmp):
 # - spider_chrome 2.37.129 + spider_chromiumoxide_cdp 0.7.8 => compile errors
 # - spider_chrome 2.37.129 + spider_chromiumoxide_cdp 0.7.7 => compiles
-# Use the yonran/chromey fix-new_page-hang branch for both crates to keep CDP
-# types/API in sync while pulling in the page-creation hang fix.
+# Use the yonran/chromey fix-page-creation-before-load branch for both crates to
+# keep CDP types/API in sync while pulling in the page-creation fix.
 # Keep dependency key as `chromiumoxide` because the code imports `chromiumoxide::...`.
-chromiumoxide = { package = "chromey", git = "https://github.com/yonran/chromey", branch = "fix-new_page-hang" }
-spider_chromiumoxide_cdp = { package = "spider_chromiumoxide_cdp", git = "https://github.com/yonran/chromey", branch = "fix-new_page-hang" }
+chromiumoxide = { package = "chromey", git = "https://github.com/yonran/chromey", branch = "fix-page-creation-before-load" }
+spider_chromiumoxide_cdp = { package = "spider_chromiumoxide_cdp", git = "https://github.com/yonran/chromey", branch = "fix-page-creation-before-load" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 futures = "0.3"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
