@@ -29,6 +29,18 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 
 CLI runs fail with an explicit error when a required prompt override is missing.
 
+## Objective
+
+The scraper should attempt to find all account information from a login (and support incremental downloads) that would be relevant for accounting and expense tracking.
+
+For bank accounts, it should fetch transaction lists (e.g. csv or qfx files).
+If no one format has all information, then download multiple formats (e.g. if only qfx has transaction ids and only csv has the full non-truncated description, then download both and document the tradeoff).
+Bank accounts and credit cards should also have balance information at specific points of time (e.g. start of statement or end of statement).
+If e.g. only the HTML contains some information, then also save the HTML table too, and implement the extractor to extract info from that table.
+If other attachments are available such as check images, download those too.
+
+For vendor accounts (e.g. safeway, target, etc.), it should download all the statements, invoices, receipts, etc.
+
 ## Runtime model
 
 - `driver.mjs` runs in a QuickJS sandbox
