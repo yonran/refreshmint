@@ -575,8 +575,8 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chromey"
-version = "2.38.3"
-source = "git+https://github.com/spider-rs/chromey?branch=main#923e39d00d41b84668f5c6f90f51103bbd2bed0f"
+version = "2.38.4"
+source = "git+https://github.com/yonran/chromey?branch=fix-new_page-hang#71db883cadf7f0eb49b2a67bce849336ef4fa3f2"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
@@ -4407,7 +4407,7 @@ dependencies = [
 [[package]]
 name = "spider_chromiumoxide_cdp"
 version = "0.7.8"
-source = "git+https://github.com/spider-rs/chromey?branch=main#923e39d00d41b84668f5c6f90f51103bbd2bed0f"
+source = "git+https://github.com/yonran/chromey?branch=fix-new_page-hang#71db883cadf7f0eb49b2a67bce849336ef4fa3f2"
 dependencies = [
  "serde",
  "serde_json",
@@ -4418,7 +4418,7 @@ dependencies = [
 [[package]]
 name = "spider_chromiumoxide_pdl"
 version = "0.7.5"
-source = "git+https://github.com/spider-rs/chromey?branch=main#923e39d00d41b84668f5c6f90f51103bbd2bed0f"
+source = "git+https://github.com/yonran/chromey?branch=fix-new_page-hang#71db883cadf7f0eb49b2a67bce849336ef4fa3f2"
 dependencies = [
  "either",
  "heck 0.4.1",
@@ -4434,7 +4434,7 @@ dependencies = [
 [[package]]
 name = "spider_chromiumoxide_types"
 version = "0.7.4"
-source = "git+https://github.com/spider-rs/chromey?branch=main#923e39d00d41b84668f5c6f90f51103bbd2bed0f"
+source = "git+https://github.com/yonran/chromey?branch=fix-new_page-hang#71db883cadf7f0eb49b2a67bce849336ef4fa3f2"
 dependencies = [
  "serde",
  "serde_json",
