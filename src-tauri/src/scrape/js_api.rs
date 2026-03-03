@@ -703,148 +703,50 @@ impl PageApi {
             return Ok(());
         }
 
-        if urls_differ_only_by_fragment(&current_url, &url) {
-            let url_json = serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".to_string());
-            let expression =
-                format!("(() => {{ window.location.href = {url_json}; return true; }})()");
+        use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
+        let params = NavigateParams::builder()
+            .url(url.clone())
+            .build()
+            .map_err(|e| js_err(format!("goto build failed: {e}")))?;
+        let nav_outcome = if let Some(remaining) = goto_remaining(deadline, timeout_ms, &url)? {
+            tokio::time::timeout(remaining, page.execute(params))
+                .await
+                .ok()
+        } else {
+            Some(page.execute(params).await)
+        };
 
-            if let Some(remaining) = goto_remaining(deadline, timeout_ms, &url)? {
-                tokio::time::timeout(remaining, page.evaluate(expression.as_str()))
-                    .await
-                    .map_err(|_| goto_timeout_err(timeout_ms, &url))?
-                    .map_err(|e| js_err(format!("goto failed (hash-navigation): {e}")))?;
-            } else {
-                page.evaluate(expression.as_str())
-                    .await
-                    .map_err(|e| js_err(format!("goto failed (hash-navigation): {e}")))?;
-            }
-
-            loop {
-                let observed = self.current_url().await?;
-                if observed == url {
-                    break;
-                }
-                if let Some(limit) = deadline {
-                    if tokio::time::Instant::now() >= limit {
-                        return Err(goto_timeout_err(timeout_ms, &url));
+        if let Some(nav_result) = nav_outcome {
+            match nav_result {
+                Ok(nav_result) => {
+                    if let Some(error_text) = nav_result.result.error_text {
+                        return Err(js_err(format!("goto failed: {error_text} at {url}")));
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+                Err(err) => {
+                    let err_text = err.to_string();
+                    if is_cdp_request_timeout(&err_text) {
+                        // Chromiumoxide wraps Page.navigate as a navigation request and can
+                        // surface a timeout before our explicit waitUntil completes.
+                        // Keep observing URL/lifecycle up to the caller's timeout.
+                    } else {
+                        return Err(js_err(format!("goto failed: {err}")));
+                    }
+                }
             }
-            self.wait_for_goto_wait_until(&wait_until, deadline, timeout_ms, &url)
-                .await?;
-            self.ensure_not_browser_error_page(&url).await?;
-            return Ok(());
         }
 
-        if url.starts_with("data:") {
-            // Robustly navigate to about:blank first
-            let current_href = match page.evaluate("window.location.href").await {
-                Ok(res) => res
-                    .value()
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                Err(_) => String::new(),
-            };
-
-            if current_href != "about:blank" {
-                use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
-                // Use Page.navigate via execute() to force navigation without waiting for CDP events
-                let params = NavigateParams::builder()
-                    .url("about:blank")
-                    .build()
-                    .map_err(|e| js_err(format!("goto(data) prelude build failed: {e}")))?;
-                page.execute(params).await.ok();
-
-                for _ in 0..50 {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    if let Ok(res) = page.evaluate("window.location.href").await {
-                        let h = res.value().and_then(|v| v.as_str()).unwrap_or("");
-                        if h == "about:blank" {
-                            break;
-                        }
-                    }
+        loop {
+            let observed = self.current_url().await?;
+            if observed != current_url {
+                break;
+            }
+            if let Some(limit) = deadline {
+                if tokio::time::Instant::now() >= limit {
+                    return Err(goto_timeout_err(timeout_ms, &url));
                 }
             }
-
-            let url_json = serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".to_string());
-            let expression = format!(
-                r#"(() => {{
-                    const data = {url_json};
-                    const comma = data.indexOf(',');
-                    if (comma === -1) return;
-                    const html = decodeURIComponent(data.substring(comma + 1));
-                    try {{
-                        document.open();
-                        document.write(html);
-                        document.close();
-                    }} catch (e) {{
-                        console.warn('document.write failed, falling back to innerHTML', e);
-                        document.body.innerHTML = html;
-                    }}
-                }})()"#
-            );
-
-            use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
-            let eval = EvaluateParams::builder()
-                .expression(expression)
-                .await_promise(false)
-                .return_by_value(false)
-                .build()
-                .map_err(|e| js_err(format!("goto(data) build failed: {e}")))?;
-            page.evaluate_expression(eval)
-                .await
-                .map_err(|e| js_err(format!("goto(data) failed: {e}")))?;
-
-            // Brief wait for rendering
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        } else {
-            use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
-            let params = NavigateParams::builder()
-                .url(url.clone())
-                .build()
-                .map_err(|e| js_err(format!("goto build failed: {e}")))?;
-            let nav_outcome = if let Some(remaining) = goto_remaining(deadline, timeout_ms, &url)? {
-                tokio::time::timeout(remaining, page.execute(params))
-                    .await
-                    .ok()
-            } else {
-                Some(page.execute(params).await)
-            };
-
-            if let Some(nav_result) = nav_outcome {
-                match nav_result {
-                    Ok(nav_result) => {
-                        if let Some(error_text) = nav_result.result.error_text {
-                            return Err(js_err(format!("goto failed: {error_text} at {url}")));
-                        }
-                    }
-                    Err(err) => {
-                        let err_text = err.to_string();
-                        if is_cdp_request_timeout(&err_text) {
-                            // Chromiumoxide wraps Page.navigate as a navigation request and can
-                            // surface a timeout before our explicit waitUntil completes.
-                            // Keep observing URL/lifecycle up to the caller's timeout.
-                        } else {
-                            return Err(js_err(format!("goto failed: {err}")));
-                        }
-                    }
-                }
-            }
-
-            loop {
-                let observed = self.current_url().await?;
-                if observed != current_url {
-                    break;
-                }
-                if let Some(limit) = deadline {
-                    if tokio::time::Instant::now() >= limit {
-                        return Err(goto_timeout_err(timeout_ms, &url));
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
-            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
         }
         self.wait_for_goto_wait_until(&wait_until, deadline, timeout_ms, &url)
             .await?;
@@ -2954,22 +2856,6 @@ fn url_matches_pattern(url: &str, pattern: &str) -> bool {
     true
 }
 
-fn urls_differ_only_by_fragment(current_url: &str, target_url: &str) -> bool {
-    if current_url == target_url {
-        return false;
-    }
-    let (current_base, current_fragment) = split_url_fragment(current_url);
-    let (target_base, target_fragment) = split_url_fragment(target_url);
-    current_base == target_base && current_fragment != target_fragment
-}
-
-fn split_url_fragment(url: &str) -> (&str, Option<&str>) {
-    match url.split_once('#') {
-        Some((base, fragment)) => (base, Some(fragment)),
-        None => (url, None),
-    }
-}
-
 fn network_method_from_headers(
     headers: Option<&chromiumoxide::cdp::browser_protocol::network::Headers>,
 ) -> String {
@@ -4167,30 +4053,6 @@ mod tests {
         assert!(!url_matches_pattern(
             "https://example.com/a/b/c",
             "https://example.org/*"
-        ));
-    }
-
-    #[test]
-    fn urls_differ_only_by_fragment_true_for_hash_change() {
-        assert!(urls_differ_only_by_fragment(
-            "https://example.com/path#foo",
-            "https://example.com/path#bar"
-        ));
-        assert!(urls_differ_only_by_fragment(
-            "https://example.com/path",
-            "https://example.com/path#foo"
-        ));
-    }
-
-    #[test]
-    fn urls_differ_only_by_fragment_false_for_other_changes() {
-        assert!(!urls_differ_only_by_fragment(
-            "https://example.com/path#foo",
-            "https://example.com/path#foo"
-        ));
-        assert!(!urls_differ_only_by_fragment(
-            "https://example.com/path#foo",
-            "https://example.com/other#foo"
         ));
     }
 
