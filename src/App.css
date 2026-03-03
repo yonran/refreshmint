@@ -101,7 +101,7 @@
 .table-wrap {
     border: 1px solid #e3e3e3;
     border-radius: 1rem;
-    overflow: hidden;
+    overflow: auto;
 }
 
 .txn-form {

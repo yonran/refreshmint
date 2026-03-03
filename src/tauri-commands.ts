@@ -578,9 +578,15 @@ export async function suggestGlCategories(
 export async function recategorizeGlTransaction(
     ledger: string,
     txnId: string,
+    oldAccount: string,
     newAccount: string,
 ): Promise<void> {
-    await invoke('recategorize_gl_transaction', { ledger, txnId, newAccount });
+    await invoke('recategorize_gl_transaction', {
+        ledger,
+        txnId,
+        oldAccount,
+        newAccount,
+    });
 }
 
 export async function mergeGlTransfer(

@@ -1300,6 +1300,7 @@ fn split_journal_blocks(content: &str) -> Vec<String> {
 pub fn recategorize_gl_transaction(
     ledger_dir: &Path,
     txn_id: &str,
+    old_account: &str,
     new_account: &str,
     lock_owner: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1320,7 +1321,7 @@ pub fn recategorize_gl_transaction(
                     .lines()
                     .map(|line| {
                         let is_indented = line.starts_with(' ') || line.starts_with('\t');
-                        if is_indented && line.trim() == "Expenses:Unknown" {
+                        if is_indented && line.trim() == old_account {
                             let indent: String =
                                 line.chars().take_while(|c| c.is_whitespace()).collect();
                             format!("{indent}{new_account}")
