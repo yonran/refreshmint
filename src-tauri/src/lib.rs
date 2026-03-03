@@ -36,24 +36,25 @@ struct LockMetadataWatcher {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SecretEntry {
     domain: String,
     name: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AccountSecretEntry {
     domain: String,
     name: String,
-    #[serde(rename = "hasValue")]
     has_value: bool,
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SecretSyncResult {
     required: Vec<SecretEntry>,
     added: Vec<SecretEntry>,
-    #[serde(rename = "existingRequired")]
     existing_required: Vec<SecretEntry>,
     extras: Vec<SecretEntry>,
 }
@@ -1330,6 +1331,7 @@ fn run_hledger_report(
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AccountJournalEntry {
     id: String,
     date: String,
@@ -1338,7 +1340,6 @@ struct AccountJournalEntry {
     comment: String,
     evidence: Vec<String>,
     posted: Option<String>,
-    #[serde(rename = "isTransfer")]
     is_transfer: bool,
     /// Quantity of the first posting (no commodity symbol), e.g. `"-21.32"`.
     amount: Option<String>,

@@ -24,6 +24,15 @@ Also read [AGENTS.local.md](./AGENTS.local.md) if it exists for machine-local de
 - After script edits, re-run `debug exec`; do not restart `debug start` unless the socket/session is broken or login state must be reset.
 - If a debug run is interrupted/aborted, verify whether partial staged resources were finalized before re-running.
 
+## Rust Serialization
+
+All `#[derive(Serialize)]` structs returned by Tauri commands must have
+`#[serde(rename_all = "camelCase")]` at the struct level. Remove any redundant
+per-field `#[serde(rename = "...")]` attrs that are now covered by `rename_all`.
+
+Exceptions (on-disk formats such as `operations.rs`) must have an explicit comment
+explaining why `rename_all = "camelCase"` is omitted.
+
 ## Scraping
 
 Read [scraper.md](./docs/scraper.md) before you edit any extension driver which scrapes an account.

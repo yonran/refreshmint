@@ -21,6 +21,7 @@ const ALLOWED_COMMANDS: &[&str] = &[
 const BLOCKED_FLAG_PREFIXES: &[&str] = &["-f", "--file", "-o", "--output-file", "--output-format"];
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReportResult {
     /// Populated for CSV-output commands (all except stats/activity)
     pub rows: Vec<Vec<String>>,
