@@ -194,9 +194,7 @@ function normalizeLoginAccountConfig(value: unknown): LoginAccountConfig {
     if (!isRecord(value)) {
         return {};
     }
-    // Tauri serializes LoginAccountConfig with snake_case keys (gl_account),
-    // but normalized/in-memory objects use camelCase (glAccount).
-    const glAccount = value['glAccount'] ?? value['gl_account'];
+    const glAccount = value['glAccount'];
     if (typeof glAccount === 'string' || glAccount === null) {
         return { glAccount };
     }

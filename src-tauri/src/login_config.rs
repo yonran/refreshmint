@@ -7,12 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Per-login-account configuration: maps a label to a GL account.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LoginAccountConfig {
-    #[serde(
-        rename = "gl_account",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "gl_account")]
     pub gl_account: Option<String>,
 }
 
