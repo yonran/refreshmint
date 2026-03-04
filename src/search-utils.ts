@@ -1,5 +1,20 @@
 import type { AccountRow } from './tauri-commands.ts';
 
+/**
+ * Quotes a value for use in an hledger query predicate (e.g. `desc:VALUE`).
+ *
+ * hledger tokenizes queries like a POSIX shell command line: predicates are
+ * separated by whitespace, and a value containing whitespace must be wrapped
+ * in double or single quotes.  Double-quote wrapping is used here; internal
+ * backslashes and double quotes are backslash-escaped.
+ *
+ * Reference: https://hledger.org/hledger.html#queries (section "Query arguments")
+ */
+export function quoteHledgerValue(value: string): string {
+    if (!/[\s"]/.test(value)) return value;
+    return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+}
+
 export const QUERY_PREFIXES = [
     'desc:',
     'acct:',

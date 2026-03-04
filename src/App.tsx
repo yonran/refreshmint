@@ -94,7 +94,11 @@ import {
     validateTransactionText,
     queryTransactions,
 } from './tauri-commands.ts';
-import { getCurrentToken, getSearchSuggestions } from './search-utils.ts';
+import {
+    getCurrentToken,
+    getSearchSuggestions,
+    quoteHledgerValue,
+} from './search-utils.ts';
 import { ReportsTab } from './ReportsTab.tsx';
 
 type TransactionDraft = {
@@ -3905,6 +3909,11 @@ function App() {
         });
     }
 
+    function appendSearchTerm(term: string) {
+        const current = transactionsSearch.trim();
+        setTransactionsSearch(current ? `${current} ${term}` : term);
+    }
+
     return (
         <div
             className="app"
@@ -4840,6 +4849,7 @@ function App() {
                                     );
                                 }}
                                 hideObviousAmounts={hideObviousAmounts}
+                                onAddSearchTerm={appendSearchTerm}
                             />
                             {glTransferModalTxnId !== null &&
                                 ((modalTxnId) => {
@@ -7861,6 +7871,7 @@ function TransactionsTable({
     onOpenLinkTransfer,
     onBulkRecategorize,
     hideObviousAmounts = true,
+    onAddSearchTerm,
 }: {
     transactions: TransactionRow[];
     ledgerPath: string | null;
@@ -7878,6 +7889,7 @@ function TransactionsTable({
         newAccount: string,
     ) => void;
     hideObviousAmounts?: boolean;
+    onAddSearchTerm?: (term: string) => void;
 }) {
     const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
     const [lightboxFilename, setLightboxFilename] = useState<string | null>(
@@ -7895,6 +7907,34 @@ function TransactionsTable({
         entries: Array<{ txnId: string; oldAccount: string }>;
         newAccount: string;
     } | null>(null);
+    type ContextMenuItem = { label: string; action: () => void };
+    const [contextMenu, setContextMenu] = useState<{
+        x: number;
+        y: number;
+        items: ContextMenuItem[];
+    } | null>(null);
+
+    function openContextMenu(e: React.MouseEvent, items: ContextMenuItem[]) {
+        e.preventDefault();
+        e.stopPropagation();
+        setContextMenu({ x: e.clientX, y: e.clientY, items });
+    }
+
+    useEffect(() => {
+        if (!contextMenu) return;
+        const close = () => {
+            setContextMenu(null);
+        };
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setContextMenu(null);
+        };
+        document.addEventListener('mousedown', close);
+        document.addEventListener('keydown', onKey);
+        return () => {
+            document.removeEventListener('mousedown', close);
+            document.removeEventListener('keydown', onKey);
+        };
+    }, [contextMenu]);
 
     async function handleAttachmentClick(filename: string) {
         if (ledgerPath === null) return;
@@ -8116,8 +8156,51 @@ function TransactionsTable({
                                                 )}
                                             </td>
                                         )}
-                                        <td className="mono">{txn.date}</td>
-                                        <td>{txn.description}</td>
+                                        <td
+                                            className="mono"
+                                            onContextMenu={(e) => {
+                                                openContextMenu(e, [
+                                                    {
+                                                        label: `Filter: date:${txn.date}`,
+                                                        action: () =>
+                                                            onAddSearchTerm?.(
+                                                                `date:${txn.date}`,
+                                                            ),
+                                                    },
+                                                    {
+                                                        label: `Filter: date:>=${txn.date}`,
+                                                        action: () =>
+                                                            onAddSearchTerm?.(
+                                                                `date:>=${txn.date}`,
+                                                            ),
+                                                    },
+                                                    {
+                                                        label: `Filter: date:<=${txn.date}`,
+                                                        action: () =>
+                                                            onAddSearchTerm?.(
+                                                                `date:<=${txn.date}`,
+                                                            ),
+                                                    },
+                                                ]);
+                                            }}
+                                        >
+                                            {txn.date}
+                                        </td>
+                                        <td
+                                            onContextMenu={(e) => {
+                                                openContextMenu(e, [
+                                                    {
+                                                        label: `Filter: desc:${quoteHledgerValue(txn.description)}`,
+                                                        action: () =>
+                                                            onAddSearchTerm?.(
+                                                                `desc:${quoteHledgerValue(txn.description)}`,
+                                                            ),
+                                                    },
+                                                ]);
+                                            }}
+                                        >
+                                            {txn.description}
+                                        </td>
                                         <td>
                                             <PostingsList
                                                 postings={txn.postings}
@@ -8127,7 +8210,46 @@ function TransactionsTable({
                                                 }
                                             />
                                         </td>
-                                        <td className="amount">
+                                        <td
+                                            className="amount"
+                                            onContextMenu={(e) => {
+                                                const totals = txn.totals;
+                                                if (
+                                                    totals == null ||
+                                                    totals.length === 0
+                                                )
+                                                    return;
+                                                const t = totals[0];
+                                                if (t == null) return;
+                                                const total = formatScaled(
+                                                    t.mantissa,
+                                                    t.scale,
+                                                );
+                                                openContextMenu(e, [
+                                                    {
+                                                        label: `Filter: amt:${total}`,
+                                                        action: () =>
+                                                            onAddSearchTerm?.(
+                                                                `amt:${total}`,
+                                                            ),
+                                                    },
+                                                    {
+                                                        label: `Filter: amt:>=${total}`,
+                                                        action: () =>
+                                                            onAddSearchTerm?.(
+                                                                `amt:>=${total}`,
+                                                            ),
+                                                    },
+                                                    {
+                                                        label: `Filter: amt:<=${total}`,
+                                                        action: () =>
+                                                            onAddSearchTerm?.(
+                                                                `amt:<=${total}`,
+                                                            ),
+                                                    },
+                                                ]);
+                                            }}
+                                        >
                                             {formatTotals(txn.totals)}
                                         </td>
                                         <td>
@@ -8530,6 +8652,29 @@ function TransactionsTable({
                             </button>
                         </div>
                     </div>
+                </div>
+            )}
+            {contextMenu && (
+                <div
+                    className="context-menu"
+                    style={{ left: contextMenu.x, top: contextMenu.y }}
+                    onMouseDown={(e) => {
+                        e.stopPropagation();
+                    }}
+                >
+                    {contextMenu.items.map((item, i) => (
+                        <button
+                            key={i}
+                            type="button"
+                            className="context-menu-item"
+                            onClick={() => {
+                                item.action();
+                                setContextMenu(null);
+                            }}
+                        >
+                            {item.label}
+                        </button>
+                    ))}
                 </div>
             )}
         </>
