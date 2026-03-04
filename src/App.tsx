@@ -8071,7 +8071,12 @@ function TransactionsTable({
                                                                             className="ghost-button"
                                                                             onClick={() => {
                                                                                 setCategoryDraft(
-                                                                                    '',
+                                                                                    p.account ===
+                                                                                        'Expenses:Unknown' &&
+                                                                                        suggested !==
+                                                                                            null
+                                                                                        ? suggested
+                                                                                        : '',
                                                                                 );
                                                                                 setEditingKey(
                                                                                     key,
