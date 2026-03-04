@@ -281,36 +281,26 @@ fn transaction_accounts(txn: &Transaction) -> String {
     ordered.join(", ")
 }
 
+// Returns the net effect of this transaction on net worth: the algebraic sum
+// of all Assets and Liabilities postings.  This is consistent with how
+// `hledger balancesheet` computes net worth — it displays Liabilities negated
+// (`maNegate`) and subtracts them from Assets, which is algebraically
+// equivalent to Assets_raw + Liabilities_raw.  In hledger's raw journal
+// convention, Liabilities are NormallyNegative, so a CC charge posts
+// `Liabilities:CC -50 USD` (more debt = more negative), and the sum correctly
+// yields -50 for the net-worth change.
 fn transaction_amounts(txn: &Transaction) -> Option<Vec<AmountTotal>> {
-    let mut positive_totals: BTreeMap<String, CommodityTotal> = BTreeMap::new();
-    let mut saw_positive = false;
-
+    let mut totals: BTreeMap<String, CommodityTotal> = BTreeMap::new();
     for posting in &txn.tpostings {
-        for amount in &posting.pamount {
-            let mantissa = parse_mantissa(&amount.aquantity.decimal_mantissa)?;
-            if mantissa > 0 {
-                saw_positive = true;
-                if add_amount_total(&mut positive_totals, amount).is_err() {
+        if posting.paccount.starts_with("Assets:") || posting.paccount.starts_with("Liabilities:") {
+            for amount in &posting.pamount {
+                if add_amount_total(&mut totals, amount).is_err() {
                     return None;
                 }
             }
         }
     }
-
-    if saw_positive {
-        return totals_to_rows(&positive_totals);
-    }
-
-    let mut all_totals: BTreeMap<String, CommodityTotal> = BTreeMap::new();
-    for posting in &txn.tpostings {
-        for amount in &posting.pamount {
-            if add_amount_total(&mut all_totals, amount).is_err() {
-                return None;
-            }
-        }
-    }
-
-    totals_to_rows(&all_totals)
+    totals_to_rows(&totals)
 }
 
 fn transaction_postings(txn: &Transaction) -> Vec<PostingRow> {
