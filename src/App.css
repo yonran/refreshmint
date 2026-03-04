@@ -922,3 +922,31 @@ details[open] > .disclosure-summary::before {
     border-radius: 2px;
     flex-shrink: 0;
 }
+
+.preferences-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    max-width: 600px;
+}
+
+.preferences-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.preferences-section h3 {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #333;
+    border-bottom: 1px solid #e3e3e3;
+    padding-bottom: 0.4rem;
+}
+
+.pref-description {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #666;
+}

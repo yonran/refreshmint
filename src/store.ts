@@ -9,7 +9,8 @@ export type ActiveTab =
     | 'transactions'
     | 'scrape'
     | 'pipeline'
-    | 'reports';
+    | 'reports'
+    | 'preferences';
 
 async function getStore() {
     return await load(STORE_NAME, { autoSave: true, defaults: {} });
@@ -75,7 +76,8 @@ export async function getLastActiveTab(): Promise<ActiveTab | null> {
         value === 'transactions' ||
         value === 'scrape' ||
         value === 'pipeline' ||
-        value === 'reports'
+        value === 'reports' ||
+        value === 'preferences'
     ) {
         return value;
     }

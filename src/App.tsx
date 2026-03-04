@@ -1008,6 +1008,10 @@ function App() {
                 searchInputRef.current?.focus();
                 searchInputRef.current?.select();
             }
+            if ((e.metaKey || e.ctrlKey) && e.key === ',') {
+                e.preventDefault();
+                setActiveTab('preferences');
+            }
         };
         window.addEventListener('keydown', handler);
         return () => {
@@ -4083,6 +4087,19 @@ function App() {
                         </button>
                         <button
                             className={
+                                activeTab === 'preferences'
+                                    ? 'tab active'
+                                    : 'tab'
+                            }
+                            onClick={() => {
+                                setActiveTab('preferences');
+                            }}
+                            type="button"
+                        >
+                            Preferences
+                        </button>
+                        <button
+                            className={
                                 activeTab === 'scrape' ? 'tab active' : 'tab'
                             }
                             onClick={() => {
@@ -6043,6 +6060,8 @@ function App() {
                             ledger={ledger.path}
                             accounts={ledger.accounts}
                         />
+                    ) : activeTab === 'preferences' ? (
+                        <div className="preferences-panel"></div>
                     ) : (
                         <div className="transactions-panel">
                             <section className="txn-form">
