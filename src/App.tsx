@@ -8005,7 +8005,7 @@ function TransactionsTable({
         const p = singleNonBalancingPosting(txn);
         return p ? [{ txnId: id, oldAccount: p.account }] : [];
     });
-    const colCount = (hasActions ? 6 : 5) + (hasCheckbox ? 1 : 0);
+    const colCount = 5 + (hasCheckbox ? 1 : 0);
 
     return (
         <>
@@ -8089,7 +8089,6 @@ function TransactionsTable({
                             <th>Postings</th>
                             <th>Amount</th>
                             <th>Attachments</th>
-                            {hasActions && <th>Categorize</th>}
                         </tr>
                     </thead>
                     <tbody>
@@ -8202,13 +8201,278 @@ function TransactionsTable({
                                             {txn.description}
                                         </td>
                                         <td>
-                                            <PostingsList
-                                                postings={txn.postings}
-                                                hideAmounts={
-                                                    hideObviousAmounts &&
-                                                    hasObviousAmounts(txn)
-                                                }
-                                            />
+                                            {hasActions ? (
+                                                <div className="postings-list">
+                                                    {txn.postings.map((p) => {
+                                                        const key = `${txn.id}:${p.account}`;
+                                                        const isEditing =
+                                                            editingKey === key;
+                                                        const isUnknown =
+                                                            p.account ===
+                                                            'Expenses:Unknown';
+                                                        const isNonBalanceSheet =
+                                                            !p.account.startsWith(
+                                                                'Assets:',
+                                                            ) &&
+                                                            !p.account.startsWith(
+                                                                'Liabilities:',
+                                                            );
+                                                        const postingMenuItems: ContextMenuItem[] =
+                                                            [
+                                                                {
+                                                                    label: `Filter: acct:${quoteHledgerValue(p.account)}`,
+                                                                    action: () =>
+                                                                        onAddSearchTerm?.(
+                                                                            `acct:${quoteHledgerValue(p.account)}`,
+                                                                        ),
+                                                                },
+                                                            ];
+                                                        if (isNonBalanceSheet) {
+                                                            postingMenuItems.push(
+                                                                {
+                                                                    label: 'Set Category',
+                                                                    action: () => {
+                                                                        setCategoryDraft(
+                                                                            isUnknown &&
+                                                                                suggested !==
+                                                                                    null
+                                                                                ? suggested
+                                                                                : '',
+                                                                        );
+                                                                        setEditingKey(
+                                                                            key,
+                                                                        );
+                                                                    },
+                                                                },
+                                                            );
+                                                        }
+                                                        if (
+                                                            isUncategorized &&
+                                                            transferMatch !==
+                                                                null &&
+                                                            onOpenLinkTransfer !==
+                                                                undefined
+                                                        ) {
+                                                            postingMenuItems.push(
+                                                                {
+                                                                    label: 'Link Transfer',
+                                                                    action: () => {
+                                                                        onOpenLinkTransfer(
+                                                                            txn.id,
+                                                                        );
+                                                                    },
+                                                                },
+                                                            );
+                                                        }
+                                                        const hideAmounts =
+                                                            hideObviousAmounts &&
+                                                            hasObviousAmounts(
+                                                                txn,
+                                                            );
+                                                        return (
+                                                            <div
+                                                                key={p.account}
+                                                                className="postings-item"
+                                                            >
+                                                                {isEditing ? (
+                                                                    <>
+                                                                        <input
+                                                                            type="text"
+                                                                            list="gl-account-datalist"
+                                                                            value={
+                                                                                categoryDraft
+                                                                            }
+                                                                            placeholder="Account name…"
+                                                                            autoFocus
+                                                                            onFocus={(
+                                                                                e,
+                                                                            ) => {
+                                                                                e.target.select();
+                                                                            }}
+                                                                            onChange={(
+                                                                                e,
+                                                                            ) => {
+                                                                                setCategoryDraft(
+                                                                                    e
+                                                                                        .target
+                                                                                        .value,
+                                                                                );
+                                                                            }}
+                                                                            onKeyDown={(
+                                                                                e,
+                                                                            ) => {
+                                                                                if (
+                                                                                    e.key ===
+                                                                                        'Enter' &&
+                                                                                    categoryDraft.trim()
+                                                                                ) {
+                                                                                    onRecategorize?.(
+                                                                                        txn.id,
+                                                                                        p.account,
+                                                                                        categoryDraft.trim(),
+                                                                                    );
+                                                                                    setEditingKey(
+                                                                                        null,
+                                                                                    );
+                                                                                } else if (
+                                                                                    e.key ===
+                                                                                    'Escape'
+                                                                                ) {
+                                                                                    setEditingKey(
+                                                                                        null,
+                                                                                    );
+                                                                                }
+                                                                            }}
+                                                                        />
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            disabled={
+                                                                                !categoryDraft.trim()
+                                                                            }
+                                                                            onClick={() => {
+                                                                                if (
+                                                                                    categoryDraft.trim()
+                                                                                ) {
+                                                                                    onRecategorize?.(
+                                                                                        txn.id,
+                                                                                        p.account,
+                                                                                        categoryDraft.trim(),
+                                                                                    );
+                                                                                    setEditingKey(
+                                                                                        null,
+                                                                                    );
+                                                                                }
+                                                                            }}
+                                                                        >
+                                                                            Set
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            onClick={() => {
+                                                                                setEditingKey(
+                                                                                    null,
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            Cancel
+                                                                        </button>
+                                                                    </>
+                                                                ) : isUnknown ? (
+                                                                    <button
+                                                                        type="button"
+                                                                        className="posting-account posting-account-unknown"
+                                                                        title="Click to set category"
+                                                                        onClick={() => {
+                                                                            setCategoryDraft(
+                                                                                suggested !==
+                                                                                    null
+                                                                                    ? suggested
+                                                                                    : '',
+                                                                            );
+                                                                            setEditingKey(
+                                                                                key,
+                                                                            );
+                                                                        }}
+                                                                        onContextMenu={(
+                                                                            e,
+                                                                        ) => {
+                                                                            openContextMenu(
+                                                                                e,
+                                                                                postingMenuItems,
+                                                                            );
+                                                                        }}
+                                                                    >
+                                                                        {
+                                                                            p.account
+                                                                        }
+                                                                    </button>
+                                                                ) : (
+                                                                    <span
+                                                                        onContextMenu={(
+                                                                            e,
+                                                                        ) => {
+                                                                            openContextMenu(
+                                                                                e,
+                                                                                postingMenuItems,
+                                                                            );
+                                                                        }}
+                                                                    >
+                                                                        {
+                                                                            p.account
+                                                                        }
+                                                                    </span>
+                                                                )}
+                                                                {isUnknown &&
+                                                                    !isEditing &&
+                                                                    transferMatch !==
+                                                                        null &&
+                                                                    onMergeTransfer !==
+                                                                        undefined && (
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            onClick={() => {
+                                                                                onMergeTransfer(
+                                                                                    txn.id,
+                                                                                    transferMatch.txnId,
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            ↔{' '}
+                                                                            {
+                                                                                transferMatch.date
+                                                                            }{' '}
+                                                                            {
+                                                                                transferMatch.description
+                                                                            }
+                                                                        </button>
+                                                                    )}
+                                                                {isUnknown &&
+                                                                    !isEditing &&
+                                                                    suggested !==
+                                                                        null &&
+                                                                    transferMatch ===
+                                                                        null &&
+                                                                    onRecategorize !==
+                                                                        undefined && (
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            onClick={() => {
+                                                                                onRecategorize(
+                                                                                    txn.id,
+                                                                                    'Expenses:Unknown',
+                                                                                    suggested,
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            {
+                                                                                suggested
+                                                                            }
+                                                                        </button>
+                                                                    )}
+                                                                {!hideAmounts && (
+                                                                    <span className="amount">
+                                                                        {formatTotals(
+                                                                            p.totals,
+                                                                        )}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            ) : (
+                                                <PostingsList
+                                                    postings={txn.postings}
+                                                    hideAmounts={
+                                                        hideObviousAmounts &&
+                                                        hasObviousAmounts(txn)
+                                                    }
+                                                />
+                                            )}
                                         </td>
                                         <td
                                             className="amount"
@@ -8297,226 +8561,6 @@ function TransactionsTable({
                                                 </div>
                                             )}
                                         </td>
-                                        {hasActions && (
-                                            <td>
-                                                {/* ML suggestion chip — only for Expenses:Unknown */}
-                                                {isUncategorized &&
-                                                    transferMatch !== null &&
-                                                    onMergeTransfer !==
-                                                        undefined && (
-                                                        <div className="categorize-chip">
-                                                            <span className="text-muted">
-                                                                Transfer ↔{' '}
-                                                                {
-                                                                    transferMatch.date
-                                                                }{' '}
-                                                                {
-                                                                    transferMatch.description
-                                                                }
-                                                            </span>
-                                                            <button
-                                                                type="button"
-                                                                className="ghost-button"
-                                                                onClick={() => {
-                                                                    onMergeTransfer(
-                                                                        txn.id,
-                                                                        transferMatch.txnId,
-                                                                    );
-                                                                }}
-                                                            >
-                                                                Merge
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                {isUncategorized &&
-                                                    transferMatch === null &&
-                                                    suggested !== null &&
-                                                    onRecategorize !==
-                                                        undefined && (
-                                                        <div className="categorize-chip">
-                                                            <span className="text-muted">
-                                                                {suggested}
-                                                            </span>
-                                                            <button
-                                                                type="button"
-                                                                className="ghost-button"
-                                                                onClick={() => {
-                                                                    onRecategorize(
-                                                                        txn.id,
-                                                                        'Expenses:Unknown',
-                                                                        suggested,
-                                                                    );
-                                                                }}
-                                                            >
-                                                                Accept
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                {/* Per-expense-posting Set Category */}
-                                                {onRecategorize !== undefined &&
-                                                    txn.postings
-                                                        .filter((p) => {
-                                                            if (
-                                                                !p.account.startsWith(
-                                                                    'Expenses:',
-                                                                )
-                                                            )
-                                                                return false;
-                                                            // Skip Unknown when ML suggestion is already shown above
-                                                            if (
-                                                                p.account ===
-                                                                    'Expenses:Unknown' &&
-                                                                suggested !==
-                                                                    null &&
-                                                                transferMatch ===
-                                                                    null
-                                                            )
-                                                                return false;
-                                                            return true;
-                                                        })
-                                                        .map((p) => {
-                                                            const key = `${txn.id}:${p.account}`;
-                                                            const isEditing =
-                                                                editingKey ===
-                                                                key;
-                                                            return (
-                                                                <div
-                                                                    key={
-                                                                        p.account
-                                                                    }
-                                                                    className="categorize-chip"
-                                                                >
-                                                                    {isEditing ? (
-                                                                        <>
-                                                                            <input
-                                                                                type="text"
-                                                                                list="gl-account-datalist"
-                                                                                value={
-                                                                                    categoryDraft
-                                                                                }
-                                                                                placeholder="Account name…"
-                                                                                autoFocus
-                                                                                onChange={(
-                                                                                    e,
-                                                                                ) => {
-                                                                                    setCategoryDraft(
-                                                                                        e
-                                                                                            .target
-                                                                                            .value,
-                                                                                    );
-                                                                                }}
-                                                                                onKeyDown={(
-                                                                                    e,
-                                                                                ) => {
-                                                                                    if (
-                                                                                        e.key ===
-                                                                                            'Enter' &&
-                                                                                        categoryDraft.trim()
-                                                                                    ) {
-                                                                                        onRecategorize(
-                                                                                            txn.id,
-                                                                                            p.account,
-                                                                                            categoryDraft.trim(),
-                                                                                        );
-                                                                                        setEditingKey(
-                                                                                            null,
-                                                                                        );
-                                                                                    } else if (
-                                                                                        e.key ===
-                                                                                        'Escape'
-                                                                                    ) {
-                                                                                        setEditingKey(
-                                                                                            null,
-                                                                                        );
-                                                                                    }
-                                                                                }}
-                                                                            />
-                                                                            <button
-                                                                                type="button"
-                                                                                className="ghost-button"
-                                                                                disabled={
-                                                                                    !categoryDraft.trim()
-                                                                                }
-                                                                                onClick={() => {
-                                                                                    if (
-                                                                                        categoryDraft.trim()
-                                                                                    ) {
-                                                                                        onRecategorize(
-                                                                                            txn.id,
-                                                                                            p.account,
-                                                                                            categoryDraft.trim(),
-                                                                                        );
-                                                                                        setEditingKey(
-                                                                                            null,
-                                                                                        );
-                                                                                    }
-                                                                                }}
-                                                                            >
-                                                                                Set
-                                                                            </button>
-                                                                            <button
-                                                                                type="button"
-                                                                                className="ghost-button"
-                                                                                onClick={() => {
-                                                                                    setEditingKey(
-                                                                                        null,
-                                                                                    );
-                                                                                }}
-                                                                            >
-                                                                                Cancel
-                                                                            </button>
-                                                                        </>
-                                                                    ) : (
-                                                                        <>
-                                                                            <span className="text-muted">
-                                                                                {
-                                                                                    p.account
-                                                                                }
-                                                                            </span>
-                                                                            <button
-                                                                                type="button"
-                                                                                className="ghost-button"
-                                                                                onClick={() => {
-                                                                                    setCategoryDraft(
-                                                                                        p.account ===
-                                                                                            'Expenses:Unknown' &&
-                                                                                            suggested !==
-                                                                                                null
-                                                                                            ? suggested
-                                                                                            : '',
-                                                                                    );
-                                                                                    setEditingKey(
-                                                                                        key,
-                                                                                    );
-                                                                                }}
-                                                                            >
-                                                                                Set
-                                                                                Category
-                                                                            </button>
-                                                                        </>
-                                                                    )}
-                                                                </div>
-                                                            );
-                                                        })}
-                                                {/* Manual Link Transfer — only for Expenses:Unknown rows without auto-match */}
-                                                {isUncategorized &&
-                                                    transferMatch === null &&
-                                                    onOpenLinkTransfer !==
-                                                        undefined && (
-                                                        <button
-                                                            type="button"
-                                                            className="ghost-button"
-                                                            onClick={() => {
-                                                                onOpenLinkTransfer(
-                                                                    txn.id,
-                                                                );
-                                                            }}
-                                                        >
-                                                            Link Transfer
-                                                        </button>
-                                                    )}
-                                            </td>
-                                        )}
                                     </tr>
                                 );
                             })
