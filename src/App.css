@@ -610,6 +610,9 @@ details[open] > .disclosure-summary::before {
     border-radius: 0.25rem;
     border: 1px solid #eee;
     white-space: nowrap;
+    max-width: 16ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .evidence-chip-image {

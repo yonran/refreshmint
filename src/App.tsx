@@ -7887,6 +7887,9 @@ function TransactionsTable({
                                                             <span
                                                                 key={`${txn.id}-${evidenceRef}`}
                                                                 className="evidence-chip"
+                                                                title={
+                                                                    evidenceRef
+                                                                }
                                                             >
                                                                 {evidenceRef}
                                                             </span>
