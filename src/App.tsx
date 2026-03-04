@@ -278,6 +278,9 @@ function App() {
     const [isOpening, setIsOpening] = useState(false);
     const [ledger, setLedger] = useState<LedgerView | null>(null);
     const [activeTab, setActiveTab] = useState<ActiveTab>('accounts');
+    const [hideObviousAmounts, setHideObviousAmounts] = useState(
+        () => localStorage.getItem('pref:hideObviousAmounts') !== 'false',
+    );
     const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
     const [unpostedOnly, setUnpostedOnly] = useState(false);
     const [selectedLoginAccount, setSelectedLoginAccount] =
@@ -4836,6 +4839,7 @@ function App() {
                                         newAccount,
                                     );
                                 }}
+                                hideObviousAmounts={hideObviousAmounts}
                             />
                             {glTransferModalTxnId !== null &&
                                 ((modalTxnId) => {
@@ -6047,6 +6051,9 @@ function App() {
                                         <TransactionsTable
                                             transactions={pipelineGlRows}
                                             ledgerPath={ledgerPath}
+                                            hideObviousAmounts={
+                                                hideObviousAmounts
+                                            }
                                         />
                                     </div>
                                 )}
@@ -6061,7 +6068,34 @@ function App() {
                             accounts={ledger.accounts}
                         />
                     ) : activeTab === 'preferences' ? (
-                        <div className="preferences-panel"></div>
+                        <div className="preferences-panel">
+                            <section className="preferences-section">
+                                <h3>Transactions</h3>
+                                <label className="checkbox-field">
+                                    <input
+                                        type="checkbox"
+                                        checked={hideObviousAmounts}
+                                        onChange={(e) => {
+                                            const v = e.target.checked;
+                                            setHideObviousAmounts(v);
+                                            localStorage.setItem(
+                                                'pref:hideObviousAmounts',
+                                                String(v),
+                                            );
+                                        }}
+                                    />
+                                    <span>
+                                        Collapse obvious posting amounts
+                                    </span>
+                                </label>
+                                <p className="pref-description">
+                                    When a transaction has exactly 2 postings
+                                    and exactly one is an asset or liability,
+                                    hide the amounts from the postings list —
+                                    they are derivable from the Amount column.
+                                </p>
+                            </section>
+                        </div>
                     ) : (
                         <div className="transactions-panel">
                             <section className="txn-form">
@@ -7793,6 +7827,21 @@ function attachmentFilename(ref: string): string {
         : ref;
 }
 
+// A transaction's posting amounts are "obvious" — and therefore redundant to
+// display — when there are exactly 2 postings and exactly 1 is a balance-sheet
+// account (Assets/Liabilities). In that case both amounts equal the net-worth
+// effect shown in the Amount column (one is it, the other is its negation),
+// so showing them clutters the Postings column without adding information.
+function hasObviousAmounts(txn: TransactionRow): boolean {
+    if (txn.postings.length !== 2) return false;
+    const balanceSheetCount = txn.postings.filter(
+        (p) =>
+            p.account.startsWith('Assets:') ||
+            p.account.startsWith('Liabilities:'),
+    ).length;
+    return balanceSheetCount === 1;
+}
+
 function singleNonBalancingPosting(txn: TransactionRow): PostingRow | null {
     const candidates = txn.postings.filter(
         (p) =>
@@ -7811,6 +7860,7 @@ function TransactionsTable({
     onMergeTransfer,
     onOpenLinkTransfer,
     onBulkRecategorize,
+    hideObviousAmounts = true,
 }: {
     transactions: TransactionRow[];
     ledgerPath: string | null;
@@ -7827,6 +7877,7 @@ function TransactionsTable({
         entries: Array<{ txnId: string; oldAccount: string }>,
         newAccount: string,
     ) => void;
+    hideObviousAmounts?: boolean;
 }) {
     const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
     const [lightboxFilename, setLightboxFilename] = useState<string | null>(
@@ -8070,6 +8121,10 @@ function TransactionsTable({
                                         <td>
                                             <PostingsList
                                                 postings={txn.postings}
+                                                hideAmounts={
+                                                    hideObviousAmounts &&
+                                                    hasObviousAmounts(txn)
+                                                }
                                             />
                                         </td>
                                         <td className="amount">
@@ -8524,15 +8579,23 @@ function formatScaled(mantissa: string, scale: number): string {
     return negative ? `-${digits}` : digits;
 }
 
-function PostingsList({ postings }: { postings: PostingRow[] }) {
+function PostingsList({
+    postings,
+    hideAmounts = false,
+}: {
+    postings: PostingRow[];
+    hideAmounts?: boolean;
+}) {
     return (
         <div className="postings-list">
             {postings.map((posting) => (
                 <div key={posting.account} className="postings-item">
                     <span>{posting.account}</span>
-                    <span className="amount">
-                        {formatTotals(posting.totals)}
-                    </span>
+                    {!hideAmounts && (
+                        <span className="amount">
+                            {formatTotals(posting.totals)}
+                        </span>
+                    )}
                 </div>
             ))}
         </div>
