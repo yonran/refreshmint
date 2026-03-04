@@ -3251,6 +3251,31 @@ function App() {
         }
     }
 
+    async function handleBulkRecategorize(
+        entries: Array<{ txnId: string; oldAccount: string }>,
+        newAccount: string,
+    ) {
+        if (!ledger) return;
+        try {
+            for (const { txnId, oldAccount } of entries) {
+                await recategorizeGlTransaction(
+                    ledger.path,
+                    txnId,
+                    oldAccount,
+                    newAccount,
+                );
+            }
+            const [reloaded, suggestions] = await Promise.all([
+                openLedger(ledger.path),
+                suggestGlCategories(ledger.path),
+            ]);
+            setLedger(reloaded);
+            setGlCategorySuggestions(suggestions);
+        } catch (error) {
+            console.error('bulk recategorize failed:', error);
+        }
+    }
+
     async function handleSavePipelineGlAccount() {
         if (!ledger || !selectedLoginAccount) return;
         const { loginName, label } = selectedLoginAccount;
@@ -4763,39 +4788,38 @@ function App() {
                                     </div>
                                 )}
                             </section>
-                            <div className="table-wrap">
-                                <TransactionsTable
-                                    transactions={filteredTransactions}
-                                    ledgerPath={ledgerPath}
-                                    accountNames={ledger.accounts.map(
-                                        (a) => a.name,
-                                    )}
-                                    glCategorySuggestions={
-                                        glCategorySuggestions
-                                    }
-                                    onRecategorize={(
+                            <TransactionsTable
+                                transactions={filteredTransactions}
+                                ledgerPath={ledgerPath}
+                                accountNames={ledger.accounts.map(
+                                    (a) => a.name,
+                                )}
+                                glCategorySuggestions={glCategorySuggestions}
+                                onRecategorize={(
+                                    txnId,
+                                    oldAccount,
+                                    newAccount,
+                                ) => {
+                                    void handleRecategorizeGlTransaction(
                                         txnId,
                                         oldAccount,
                                         newAccount,
-                                    ) => {
-                                        void handleRecategorizeGlTransaction(
-                                            txnId,
-                                            oldAccount,
-                                            newAccount,
-                                        );
-                                    }}
-                                    onMergeTransfer={(txnId1, txnId2) => {
-                                        void handleMergeGlTransfer(
-                                            txnId1,
-                                            txnId2,
-                                        );
-                                    }}
-                                    onOpenLinkTransfer={(txnId) => {
-                                        setGlTransferModalSearch('');
-                                        setGlTransferModalTxnId(txnId);
-                                    }}
-                                />
-                            </div>
+                                    );
+                                }}
+                                onMergeTransfer={(txnId1, txnId2) => {
+                                    void handleMergeGlTransfer(txnId1, txnId2);
+                                }}
+                                onOpenLinkTransfer={(txnId) => {
+                                    setGlTransferModalSearch('');
+                                    setGlTransferModalTxnId(txnId);
+                                }}
+                                onBulkRecategorize={(entries, newAccount) => {
+                                    void handleBulkRecategorize(
+                                        entries,
+                                        newAccount,
+                                    );
+                                }}
+                            />
                             {glTransferModalTxnId !== null &&
                                 ((modalTxnId) => {
                                     const q =
@@ -7750,6 +7774,15 @@ function attachmentFilename(ref: string): string {
         : ref;
 }
 
+function singleNonBalancingPosting(txn: TransactionRow): PostingRow | null {
+    const candidates = txn.postings.filter(
+        (p) =>
+            !p.account.startsWith('Assets:') &&
+            !p.account.startsWith('Liabilities:'),
+    );
+    return candidates.length === 1 ? (candidates[0] ?? null) : null;
+}
+
 function TransactionsTable({
     transactions,
     ledgerPath,
@@ -7758,6 +7791,7 @@ function TransactionsTable({
     onRecategorize,
     onMergeTransfer,
     onOpenLinkTransfer,
+    onBulkRecategorize,
 }: {
     transactions: TransactionRow[];
     ledgerPath: string | null;
@@ -7770,6 +7804,10 @@ function TransactionsTable({
     ) => void;
     onMergeTransfer?: (txnId1: string, txnId2: string) => void;
     onOpenLinkTransfer?: (txnId: string) => void;
+    onBulkRecategorize?: (
+        entries: Array<{ txnId: string; oldAccount: string }>,
+        newAccount: string,
+    ) => void;
 }) {
     const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
     const [lightboxFilename, setLightboxFilename] = useState<string | null>(
@@ -7779,6 +7817,14 @@ function TransactionsTable({
     const [lightboxError, setLightboxError] = useState<string | null>(null);
     const [editingKey, setEditingKey] = useState<string | null>(null); // `${txnId}:${oldAccount}`
     const [categoryDraft, setCategoryDraft] = useState('');
+    const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(
+        new Set(),
+    );
+    const [bulkDraft, setBulkDraft] = useState('');
+    const [bulkConfirm, setBulkConfirm] = useState<{
+        entries: Array<{ txnId: string; oldAccount: string }>;
+        newAccount: string;
+    } | null>(null);
 
     async function handleAttachmentClick(filename: string) {
         if (ledgerPath === null) return;
@@ -7807,318 +7853,486 @@ function TransactionsTable({
         onRecategorize !== undefined ||
         onMergeTransfer !== undefined ||
         onOpenLinkTransfer !== undefined;
-    const colCount = hasActions ? 6 : 5;
+    const hasCheckbox = onBulkRecategorize !== undefined;
+
+    useEffect(() => {
+        if (selectedIds.size === 0 || bulkDraft !== '') return;
+        const tally = new Map<string, number>();
+        for (const id of selectedIds) {
+            const s = glCategorySuggestions[id]?.suggested;
+            if (s != null) tally.set(s, (tally.get(s) ?? 0) + 1);
+        }
+        if (tally.size === 0) return;
+        const best = [...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+        if (best !== undefined) setBulkDraft(best);
+    }, [selectedIds]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    function applyBulk(
+        entries: Array<{ txnId: string; oldAccount: string }>,
+        newAccount: string,
+    ) {
+        if (onBulkRecategorize === undefined) return;
+        const accounts = new Set(entries.map((e) => e.oldAccount));
+        if (accounts.size <= 1) {
+            onBulkRecategorize(entries, newAccount);
+            setSelectedIds(new Set());
+            setBulkDraft('');
+        } else {
+            setBulkConfirm({ entries, newAccount });
+        }
+    }
+
+    const eligibleIds = transactions
+        .filter((t) => singleNonBalancingPosting(t) !== null)
+        .map((t) => t.id);
+    const allSelected =
+        eligibleIds.length > 0 &&
+        eligibleIds.every((id) => selectedIds.has(id));
+    const someSelected = eligibleIds.some((id) => selectedIds.has(id));
+    const bulkEntries = [...selectedIds].flatMap((id) => {
+        const txn = transactions.find((t) => t.id === id);
+        if (!txn) return [];
+        const p = singleNonBalancingPosting(txn);
+        return p ? [{ txnId: id, oldAccount: p.account }] : [];
+    });
+    const colCount = (hasActions ? 6 : 5) + (hasCheckbox ? 1 : 0);
 
     return (
         <>
-            <table className="ledger-table">
-                <thead>
-                    <tr>
-                        <th>Date</th>
-                        <th>Description</th>
-                        <th>Postings</th>
-                        <th>Amount</th>
-                        <th>Attachments</th>
-                        {hasActions && <th>Categorize</th>}
-                    </tr>
-                </thead>
-                <tbody>
-                    {transactions.length === 0 ? (
+            {hasCheckbox && selectedIds.size > 0 && (
+                <div className="bulk-action-bar">
+                    <span className="count-label">
+                        {selectedIds.size} selected
+                        {bulkEntries.length < selectedIds.size &&
+                            ` (${bulkEntries.length} eligible)`}
+                    </span>
+                    <input
+                        type="text"
+                        list="gl-account-datalist"
+                        value={bulkDraft}
+                        placeholder="New account…"
+                        onChange={(e) => {
+                            setBulkDraft(e.target.value);
+                        }}
+                        onKeyDown={(e) => {
+                            if (
+                                e.key === 'Enter' &&
+                                bulkDraft.trim() &&
+                                bulkEntries.length > 0
+                            ) {
+                                applyBulk(bulkEntries, bulkDraft.trim());
+                            } else if (e.key === 'Escape') {
+                                setSelectedIds(new Set());
+                                setBulkDraft('');
+                            }
+                        }}
+                    />
+                    <button
+                        type="button"
+                        className="ghost-button"
+                        disabled={!bulkDraft.trim() || bulkEntries.length === 0}
+                        onClick={() => {
+                            applyBulk(bulkEntries, bulkDraft.trim());
+                        }}
+                    >
+                        Set Category
+                    </button>
+                    <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={() => {
+                            setSelectedIds(new Set());
+                            setBulkDraft('');
+                        }}
+                    >
+                        Clear
+                    </button>
+                </div>
+            )}
+            <div className="table-wrap">
+                <table className="ledger-table">
+                    <thead>
                         <tr>
-                            <td colSpan={colCount} className="table-empty">
-                                No transactions found.
-                            </td>
+                            {hasCheckbox && (
+                                <th>
+                                    <input
+                                        type="checkbox"
+                                        checked={allSelected}
+                                        ref={(el) => {
+                                            if (el)
+                                                el.indeterminate =
+                                                    someSelected &&
+                                                    !allSelected;
+                                        }}
+                                        onChange={() => {
+                                            setSelectedIds(
+                                                allSelected
+                                                    ? new Set()
+                                                    : new Set(eligibleIds),
+                                            );
+                                        }}
+                                    />
+                                </th>
+                            )}
+                            <th>Date</th>
+                            <th>Description</th>
+                            <th>Postings</th>
+                            <th>Amount</th>
+                            <th>Attachments</th>
+                            {hasActions && <th>Categorize</th>}
                         </tr>
-                    ) : (
-                        transactions.map((txn) => {
-                            const isUncategorized = txn.postings.some(
-                                (p) => p.account === 'Expenses:Unknown',
-                            );
-                            const glSuggestion = glCategorySuggestions[txn.id];
-                            const transferMatch =
-                                glSuggestion?.transferMatch ?? null;
-                            const suggested = glSuggestion?.suggested ?? null;
-                            return (
-                                <tr
-                                    key={txn.id}
-                                    className={
-                                        isUncategorized
-                                            ? 'row-uncategorized'
-                                            : undefined
-                                    }
-                                >
-                                    <td className="mono">{txn.date}</td>
-                                    <td>{txn.description}</td>
-                                    <td>
-                                        <PostingsList postings={txn.postings} />
-                                    </td>
-                                    <td className="amount">
-                                        {formatTotals(txn.totals)}
-                                    </td>
-                                    <td>
-                                        {txn.evidence.length === 0 ? (
-                                            <span className="text-muted">
-                                                -
-                                            </span>
-                                        ) : (
-                                            <div className="evidence-list">
-                                                {txn.evidence.map(
-                                                    (evidenceRef) =>
-                                                        isImageAttachmentRef(
-                                                            evidenceRef,
-                                                        ) ? (
+                    </thead>
+                    <tbody>
+                        {transactions.length === 0 ? (
+                            <tr>
+                                <td colSpan={colCount} className="table-empty">
+                                    No transactions found.
+                                </td>
+                            </tr>
+                        ) : (
+                            transactions.map((txn) => {
+                                const isUncategorized = txn.postings.some(
+                                    (p) => p.account === 'Expenses:Unknown',
+                                );
+                                const glSuggestion =
+                                    glCategorySuggestions[txn.id];
+                                const transferMatch =
+                                    glSuggestion?.transferMatch ?? null;
+                                const suggested =
+                                    glSuggestion?.suggested ?? null;
+                                const eligible =
+                                    singleNonBalancingPosting(txn) !== null;
+                                return (
+                                    <tr
+                                        key={txn.id}
+                                        className={
+                                            isUncategorized
+                                                ? 'row-uncategorized'
+                                                : undefined
+                                        }
+                                    >
+                                        {hasCheckbox && (
+                                            <td>
+                                                {eligible && (
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={selectedIds.has(
+                                                            txn.id,
+                                                        )}
+                                                        onChange={() => {
+                                                            setSelectedIds(
+                                                                (prev) => {
+                                                                    const next =
+                                                                        new Set(
+                                                                            prev,
+                                                                        );
+                                                                    if (
+                                                                        next.has(
+                                                                            txn.id,
+                                                                        )
+                                                                    )
+                                                                        next.delete(
+                                                                            txn.id,
+                                                                        );
+                                                                    else
+                                                                        next.add(
+                                                                            txn.id,
+                                                                        );
+                                                                    return next;
+                                                                },
+                                                            );
+                                                        }}
+                                                    />
+                                                )}
+                                            </td>
+                                        )}
+                                        <td className="mono">{txn.date}</td>
+                                        <td>{txn.description}</td>
+                                        <td>
+                                            <PostingsList
+                                                postings={txn.postings}
+                                            />
+                                        </td>
+                                        <td className="amount">
+                                            {formatTotals(txn.totals)}
+                                        </td>
+                                        <td>
+                                            {txn.evidence.length === 0 ? (
+                                                <span className="text-muted">
+                                                    -
+                                                </span>
+                                            ) : (
+                                                <div className="evidence-list">
+                                                    {txn.evidence.map(
+                                                        (evidenceRef) =>
+                                                            isImageAttachmentRef(
+                                                                evidenceRef,
+                                                            ) ? (
+                                                                <button
+                                                                    key={`${txn.id}-${evidenceRef}`}
+                                                                    className="evidence-chip evidence-chip-image"
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        void handleAttachmentClick(
+                                                                            attachmentFilename(
+                                                                                evidenceRef,
+                                                                            ),
+                                                                        );
+                                                                    }}
+                                                                >
+                                                                    {attachmentFilename(
+                                                                        evidenceRef,
+                                                                    )}
+                                                                </button>
+                                                            ) : (
+                                                                <span
+                                                                    key={`${txn.id}-${evidenceRef}`}
+                                                                    className="evidence-chip"
+                                                                    title={
+                                                                        evidenceRef
+                                                                    }
+                                                                >
+                                                                    {
+                                                                        evidenceRef
+                                                                    }
+                                                                </span>
+                                                            ),
+                                                    )}
+                                                </div>
+                                            )}
+                                        </td>
+                                        {hasActions && (
+                                            <td>
+                                                {/* ML suggestion chip — only for Expenses:Unknown */}
+                                                {isUncategorized &&
+                                                    transferMatch !== null &&
+                                                    onMergeTransfer !==
+                                                        undefined && (
+                                                        <div className="categorize-chip">
+                                                            <span className="text-muted">
+                                                                Transfer ↔{' '}
+                                                                {
+                                                                    transferMatch.date
+                                                                }{' '}
+                                                                {
+                                                                    transferMatch.description
+                                                                }
+                                                            </span>
                                                             <button
-                                                                key={`${txn.id}-${evidenceRef}`}
-                                                                className="evidence-chip evidence-chip-image"
                                                                 type="button"
+                                                                className="ghost-button"
                                                                 onClick={() => {
-                                                                    void handleAttachmentClick(
-                                                                        attachmentFilename(
-                                                                            evidenceRef,
-                                                                        ),
+                                                                    onMergeTransfer(
+                                                                        txn.id,
+                                                                        transferMatch.txnId,
                                                                     );
                                                                 }}
                                                             >
-                                                                {attachmentFilename(
-                                                                    evidenceRef,
-                                                                )}
+                                                                Merge
                                                             </button>
-                                                        ) : (
-                                                            <span
-                                                                key={`${txn.id}-${evidenceRef}`}
-                                                                className="evidence-chip"
-                                                                title={
-                                                                    evidenceRef
-                                                                }
-                                                            >
-                                                                {evidenceRef}
+                                                        </div>
+                                                    )}
+                                                {isUncategorized &&
+                                                    transferMatch === null &&
+                                                    suggested !== null &&
+                                                    onRecategorize !==
+                                                        undefined && (
+                                                        <div className="categorize-chip">
+                                                            <span className="text-muted">
+                                                                {suggested}
                                                             </span>
-                                                        ),
-                                                )}
-                                            </div>
-                                        )}
-                                    </td>
-                                    {hasActions && (
-                                        <td>
-                                            {/* ML suggestion chip — only for Expenses:Unknown */}
-                                            {isUncategorized &&
-                                                transferMatch !== null &&
-                                                onMergeTransfer !==
-                                                    undefined && (
-                                                    <div className="categorize-chip">
-                                                        <span className="text-muted">
-                                                            Transfer ↔{' '}
-                                                            {transferMatch.date}{' '}
-                                                            {
-                                                                transferMatch.description
-                                                            }
-                                                        </span>
-                                                        <button
-                                                            type="button"
-                                                            className="ghost-button"
-                                                            onClick={() => {
-                                                                onMergeTransfer(
-                                                                    txn.id,
-                                                                    transferMatch.txnId,
-                                                                );
-                                                            }}
-                                                        >
-                                                            Merge
-                                                        </button>
-                                                    </div>
-                                                )}
-                                            {isUncategorized &&
-                                                transferMatch === null &&
-                                                suggested !== null &&
-                                                onRecategorize !==
-                                                    undefined && (
-                                                    <div className="categorize-chip">
-                                                        <span className="text-muted">
-                                                            {suggested}
-                                                        </span>
-                                                        <button
-                                                            type="button"
-                                                            className="ghost-button"
-                                                            onClick={() => {
-                                                                onRecategorize(
-                                                                    txn.id,
-                                                                    'Expenses:Unknown',
-                                                                    suggested,
-                                                                );
-                                                            }}
-                                                        >
-                                                            Accept
-                                                        </button>
-                                                    </div>
-                                                )}
-                                            {/* Per-expense-posting Set Category */}
-                                            {onRecategorize !== undefined &&
-                                                txn.postings
-                                                    .filter((p) => {
-                                                        if (
-                                                            !p.account.startsWith(
-                                                                'Expenses:',
-                                                            )
-                                                        )
-                                                            return false;
-                                                        // Skip Unknown when ML suggestion is already shown above
-                                                        if (
-                                                            p.account ===
-                                                                'Expenses:Unknown' &&
-                                                            suggested !==
-                                                                null &&
-                                                            transferMatch ===
-                                                                null
-                                                        )
-                                                            return false;
-                                                        return true;
-                                                    })
-                                                    .map((p) => {
-                                                        const key = `${txn.id}:${p.account}`;
-                                                        const isEditing =
-                                                            editingKey === key;
-                                                        return (
-                                                            <div
-                                                                key={p.account}
-                                                                className="categorize-chip"
+                                                            <button
+                                                                type="button"
+                                                                className="ghost-button"
+                                                                onClick={() => {
+                                                                    onRecategorize(
+                                                                        txn.id,
+                                                                        'Expenses:Unknown',
+                                                                        suggested,
+                                                                    );
+                                                                }}
                                                             >
-                                                                {isEditing ? (
-                                                                    <>
-                                                                        <input
-                                                                            type="text"
-                                                                            list="gl-account-datalist"
-                                                                            value={
-                                                                                categoryDraft
-                                                                            }
-                                                                            placeholder="Account name…"
-                                                                            autoFocus
-                                                                            onChange={(
-                                                                                e,
-                                                                            ) => {
-                                                                                setCategoryDraft(
-                                                                                    e
-                                                                                        .target
-                                                                                        .value,
-                                                                                );
-                                                                            }}
-                                                                            onKeyDown={(
-                                                                                e,
-                                                                            ) => {
-                                                                                if (
-                                                                                    e.key ===
-                                                                                        'Enter' &&
-                                                                                    categoryDraft.trim()
-                                                                                ) {
-                                                                                    onRecategorize(
-                                                                                        txn.id,
-                                                                                        p.account,
-                                                                                        categoryDraft.trim(),
-                                                                                    );
-                                                                                    setEditingKey(
-                                                                                        null,
-                                                                                    );
-                                                                                } else if (
-                                                                                    e.key ===
-                                                                                    'Escape'
-                                                                                ) {
-                                                                                    setEditingKey(
-                                                                                        null,
-                                                                                    );
+                                                                Accept
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                {/* Per-expense-posting Set Category */}
+                                                {onRecategorize !== undefined &&
+                                                    txn.postings
+                                                        .filter((p) => {
+                                                            if (
+                                                                !p.account.startsWith(
+                                                                    'Expenses:',
+                                                                )
+                                                            )
+                                                                return false;
+                                                            // Skip Unknown when ML suggestion is already shown above
+                                                            if (
+                                                                p.account ===
+                                                                    'Expenses:Unknown' &&
+                                                                suggested !==
+                                                                    null &&
+                                                                transferMatch ===
+                                                                    null
+                                                            )
+                                                                return false;
+                                                            return true;
+                                                        })
+                                                        .map((p) => {
+                                                            const key = `${txn.id}:${p.account}`;
+                                                            const isEditing =
+                                                                editingKey ===
+                                                                key;
+                                                            return (
+                                                                <div
+                                                                    key={
+                                                                        p.account
+                                                                    }
+                                                                    className="categorize-chip"
+                                                                >
+                                                                    {isEditing ? (
+                                                                        <>
+                                                                            <input
+                                                                                type="text"
+                                                                                list="gl-account-datalist"
+                                                                                value={
+                                                                                    categoryDraft
                                                                                 }
-                                                                            }}
-                                                                        />
-                                                                        <button
-                                                                            type="button"
-                                                                            className="ghost-button"
-                                                                            disabled={
-                                                                                !categoryDraft.trim()
-                                                                            }
-                                                                            onClick={() => {
-                                                                                if (
-                                                                                    categoryDraft.trim()
-                                                                                ) {
-                                                                                    onRecategorize(
-                                                                                        txn.id,
-                                                                                        p.account,
-                                                                                        categoryDraft.trim(),
+                                                                                placeholder="Account name…"
+                                                                                autoFocus
+                                                                                onChange={(
+                                                                                    e,
+                                                                                ) => {
+                                                                                    setCategoryDraft(
+                                                                                        e
+                                                                                            .target
+                                                                                            .value,
                                                                                     );
+                                                                                }}
+                                                                                onKeyDown={(
+                                                                                    e,
+                                                                                ) => {
+                                                                                    if (
+                                                                                        e.key ===
+                                                                                            'Enter' &&
+                                                                                        categoryDraft.trim()
+                                                                                    ) {
+                                                                                        onRecategorize(
+                                                                                            txn.id,
+                                                                                            p.account,
+                                                                                            categoryDraft.trim(),
+                                                                                        );
+                                                                                        setEditingKey(
+                                                                                            null,
+                                                                                        );
+                                                                                    } else if (
+                                                                                        e.key ===
+                                                                                        'Escape'
+                                                                                    ) {
+                                                                                        setEditingKey(
+                                                                                            null,
+                                                                                        );
+                                                                                    }
+                                                                                }}
+                                                                            />
+                                                                            <button
+                                                                                type="button"
+                                                                                className="ghost-button"
+                                                                                disabled={
+                                                                                    !categoryDraft.trim()
+                                                                                }
+                                                                                onClick={() => {
+                                                                                    if (
+                                                                                        categoryDraft.trim()
+                                                                                    ) {
+                                                                                        onRecategorize(
+                                                                                            txn.id,
+                                                                                            p.account,
+                                                                                            categoryDraft.trim(),
+                                                                                        );
+                                                                                        setEditingKey(
+                                                                                            null,
+                                                                                        );
+                                                                                    }
+                                                                                }}
+                                                                            >
+                                                                                Set
+                                                                            </button>
+                                                                            <button
+                                                                                type="button"
+                                                                                className="ghost-button"
+                                                                                onClick={() => {
                                                                                     setEditingKey(
                                                                                         null,
                                                                                     );
+                                                                                }}
+                                                                            >
+                                                                                Cancel
+                                                                            </button>
+                                                                        </>
+                                                                    ) : (
+                                                                        <>
+                                                                            <span className="text-muted">
+                                                                                {
+                                                                                    p.account
                                                                                 }
-                                                                            }}
-                                                                        >
-                                                                            Set
-                                                                        </button>
-                                                                        <button
-                                                                            type="button"
-                                                                            className="ghost-button"
-                                                                            onClick={() => {
-                                                                                setEditingKey(
-                                                                                    null,
-                                                                                );
-                                                                            }}
-                                                                        >
-                                                                            Cancel
-                                                                        </button>
-                                                                    </>
-                                                                ) : (
-                                                                    <>
-                                                                        <span className="text-muted">
-                                                                            {
-                                                                                p.account
-                                                                            }
-                                                                        </span>
-                                                                        <button
-                                                                            type="button"
-                                                                            className="ghost-button"
-                                                                            onClick={() => {
-                                                                                setCategoryDraft(
-                                                                                    p.account ===
-                                                                                        'Expenses:Unknown' &&
-                                                                                        suggested !==
-                                                                                            null
-                                                                                        ? suggested
-                                                                                        : '',
-                                                                                );
-                                                                                setEditingKey(
-                                                                                    key,
-                                                                                );
-                                                                            }}
-                                                                        >
-                                                                            Set
-                                                                            Category
-                                                                        </button>
-                                                                    </>
-                                                                )}
-                                                            </div>
-                                                        );
-                                                    })}
-                                            {/* Manual Link Transfer — only for Expenses:Unknown rows without auto-match */}
-                                            {isUncategorized &&
-                                                transferMatch === null &&
-                                                onOpenLinkTransfer !==
-                                                    undefined && (
-                                                    <button
-                                                        type="button"
-                                                        className="ghost-button"
-                                                        onClick={() => {
-                                                            onOpenLinkTransfer(
-                                                                txn.id,
+                                                                            </span>
+                                                                            <button
+                                                                                type="button"
+                                                                                className="ghost-button"
+                                                                                onClick={() => {
+                                                                                    setCategoryDraft(
+                                                                                        p.account ===
+                                                                                            'Expenses:Unknown' &&
+                                                                                            suggested !==
+                                                                                                null
+                                                                                            ? suggested
+                                                                                            : '',
+                                                                                    );
+                                                                                    setEditingKey(
+                                                                                        key,
+                                                                                    );
+                                                                                }}
+                                                                            >
+                                                                                Set
+                                                                                Category
+                                                                            </button>
+                                                                        </>
+                                                                    )}
+                                                                </div>
                                                             );
-                                                        }}
-                                                    >
-                                                        Link Transfer
-                                                    </button>
-                                                )}
-                                        </td>
-                                    )}
-                                </tr>
-                            );
-                        })
-                    )}
-                </tbody>
-            </table>
+                                                        })}
+                                                {/* Manual Link Transfer — only for Expenses:Unknown rows without auto-match */}
+                                                {isUncategorized &&
+                                                    transferMatch === null &&
+                                                    onOpenLinkTransfer !==
+                                                        undefined && (
+                                                        <button
+                                                            type="button"
+                                                            className="ghost-button"
+                                                            onClick={() => {
+                                                                onOpenLinkTransfer(
+                                                                    txn.id,
+                                                                );
+                                                            }}
+                                                        >
+                                                            Link Transfer
+                                                        </button>
+                                                    )}
+                                            </td>
+                                        )}
+                                    </tr>
+                                );
+                            })
+                        )}
+                    </tbody>
+                </table>
+                <datalist id="gl-account-datalist">
+                    {accountNames.map((n) => (
+                        <option key={n} value={n} />
+                    ))}
+                </datalist>
+            </div>
             {(lightboxLoading ||
                 lightboxSrc !== null ||
                 lightboxError !== null) && (
@@ -8159,11 +8373,91 @@ function TransactionsTable({
                     </div>
                 </div>
             )}
-            <datalist id="gl-account-datalist">
-                {accountNames.map((n) => (
-                    <option key={n} value={n} />
-                ))}
-            </datalist>
+            {bulkConfirm !== null && (
+                <div
+                    className="modal-overlay"
+                    onClick={() => {
+                        setBulkConfirm(null);
+                    }}
+                >
+                    <div
+                        className="modal-dialog"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                        }}
+                    >
+                        <div className="modal-header">
+                            <h3>Confirm bulk recategorize</h3>
+                            <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => {
+                                    setBulkConfirm(null);
+                                }}
+                            >
+                                Close
+                            </button>
+                        </div>
+                        <p>
+                            The selected rows have different current accounts.
+                            All will be changed to{' '}
+                            <strong>{bulkConfirm.newAccount}</strong>:
+                        </p>
+                        <ul>
+                            {[
+                                ...new Map(
+                                    bulkConfirm.entries.map((e) => [
+                                        e.oldAccount,
+                                        0,
+                                    ]),
+                                ).entries(),
+                            ].map(([acct]) => {
+                                const count = bulkConfirm.entries.filter(
+                                    (e) => e.oldAccount === acct,
+                                ).length;
+                                return (
+                                    <li key={acct}>
+                                        {count} × {acct} →{' '}
+                                        {bulkConfirm.newAccount}
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                        <div
+                            style={{
+                                display: 'flex',
+                                gap: '0.5rem',
+                                justifyContent: 'flex-end',
+                            }}
+                        >
+                            <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => {
+                                    setBulkConfirm(null);
+                                }}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => {
+                                    onBulkRecategorize?.(
+                                        bulkConfirm.entries,
+                                        bulkConfirm.newAccount,
+                                    );
+                                    setSelectedIds(new Set());
+                                    setBulkDraft('');
+                                    setBulkConfirm(null);
+                                }}
+                            >
+                                Confirm
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </>
     );
 }

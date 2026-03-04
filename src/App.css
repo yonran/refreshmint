@@ -741,6 +741,23 @@ details[open] > .disclosure-summary::before {
     font-style: italic;
 }
 
+.bulk-action-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: #f0f4ff;
+    border: 1px solid #c8d6f8;
+    border-radius: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.bulk-action-bar .count-label {
+    font-size: 0.875rem;
+    color: #555;
+    margin-right: auto;
+}
+
 /* Transfer matching modal */
 .modal-overlay {
     position: fixed;
