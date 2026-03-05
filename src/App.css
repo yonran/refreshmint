@@ -841,6 +841,34 @@ details[open] > .disclosure-summary::before {
     background: #e8f0fe;
 }
 
+.account-input-wrap {
+    position: relative;
+    display: inline-flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+/* Like .search-autocomplete but without right:0 — uses min-width instead */
+.account-suggestions {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 200;
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 0.4rem;
+    box-shadow: 0 4px 12px rgb(0 0 0 / 12%);
+    min-width: 220px;
+    max-height: 260px;
+    overflow-y: auto;
+}
+
+.account-warning {
+    font-size: 0.78rem;
+    color: #b45309; /* amber-700 */
+    max-width: 260px;
+}
+
 .query-error {
     color: #721c24;
     background: #f8d7da;
