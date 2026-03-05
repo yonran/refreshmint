@@ -38,6 +38,13 @@ If no one format has all information, then download multiple formats (e.g. if on
 Bank accounts and credit cards should also have balance information at specific points of time (e.g. start of statement or end of statement).
 If e.g. only the HTML contains some information, then also save the HTML table too, and implement the extractor to extract info from that table.
 If other attachments are available such as check images, download those too.
+If zelle transactions are available separately, download those too.
+Per-transaction Fields to look for in particular for bank and credit cards:
+* Transaction date
+* Posted date
+* Amount
+* Transaction type (e.g. purchase, fee, payment, transfer)
+* Merchant category code
 
 For vendor accounts (e.g. safeway, target, etc.), it should download all the statements, invoices, receipts, etc.
 
