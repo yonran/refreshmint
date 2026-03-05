@@ -76,3 +76,14 @@ Retail providers often expose different levels of detail for online and
 in-store purchases. We need to decide whether all retail receipt sources should
 normalize to one shared schema or preserve source-specific differences where the
 data is materially different.
+
+## Major Version Cleanups
+
+### Remove legacy secret fallback
+
+- Remove `ENABLE_LEGACY_SECRET_FALLBACK` and legacy keychain resolution in
+  `src-tauri/src/scrape/js_api.rs`.
+- Remove no-longer-needed legacy keychain helper APIs after cutover.
+- Remove `migrate_login_secrets` once the migration window closes.
+- Remove legacy-credentials migration UI affordances.
+- Add release notes for the breaking change (legacy secret format unsupported).
