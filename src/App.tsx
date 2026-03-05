@@ -192,6 +192,25 @@ type PipelineBulkStats = {
     post: PipelineBulkSummary;
 };
 
+type SimilarRecategorizePlan = {
+    entries: Array<{ txnId: string; oldAccount: string }>;
+    allEntries: Array<{ txnId: string; oldAccount: string }>;
+    newAccount: string;
+    searchQuery: string;
+    description: string;
+    balancingAccount: string;
+    includeAll: boolean;
+};
+
+type RecategorizeTab = {
+    id: number;
+    plan: SimilarRecategorizePlan;
+    queryResults: TransactionRow[] | null;
+    queryError: string | null;
+};
+
+type AppTab = ActiveTab | `recategorize:${number}`;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -283,7 +302,7 @@ function App() {
     const [openStatus, setOpenStatus] = useState<string | null>(null);
     const [isOpening, setIsOpening] = useState(false);
     const [ledger, setLedger] = useState<LedgerView | null>(null);
-    const [activeTab, setActiveTab] = useState<ActiveTab>('accounts');
+    const [activeTab, setActiveTab] = useState<AppTab>('accounts');
     const [hideObviousAmounts, setHideObviousAmounts] = useState(
         () => localStorage.getItem('pref:hideObviousAmounts') !== 'false',
     );
@@ -438,11 +457,18 @@ function App() {
         null,
     );
     const [queryError, setQueryError] = useState<string | null>(null);
+    const [recategorizeTabs, setRecategorizeTabs] = useState<RecategorizeTab[]>(
+        [],
+    );
     const [isNewTxnExpandedOverride, setIsNewTxnExpandedOverride] = useState<
         boolean | null
     >(null);
     const [acSuggestions, setAcSuggestions] = useState<string[]>([]);
     const [acActiveIndex, setAcActiveIndex] = useState(-1);
+    const [similarAcSuggestions, setSimilarAcSuggestions] = useState<string[]>(
+        [],
+    );
+    const [similarAcActiveIndex, setSimilarAcActiveIndex] = useState(-1);
     const [glCategorySuggestions, setGlCategorySuggestions] = useState<
         Record<string, GlCategoryResult>
     >({});
@@ -482,7 +508,9 @@ function App() {
     });
     const startupCancelledRef = useRef(false);
     const suggestRequestId = useRef(0);
+    const recategorizeTabIdRef = useRef(1);
     const searchInputRef = useRef<HTMLInputElement>(null);
+    const similarSearchInputRef = useRef<HTMLInputElement>(null);
     const secretDomainRef = useRef('');
     const secretNameRef = useRef('');
     const secretPromptResolverRef = useRef<
@@ -498,6 +526,15 @@ function App() {
               )
         : [];
     const selectedScrapeAccount = scrapeAccount.trim();
+    const activeRecategorizeTabId = activeTab.startsWith('recategorize:')
+        ? Number.parseInt(activeTab.slice('recategorize:'.length), 10)
+        : null;
+    const activeRecategorizeTab =
+        activeRecategorizeTabId === null
+            ? null
+            : (recategorizeTabs.find(
+                  (tab) => tab.id === activeRecategorizeTabId,
+              ) ?? null);
 
     const filteredTransactions = (() => {
         if (!ledger) return [];
@@ -979,6 +1016,9 @@ function App() {
             setTransactionsSearch('');
             setAcSuggestions([]);
             setAcActiveIndex(-1);
+            setRecategorizeTabs([]);
+            setSimilarAcSuggestions([]);
+            setSimilarAcActiveIndex(-1);
         }
     }, [ledgerPath]);
 
@@ -1051,6 +1091,65 @@ function App() {
             clearTimeout(timer);
         };
     }, [transactionsSearch, ledger]);
+
+    useEffect(() => {
+        if (activeRecategorizeTab === null || !ledger) {
+            return;
+        }
+        const q = activeRecategorizeTab.plan.searchQuery.trim();
+        if (!q) {
+            setRecategorizeTabs((current) =>
+                current.map((tab) =>
+                    tab.id === activeRecategorizeTab.id
+                        ? { ...tab, queryResults: null, queryError: null }
+                        : tab,
+                ),
+            );
+            return;
+        }
+        const timer = setTimeout(() => {
+            void (async () => {
+                try {
+                    const rows = await queryTransactions(ledger.path, q);
+                    setRecategorizeTabs((current) =>
+                        current.map((tab) =>
+                            tab.id === activeRecategorizeTab.id
+                                ? {
+                                      ...tab,
+                                      queryResults: rows,
+                                      queryError: null,
+                                  }
+                                : tab,
+                        ),
+                    );
+                } catch (err) {
+                    setRecategorizeTabs((current) =>
+                        current.map((tab) =>
+                            tab.id === activeRecategorizeTab.id
+                                ? {
+                                      ...tab,
+                                      queryResults: null,
+                                      queryError: String(err),
+                                  }
+                                : tab,
+                        ),
+                    );
+                }
+            })();
+        }, 300);
+        return () => {
+            clearTimeout(timer);
+        };
+    }, [activeRecategorizeTab, ledger]);
+
+    useEffect(() => {
+        if (
+            activeRecategorizeTabId !== null &&
+            !recategorizeTabs.some((tab) => tab.id === activeRecategorizeTabId)
+        ) {
+            setActiveTab('transactions');
+        }
+    }, [activeRecategorizeTabId, recategorizeTabs]);
 
     useEffect(() => {
         if (ledgerPath === null) {
@@ -1772,7 +1871,16 @@ function App() {
         if (!ledger) {
             return;
         }
-        void setLastActiveTab(activeTab);
+        const persistedTab: ActiveTab =
+            activeTab === 'accounts' ||
+            activeTab === 'transactions' ||
+            activeTab === 'scrape' ||
+            activeTab === 'pipeline' ||
+            activeTab === 'reports' ||
+            activeTab === 'preferences'
+                ? activeTab
+                : 'transactions';
+        void setLastActiveTab(persistedTab);
     }, [activeTab, ledger]);
 
     // Load GL category suggestions whenever the Transactions tab is active.
@@ -3911,6 +4019,51 @@ function App() {
         });
     }
 
+    function applySimilarSearchCompletion(suggestion: string) {
+        const input = similarSearchInputRef.current;
+        const currentQuery = activeRecategorizeTab?.plan.searchQuery ?? '';
+        if (!input || activeRecategorizeTab === null) return;
+        const cursorPos = input.selectionStart ?? currentQuery.length;
+        const { token, start, end } = getCurrentToken(currentQuery, cursorPos);
+        const cursorOffsetInToken = cursorPos - start;
+        const colonIdx = token.indexOf(':');
+        const cursorBeforeColon =
+            colonIdx !== -1 && cursorOffsetInToken <= colonIdx;
+
+        let inserted: string;
+        let replaceEnd: number;
+        if (cursorBeforeColon && suggestion.endsWith(':')) {
+            inserted = suggestion + token.substring(colonIdx + 1);
+            replaceEnd = end;
+        } else {
+            inserted = suggestion;
+            replaceEnd = end;
+        }
+
+        const needsTrailingSpace = replaceEnd >= currentQuery.length;
+        const newValue =
+            currentQuery.substring(0, start) +
+            inserted +
+            (needsTrailingSpace ? ' ' : '') +
+            currentQuery.substring(replaceEnd);
+        setRecategorizeTabs((current) =>
+            current.map((tab) =>
+                tab.id === activeRecategorizeTab.id
+                    ? {
+                          ...tab,
+                          plan: { ...tab.plan, searchQuery: newValue },
+                      }
+                    : tab,
+            ),
+        );
+        setSimilarAcSuggestions([]);
+        setSimilarAcActiveIndex(-1);
+        requestAnimationFrame(() => {
+            const pos = start + inserted.length + (needsTrailingSpace ? 1 : 0);
+            input.setSelectionRange(pos, pos);
+        });
+    }
+
     function appendSearchTerm(term: string) {
         const current = transactionsSearch.trim();
         setTransactionsSearch(current ? `${current} ${term}` : term);
@@ -4077,6 +4230,25 @@ function App() {
                         >
                             Transactions
                         </button>
+                        {recategorizeTabs.map((tab) => {
+                            const tabKey = `recategorize:${tab.id}` as const;
+                            return (
+                                <button
+                                    key={tab.id}
+                                    className={
+                                        activeTab === tabKey
+                                            ? 'tab active'
+                                            : 'tab'
+                                    }
+                                    onClick={() => {
+                                        setActiveTab(tabKey);
+                                    }}
+                                    type="button"
+                                >
+                                    Recategorize {tab.id}
+                                </button>
+                            );
+                        })}
                         <button
                             className={
                                 activeTab === 'pipeline' ? 'tab active' : 'tab'
@@ -4821,6 +4993,7 @@ function App() {
                             </section>
                             <TransactionsTable
                                 transactions={filteredTransactions}
+                                allTransactions={ledger.transactions}
                                 ledgerPath={ledgerPath}
                                 accountNames={ledger.accounts.map(
                                     (a) => a.name,
@@ -4849,6 +5022,21 @@ function App() {
                                         entries,
                                         newAccount,
                                     );
+                                }}
+                                onOpenSimilarRecategorize={(plan) => {
+                                    const id = recategorizeTabIdRef.current++;
+                                    setRecategorizeTabs((current) => [
+                                        ...current,
+                                        {
+                                            id,
+                                            plan,
+                                            queryResults: null,
+                                            queryError: null,
+                                        },
+                                    ]);
+                                    setSimilarAcSuggestions([]);
+                                    setSimilarAcActiveIndex(-1);
+                                    setActiveTab(`recategorize:${id}`);
                                 }}
                                 hideObviousAmounts={hideObviousAmounts}
                                 onAddSearchTerm={appendSearchTerm}
@@ -4993,6 +5181,414 @@ function App() {
                                         </div>
                                     );
                                 })(glTransferModalTxnId)}
+                        </div>
+                    ) : activeRecategorizeTab !== null ? (
+                        <div className="transactions-panel">
+                            {(() => {
+                                const baseEntries = activeRecategorizeTab.plan
+                                    .includeAll
+                                    ? activeRecategorizeTab.plan.allEntries
+                                    : activeRecategorizeTab.plan.entries;
+                                const similarQueryResultIds = new Set(
+                                    (
+                                        activeRecategorizeTab.queryResults ?? []
+                                    ).map((txn) => txn.id),
+                                );
+                                const matchingEntries =
+                                    activeRecategorizeTab.queryResults === null
+                                        ? baseEntries
+                                        : baseEntries.filter((entry) =>
+                                              similarQueryResultIds.has(
+                                                  entry.txnId,
+                                              ),
+                                          );
+                                const txnById = new Map(
+                                    ledger.transactions.map((txn) => [
+                                        txn.id,
+                                        txn,
+                                    ]),
+                                );
+                                return (
+                                    <section className="txn-form">
+                                        <div className="txn-form-header">
+                                            <div>
+                                                <h2>Recategorize</h2>
+                                                <p>
+                                                    Refine query and
+                                                    destination, then apply to
+                                                    matching rows.
+                                                </p>
+                                            </div>
+                                            <div className="header-actions">
+                                                <button
+                                                    type="button"
+                                                    className="ghost-button"
+                                                    onClick={() => {
+                                                        setActiveTab(
+                                                            'transactions',
+                                                        );
+                                                    }}
+                                                >
+                                                    Back to Transactions
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="ghost-button"
+                                                    onClick={() => {
+                                                        setRecategorizeTabs(
+                                                            (current) =>
+                                                                current.filter(
+                                                                    (tab) =>
+                                                                        tab.id !==
+                                                                        activeRecategorizeTab.id,
+                                                                ),
+                                                        );
+                                                        setActiveTab(
+                                                            'transactions',
+                                                        );
+                                                    }}
+                                                >
+                                                    Close
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div className="search-bar-wrapper">
+                                            <input
+                                                ref={similarSearchInputRef}
+                                                type="search"
+                                                placeholder="Search… (hledger query: desc:amazon acct:^Expenses date:thismonth)"
+                                                value={
+                                                    activeRecategorizeTab.plan
+                                                        .searchQuery
+                                                }
+                                                onChange={(e) => {
+                                                    const val = e.target.value;
+                                                    setRecategorizeTabs(
+                                                        (current) =>
+                                                            current.map(
+                                                                (tab) =>
+                                                                    tab.id ===
+                                                                    activeRecategorizeTab.id
+                                                                        ? {
+                                                                              ...tab,
+                                                                              plan: {
+                                                                                  ...tab.plan,
+                                                                                  searchQuery:
+                                                                                      val,
+                                                                              },
+                                                                          }
+                                                                        : tab,
+                                                            ),
+                                                    );
+                                                    const cursorPos =
+                                                        e.target
+                                                            .selectionStart ??
+                                                        val.length;
+                                                    const { token, start } =
+                                                        getCurrentToken(
+                                                            val,
+                                                            cursorPos,
+                                                        );
+                                                    const cursorOffsetInToken =
+                                                        cursorPos - start;
+                                                    const sugs =
+                                                        getSearchSuggestions(
+                                                            token,
+                                                            cursorOffsetInToken,
+                                                            ledger.accounts,
+                                                        );
+                                                    setSimilarAcSuggestions(
+                                                        sugs,
+                                                    );
+                                                    setSimilarAcActiveIndex(-1);
+                                                }}
+                                                onKeyDown={(e) => {
+                                                    if (
+                                                        similarAcSuggestions.length ===
+                                                        0
+                                                    )
+                                                        return;
+                                                    if (e.key === 'ArrowDown') {
+                                                        e.preventDefault();
+                                                        setSimilarAcActiveIndex(
+                                                            (i) =>
+                                                                Math.min(
+                                                                    i + 1,
+                                                                    similarAcSuggestions.length -
+                                                                        1,
+                                                                ),
+                                                        );
+                                                    } else if (
+                                                        e.key === 'ArrowUp'
+                                                    ) {
+                                                        e.preventDefault();
+                                                        setSimilarAcActiveIndex(
+                                                            (i) =>
+                                                                Math.max(
+                                                                    i - 1,
+                                                                    0,
+                                                                ),
+                                                        );
+                                                    } else if (
+                                                        (e.key === 'Enter' ||
+                                                            e.key === 'Tab') &&
+                                                        similarAcActiveIndex >=
+                                                            0
+                                                    ) {
+                                                        e.preventDefault();
+                                                        applySimilarSearchCompletion(
+                                                            similarAcSuggestions[
+                                                                similarAcActiveIndex
+                                                            ] ?? '',
+                                                        );
+                                                    } else if (
+                                                        e.key === 'Escape'
+                                                    ) {
+                                                        setSimilarAcSuggestions(
+                                                            [],
+                                                        );
+                                                        setSimilarAcActiveIndex(
+                                                            -1,
+                                                        );
+                                                    }
+                                                }}
+                                                onBlur={() => {
+                                                    setTimeout(() => {
+                                                        setSimilarAcSuggestions(
+                                                            [],
+                                                        );
+                                                        setSimilarAcActiveIndex(
+                                                            -1,
+                                                        );
+                                                    }, 150);
+                                                }}
+                                            />
+                                            {similarAcSuggestions.length >
+                                                0 && (
+                                                <div
+                                                    className="search-autocomplete"
+                                                    role="listbox"
+                                                >
+                                                    {similarAcSuggestions.map(
+                                                        (sug, i) => (
+                                                            <div
+                                                                key={sug}
+                                                                className={`ac-item${i === similarAcActiveIndex ? ' active' : ''}`}
+                                                                role="option"
+                                                                aria-selected={
+                                                                    i ===
+                                                                    similarAcActiveIndex
+                                                                }
+                                                                onMouseDown={(
+                                                                    e,
+                                                                ) => {
+                                                                    e.preventDefault();
+                                                                    applySimilarSearchCompletion(
+                                                                        sug,
+                                                                    );
+                                                                }}
+                                                            >
+                                                                {sug}
+                                                            </div>
+                                                        ),
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                        {activeRecategorizeTab.queryError !==
+                                            null && (
+                                            <div className="query-error">
+                                                {
+                                                    activeRecategorizeTab.queryError
+                                                }
+                                            </div>
+                                        )}
+                                        <p>
+                                            Recategorize{' '}
+                                            <strong>
+                                                {matchingEntries.length}
+                                            </strong>{' '}
+                                            transactions matching the current
+                                            query to{' '}
+                                            <strong>
+                                                {activeRecategorizeTab.plan.newAccount.trim() ||
+                                                    '(choose category)'}
+                                            </strong>
+                                            ?
+                                        </p>
+                                        <AccountInput
+                                            value={
+                                                activeRecategorizeTab.plan
+                                                    .newAccount
+                                            }
+                                            onChange={(v) => {
+                                                setRecategorizeTabs((current) =>
+                                                    current.map((tab) =>
+                                                        tab.id ===
+                                                        activeRecategorizeTab.id
+                                                            ? {
+                                                                  ...tab,
+                                                                  plan: {
+                                                                      ...tab.plan,
+                                                                      newAccount:
+                                                                          v,
+                                                                  },
+                                                              }
+                                                            : tab,
+                                                    ),
+                                                );
+                                            }}
+                                            accounts={ledger.accounts.map(
+                                                (a) => a.name,
+                                            )}
+                                            oldAccount={matchingEntries.map(
+                                                (entry) => entry.oldAccount,
+                                            )}
+                                            placeholder="Destination category…"
+                                        />
+                                        {activeRecategorizeTab.plan.allEntries
+                                            .length >
+                                            activeRecategorizeTab.plan.entries
+                                                .length && (
+                                            <label className="checkbox-field">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={
+                                                        activeRecategorizeTab
+                                                            .plan.includeAll
+                                                    }
+                                                    onChange={(e) => {
+                                                        const checked =
+                                                            e.target.checked;
+                                                        setRecategorizeTabs(
+                                                            (current) =>
+                                                                current.map(
+                                                                    (tab) =>
+                                                                        tab.id ===
+                                                                        activeRecategorizeTab.id
+                                                                            ? {
+                                                                                  ...tab,
+                                                                                  plan: {
+                                                                                      ...tab.plan,
+                                                                                      includeAll:
+                                                                                          checked,
+                                                                                  },
+                                                                              }
+                                                                            : tab,
+                                                                ),
+                                                        );
+                                                    }}
+                                                />
+                                                <span>
+                                                    Include{' '}
+                                                    {activeRecategorizeTab.plan
+                                                        .allEntries.length -
+                                                        activeRecategorizeTab
+                                                            .plan.entries
+                                                            .length}{' '}
+                                                    more transactions not in
+                                                    current filter
+                                                </span>
+                                            </label>
+                                        )}
+                                        <div className="table-wrap similar-confirm-table-wrap">
+                                            <table className="ledger-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Date</th>
+                                                        <th>Description</th>
+                                                        <th>From Account</th>
+                                                        <th>Amount</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {matchingEntries.length ===
+                                                    0 ? (
+                                                        <tr>
+                                                            <td
+                                                                colSpan={4}
+                                                                className="table-empty"
+                                                            >
+                                                                No transactions
+                                                                match the
+                                                                current query.
+                                                            </td>
+                                                        </tr>
+                                                    ) : (
+                                                        matchingEntries.map(
+                                                            (entry) => {
+                                                                const txn =
+                                                                    txnById.get(
+                                                                        entry.txnId,
+                                                                    );
+                                                                if (!txn)
+                                                                    return null;
+                                                                return (
+                                                                    <tr
+                                                                        key={
+                                                                            entry.txnId
+                                                                        }
+                                                                    >
+                                                                        <td className="mono">
+                                                                            {
+                                                                                txn.date
+                                                                            }
+                                                                        </td>
+                                                                        <td>
+                                                                            {
+                                                                                txn.description
+                                                                            }
+                                                                        </td>
+                                                                        <td>
+                                                                            {
+                                                                                entry.oldAccount
+                                                                            }
+                                                                        </td>
+                                                                        <td className="amount">
+                                                                            {formatTotals(
+                                                                                txn.totals,
+                                                                            )}
+                                                                        </td>
+                                                                    </tr>
+                                                                );
+                                                            },
+                                                        )
+                                                    )}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                        <div className="txn-actions">
+                                            <button
+                                                type="button"
+                                                className="primary-button"
+                                                disabled={
+                                                    !activeRecategorizeTab.plan.newAccount.trim() ||
+                                                    matchingEntries.length === 0
+                                                }
+                                                onClick={() => {
+                                                    void handleBulkRecategorize(
+                                                        matchingEntries,
+                                                        activeRecategorizeTab.plan.newAccount.trim(),
+                                                    );
+                                                    setRecategorizeTabs(
+                                                        (current) =>
+                                                            current.filter(
+                                                                (tab) =>
+                                                                    tab.id !==
+                                                                    activeRecategorizeTab.id,
+                                                            ),
+                                                    );
+                                                    setActiveTab(
+                                                        'transactions',
+                                                    );
+                                                }}
+                                            >
+                                                Apply
+                                            </button>
+                                        </div>
+                                    </section>
+                                );
+                            })()}
                         </div>
                     ) : activeTab === 'pipeline' ? (
                         <div className="transactions-panel">
@@ -6062,6 +6658,7 @@ function App() {
                                     <div className="table-wrap">
                                         <TransactionsTable
                                             transactions={pipelineGlRows}
+                                            allTransactions={pipelineGlRows}
                                             ledgerPath={ledgerPath}
                                             hideObviousAmounts={
                                                 hideObviousAmounts
@@ -7863,8 +8460,27 @@ function singleNonBalancingPosting(txn: TransactionRow): PostingRow | null {
     return candidates.length === 1 ? (candidates[0] ?? null) : null;
 }
 
+function similarityGroupKey(txn: TransactionRow): string | null {
+    if (!singleNonBalancingPosting(txn)) return null;
+    const balancing = txn.postings.find(
+        (p) =>
+            p.account.startsWith('Assets:') ||
+            p.account.startsWith('Liabilities:'),
+    );
+    if (!balancing) return null;
+    return `${txn.description}\0${balancing.account}`;
+}
+
+/** Key for grouping "similar" uncategorized transactions: same description + same balancing account. */
+function similarKey(txn: TransactionRow): string | null {
+    const posting = singleNonBalancingPosting(txn);
+    if (!posting || posting.account !== 'Expenses:Unknown') return null;
+    return similarityGroupKey(txn);
+}
+
 function TransactionsTable({
     transactions,
+    allTransactions,
     ledgerPath,
     accountNames = [],
     glCategorySuggestions = {},
@@ -7872,10 +8488,12 @@ function TransactionsTable({
     onMergeTransfer,
     onOpenLinkTransfer,
     onBulkRecategorize,
+    onOpenSimilarRecategorize,
     hideObviousAmounts = true,
     onAddSearchTerm,
 }: {
     transactions: TransactionRow[];
+    allTransactions: TransactionRow[];
     ledgerPath: string | null;
     accountNames?: string[];
     glCategorySuggestions?: Record<string, GlCategoryResult>;
@@ -7890,6 +8508,7 @@ function TransactionsTable({
         entries: Array<{ txnId: string; oldAccount: string }>,
         newAccount: string,
     ) => void;
+    onOpenSimilarRecategorize?: (plan: SimilarRecategorizePlan) => void;
     hideObviousAmounts?: boolean;
     onAddSearchTerm?: (term: string) => void;
 }) {
@@ -7909,6 +8528,37 @@ function TransactionsTable({
         entries: Array<{ txnId: string; oldAccount: string }>;
         newAccount: string;
     } | null>(null);
+
+    const similarGroupIds = useMemo(() => {
+        const map = new Map<string, string[]>();
+        for (const txn of transactions) {
+            const key = similarKey(txn);
+            if (key == null) continue;
+            let arr = map.get(key);
+            if (!arr) {
+                arr = [];
+                map.set(key, arr);
+            }
+            arr.push(txn.id);
+        }
+        return map;
+    }, [transactions]);
+
+    const allSimilarGroupIds = useMemo(() => {
+        const map = new Map<string, string[]>();
+        for (const txn of allTransactions) {
+            const key = similarKey(txn);
+            if (key == null) continue;
+            let arr = map.get(key);
+            if (!arr) {
+                arr = [];
+                map.set(key, arr);
+            }
+            arr.push(txn.id);
+        }
+        return map;
+    }, [allTransactions]);
+
     type ContextMenuItem = { label: string; action: () => void };
     const [contextMenu, setContextMenu] = useState<{
         x: number;
@@ -8008,6 +8658,50 @@ function TransactionsTable({
         return p ? [{ txnId: id, oldAccount: p.account }] : [];
     });
     const colCount = 5 + (hasCheckbox ? 1 : 0);
+
+    function toRecategorizeEntries(
+        ids: string[],
+        sourceTransactions: TransactionRow[],
+    ): Array<{ txnId: string; oldAccount: string }> {
+        return ids.flatMap((id) => {
+            const txn = sourceTransactions.find((t) => t.id === id);
+            if (!txn) return [];
+            const posting = singleNonBalancingPosting(txn);
+            if (!posting || posting.account !== 'Expenses:Unknown') return [];
+            return [{ txnId: id, oldAccount: posting.account }];
+        });
+    }
+    function openSimilarConfirmForTxn(
+        txn: TransactionRow,
+        targetAccount: string,
+    ) {
+        const key = similarityGroupKey(txn);
+        if (key === null || onOpenSimilarRecategorize === undefined) return;
+        const filteredSimilarIds = similarGroupIds.get(key) ?? [];
+        const allSimilarIds = allSimilarGroupIds.get(key) ?? [];
+        const entries = toRecategorizeEntries(filteredSimilarIds, transactions);
+        if (entries.length <= 1) return;
+        const allEntries = toRecategorizeEntries(
+            allSimilarIds,
+            allTransactions,
+        );
+        const balancingAccount =
+            txn.postings.find(
+                (posting) =>
+                    posting.account.startsWith('Assets:') ||
+                    posting.account.startsWith('Liabilities:'),
+            )?.account ?? '';
+        onOpenSimilarRecategorize({
+            entries,
+            allEntries:
+                allEntries.length >= entries.length ? allEntries : entries,
+            newAccount: targetAccount,
+            searchQuery: `desc:${quoteHledgerValue(txn.description)} acct:${quoteHledgerValue(balancingAccount)} acct:Expenses:Unknown`,
+            description: txn.description,
+            balancingAccount,
+            includeAll: false,
+        });
+    }
 
     return (
         <>
@@ -8189,15 +8883,49 @@ function TransactionsTable({
                                         </td>
                                         <td
                                             onContextMenu={(e) => {
-                                                openContextMenu(e, [
-                                                    {
-                                                        label: `Filter: desc:${quoteHledgerValue(txn.description)}`,
-                                                        action: () =>
-                                                            onAddSearchTerm?.(
-                                                                `desc:${quoteHledgerValue(txn.description)}`,
+                                                const key = similarKey(txn);
+                                                const similarIds =
+                                                    key !== null
+                                                        ? (similarGroupIds.get(
+                                                              key,
+                                                          ) ?? [])
+                                                        : [];
+                                                const balancingAccount =
+                                                    txn.postings.find(
+                                                        (p) =>
+                                                            p.account.startsWith(
+                                                                'Assets:',
+                                                            ) ||
+                                                            p.account.startsWith(
+                                                                'Liabilities:',
                                                             ),
-                                                    },
-                                                ]);
+                                                    )?.account ?? '';
+                                                const items: ContextMenuItem[] =
+                                                    [
+                                                        {
+                                                            label: `Filter: desc:${quoteHledgerValue(txn.description)}`,
+                                                            action: () =>
+                                                                onAddSearchTerm?.(
+                                                                    `desc:${quoteHledgerValue(txn.description)}`,
+                                                                ),
+                                                        },
+                                                    ];
+                                                if (
+                                                    hasCheckbox &&
+                                                    similarIds.length > 1
+                                                ) {
+                                                    items.push({
+                                                        label: `Check ${similarIds.length} uncategorized ${txn.description} transactions from ${balancingAccount}`,
+                                                        action: () => {
+                                                            setSelectedIds(
+                                                                new Set(
+                                                                    similarIds,
+                                                                ),
+                                                            );
+                                                        },
+                                                    });
+                                                }
+                                                openContextMenu(e, [...items]);
                                             }}
                                         >
                                             {txn.description}
@@ -8247,6 +8975,37 @@ function TransactionsTable({
                                                                     },
                                                                 },
                                                             );
+                                                            const keyForSimilarMenu =
+                                                                similarityGroupKey(
+                                                                    txn,
+                                                                );
+                                                            const similarIdsForMenu =
+                                                                keyForSimilarMenu !==
+                                                                null
+                                                                    ? (similarGroupIds.get(
+                                                                          keyForSimilarMenu,
+                                                                      ) ?? [])
+                                                                    : [];
+                                                            if (
+                                                                p.account !==
+                                                                    'Expenses:Unknown' &&
+                                                                onOpenSimilarRecategorize !==
+                                                                    undefined &&
+                                                                similarIdsForMenu.length >
+                                                                    1
+                                                            ) {
+                                                                postingMenuItems.push(
+                                                                    {
+                                                                        label: `Categorize ${similarIdsForMenu.length} similar transactions to ${p.account}`,
+                                                                        action: () => {
+                                                                            openSimilarConfirmForTxn(
+                                                                                txn,
+                                                                                p.account,
+                                                                            );
+                                                                        },
+                                                                    },
+                                                                );
+                                                            }
                                                         }
                                                         if (
                                                             isUncategorized &&
@@ -8271,6 +9030,20 @@ function TransactionsTable({
                                                             hasObviousAmounts(
                                                                 txn,
                                                             );
+                                                        const keyForSimilar =
+                                                            similarKey(txn);
+                                                        const filteredSimilarIds =
+                                                            keyForSimilar !==
+                                                            null
+                                                                ? (similarGroupIds.get(
+                                                                      keyForSimilar,
+                                                                  ) ?? [])
+                                                                : [];
+                                                        const canShowSimilarPill =
+                                                            onOpenSimilarRecategorize !==
+                                                                undefined &&
+                                                            filteredSimilarIds.length >
+                                                                1;
                                                         return (
                                                             <div
                                                                 key={p.account}
@@ -8356,6 +9129,31 @@ function TransactionsTable({
                                                                         >
                                                                             Cancel
                                                                         </button>
+                                                                        {canShowSimilarPill && (
+                                                                            <button
+                                                                                type="button"
+                                                                                className="similar-count-pill"
+                                                                                disabled={
+                                                                                    !categoryDraft.trim()
+                                                                                }
+                                                                                onClick={() => {
+                                                                                    if (
+                                                                                        categoryDraft.trim()
+                                                                                    ) {
+                                                                                        openSimilarConfirmForTxn(
+                                                                                            txn,
+                                                                                            categoryDraft.trim(),
+                                                                                        );
+                                                                                    }
+                                                                                }}
+                                                                            >
+                                                                                ×
+                                                                                {
+                                                                                    filteredSimilarIds.length
+                                                                                }{' '}
+                                                                                similar
+                                                                            </button>
+                                                                        )}
                                                                     </>
                                                                 ) : isUnknown ? (
                                                                     <button
@@ -8435,21 +9233,41 @@ function TransactionsTable({
                                                                         null &&
                                                                     onRecategorize !==
                                                                         undefined && (
-                                                                        <button
-                                                                            type="button"
-                                                                            className="ghost-button"
-                                                                            onClick={() => {
-                                                                                onRecategorize(
-                                                                                    txn.id,
-                                                                                    'Expenses:Unknown',
-                                                                                    suggested,
-                                                                                );
-                                                                            }}
-                                                                        >
-                                                                            {
-                                                                                suggested
-                                                                            }
-                                                                        </button>
+                                                                        <div className="categorize-chip">
+                                                                            <button
+                                                                                type="button"
+                                                                                className="ghost-button"
+                                                                                onClick={() => {
+                                                                                    onRecategorize(
+                                                                                        txn.id,
+                                                                                        'Expenses:Unknown',
+                                                                                        suggested,
+                                                                                    );
+                                                                                }}
+                                                                            >
+                                                                                {
+                                                                                    suggested
+                                                                                }
+                                                                            </button>
+                                                                            {canShowSimilarPill && (
+                                                                                <button
+                                                                                    type="button"
+                                                                                    className="similar-count-pill"
+                                                                                    onClick={() => {
+                                                                                        openSimilarConfirmForTxn(
+                                                                                            txn,
+                                                                                            suggested,
+                                                                                        );
+                                                                                    }}
+                                                                                >
+                                                                                    ×
+                                                                                    {
+                                                                                        filteredSimilarIds.length
+                                                                                    }{' '}
+                                                                                    similar
+                                                                                </button>
+                                                                            )}
+                                                                        </div>
                                                                     )}
                                                                 {!hideAmounts && (
                                                                     <span className="amount">
