@@ -33,7 +33,10 @@ Example:
     "idField": "bankId",
     "autoExtract": true,
     "secrets": {
-        "example.com": ["bank_username", "bank_password"]
+        "example.com": {
+            "username": "bank_username",
+            "password": "bank_password"
+        }
     }
 }
 ```
@@ -41,7 +44,11 @@ Example:
 Fields:
 
 - `name` (required for extension load): extension folder name under `<ledger>.refreshmint/extensions/<name>/`
-- `secrets` (optional): map of domain to secret names
+- `secrets` (optional): map of domain to declared secret roles
+    - preferred format:
+        - `"domain": { "username": "secret_name", "password": "secret_name" }`
+    - legacy format is still accepted during migration:
+        - `"domain": ["secret_name_a", "secret_name_b"]`
 - `rules` or `extract` (required, exactly one): choose one extraction method
 - `rules`: hledger CSV rules path used by extraction
 - `extract`: JS extraction script path (`extract.mjs`) exporting `extract(context)`

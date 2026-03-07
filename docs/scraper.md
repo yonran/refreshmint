@@ -410,13 +410,39 @@ For `saveResource`, `data` should be bytes (`number[]` is supported). `options` 
 `page.fill(selector, value)` performs secret substitution:
 
 - if `value` is declared in manifest `secrets.<domain>` for current top-level page domain, it is resolved from keychain
+- if `value` matches the declared `username` role, refreshmint reads the keychain Account field (no biometric prompt on macOS)
+- if `value` matches the declared `password` role, refreshmint reads keychain secret data (biometric prompt on macOS)
 - if declared only for a different domain, `fill`/`frameFill` throws
 - if keychain secret exists but is not declared for current domain, `fill`/`frameFill` throws
 - otherwise `value` is treated literally
+
+Manifest secret declarations now support typed role mapping:
+
+```json
+{
+    "secrets": {
+        "example.com": {
+            "username": "example_username",
+            "password": "example_password"
+        }
+    }
+}
+```
+
+Legacy array declarations are still accepted during migration and resolved via
+legacy fallback logic:
+
+```json
+{
+    "secrets": {
+        "example.com": ["example_username", "example_password"]
+    }
+}
+```
 
 Check secrets:
 
 ```bash
 cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
-  secret list --account Assets:Checking
+  secret list --login my-login
 ```
