@@ -2,9 +2,9 @@
     "name": "providentcu",
     "extract": "extract.mjs",
     "secrets": {
-        "accountmanager.providentcu.org": [
-            "providentcu_username",
-            "providentcu_password"
-        ]
+        "accountmanager.providentcu.org": {
+            "username": "providentcu_username",
+            "password": "providentcu_password"
+        }
     }
 }

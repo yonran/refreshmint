@@ -1,6 +1,9 @@
 {
     "name": "paypal",
     "secrets": {
-        "paypal.com": ["paypal_username", "paypal_password"]
+        "paypal.com": {
+            "username": "paypal_username",
+            "password": "paypal_password"
+        }
     }
 }

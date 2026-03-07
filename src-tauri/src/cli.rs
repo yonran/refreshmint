@@ -596,6 +596,15 @@ fn parse_posting(input: &str) -> Result<crate::ledger_add::NewPosting, Box<dyn E
 }
 
 fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
+    fn infer_secret_role(name: &str) -> &'static str {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("username") || lower.contains("_user") || lower.contains("login") {
+            "username"
+        } else {
+            "password"
+        }
+    }
+
     match args.command {
         SecretCommand::Add(a) => {
             let login = require_cli_login_name("login", &a.login)?;
@@ -603,7 +612,14 @@ fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
             let name = require_secret_field("name", &a.name)?;
 
             let store = crate::secret::SecretStore::new(format!("login/{login}"));
-            store.set(&domain, &name, &a.value)?;
+            match infer_secret_role(&name) {
+                "username" => store
+                    .set_username(&domain, &a.value)
+                    .map_err(std::io::Error::other)?,
+                _ => store
+                    .set_password(&domain, &a.value)
+                    .map_err(std::io::Error::other)?,
+            }
             eprintln!("Secret stored.");
             Ok(())
         }
@@ -613,30 +629,42 @@ fn run_secret(args: SecretArgs) -> Result<(), Box<dyn Error>> {
             let name = require_secret_field("name", &a.name)?;
 
             let store = crate::secret::SecretStore::new(format!("login/{login}"));
-            store.set(&domain, &name, &a.value)?;
+            match infer_secret_role(&name) {
+                "username" => store
+                    .set_username(&domain, &a.value)
+                    .map_err(std::io::Error::other)?,
+                _ => store
+                    .set_password(&domain, &a.value)
+                    .map_err(std::io::Error::other)?,
+            }
             eprintln!("Secret re-entered.");
             Ok(())
         }
         SecretCommand::Remove(a) => {
             let login = require_cli_login_name("login", &a.login)?;
             let domain = require_secret_field("domain", &a.domain)?;
-            let name = require_secret_field("name", &a.name)?;
+            let _name = require_secret_field("name", &a.name)?;
 
             let store = crate::secret::SecretStore::new(format!("login/{login}"));
-            store.delete(&domain, &name)?;
-            eprintln!("Secret removed.");
+            store
+                .delete_domain(&domain)
+                .map_err(std::io::Error::other)?;
+            eprintln!("Domain credentials removed.");
             Ok(())
         }
         SecretCommand::List(a) => {
             let login = require_cli_login_name("login", &a.login)?;
             let login_name = login.clone();
             let store = crate::secret::SecretStore::new(format!("login/{login}"));
-            let entries = store.list()?;
+            let entries = store.list_domains().map_err(std::io::Error::other)?;
             if entries.is_empty() {
                 println!("No secrets stored for login '{login_name}'.");
             } else {
-                for (domain, name) in &entries {
-                    println!("{domain}/{name}");
+                for entry in &entries {
+                    println!(
+                        "{} username={} password={}",
+                        entry.domain, entry.has_username, entry.has_password
+                    );
                 }
             }
             Ok(())

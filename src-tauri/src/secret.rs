@@ -1,228 +1,527 @@
 use std::error::Error;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct SecretIndexEntry {
-    key: String,
-    #[serde(default)]
-    has_value: bool,
+/// Per-domain credential stored as a keychain entry.
+///
+/// On macOS:
+///   - Service: `refreshmint/<login>/<domain>`
+///   - Account (kSecAttrAccount): the actual username — readable without biometric
+///   - Data (kSecValueData): the actual password — protected by biometric
+///
+/// On non-macOS (Linux, Windows), keyring does not expose account-field listing,
+/// so credentials are stored as two separate entries under the domain service:
+///   - account `_usr` → username (no biometric)
+///   - account `_pwd` → password (no biometric; these platforms lack biometric anyway)
+///
+/// A lightweight domains index (JSON list) is stored at:
+///   service=`refreshmint/<login>`, account=`_domains_index`, data=JSON (no biometric).
+pub struct SecretStore {
+    login_name: String,
 }
 
-pub type SecretValueStateRow = (String, String, bool);
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainEntry {
+    pub domain: String,
+    pub has_username: bool,
+    pub has_password: bool,
+}
 
-/// Keyring-based secret storage for a single account.
-///
-/// Secrets are stored in the OS keychain with:
-/// - Service: `refreshmint/<account>`
-/// - User: `<domain>/<name>`
-///
-/// An index entry at user=`_index` maintains metadata for all known
-/// `"domain/name"` strings for enumeration (since keyring doesn't
-/// support listing) and whether a value is currently stored.
-pub struct SecretStore {
-    account: String,
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct DomainIndexEntry {
+    domain: String,
+    #[serde(default)]
+    has_username: bool,
+    #[serde(default)]
+    has_password: bool,
 }
 
 impl SecretStore {
-    pub fn new(account: String) -> Self {
-        Self { account }
+    pub fn new(login_name: String) -> Self {
+        Self { login_name }
     }
 
-    fn service(&self) -> String {
-        format!("refreshmint/{}", self.account)
+    fn service_for_domain(&self, domain: &str) -> String {
+        format!("refreshmint/{}/{}", self.login_name, domain)
     }
 
-    fn entry(&self, user: &str) -> Result<keyring::Entry, keyring::Error> {
-        keyring::Entry::new(&self.service(), user)
+    fn index_service(&self) -> String {
+        format!("refreshmint/{}", self.login_name)
     }
 
-    fn index_entry(&self) -> Result<keyring::Entry, keyring::Error> {
-        self.entry("_index")
-    }
+    const INDEX_ACCOUNT: &'static str = "_domains_index";
 
-    fn read_index_entries(&self) -> Result<Vec<SecretIndexEntry>, Box<dyn Error>> {
-        let entry = self.index_entry()?;
+    fn read_domains_index(&self) -> Result<Vec<DomainIndexEntry>, Box<dyn Error + Send + Sync>> {
+        let entry = keyring::Entry::new(&self.index_service(), Self::INDEX_ACCOUNT)?;
         match entry.get_password() {
             Ok(json) => {
-                if let Ok(entries) = serde_json::from_str::<Vec<SecretIndexEntry>>(&json) {
-                    return Ok(entries);
-                }
-
-                // Backward compatibility with legacy index format: `["domain/name", ...]`.
-                let keys = serde_json::from_str::<Vec<String>>(&json)?;
-                Ok(keys
-                    .into_iter()
-                    .map(|key| SecretIndexEntry {
-                        key,
-                        has_value: false,
-                    })
-                    .collect())
+                let entries: Vec<DomainIndexEntry> = serde_json::from_str(&json)?;
+                Ok(entries)
             }
             Err(keyring::Error::NoEntry) => Ok(Vec::new()),
             Err(e) => Err(e.into()),
         }
     }
 
-    fn write_index_entries(&self, entries: &[SecretIndexEntry]) -> Result<(), Box<dyn Error>> {
+    fn write_domains_index(
+        &self,
+        entries: &[DomainIndexEntry],
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let json = serde_json::to_string(entries)?;
-        // Keep index metadata as a plain keychain entry so list/index operations
-        // do not require biometric auth.
-        self.set_entry_password("_index", &json, false)?;
+        let entry = keyring::Entry::new(&self.index_service(), Self::INDEX_ACCOUNT)?;
+        entry.set_password(&json)?;
         Ok(())
     }
 
-    fn key(domain: &str, name: &str) -> String {
-        format!("{domain}/{name}")
-    }
-
-    fn upsert_index_entry(entries: &mut Vec<SecretIndexEntry>, key: String, has_value: bool) {
-        if let Some(existing) = entries.iter_mut().find(|entry| entry.key == key) {
-            if has_value {
-                existing.has_value = true;
+    fn upsert_domains_index(
+        &self,
+        domain: &str,
+        has_username: Option<bool>,
+        has_password: Option<bool>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let mut index = self.read_domains_index()?;
+        if let Some(existing) = index.iter_mut().find(|e| e.domain == domain) {
+            if let Some(u) = has_username {
+                existing.has_username = u;
+            }
+            if let Some(p) = has_password {
+                existing.has_password = p;
             }
         } else {
-            entries.push(SecretIndexEntry { key, has_value });
+            index.push(DomainIndexEntry {
+                domain: domain.to_string(),
+                has_username: has_username.unwrap_or(false),
+                has_password: has_password.unwrap_or(false),
+            });
         }
+        index.sort_by(|a, b| a.domain.cmp(&b.domain));
+        self.write_domains_index(&index)
     }
 
-    pub fn set(&self, domain: &str, name: &str, value: &str) -> Result<(), Box<dyn Error>> {
-        let user = Self::key(domain, name);
-        self.set_entry_password(&user, value, true)?;
-
-        let mut index = self.read_index_entries()?;
-        Self::upsert_index_entry(&mut index, user, true);
-        index.sort_by(|a, b| a.key.cmp(&b.key));
-        self.write_index_entries(&index)?;
-        Ok(())
-    }
-
-    /// Ensure a (domain, name) pair is present in the index without setting a value.
+    /// Store credentials (username + password) for a domain.
     ///
-    /// This is useful for preparing required secret slots ahead of time so UI can
-    /// prompt for values later, without forcing a keychain write/biometric prompt.
-    pub fn ensure_indexed(&self, domain: &str, name: &str) -> Result<(), Box<dyn Error>> {
-        let user = Self::key(domain, name);
-        let mut index = self.read_index_entries()?;
-        Self::upsert_index_entry(&mut index, user, false);
-        index.sort_by(|a, b| a.key.cmp(&b.key));
-        self.write_index_entries(&index)?;
+    /// On macOS the username is stored as the keychain Account field and the
+    /// password is stored as biometric-protected Data.  On other platforms both
+    /// are stored as regular keyring entries.
+    pub fn set_credentials(
+        &self,
+        domain: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.set_credentials_macos(domain, username, password)?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.set_credentials_other(domain, username, password)?;
+        }
+        self.upsert_domains_index(domain, Some(true), Some(true))?;
         Ok(())
     }
 
-    pub fn get(&self, domain: &str, name: &str) -> Result<String, Box<dyn Error>> {
-        let user = Self::key(domain, name);
-        let entry = self.entry(&user)?;
-        let value = entry.get_password()?;
-        Ok(value)
-    }
-
-    pub fn delete(&self, domain: &str, name: &str) -> Result<(), Box<dyn Error>> {
-        let user = Self::key(domain, name);
-        let entry = self.entry(&user)?;
-        match entry.delete_credential() {
-            Ok(()) => {}
-            Err(keyring::Error::NoEntry) => {}
-            Err(e) => return Err(e.into()),
+    /// Store only the username for a domain (password unchanged).
+    ///
+    /// If a password was already stored for this domain it is preserved.
+    /// If the username changes the old keychain entry is replaced.
+    pub fn set_username(
+        &self,
+        domain: &str,
+        username: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.set_username_macos(domain, username)?;
         }
-
-        let mut index = self.read_index_entries()?;
-        index.retain(|entry| entry.key != user);
-        self.write_index_entries(&index)?;
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.set_username_other(domain, username)?;
+        }
+        self.upsert_domains_index(domain, Some(true), None)?;
         Ok(())
     }
 
-    /// List all (domain, name) pairs stored for this account.
-    pub fn list(&self) -> Result<Vec<(String, String)>, Box<dyn Error>> {
-        let index = self.read_index_entries()?;
-        let mut pairs = Vec::new();
-        for entry in &index {
-            if let Some((domain, name)) = entry.key.split_once('/') {
-                pairs.push((domain.to_string(), name.to_string()));
-            }
+    /// Store only the password for a domain (username unchanged).
+    ///
+    /// The username must already be set; `get_username` is called first.
+    pub fn set_password(
+        &self,
+        domain: &str,
+        password: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.set_password_macos(domain, password)?;
         }
-        Ok(pairs)
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.set_password_other(domain, password)?;
+        }
+        self.upsert_domains_index(domain, None, Some(true))?;
+        Ok(())
     }
 
-    /// List all (domain, name) pairs and whether a value exists.
-    pub fn list_with_value_state(&self) -> Result<Vec<SecretValueStateRow>, Box<dyn Error>> {
-        let index = self.read_index_entries()?;
-        let mut entries = Vec::new();
-        for entry in &index {
-            if let Some((domain, name)) = entry.key.split_once('/') {
-                entries.push((domain.to_string(), name.to_string(), entry.has_value));
-            }
+    /// Read the username (Account field) for a domain — no biometric prompt.
+    pub fn get_username(&self, domain: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.get_username_macos(domain)
         }
-        Ok(entries)
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.get_username_other(domain)
+        }
     }
 
-    /// Return all secret values for this account (used for scrubbing).
-    pub fn all_values(&self) -> Result<Vec<String>, Box<dyn Error>> {
-        let index = self.read_index_entries()?;
+    /// Read the password (Data field) for a domain — triggers biometric on macOS.
+    pub fn get_password(&self, domain: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.get_password_macos(domain)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.get_password_other(domain)
+        }
+    }
+
+    /// List all configured domains with their credential status.
+    pub fn list_domains(&self) -> Result<Vec<DomainEntry>, Box<dyn Error + Send + Sync>> {
+        let index = self.read_domains_index()?;
+        Ok(index
+            .into_iter()
+            .map(|e| DomainEntry {
+                domain: e.domain,
+                has_username: e.has_username,
+                has_password: e.has_password,
+            })
+            .collect())
+    }
+
+    /// Delete all credential data for a domain.
+    pub fn delete_domain(&self, domain: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.delete_domain_macos(domain)?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.delete_domain_other(domain)?;
+        }
+        // Remove from index
+        let mut index = self.read_domains_index()?;
+        index.retain(|e| e.domain != domain);
+        self.write_domains_index(&index)?;
+        Ok(())
+    }
+
+    /// Return all stored usernames for log scrubbing — no biometric prompt.
+    ///
+    /// Passwords are NOT included here because reading them triggers biometric
+    /// on macOS. Callers that need passwords for scrubbing should maintain their
+    /// own cache of resolved values (see `scrub_known_secrets` in js_api.rs).
+    pub fn all_usernames(&self) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
+        let index = self.read_domains_index()?;
         let mut values = Vec::new();
-        for indexed in &index {
-            if !indexed.has_value {
-                continue;
-            }
-            let entry = self.entry(&indexed.key)?;
-            match entry.get_password() {
-                Ok(v) => values.push(v),
-                Err(keyring::Error::NoEntry) => {}
-                Err(e) => return Err(e.into()),
+        for entry in &index {
+            if entry.has_username {
+                if let Ok(u) = self.get_username(&entry.domain) {
+                    if !u.is_empty() {
+                        values.push(u);
+                    }
+                }
             }
         }
         Ok(values)
     }
 
-    fn set_entry_password(
-        &self,
-        user: &str,
-        value: &str,
-        require_biometry: bool,
-    ) -> Result<(), Box<dyn Error>> {
-        #[cfg(not(target_os = "macos"))]
-        let _ = require_biometry;
+    // ── macOS implementation ────────────────────────────────────────────────
 
-        #[cfg(target_os = "macos")]
-        if require_biometry {
-            if let Err(err) = self.set_entry_password_with_biometry(user, value) {
-                if cfg!(debug_assertions) {
-                    eprintln!(
-                        "Warning: secure keychain write failed for '{user}', using dev fallback: {err}"
-                    );
-                    let entry = self.entry(user)?;
-                    entry.set_password(value)?;
-                    return Ok(());
-                }
-                return Err(err);
-            }
-            return Ok(());
-        }
-
-        let entry = self.entry(user)?;
-        entry.set_password(value)?;
-        Ok(())
-    }
-
+    /// On macOS the single keychain entry per domain has:
+    ///   - kSecAttrAccount = username (plaintext attribute, no auth)
+    ///   - kSecValueData = password (biometric-protected)
+    ///
+    /// set_credentials: delete old entry (if username changed), create new with biometric data.
     #[cfg(target_os = "macos")]
-    fn set_entry_password_with_biometry(
+    fn set_credentials_macos(
         &self,
-        user: &str,
-        value: &str,
-    ) -> Result<(), Box<dyn Error>> {
+        domain: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         use security_framework::passwords::{
             set_generic_password_options, AccessControlOptions, PasswordOptions,
         };
 
-        let service = self.service();
-        let mut options = PasswordOptions::new_generic_password(&service, user);
-        options.set_access_control_options(AccessControlOptions::BIOMETRY_ANY);
-        if set_generic_password_options(value.as_bytes(), options).is_ok() {
-            return Ok(());
-        }
+        let service = self.service_for_domain(domain);
 
-        // Fallback for environments where pure-biometry constraints are unavailable.
-        let mut options = PasswordOptions::new_generic_password(&service, user);
-        options.set_access_control_options(AccessControlOptions::USER_PRESENCE);
-        set_generic_password_options(value.as_bytes(), options)?;
+        // Delete any existing entry (account name may differ if username changed).
+        self.delete_domain_macos(domain).ok();
+
+        // Create new entry with biometric-protected password and username as account.
+        let mut options = PasswordOptions::new_generic_password(&service, username);
+        options.set_access_control_options(AccessControlOptions::BIOMETRY_ANY);
+        if let Err(err) = set_generic_password_options(password.as_bytes(), options) {
+            if cfg!(debug_assertions) {
+                eprintln!(
+                    "Warning: biometric keychain write failed for '{domain}', using dev fallback: {err}"
+                );
+                security_framework::passwords::set_generic_password(
+                    &service,
+                    username,
+                    password.as_bytes(),
+                )?;
+                return Ok(());
+            }
+            // Retry with USER_PRESENCE fallback
+            let mut options2 = PasswordOptions::new_generic_password(&service, username);
+            options2.set_access_control_options(AccessControlOptions::USER_PRESENCE);
+            set_generic_password_options(password.as_bytes(), options2)?;
+        }
+        Ok(())
+    }
+
+    /// Set just the username: create/replace entry with empty data (no biometric).
+    /// If a password already exists, it is lost — callers should use set_credentials instead.
+    #[cfg(target_os = "macos")]
+    fn set_username_macos(
+        &self,
+        domain: &str,
+        username: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let service = self.service_for_domain(domain);
+        // Delete any existing entry for this domain service.
+        self.delete_domain_macos(domain).ok();
+        // Create entry with username as account, empty data (no biometric required).
+        security_framework::passwords::set_generic_password(&service, username, b"")?;
+        Ok(())
+    }
+
+    /// Set just the password: look up current username, delete old entry, recreate with biometric.
+    #[cfg(target_os = "macos")]
+    fn set_password_macos(
+        &self,
+        domain: &str,
+        password: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Read current username (no biometric needed — account field).
+        let username = self.get_username_macos(domain)?;
+        // Recreate with biometric password.
+        self.set_credentials_macos(domain, &username, password)
+    }
+
+    /// Read kSecAttrAccount for this domain's entry — no biometric prompt.
+    #[cfg(target_os = "macos")]
+    fn get_username_macos(&self, domain: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+        use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+
+        let service = self.service_for_domain(domain);
+        let results = ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(&service)
+            .load_attributes(true)
+            .limit(Limit::Max(1))
+            .search()?;
+
+        for result in results {
+            // simplify_dict() maps kSecAttrAccount → "acct"
+            if let Some(attrs) = result.simplify_dict() {
+                if let Some(account) = attrs.get("acct") {
+                    return Ok(account.clone());
+                }
+            }
+        }
+        Err(format!("no credential entry found for domain '{domain}'").into())
+    }
+
+    /// Read kSecValueData for this domain's entry — triggers biometric on macOS.
+    #[cfg(target_os = "macos")]
+    fn get_password_macos(&self, domain: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+        use security_framework::item::{ItemClass, ItemSearchOptions, Limit, SearchResult};
+
+        let service = self.service_for_domain(domain);
+        let results = ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(&service)
+            .load_data(true)
+            .limit(Limit::Max(1))
+            .search()?;
+
+        for result in results {
+            if let SearchResult::Data(data) = result {
+                return Ok(String::from_utf8(data)?);
+            }
+        }
+        Err(format!("no password found for domain '{domain}'").into())
+    }
+
+    /// Delete all keychain entries for this domain service.
+    #[cfg(target_os = "macos")]
+    fn delete_domain_macos(&self, domain: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        use security_framework::item::{ItemClass, ItemSearchOptions};
+
+        let service = self.service_for_domain(domain);
+        // Delete all entries matching this service (ignoring account).
+        let delete_result = ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(&service)
+            .delete();
+        match delete_result {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // -25300 is Apple's errSecItemNotFound.
+                if e.code() == -25300 {
+                    Ok(())
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
+    }
+
+    // ── Non-macOS implementation ────────────────────────────────────────────
+
+    /// On non-macOS platforms keyring entries don't expose account-field listing,
+    /// so we use two fixed-account entries per domain:
+    ///   - `_usr` → username (regular entry, no biometric)
+    ///   - `_pwd` → password (regular entry)
+    #[cfg(not(target_os = "macos"))]
+    fn set_credentials_other(
+        &self,
+        domain: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.set_username_other(domain, username)?;
+        self.set_password_other(domain, password)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn set_username_other(
+        &self,
+        domain: &str,
+        username: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let service = self.service_for_domain(domain);
+        let entry = keyring::Entry::new(&service, "_usr")?;
+        entry.set_password(username)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn set_password_other(
+        &self,
+        domain: &str,
+        password: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let service = self.service_for_domain(domain);
+        let entry = keyring::Entry::new(&service, "_pwd")?;
+        entry.set_password(password)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn get_username_other(&self, domain: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+        let service = self.service_for_domain(domain);
+        let entry = keyring::Entry::new(&service, "_usr")?;
+        Ok(entry.get_password()?)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn get_password_other(&self, domain: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+        let service = self.service_for_domain(domain);
+        let entry = keyring::Entry::new(&service, "_pwd")?;
+        Ok(entry.get_password()?)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn delete_domain_other(&self, domain: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let service = self.service_for_domain(domain);
+        for account in &["_usr", "_pwd"] {
+            match keyring::Entry::new(&service, account).and_then(|e| e.delete_credential()) {
+                Ok(()) => {}
+                Err(keyring::Error::NoEntry) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
+    // ── Legacy migration helpers ────────────────────────────────────────────
+
+    /// Check whether old-format entries exist for this login.
+    ///
+    /// Old format: service=`refreshmint/<login>`, account=`<domain>/<name>`.
+    /// Returns a list of old-style (domain, name) pairs found in the keychain.
+    pub fn list_legacy_entries(
+        &self,
+    ) -> Result<Vec<(String, String)>, Box<dyn Error + Send + Sync>> {
+        let old_service = format!("refreshmint/{}", self.login_name);
+        let entry = keyring::Entry::new(&old_service, Self::INDEX_ACCOUNT)?;
+        let json = match entry.get_password() {
+            Ok(j) => j,
+            Err(keyring::Error::NoEntry) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+
+        // Legacy index was Vec<SecretIndexEntry> = Vec<{key: "domain/name", has_value: bool}>
+        #[derive(serde::Deserialize)]
+        struct LegacyIndexEntry {
+            key: String,
+            #[serde(default)]
+            has_value: bool,
+        }
+        let legacy: Vec<LegacyIndexEntry> = serde_json::from_str(&json).unwrap_or_default();
+        let mut pairs = Vec::new();
+        for entry in legacy {
+            if entry.has_value {
+                if let Some((domain, name)) = entry.key.split_once('/') {
+                    pairs.push((domain.to_string(), name.to_string()));
+                }
+            }
+        }
+        Ok(pairs)
+    }
+
+    /// Read a single legacy secret value (for migration).  Triggers biometric on macOS.
+    pub fn get_legacy_value(
+        &self,
+        domain: &str,
+        name: &str,
+    ) -> Result<String, Box<dyn Error + Send + Sync>> {
+        let old_service = format!("refreshmint/{}", self.login_name);
+        let account = format!("{domain}/{name}");
+        let entry = keyring::Entry::new(&old_service, &account)?;
+        Ok(entry.get_password()?)
+    }
+
+    /// Delete a single legacy secret entry.
+    pub fn delete_legacy_entry(
+        &self,
+        domain: &str,
+        name: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let old_service = format!("refreshmint/{}", self.login_name);
+        let account = format!("{domain}/{name}");
+        let entry = keyring::Entry::new(&old_service, &account)?;
+        match entry.delete_credential() {
+            Ok(()) => {}
+            Err(keyring::Error::NoEntry) => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    }
+
+    /// Delete the legacy domains index entry.
+    pub fn delete_legacy_index(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let old_service = format!("refreshmint/{}", self.login_name);
+        let entry = keyring::Entry::new(&old_service, Self::INDEX_ACCOUNT)?;
+        match entry.delete_credential() {
+            Ok(()) => {}
+            Err(keyring::Error::NoEntry) => {}
+            Err(e) => return Err(e.into()),
+        }
         Ok(())
     }
 }
@@ -232,7 +531,7 @@ impl SecretStore {
 mod tests {
     use super::*;
 
-    fn test_account() -> String {
+    fn test_login() -> String {
         format!(
             "test-{}-{}",
             std::process::id(),
@@ -244,122 +543,110 @@ mod tests {
     }
 
     fn cleanup(store: &SecretStore) {
-        if let Ok(pairs) = store.list() {
-            for (d, n) in &pairs {
-                let _ = store.delete(d, n);
+        if let Ok(domains) = store.list_domains() {
+            for entry in &domains {
+                let _ = store.delete_domain(&entry.domain);
             }
         }
-        // Also clean up the index entry itself
-        if let Ok(entry) = store.index_entry() {
-            let _ = entry.delete_credential();
+        // Clean up index
+        let idx = keyring::Entry::new(&store.index_service(), SecretStore::INDEX_ACCOUNT);
+        if let Ok(e) = idx {
+            let _ = e.delete_credential();
         }
     }
 
     #[test]
-    fn set_get_roundtrip() {
-        let store = SecretStore::new(test_account());
-        let result = store.set("example.com", "password", "hunter2");
+    fn set_get_credentials_roundtrip() {
+        let store = SecretStore::new(test_login());
+        let result = store.set_credentials("example.com", "alice", "hunter2");
         if let Err(e) = &result {
-            // keyring may fail in CI or headless environments; skip gracefully
             eprintln!("skipping keyring test (set failed): {e}");
             return;
         }
 
-        let value = store.get("example.com", "password").unwrap();
-        assert_eq!(value, "hunter2");
+        let username = store.get_username("example.com").unwrap();
+        assert_eq!(username, "alice");
+
+        let password = store.get_password("example.com").unwrap();
+        assert_eq!(password, "hunter2");
 
         cleanup(&store);
     }
 
     #[test]
-    fn list_returns_stored_pairs() {
-        let store = SecretStore::new(test_account());
-        if store.set("a.com", "user", "u").is_err() {
+    fn list_domains_returns_configured_entries() {
+        let store = SecretStore::new(test_login());
+        if store.set_credentials("a.com", "user_a", "pass_a").is_err() {
             eprintln!("skipping keyring test");
             return;
         }
-        store.set("b.com", "token", "t").unwrap();
+        store.set_credentials("b.com", "user_b", "pass_b").unwrap();
 
-        let pairs = store.list().unwrap();
-        assert_eq!(pairs.len(), 2);
-        assert!(pairs.contains(&("a.com".to_string(), "user".to_string())));
-        assert!(pairs.contains(&("b.com".to_string(), "token".to_string())));
+        let domains = store.list_domains().unwrap();
+        assert_eq!(domains.len(), 2);
+        assert!(domains.iter().any(|d| d.domain == "a.com"));
+        assert!(domains.iter().any(|d| d.domain == "b.com"));
 
         cleanup(&store);
     }
 
     #[test]
-    fn delete_removes_entry() {
-        let store = SecretStore::new(test_account());
-        if store.set("x.com", "key", "val").is_err() {
+    fn delete_domain_removes_entry() {
+        let store = SecretStore::new(test_login());
+        if store.set_credentials("x.com", "user", "pass").is_err() {
             eprintln!("skipping keyring test");
             return;
         }
 
-        store.delete("x.com", "key").unwrap();
-        let pairs = store.list().unwrap();
-        assert!(pairs.is_empty());
-
-        // get should fail after delete
-        assert!(store.get("x.com", "key").is_err());
+        store.delete_domain("x.com").unwrap();
+        let domains = store.list_domains().unwrap();
+        assert!(domains.is_empty());
 
         cleanup(&store);
     }
 
     #[test]
-    fn all_values_returns_secret_values() {
-        let store = SecretStore::new(test_account());
-        if store.set("a.com", "pw", "secret1").is_err() {
+    fn all_usernames_returns_username() {
+        let store = SecretStore::new(test_login());
+        if store
+            .set_credentials("secret.com", "myuser", "mypass")
+            .is_err()
+        {
             eprintln!("skipping keyring test");
             return;
         }
-        store.set("b.com", "pw", "secret2").unwrap();
 
-        let values = store.all_values().unwrap();
-        assert_eq!(values.len(), 2);
-        assert!(values.contains(&"secret1".to_string()));
-        assert!(values.contains(&"secret2".to_string()));
+        let usernames = store.all_usernames().unwrap();
+        assert!(usernames.contains(&"myuser".to_string()));
+        // Passwords are NOT returned (would trigger biometric on macOS)
+        assert!(!usernames.contains(&"mypass".to_string()));
 
         cleanup(&store);
     }
 
     #[test]
-    fn set_is_idempotent_for_index() {
-        let store = SecretStore::new(test_account());
-        if store.set("d.com", "name", "v1").is_err() {
+    fn set_credentials_replaces_existing() {
+        let store = SecretStore::new(test_login());
+        if store
+            .set_credentials("d.com", "old_user", "old_pass")
+            .is_err()
+        {
             eprintln!("skipping keyring test");
             return;
         }
-        // Set same key again with different value
-        store.set("d.com", "name", "v2").unwrap();
+        store
+            .set_credentials("d.com", "new_user", "new_pass")
+            .unwrap();
 
-        let pairs = store.list().unwrap();
-        assert_eq!(pairs.len(), 1);
+        let username = store.get_username("d.com").unwrap();
+        assert_eq!(username, "new_user");
 
-        let value = store.get("d.com", "name").unwrap();
-        assert_eq!(value, "v2");
+        let password = store.get_password("d.com").unwrap();
+        assert_eq!(password, "new_pass");
+
+        let domains = store.list_domains().unwrap();
+        assert_eq!(domains.len(), 1);
 
         cleanup(&store);
-    }
-
-    #[test]
-    fn delete_nonexistent_is_ok() {
-        let store = SecretStore::new(test_account());
-        // Should not error when deleting something that doesn't exist
-        let result = store.delete("nonexistent.com", "nope");
-        // May fail if keyring itself is unavailable, but shouldn't panic
-        if let Err(e) = result {
-            eprintln!("skipping keyring test (delete failed): {e}");
-        }
-        cleanup(&store);
-    }
-
-    #[test]
-    fn list_empty_account() {
-        let store = SecretStore::new(test_account());
-        match store.list() {
-            Ok(pairs) => assert!(pairs.is_empty()),
-            Err(e) => eprintln!("skipping keyring test: {e}"),
-        }
     }
 }

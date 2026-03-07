@@ -35,28 +35,28 @@ struct LockMetadataWatcher {
     _watcher: notify::RecommendedWatcher,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SecretEntry {
-    domain: String,
-    name: String,
-}
-
+/// Per-domain credential status returned by list/sync commands.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct AccountSecretEntry {
+struct DomainSecretEntry {
     domain: String,
-    name: String,
-    has_value: bool,
+    has_username: bool,
+    has_password: bool,
 }
 
+/// Sync result: which domains are required by the manifest, which are missing
+/// credentials, and which are extra (stored but not required).
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SecretSyncResult {
-    required: Vec<SecretEntry>,
-    added: Vec<SecretEntry>,
-    existing_required: Vec<SecretEntry>,
-    extras: Vec<SecretEntry>,
+    /// All domains declared in the extension manifest.
+    required: Vec<DomainSecretEntry>,
+    /// Required domains missing a username (new scheme only).
+    missing_username: Vec<String>,
+    /// Required domains missing a password.
+    missing_password: Vec<String>,
+    /// Domains in the store that are not declared by the manifest.
+    extras: Vec<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -112,11 +112,6 @@ pub fn run_with_context(
             validate_transaction_text,
             list_scrape_extensions,
             load_scrape_extension,
-            list_account_secrets,
-            sync_account_secrets_for_extension,
-            add_account_secret,
-            reenter_account_secret,
-            remove_account_secret,
             start_scrape_debug_session_for_login,
             start_scrape_debug_session,
             stop_scrape_debug_session,
@@ -162,9 +157,12 @@ pub fn run_with_context(
             repair_login_account_labels,
             list_login_secrets,
             sync_login_secrets_for_extension,
-            add_login_secret,
-            reenter_login_secret,
-            remove_login_secret,
+            set_login_credentials,
+            set_login_username,
+            set_login_password,
+            remove_login_domain,
+            get_login_username,
+            migrate_login_secrets,
             clear_login_profile,
             migrate_ledger,
             query_transactions,
@@ -255,155 +253,27 @@ fn load_scrape_extension(ledger: String, source: String, replace: bool) -> Resul
         .map_err(|err| err.to_string())
 }
 
-#[tauri::command]
-fn list_account_secrets(account: String) -> Result<Vec<AccountSecretEntry>, String> {
-    let account = require_non_empty_input("account", account)?;
-    let store = crate::secret::SecretStore::new(account);
-    let mut entries = store
-        .list_with_value_state()
-        .map_err(|err| err.to_string())?
-        .into_iter()
-        .map(|(domain, name, has_value)| AccountSecretEntry {
-            domain,
-            name,
-            has_value,
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
-    Ok(entries)
-}
-
-fn flatten_declared_secret_entries(
+/// Build a `DomainSecretEntry` list from the manifest's `SecretDeclarations`.
+///
+/// Each domain in the manifest becomes one entry; the presence flags are
+/// determined by comparing against the stored domains.
+fn build_required_entries(
     declared: &scrape::js_api::SecretDeclarations,
-) -> Vec<SecretEntry> {
-    let mut entries = declared
-        .iter()
-        .flat_map(|(domain, names)| {
-            names.iter().map(|name| SecretEntry {
+    stored: &[crate::secret::DomainEntry],
+) -> Vec<DomainSecretEntry> {
+    let stored_map: std::collections::BTreeMap<&str, &crate::secret::DomainEntry> =
+        stored.iter().map(|e| (e.domain.as_str(), e)).collect();
+    declared
+        .keys()
+        .map(|domain| {
+            let stored_entry = stored_map.get(domain.as_str());
+            DomainSecretEntry {
                 domain: domain.clone(),
-                name: name.clone(),
-            })
+                has_username: stored_entry.is_some_and(|e| e.has_username),
+                has_password: stored_entry.is_some_and(|e| e.has_password),
+            }
         })
-        .collect::<Vec<_>>();
-    entries.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
-    entries
-}
-
-fn classify_secret_entries(
-    required: &[SecretEntry],
-    existing: &[SecretEntry],
-) -> (Vec<SecretEntry>, Vec<SecretEntry>, Vec<SecretEntry>) {
-    let required_keys = required
-        .iter()
-        .map(|entry| format!("{}/{}", entry.domain, entry.name))
-        .collect::<std::collections::BTreeSet<_>>();
-    let existing_keys = existing
-        .iter()
-        .map(|entry| format!("{}/{}", entry.domain, entry.name))
-        .collect::<std::collections::BTreeSet<_>>();
-
-    let mut added = Vec::new();
-    let mut existing_required = Vec::new();
-    for entry in required {
-        let key = format!("{}/{}", entry.domain, entry.name);
-        if existing_keys.contains(&key) {
-            existing_required.push(entry.clone());
-        } else {
-            added.push(entry.clone());
-        }
-    }
-
-    let mut extras = Vec::new();
-    for entry in existing {
-        let key = format!("{}/{}", entry.domain, entry.name);
-        if !required_keys.contains(&key) {
-            extras.push(entry.clone());
-        }
-    }
-
-    (added, existing_required, extras)
-}
-
-#[tauri::command]
-fn sync_account_secrets_for_extension(
-    ledger: String,
-    account: String,
-    extension: String,
-) -> Result<SecretSyncResult, String> {
-    let target_dir = std::path::PathBuf::from(ledger);
-    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
-    let account = require_non_empty_input("account", account)?;
-    let extension = account_config::resolve_extension(&target_dir, &account, Some(&extension))
-        .map_err(|err| err.to_string())?;
-
-    let extension_dir = account_config::resolve_extension_dir(&target_dir, &extension);
-    let declared =
-        scrape::load_manifest_secret_declarations(&extension_dir).map_err(|err| err.to_string())?;
-    let required = flatten_declared_secret_entries(&declared);
-
-    let store = crate::secret::SecretStore::new(account);
-    let mut existing = store
-        .list()
-        .map_err(|err| err.to_string())?
-        .into_iter()
-        .map(|(domain, name)| SecretEntry { domain, name })
-        .collect::<Vec<_>>();
-    existing.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
-
-    let (added, existing_required, extras) = classify_secret_entries(&required, &existing);
-    for entry in &added {
-        store
-            .ensure_indexed(&entry.domain, &entry.name)
-            .map_err(|err| err.to_string())?;
-    }
-
-    Ok(SecretSyncResult {
-        required,
-        added,
-        existing_required,
-        extras,
-    })
-}
-
-#[tauri::command]
-fn add_account_secret(
-    account: String,
-    domain: String,
-    name: String,
-    value: String,
-) -> Result<(), String> {
-    let account = require_non_empty_input("account", account)?;
-    let domain = require_non_empty_input("domain", domain)?;
-    let name = require_non_empty_input("name", name)?;
-    let store = crate::secret::SecretStore::new(account);
-    store
-        .set(&domain, &name, &value)
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-fn reenter_account_secret(
-    account: String,
-    domain: String,
-    name: String,
-    value: String,
-) -> Result<(), String> {
-    let account = require_non_empty_input("account", account)?;
-    let domain = require_non_empty_input("domain", domain)?;
-    let name = require_non_empty_input("name", name)?;
-    let store = crate::secret::SecretStore::new(account);
-    store
-        .set(&domain, &name, &value)
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-fn remove_account_secret(account: String, domain: String, name: String) -> Result<(), String> {
-    let account = require_non_empty_input("account", account)?;
-    let domain = require_non_empty_input("domain", domain)?;
-    let name = require_non_empty_input("name", name)?;
-    let store = crate::secret::SecretStore::new(account);
-    store.delete(&domain, &name).map_err(|err| err.to_string())
+        .collect()
 }
 
 fn require_non_empty_input(field_name: &str, value: String) -> Result<String, String> {
@@ -1184,20 +1054,20 @@ fn repair_login_account_labels(
 // --- Login-keyed secret commands ---
 
 #[tauri::command]
-fn list_login_secrets(login_name: String) -> Result<Vec<AccountSecretEntry>, String> {
+fn list_login_secrets(login_name: String) -> Result<Vec<DomainSecretEntry>, String> {
     let login_name = require_login_name_input(login_name)?;
     let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
     let mut entries = store
-        .list_with_value_state()
+        .list_domains()
         .map_err(|err| err.to_string())?
         .into_iter()
-        .map(|(domain, name, has_value)| AccountSecretEntry {
-            domain,
-            name,
-            has_value,
+        .map(|e| DomainSecretEntry {
+            domain: e.domain,
+            has_username: e.has_username,
+            has_password: e.has_password,
         })
         .collect::<Vec<_>>();
-    entries.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
+    entries.sort_by_key(|e| e.domain.clone());
     Ok(entries)
 }
 
@@ -1216,71 +1086,173 @@ fn sync_login_secrets_for_extension(
     let extension_dir = account_config::resolve_extension_dir(&target_dir, &extension);
     let declared =
         scrape::load_manifest_secret_declarations(&extension_dir).map_err(|err| err.to_string())?;
-    let required = flatten_declared_secret_entries(&declared);
 
     let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
-    let mut existing = store
-        .list()
-        .map_err(|err| err.to_string())?
-        .into_iter()
-        .map(|(domain, name)| SecretEntry { domain, name })
-        .collect::<Vec<_>>();
-    existing.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
-
-    let (added, existing_required, extras) = classify_secret_entries(&required, &existing);
-    for entry in &added {
-        store
-            .ensure_indexed(&entry.domain, &entry.name)
-            .map_err(|err| err.to_string())?;
-    }
+    let stored = store.list_domains().map_err(|err| err.to_string())?;
+    let required_domains: std::collections::BTreeSet<&str> =
+        declared.keys().map(String::as_str).collect();
+    let required = build_required_entries(&declared, &stored);
+    let missing_username = required
+        .iter()
+        .filter(|e| {
+            declared
+                .get(&e.domain)
+                .and_then(|c| c.username.as_ref())
+                .is_some()
+                && !e.has_username
+        })
+        .map(|e| e.domain.clone())
+        .collect();
+    let missing_password = required
+        .iter()
+        .filter(|e| {
+            let creds = declared.get(&e.domain);
+            let has_password_decl = creds.and_then(|c| c.password.as_ref()).is_some()
+                || creds.is_some_and(|c| !c.extra_names.is_empty());
+            has_password_decl && !e.has_password
+        })
+        .map(|e| e.domain.clone())
+        .collect();
+    let extras = stored
+        .iter()
+        .filter(|e| !required_domains.contains(e.domain.as_str()))
+        .map(|e| e.domain.clone())
+        .collect();
 
     Ok(SecretSyncResult {
         required,
-        added,
-        existing_required,
+        missing_username,
+        missing_password,
         extras,
     })
 }
 
+/// Store username + password together for a domain (one biometric prompt on macOS).
 #[tauri::command]
-fn add_login_secret(
+fn set_login_credentials(
     login_name: String,
     domain: String,
-    name: String,
-    value: String,
+    username: String,
+    password: String,
 ) -> Result<(), String> {
     let login_name = require_login_name_input(login_name)?;
     let domain = require_non_empty_input("domain", domain)?;
-    let name = require_non_empty_input("name", name)?;
     let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
     store
-        .set(&domain, &name, &value)
+        .set_credentials(&domain, &username, &password)
         .map_err(|err| err.to_string())
 }
 
+/// Store only the username for a domain (no biometric prompt on macOS).
 #[tauri::command]
-fn reenter_login_secret(
-    login_name: String,
-    domain: String,
-    name: String,
-    value: String,
-) -> Result<(), String> {
+fn set_login_username(login_name: String, domain: String, username: String) -> Result<(), String> {
     let login_name = require_login_name_input(login_name)?;
     let domain = require_non_empty_input("domain", domain)?;
-    let name = require_non_empty_input("name", name)?;
     let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
     store
-        .set(&domain, &name, &value)
+        .set_username(&domain, &username)
         .map_err(|err| err.to_string())
 }
 
+/// Store only the password for a domain (biometric prompt on macOS).
 #[tauri::command]
-fn remove_login_secret(login_name: String, domain: String, name: String) -> Result<(), String> {
+fn set_login_password(login_name: String, domain: String, password: String) -> Result<(), String> {
     let login_name = require_login_name_input(login_name)?;
     let domain = require_non_empty_input("domain", domain)?;
-    let name = require_non_empty_input("name", name)?;
     let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
-    store.delete(&domain, &name).map_err(|err| err.to_string())
+    store
+        .set_password(&domain, &password)
+        .map_err(|err| err.to_string())
+}
+
+/// Delete all credentials for a domain.
+#[tauri::command]
+fn remove_login_domain(login_name: String, domain: String) -> Result<(), String> {
+    let login_name = require_login_name_input(login_name)?;
+    let domain = require_non_empty_input("domain", domain)?;
+    let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
+    store.delete_domain(&domain).map_err(|err| err.to_string())
+}
+
+/// Read the username for a domain — no biometric prompt.
+#[tauri::command]
+fn get_login_username(login_name: String, domain: String) -> Result<String, String> {
+    let login_name = require_login_name_input(login_name)?;
+    let domain = require_non_empty_input("domain", domain)?;
+    let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
+    store.get_username(&domain).map_err(|err| err.to_string())
+}
+
+/// Migrate legacy keychain entries (service=`refreshmint/<login>`, account=`<domain>/<name>`)
+/// to the new scheme (service=`refreshmint/login/<login>/<domain>`, account=username).
+///
+/// Returns a list of domains that were migrated.
+///
+/// Behavior notes:
+/// - Idempotent: returns an empty list when no legacy entries remain.
+/// - Reads each legacy secret value first; on read failure it aborts with an error.
+/// - Writes new entries per domain, then best-effort removes migrated legacy entries.
+/// - See `scrape/js_api.rs` `ENABLE_LEGACY_SECRET_FALLBACK` for runtime fallback policy.
+#[tauri::command]
+fn migrate_login_secrets(login_name: String) -> Result<Vec<String>, String> {
+    let login_name = require_login_name_input(login_name)?;
+    let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
+    let legacy = store.list_legacy_entries().map_err(|err| err.to_string())?;
+    if legacy.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Group by domain: collect all (domain, name, value) triples
+    let mut by_domain: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for (domain, name) in &legacy {
+        let value = store
+            .get_legacy_value(domain, name)
+            .map_err(|err| format!("failed to read legacy secret '{domain}/{name}': {err}"))?;
+        by_domain
+            .entry(domain.clone())
+            .or_default()
+            .push((name.clone(), value));
+    }
+
+    let mut migrated = Vec::new();
+    for (domain, name_values) in &by_domain {
+        // Heuristic: name containing "username"/"user"/"login" → username role, else password
+        let username = name_values
+            .iter()
+            .find(|(n, _)| {
+                n.to_ascii_lowercase().contains("username")
+                    || n.to_ascii_lowercase().contains("_user")
+            })
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        let password = name_values
+            .iter()
+            .find(|(n, _)| {
+                n.to_ascii_lowercase().contains("password")
+                    || n.to_ascii_lowercase().contains("_pass")
+            })
+            .or_else(|| name_values.last())
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+
+        store
+            .set_credentials(domain, &username, &password)
+            .map_err(|err| format!("failed to migrate domain '{domain}': {err}"))?;
+
+        // Clean up legacy entries for this domain
+        for (name, _) in name_values {
+            let _ = store.delete_legacy_entry(domain, name);
+        }
+        migrated.push(domain.clone());
+    }
+
+    // Clean up legacy index if all entries were migrated
+    if migrated.len() == by_domain.len() {
+        let _ = store.delete_legacy_index();
+    }
+
+    Ok(migrated)
 }
 
 #[tauri::command]
@@ -1677,11 +1649,11 @@ fn map_account_journal_entries(
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        classify_secret_entries, delete_login_account, evidence_ref_matches_document,
-        flatten_declared_secret_entries, inspect_login_extraction_support, require_existing_login,
-        require_label_input, require_login_name_input, require_non_empty_input, SecretEntry,
+        delete_login_account, evidence_ref_matches_document, inspect_login_extraction_support,
+        require_existing_login, require_label_input, require_login_name_input,
+        require_non_empty_input,
     };
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1883,97 +1855,6 @@ mod tests {
         assert!(evidence_ref_matches_document("foo.csv#row:1", "foo.csv"));
         assert!(!evidence_ref_matches_document("foo.csvx:1:1", "foo.csv"));
         assert!(!evidence_ref_matches_document("foo.csv", "foo.csv"));
-    }
-
-    #[test]
-    fn flatten_declared_secret_entries_expands_and_sorts() {
-        let mut declared = BTreeMap::<String, BTreeSet<String>>::new();
-        declared.insert(
-            "b.com".to_string(),
-            ["token".to_string()].into_iter().collect(),
-        );
-        declared.insert(
-            "a.com".to_string(),
-            ["password".to_string(), "username".to_string()]
-                .into_iter()
-                .collect(),
-        );
-
-        let entries = flatten_declared_secret_entries(&declared);
-        assert_eq!(
-            entries,
-            vec![
-                SecretEntry {
-                    domain: "a.com".to_string(),
-                    name: "password".to_string(),
-                },
-                SecretEntry {
-                    domain: "a.com".to_string(),
-                    name: "username".to_string(),
-                },
-                SecretEntry {
-                    domain: "b.com".to_string(),
-                    name: "token".to_string(),
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn classify_secret_entries_returns_added_existing_and_extras() {
-        let required = vec![
-            SecretEntry {
-                domain: "a.com".to_string(),
-                name: "username".to_string(),
-            },
-            SecretEntry {
-                domain: "a.com".to_string(),
-                name: "password".to_string(),
-            },
-            SecretEntry {
-                domain: "b.com".to_string(),
-                name: "token".to_string(),
-            },
-        ];
-        let existing = vec![
-            SecretEntry {
-                domain: "a.com".to_string(),
-                name: "username".to_string(),
-            },
-            SecretEntry {
-                domain: "z.com".to_string(),
-                name: "legacy".to_string(),
-            },
-        ];
-
-        let (added, existing_required, extras) = classify_secret_entries(&required, &existing);
-        assert_eq!(
-            added,
-            vec![
-                SecretEntry {
-                    domain: "a.com".to_string(),
-                    name: "password".to_string(),
-                },
-                SecretEntry {
-                    domain: "b.com".to_string(),
-                    name: "token".to_string(),
-                },
-            ]
-        );
-        assert_eq!(
-            existing_required,
-            vec![SecretEntry {
-                domain: "a.com".to_string(),
-                name: "username".to_string(),
-            }]
-        );
-        assert_eq!(
-            extras,
-            vec![SecretEntry {
-                domain: "z.com".to_string(),
-                name: "legacy".to_string(),
-            }]
-        );
     }
 
     #[test]

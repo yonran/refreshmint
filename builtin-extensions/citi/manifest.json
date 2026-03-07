@@ -2,7 +2,13 @@
     "name": "citi",
     "extract": "extract.mjs",
     "secrets": {
-        "www.citi.com": ["citi_username", "citi_password"],
-        "online.citi.com": ["citi_username", "citi_password"]
+        "www.citi.com": {
+            "username": "citi_username",
+            "password": "citi_password"
+        },
+        "online.citi.com": {
+            "username": "citi_username",
+            "password": "citi_password"
+        }
     }
 }

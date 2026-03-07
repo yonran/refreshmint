@@ -2,6 +2,9 @@
     "name": "bankofamerica",
     "extract": "extract.mjs",
     "secrets": {
-        "secure.bankofamerica.com": ["bofa_username", "bofa_password"]
+        "secure.bankofamerica.com": {
+            "username": "bofa_username",
+            "password": "bofa_password"
+        }
     }
 }

@@ -27,11 +27,10 @@ import {
     setRecentLedgers,
 } from './store.ts';
 import {
-    type AccountSecretEntry,
+    type DomainSecretEntry,
     type AccountJournalEntry,
     type AmountStyleHint,
     type AmountTotal,
-    addLoginSecret,
     addTransaction,
     addTransactionText,
     type CategoryResult,
@@ -45,6 +44,7 @@ import {
     getLockStatusSnapshot,
     getUnpostedEntriesForTransfer,
     getScrapeDebugSessionSocket,
+    getLoginUsername,
     type LoginAccountConfig,
     type LoginExtractionSupport,
     type LoginConfig,
@@ -58,6 +58,7 @@ import {
     listScrapeExtensions,
     loadScrapeExtension,
     migrateLedger,
+    migrateLoginSecrets,
     openLedger,
     type AccountRow,
     type DocumentWithInfo,
@@ -68,13 +69,15 @@ import {
     postLoginAccountEntry,
     postLoginAccountTransfer,
     postTransfer,
-    reenterLoginSecret,
+    removeLoginDomain,
     repairLoginAccountLabels,
-    removeLoginSecret,
     runLoginAccountExtraction,
     runScrapeForLogin,
     setLoginAccount,
+    setLoginCredentials,
     setLoginExtension,
+    setLoginPassword,
+    setLoginUsername,
     startScrapeDebugSessionForLogin,
     startLockMetadataWatch,
     stopLockMetadataWatch,
@@ -85,7 +88,6 @@ import {
     mergeGlTransfer,
     type GlCategoryResult,
     syncGlTransaction,
-    type SecretEntry,
     syncLoginSecretsForExtension,
     type TransactionRow,
     type UnpostedTransferResult,
@@ -259,8 +261,8 @@ function suggestGlAccountName(label: string): string {
     return `Assets:Checking:${name}`;
 }
 
-function secretPairKey(domain: string, name: string): string {
-    return `${domain}/${name}`;
+function secretDomainKey(domain: string): string {
+    return domain;
 }
 
 function localIsoDate(): string {
@@ -366,15 +368,16 @@ function App() {
     const [loginAccountMappings, setLoginAccountMappings] = useState<
         Record<string, LoginAccountMapping[]>
     >({});
-    const [accountSecrets, setAccountSecrets] = useState<AccountSecretEntry[]>(
+    const [accountSecrets, setAccountSecrets] = useState<DomainSecretEntry[]>(
         [],
     );
     const [requiredSecretsForExtension, setRequiredSecretsForExtension] =
-        useState<SecretEntry[]>([]);
+        useState<DomainSecretEntry[]>([]);
     const [hasRequiredSecretsSync, setHasRequiredSecretsSync] = useState(false);
     const [secretDomain, setSecretDomain] = useState('');
-    const [secretName, setSecretName] = useState('');
-    const [secretValue, setSecretValue] = useState('');
+    // secretUsername: pre-filled when editing an existing domain (no biometric)
+    const [secretUsername, setSecretUsername] = useState('');
+    const [secretPassword, setSecretPassword] = useState('');
     const [isSecretsPanelExpanded, setIsSecretsPanelExpanded] = useState(false);
     const [secretsStatus, setSecretsStatus] = useState<string | null>(null);
     const [isRunningScrape, setIsRunningScrape] = useState(false);
@@ -512,7 +515,6 @@ function App() {
     const searchInputRef = useRef<HTMLInputElement>(null);
     const similarSearchInputRef = useRef<HTMLInputElement>(null);
     const secretDomainRef = useRef('');
-    const secretNameRef = useRef('');
     const secretPromptResolverRef = useRef<
         ((confirmed: boolean) => void) | null
     >(null);
@@ -847,25 +849,20 @@ function App() {
             setIsLoadingPipelineBulkStats(false);
         }
     }, [ledgerPath, loginAccounts, loginConfigsByName]);
-    const requiredSecretKeySet = new Set(
+    const requiredSecretDomainSet = new Set(
         requiredSecretsForExtension.map((entry) =>
-            secretPairKey(entry.domain, entry.name),
+            secretDomainKey(entry.domain),
         ),
     );
     const trimmedSecretDomain = secretDomain.trim();
-    const trimmedSecretName = secretName.trim();
     const currentSecretEntry = accountSecrets.find(
-        (entry) =>
-            entry.domain === trimmedSecretDomain &&
-            entry.name === trimmedSecretName,
+        (entry) => entry.domain === trimmedSecretDomain,
     );
-    const currentSecretPairExists = currentSecretEntry !== undefined;
-    const currentSecretHasValue = currentSecretEntry?.hasValue ?? false;
-    const secretValuePlaceholder = currentSecretHasValue ? '●●●●●●●●' : '';
+    const currentDomainExists = currentSecretEntry !== undefined;
     const extraSecretCount = hasRequiredSecretsSync
         ? accountSecrets.reduce((count, entry) => {
-              const key = secretPairKey(entry.domain, entry.name);
-              return requiredSecretKeySet.has(key) ? count : count + 1;
+              const key = secretDomainKey(entry.domain);
+              return requiredSecretDomainSet.has(key) ? count : count + 1;
           }, 0)
         : 0;
 
@@ -938,10 +935,6 @@ function App() {
     }, [secretDomain]);
 
     useEffect(() => {
-        secretNameRef.current = secretName;
-    }, [secretName]);
-
-    useEffect(() => {
         return () => {
             if (secretPromptResolverRef.current !== null) {
                 secretPromptResolverRef.current(false);
@@ -978,8 +971,8 @@ function App() {
             setRequiredSecretsForExtension([]);
             setHasRequiredSecretsSync(false);
             setSecretDomain('');
-            setSecretName('');
-            setSecretValue('');
+            setSecretUsername('');
+            setSecretPassword('');
             setIsSecretsPanelExpanded(false);
             setSecretsStatus(null);
             setIsLoadingAccountSecrets(false);
@@ -1437,34 +1430,33 @@ function App() {
                     setHasRequiredSecretsSync(true);
 
                     const currentDomain = secretDomainRef.current.trim();
-                    const currentName = secretNameRef.current.trim();
-                    const currentHasPair =
-                        currentDomain.length > 0 && currentName.length > 0;
-                    const currentKey = secretPairKey(
-                        currentDomain,
-                        currentName,
-                    );
-                    const requiredKeySet = new Set(
+                    const requiredDomainSet = new Set(
                         result.required.map((entry) =>
-                            secretPairKey(entry.domain, entry.name),
+                            secretDomainKey(entry.domain),
                         ),
                     );
 
-                    if (currentHasPair && !requiredKeySet.has(currentKey)) {
+                    if (
+                        currentDomain.length > 0 &&
+                        !requiredDomainSet.has(currentDomain)
+                    ) {
                         setSecretDomain('');
-                        setSecretName('');
-                        setSecretValue('');
-                    } else if (!currentHasPair && result.required.length > 0) {
+                        setSecretUsername('');
+                        setSecretPassword('');
+                    } else if (
+                        currentDomain.length === 0 &&
+                        result.required.length > 0
+                    ) {
                         const first = result.required[0];
                         if (first !== undefined) {
                             setSecretDomain(first.domain);
-                            setSecretName(first.name);
                         }
                     }
 
                     const requiredCount = result.required.length;
-                    const addedCount = result.added.length;
-                    const existingCount = result.existingRequired.length;
+                    const missingCount =
+                        result.missingUsername.length +
+                        result.missingPassword.length;
                     const extraCount = result.extras.length;
                     if (requiredCount === 0) {
                         setSecretsStatus(
@@ -1473,10 +1465,14 @@ function App() {
                     } else {
                         const extraSuffix =
                             extraCount > 0
-                                ? ` ${extraCount} extra secret${extraCount === 1 ? '' : 's'} found.`
+                                ? ` ${extraCount} extra domain${extraCount === 1 ? '' : 's'} found.`
+                                : '';
+                        const missingSuffix =
+                            missingCount > 0
+                                ? ` ${missingCount} credential${missingCount === 1 ? '' : 's'} missing.`
                                 : '';
                         setSecretsStatus(
-                            `Prepared ${requiredCount} required secret${requiredCount === 1 ? '' : 's'}: ${addedCount} added, ${existingCount} already stored.${extraSuffix}`,
+                            `${requiredCount} required domain${requiredCount === 1 ? '' : 's'}.${missingSuffix}${extraSuffix}`,
                         );
                     }
 
@@ -2428,39 +2424,36 @@ function App() {
     }
 
     async function confirmSaveOrDiscardSecretValue(context: string) {
-        if (secretValue.length === 0) {
+        if (secretPassword.length === 0) {
             return true;
         }
 
         const shouldSave = await promptSecretDecision({
-            title: 'Unsaved secret value',
-            message: `You have an unsaved secret value ${context}. Save it first?`,
+            title: 'Unsaved password',
+            message: `You have an unsaved password ${context}. Save it first?`,
             confirmLabel: 'Save',
             cancelLabel: 'Discard',
         });
         if (!shouldSave) {
-            setSecretValue('');
-            setSecretsStatus('Discarded unsaved secret value.');
+            setSecretPassword('');
+            setSecretsStatus('Discarded unsaved password.');
             return true;
         }
 
-        const mode: 'add' | 'reenter' = currentSecretPairExists
-            ? 'reenter'
-            : 'add';
-        const saved = await handleSaveAccountSecret(mode);
+        const saved = await handleSaveDomainCredentials();
         if (saved) {
             return true;
         }
         const shouldDiscardAfterFailedSave = await promptSecretDecision({
             title: 'Save failed',
-            message: `Could not save the secret value ${context}. Discard it and continue?`,
+            message: `Could not save the password ${context}. Discard it and continue?`,
             confirmLabel: 'Discard',
             cancelLabel: 'Keep editing',
         });
 
         if (shouldDiscardAfterFailedSave) {
-            setSecretValue('');
-            setSecretsStatus('Discarded unsaved secret value.');
+            setSecretPassword('');
+            setSecretsStatus('Discarded unsaved password.');
             return true;
         }
         return false;
@@ -2484,7 +2477,8 @@ function App() {
         }
     }
 
-    async function handleSaveAccountSecret(mode: 'add' | 'reenter') {
+    /** Save username + password credentials for the current domain. */
+    async function handleSaveDomainCredentials(): Promise<boolean> {
         const loginName = activeSecretsLoginName;
         if (loginName === null) {
             setSecretsStatus(
@@ -2498,60 +2492,46 @@ function App() {
             setSecretsStatus('Domain is required.');
             return false;
         }
-        const name = secretName.trim();
-        if (name.length === 0) {
-            setSecretsStatus('Name is required.');
-            return false;
-        }
-        const existingEntry = accountSecrets.find(
-            (entry) => entry.domain === domain && entry.name === name,
-        );
-        const existingEntryHasValue = existingEntry?.hasValue === true;
-        if (mode === 'add' && existingEntry !== undefined) {
-            setSecretsStatus(
-                `Secret pair ${domain}/${name} already exists. Use Set/Change value.`,
-            );
-            return false;
-        }
-        if (mode === 'reenter' && existingEntry === undefined) {
-            setSecretsStatus(
-                `Secret pair ${domain}/${name} does not exist. Use Add new pair first.`,
-            );
-            return false;
-        }
-        if (secretValue.length === 0) {
-            setSecretsStatus('Value is required.');
+        const username = secretUsername.trim();
+        const password = secretPassword;
+
+        if (username.length === 0 && password.length === 0) {
+            setSecretsStatus('Username or password is required.');
             return false;
         }
 
         setIsSavingAccountSecret(true);
         try {
-            if (mode === 'add') {
-                await addLoginSecret(loginName, domain, name, secretValue);
+            if (username.length > 0 && password.length > 0) {
+                await setLoginCredentials(
+                    loginName,
+                    domain,
+                    username,
+                    password,
+                );
+            } else if (username.length > 0) {
+                await setLoginUsername(loginName, domain, username);
             } else {
-                await reenterLoginSecret(loginName, domain, name, secretValue);
+                await setLoginPassword(loginName, domain, password);
             }
             await refreshLoginSecrets(loginName);
-            setSecretValue('');
+            setSecretPassword('');
+            const isNew = currentDomainExists;
             setSecretsStatus(
-                mode === 'add'
-                    ? 'Secret pair added.'
-                    : existingEntryHasValue
-                      ? 'Secret value changed.'
-                      : 'Secret value set.',
+                isNew
+                    ? `Credentials updated for ${domain}.`
+                    : `Credentials saved for ${domain}.`,
             );
             return true;
         } catch (error) {
-            setSecretsStatus(
-                `Failed to ${mode === 'add' ? 'add pair' : 'save secret value'}: ${String(error)}`,
-            );
+            setSecretsStatus(`Failed to save credentials: ${String(error)}`);
             return false;
         } finally {
             setIsSavingAccountSecret(false);
         }
     }
 
-    async function handleRemoveAccountSecret(domain: string, name: string) {
+    async function handleRemoveDomainSecret(domain: string) {
         const loginName = activeSecretsLoginName;
         if (loginName === null) {
             setSecretsStatus(
@@ -2560,39 +2540,70 @@ function App() {
             );
             return;
         }
-        const key = `${domain}/${name}`;
-        setBusySecretKey(key);
+        setBusySecretKey(domain);
         try {
-            await removeLoginSecret(loginName, domain, name);
+            await removeLoginDomain(loginName, domain);
             await refreshLoginSecrets(loginName);
-            if (secretDomain === domain && secretName === name) {
-                setSecretValue('');
+            if (secretDomain === domain) {
+                setSecretUsername('');
+                setSecretPassword('');
             }
-            setSecretsStatus(`Removed ${key}.`);
+            setSecretsStatus(`Removed credentials for ${domain}.`);
         } catch (error) {
-            setSecretsStatus(`Failed to remove ${key}: ${String(error)}`);
+            setSecretsStatus(`Failed to remove ${domain}: ${String(error)}`);
         } finally {
             setBusySecretKey(null);
         }
     }
 
-    async function handleReenterPreset(
-        domain: string,
-        name: string,
-        hasValue: boolean,
-    ) {
+    async function handleEditDomainPreset(domain: string) {
         const canContinue = await confirmSaveOrDiscardSecretValue(
-            'before selecting another secret pair',
+            'before selecting another domain',
         );
         if (!canContinue) {
             return;
         }
         setSecretDomain(domain);
-        setSecretName(name);
-        setSecretValue('');
-        setSecretsStatus(
-            `${hasValue ? 'Change' : 'Set'} value for ${domain}/${name}.`,
-        );
+        setSecretPassword('');
+        setSecretsStatus(`Edit credentials for ${domain}.`);
+
+        // Pre-fill the username (no biometric needed)
+        const loginName = activeSecretsLoginName;
+        if (loginName !== null) {
+            try {
+                const username = await getLoginUsername(loginName, domain);
+                setSecretUsername(username);
+            } catch {
+                setSecretUsername('');
+            }
+        }
+    }
+
+    async function handleMigrateLoginSecrets() {
+        const loginName = activeSecretsLoginName;
+        if (loginName === null) {
+            setSecretsStatus(
+                selectedLoginMappingError ??
+                    'Select a login mapping or login first.',
+            );
+            return;
+        }
+        setIsSavingAccountSecret(true);
+        try {
+            const migrated = await migrateLoginSecrets(loginName);
+            await refreshLoginSecrets(loginName);
+            if (migrated.length === 0) {
+                setSecretsStatus('No legacy credentials to migrate.');
+            } else {
+                setSecretsStatus(
+                    `Migrated ${migrated.length} domain${migrated.length === 1 ? '' : 's'}: ${migrated.join(', ')}.`,
+                );
+            }
+        } catch (error) {
+            setSecretsStatus(`Migration failed: ${String(error)}`);
+        } finally {
+            setIsSavingAccountSecret(false);
+        }
     }
 
     async function handleScrapeAccountInputChange(nextAccount: string) {
@@ -2873,10 +2884,7 @@ function App() {
 
     function handleSubmitSecretForm(event: SyntheticEvent<HTMLFormElement>) {
         event.preventDefault();
-        const mode: 'add' | 'reenter' = currentSecretPairExists
-            ? 'reenter'
-            : 'add';
-        void handleSaveAccountSecret(mode);
+        void handleSaveDomainCredentials();
     }
 
     function parseOptionalIndex(raw: string): {
@@ -7568,15 +7576,18 @@ function App() {
                                                         />
                                                     </label>
                                                     <label className="field">
-                                                        <span>Name</span>
+                                                        <span>Username</span>
                                                         <input
                                                             type="text"
-                                                            value={secretName}
-                                                            placeholder="password"
+                                                            autoComplete="username"
+                                                            value={
+                                                                secretUsername
+                                                            }
+                                                            placeholder="username"
                                                             onChange={(
                                                                 event,
                                                             ) => {
-                                                                setSecretName(
+                                                                setSecretUsername(
                                                                     event.target
                                                                         .value,
                                                                 );
@@ -7593,18 +7604,23 @@ function App() {
                                                         />
                                                     </label>
                                                     <label className="field">
-                                                        <span>Value</span>
+                                                        <span>Password</span>
                                                         <input
                                                             type="password"
                                                             autoComplete="new-password"
-                                                            value={secretValue}
+                                                            value={
+                                                                secretPassword
+                                                            }
                                                             placeholder={
-                                                                secretValuePlaceholder
+                                                                currentSecretEntry?.hasPassword ===
+                                                                true
+                                                                    ? '●●●●●●●●'
+                                                                    : ''
                                                             }
                                                             onChange={(
                                                                 event,
                                                             ) => {
-                                                                setSecretValue(
+                                                                setSecretPassword(
                                                                     event.target
                                                                         .value,
                                                                 );
@@ -7623,35 +7639,12 @@ function App() {
                                                 </div>
                                                 <div className="txn-actions">
                                                     <button
-                                                        type="button"
-                                                        className="ghost-button"
-                                                        onClick={() => {
-                                                            void handleSaveAccountSecret(
-                                                                'add',
-                                                            );
-                                                        }}
-                                                        disabled={
-                                                            !hasActiveSecretsLogin ||
-                                                            (trimmedSecretDomain.length >
-                                                                0 &&
-                                                                trimmedSecretName.length >
-                                                                    0 &&
-                                                                currentSecretPairExists) ||
-                                                            isSavingAccountSecret ||
-                                                            busySecretKey !==
-                                                                null
-                                                        }
-                                                    >
-                                                        {isSavingAccountSecret
-                                                            ? 'Saving...'
-                                                            : 'Add new pair'}
-                                                    </button>
-                                                    <button
                                                         type="submit"
                                                         className="ghost-button"
                                                         disabled={
                                                             !hasActiveSecretsLogin ||
-                                                            !currentSecretPairExists ||
+                                                            trimmedSecretDomain.length ===
+                                                                0 ||
                                                             isSavingAccountSecret ||
                                                             busySecretKey !==
                                                                 null
@@ -7659,16 +7652,32 @@ function App() {
                                                     >
                                                         {isSavingAccountSecret
                                                             ? 'Saving...'
-                                                            : currentSecretHasValue
-                                                              ? 'Change value'
-                                                              : 'Set value'}
+                                                            : currentDomainExists
+                                                              ? 'Update credentials'
+                                                              : 'Save credentials'}
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="ghost-button"
+                                                        onClick={() => {
+                                                            void handleMigrateLoginSecrets();
+                                                        }}
+                                                        disabled={
+                                                            !hasActiveSecretsLogin ||
+                                                            isSavingAccountSecret ||
+                                                            busySecretKey !==
+                                                                null
+                                                        }
+                                                    >
+                                                        Migrate legacy
                                                     </button>
                                                 </div>
                                                 <p className="hint">
-                                                    Add new pair creates a new
-                                                    domain/name. Press Enter or
-                                                    use Set or Change value to
-                                                    save the value.
+                                                    Enter domain, username, and
+                                                    password. Username is stored
+                                                    without biometric; password
+                                                    requires Touch ID / Face ID
+                                                    on macOS.
                                                 </p>
                                             </form>
                                             {isLoadingAccountSecrets ? (
@@ -7678,7 +7687,7 @@ function App() {
                                             ) : accountSecrets.length === 0 ? (
                                                 <p className="hint">
                                                     {hasActiveSecretsLogin
-                                                        ? 'No secrets stored for this login.'
+                                                        ? 'No credentials stored for this login.'
                                                         : selectedScrapeAccount.length >
                                                                 0 &&
                                                             selectedLoginMappingError !==
@@ -7692,7 +7701,12 @@ function App() {
                                                         <thead>
                                                             <tr>
                                                                 <th>Domain</th>
-                                                                <th>Name</th>
+                                                                <th>
+                                                                    Username
+                                                                </th>
+                                                                <th>
+                                                                    Password
+                                                                </th>
                                                                 <th>Actions</th>
                                                             </tr>
                                                         </thead>
@@ -7700,16 +7714,15 @@ function App() {
                                                             {accountSecrets.map(
                                                                 (entry) => {
                                                                     const key =
-                                                                        secretPairKey(
+                                                                        secretDomainKey(
                                                                             entry.domain,
-                                                                            entry.name,
                                                                         );
                                                                     const isBusy =
                                                                         busySecretKey ===
                                                                         key;
                                                                     const isExtra =
                                                                         hasRequiredSecretsSync &&
-                                                                        !requiredSecretKeySet.has(
+                                                                        !requiredSecretDomainSet.has(
                                                                             key,
                                                                         );
                                                                     return (
@@ -7719,14 +7732,9 @@ function App() {
                                                                             }
                                                                         >
                                                                             <td>
-                                                                                {
-                                                                                    entry.domain
-                                                                                }
-                                                                            </td>
-                                                                            <td>
                                                                                 <span>
                                                                                     {
-                                                                                        entry.name
+                                                                                        entry.domain
                                                                                     }
                                                                                 </span>
                                                                                 {isExtra ? (
@@ -7736,15 +7744,37 @@ function App() {
                                                                                 ) : null}
                                                                             </td>
                                                                             <td>
+                                                                                {entry.hasUsername ? (
+                                                                                    <span className="secret-chip">
+                                                                                        set
+                                                                                    </span>
+                                                                                ) : (
+                                                                                    <span className="secret-chip secret-chip--missing">
+                                                                                        not
+                                                                                        set
+                                                                                    </span>
+                                                                                )}
+                                                                            </td>
+                                                                            <td>
+                                                                                {entry.hasPassword ? (
+                                                                                    <span className="secret-chip">
+                                                                                        set
+                                                                                    </span>
+                                                                                ) : (
+                                                                                    <span className="secret-chip secret-chip--missing">
+                                                                                        not
+                                                                                        set
+                                                                                    </span>
+                                                                                )}
+                                                                            </td>
+                                                                            <td>
                                                                                 <div className="txn-actions">
                                                                                     <button
                                                                                         type="button"
                                                                                         className="ghost-button"
                                                                                         onClick={() => {
-                                                                                            void handleReenterPreset(
+                                                                                            void handleEditDomainPreset(
                                                                                                 entry.domain,
-                                                                                                entry.name,
-                                                                                                entry.hasValue,
                                                                                             );
                                                                                         }}
                                                                                         disabled={
@@ -7753,17 +7783,14 @@ function App() {
                                                                                                 null
                                                                                         }
                                                                                     >
-                                                                                        {entry.hasValue
-                                                                                            ? 'Change value'
-                                                                                            : 'Set value'}
+                                                                                        Edit
                                                                                     </button>
                                                                                     <button
                                                                                         type="button"
                                                                                         className="ghost-button"
                                                                                         onClick={() => {
-                                                                                            void handleRemoveAccountSecret(
+                                                                                            void handleRemoveDomainSecret(
                                                                                                 entry.domain,
-                                                                                                entry.name,
                                                                                             );
                                                                                         }}
                                                                                         disabled={
@@ -7789,7 +7816,7 @@ function App() {
                                             {hasRequiredSecretsSync &&
                                             extraSecretCount > 0 ? (
                                                 <p className="hint">
-                                                    {extraSecretCount} secret
+                                                    {extraSecretCount} domain
                                                     {extraSecretCount === 1
                                                         ? ''
                                                         : 's'}{' '}

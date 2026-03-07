@@ -6,7 +6,6 @@ pub mod profile;
 pub mod sandbox;
 
 use serde::Deserialize;
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,10 +23,26 @@ pub struct ScrapeConfig {
     pub prompt_requires_override: bool,
 }
 
+/// The value type for a domain entry in `manifest.json` `secrets` field.
+///
+/// New format: `{"username": "my_user", "password": "my_pass"}`
+/// Legacy format: `["my_user", "my_pass"]`  (all treated as extra names)
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ManifestSecretEntry {
+    Legacy(Vec<String>),
+    Typed {
+        #[serde(default)]
+        username: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+    },
+}
+
 #[derive(Deserialize)]
 struct ExtensionManifest {
     #[serde(default)]
-    secrets: std::collections::BTreeMap<String, Vec<String>>,
+    secrets: std::collections::BTreeMap<String, ManifestSecretEntry>,
     #[serde(default)]
     extract: Option<String>,
     #[serde(default)]
@@ -64,7 +79,7 @@ pub fn load_manifest(
     })?;
 
     let mut declared = js_api::SecretDeclarations::new();
-    for (domain_input, names) in &manifest.secrets {
+    for (domain_input, entry) in &manifest.secrets {
         let domain = normalize_manifest_domain(domain_input);
         if domain.is_empty() {
             return Err(format!(
@@ -73,22 +88,54 @@ pub fn load_manifest(
             )
             .into());
         }
-        let mut normalized = BTreeSet::new();
-        for name in names {
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
-                return Err(format!(
-                    "manifest secrets for domain '{domain}' contains an empty name in {}",
-                    manifest_path.display()
-                )
-                .into());
+        let creds = match entry {
+            ManifestSecretEntry::Typed { username, password } => {
+                for name in username.iter().chain(password.iter()) {
+                    if name.trim().is_empty() {
+                        return Err(format!(
+                            "manifest secrets for domain '{domain}' contains an empty name in {}",
+                            manifest_path.display()
+                        )
+                        .into());
+                    }
+                }
+                js_api::DomainCredentials {
+                    username: username
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    password: password
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    extra_names: Vec::new(),
+                }
             }
-            normalized.insert(trimmed.to_string());
-        }
-        declared
-            .entry(domain)
-            .or_default()
-            .extend(normalized.into_iter());
+            ManifestSecretEntry::Legacy(names) => {
+                let mut extra_names = Vec::new();
+                for name in names {
+                    let trimmed = name.trim();
+                    if trimmed.is_empty() {
+                        return Err(format!(
+                            "manifest secrets for domain '{domain}' contains an empty name in {}",
+                            manifest_path.display()
+                        )
+                        .into());
+                    }
+                    if !extra_names.contains(&trimmed.to_string()) {
+                        extra_names.push(trimmed.to_string());
+                    }
+                }
+                js_api::DomainCredentials {
+                    username: None,
+                    password: None,
+                    extra_names,
+                }
+            }
+        };
+        declared.insert(domain, creds);
     }
 
     Ok(ParsedManifest {
@@ -635,13 +682,14 @@ mod tests {
         let example = declared
             .get("example.com")
             .unwrap_or_else(|| panic!("missing normalized example.com declaration"));
-        assert!(example.contains("username"));
-        assert!(example.contains("password"));
-        assert_eq!(example.len(), 2);
+        // Legacy array format: names go into extra_names
+        assert!(example.extra_names.contains(&"username".to_string()));
+        assert!(example.extra_names.contains(&"password".to_string()));
+        assert_eq!(example.extra_names.len(), 2); // deduped
         let sub = declared
             .get("sub.example.com")
             .unwrap_or_else(|| panic!("missing normalized subdomain declaration"));
-        assert!(sub.contains("otp"));
+        assert!(sub.extra_names.contains(&"otp".to_string()));
 
         let _ = fs::remove_dir_all(&root);
     }

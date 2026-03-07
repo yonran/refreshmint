@@ -183,8 +183,33 @@ struct OpenTab {
     opener_target_id: Option<String>,
 }
 
-pub type SecretDeclarations = BTreeMap<String, BTreeSet<String>>;
+/// Per-domain credential role declaration from the manifest.
+///
+/// A manifest may declare one or both of these names.  The `username` name
+/// resolves to the Account field (no biometric on macOS); the `password` name
+/// resolves to the Data field (biometric on macOS).
+///
+/// `extra_names` holds secret names from legacy array-format manifest
+/// declarations that could not be assigned to a specific role.  They are
+/// resolved via the legacy keychain fallback path.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct DomainCredentials {
+    /// Secret name whose value is the account/username (stored without biometric).
+    pub username: Option<String>,
+    /// Secret name whose value is the password (biometric-protected on macOS).
+    pub password: Option<String>,
+    /// Legacy: names from an array-format manifest declaration (no role assigned).
+    pub extra_names: Vec<String>,
+}
+
+/// Maps each declared domain to its credential role assignments.
+pub type SecretDeclarations = BTreeMap<String, DomainCredentials>;
 pub type PromptOverrides = BTreeMap<String, String>;
+
+// Transitional policy: keep legacy secret fallback enabled until the
+// `migrate_login_secrets` flow is considered fully rolled out.
+// See `src-tauri/src/lib.rs` `migrate_login_secrets` command.
+const ENABLE_LEGACY_SECRET_FALLBACK: bool = true;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugOutputStream {
@@ -2775,10 +2800,13 @@ pub(crate) fn stringify_evaluation_result(
 }
 
 pub(crate) fn scrub_known_secrets(secret_store: &SecretStore, text: &mut String) {
-    if let Ok(secrets) = secret_store.all_values() {
-        for secret in &secrets {
-            if !secret.is_empty() {
-                *text = text.replace(secret, "[REDACTED]");
+    // Usernames are readable without biometric and are the most likely to
+    // appear in page-evaluation results.  Passwords are typed into form
+    // fields and rarely returned by JS evaluation.
+    if let Ok(usernames) = secret_store.all_usernames() {
+        for username in &usernames {
+            if !username.is_empty() {
+                *text = text.replace(username.as_str(), "[REDACTED]");
             }
         }
     }
@@ -3052,22 +3080,30 @@ async fn ensure_element_receives_pointer_events(
 ///
 /// A secret name can only be used when it is declared in the extension
 /// manifest for the current top-level navigation domain.
+///
+/// Username-role secrets are read from kSecAttrAccount (no biometric on macOS).
+/// Password-role secrets trigger biometric on macOS.
+/// Legacy secrets not in the new domain-credential scheme are read via the old
+/// per-(domain,name) keychain entries.
 pub(crate) async fn resolve_secret_if_applicable(
     inner: &PageInner,
     value: &str,
 ) -> JsResult<String> {
-    let all_known = inner
-        .secret_store
-        .list()
-        .map_err(|e| js_err(format!("secret lookup failed: {e}")))?;
     let referenced_name = value.trim();
     if referenced_name.is_empty() {
         return Ok(value.to_string());
     }
 
     let declared_domains = declared_domains_for_secret(&inner.declared_secrets, referenced_name);
-    let configured_in_store = all_known.iter().any(|(_, name)| name == referenced_name);
-    if declared_domains.is_empty() && !configured_in_store {
+    // Also check legacy store for unconfigured-but-stored names when fallback
+    // is enabled during migration rollout.
+    let legacy_known = if ENABLE_LEGACY_SECRET_FALLBACK {
+        inner.secret_store.list_legacy_entries().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let configured_legacy = legacy_known.iter().any(|(_, name)| name == referenced_name);
+    if declared_domains.is_empty() && !configured_legacy {
         return Ok(value.to_string());
     }
 
@@ -3091,13 +3127,30 @@ pub(crate) async fn resolve_secret_if_applicable(
         )));
     }
 
-    for (domain, name) in &all_known {
-        if name == referenced_name && domain.eq_ignore_ascii_case(&top_level_domain) {
-            return inner.secret_store.get(domain, name).map_err(|e| {
-                js_err(format!(
-                    "failed to read secret '{name}' for domain '{domain}': {e}"
-                ))
-            });
+    // Try new domain-credential scheme first.
+    let username_role =
+        is_username_role(&inner.declared_secrets, &top_level_domain, referenced_name);
+    if username_role {
+        if let Ok(v) = inner.secret_store.get_username(&top_level_domain) {
+            return Ok(v);
+        }
+    } else if let Ok(v) = inner.secret_store.get_password(&top_level_domain) {
+        return Ok(v);
+    }
+
+    // Legacy fallback: old per-(domain, name) keychain entries.
+    if ENABLE_LEGACY_SECRET_FALLBACK {
+        for (domain, name) in &legacy_known {
+            if name == referenced_name && domain.eq_ignore_ascii_case(&top_level_domain) {
+                return inner
+                    .secret_store
+                    .get_legacy_value(domain, name)
+                    .map_err(|e| {
+                        js_err(format!(
+                            "failed to read secret '{name}' for domain '{domain}': {e}"
+                        ))
+                    });
+            }
         }
     }
 
@@ -3109,8 +3162,11 @@ pub(crate) async fn resolve_secret_if_applicable(
 fn declared_domains_for_secret(declared: &SecretDeclarations, secret_name: &str) -> Vec<String> {
     let mut domains = declared
         .iter()
-        .filter_map(|(domain, names)| {
-            if names.contains(secret_name) {
+        .filter_map(|(domain, creds)| {
+            let declared_here = creds.username.as_deref() == Some(secret_name)
+                || creds.password.as_deref() == Some(secret_name)
+                || creds.extra_names.iter().any(|n| n == secret_name);
+            if declared_here {
                 Some(domain.clone())
             } else {
                 None
@@ -3119,6 +3175,11 @@ fn declared_domains_for_secret(declared: &SecretDeclarations, secret_name: &str)
         .collect::<Vec<_>>();
     domains.sort();
     domains
+}
+
+/// Whether `secret_name` is the username role for `domain` in the declarations.
+fn is_username_role(declared: &SecretDeclarations, domain: &str, secret_name: &str) -> bool {
+    declared.get(domain).and_then(|c| c.username.as_deref()) == Some(secret_name)
 }
 
 fn normalize_domain_like_input(input: &str) -> String {
@@ -4061,21 +4122,33 @@ mod tests {
         let mut declared = SecretDeclarations::new();
         declared.insert(
             "b.com".to_string(),
-            ["password".to_string()].into_iter().collect(),
+            DomainCredentials {
+                password: Some("password".to_string()),
+                ..Default::default()
+            },
         );
         declared.insert(
             "a.com".to_string(),
-            ["password".to_string(), "otp".to_string()]
-                .into_iter()
-                .collect(),
+            DomainCredentials {
+                password: Some("password".to_string()),
+                extra_names: vec!["otp".to_string()],
+                ..Default::default()
+            },
         );
         declared.insert(
             "c.com".to_string(),
-            ["username".to_string()].into_iter().collect(),
+            DomainCredentials {
+                username: Some("username".to_string()),
+                ..Default::default()
+            },
         );
 
         let domains = declared_domains_for_secret(&declared, "password");
         assert_eq!(domains, vec!["a.com".to_string(), "b.com".to_string()]);
+
+        // extra_names are also found
+        let otp_domains = declared_domains_for_secret(&declared, "otp");
+        assert_eq!(otp_domains, vec!["a.com".to_string()]);
     }
 
     #[test]

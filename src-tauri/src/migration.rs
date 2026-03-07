@@ -549,21 +549,72 @@ fn walk_files(root: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 fn copy_login_secrets_from_account(account_name: &str, login_name: &str) -> Result<(), String> {
+    fn infer_role(name: &str) -> &'static str {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("username") || lower.contains("_user") || lower.contains("login") {
+            "username"
+        } else {
+            "password"
+        }
+    }
+
     let source = crate::secret::SecretStore::new(account_name.to_string());
     let target = crate::secret::SecretStore::new(format!("login/{login_name}"));
 
-    let entries = source
-        .list_with_value_state()
-        .map_err(|err| err.to_string())?;
-    for (domain, name, has_value) in entries {
-        if has_value {
-            let value = source.get(&domain, &name).map_err(|err| err.to_string())?;
-            target
-                .set(&domain, &name, &value)
+    for entry in source.list_domains().map_err(|err| err.to_string())? {
+        let domain = entry.domain;
+        if entry.has_username {
+            let username = source
+                .get_username(&domain)
                 .map_err(|err| err.to_string())?;
-        } else {
             target
-                .ensure_indexed(&domain, &name)
+                .set_username(&domain, &username)
+                .map_err(|err| err.to_string())?;
+        }
+        if entry.has_password {
+            let password = source
+                .get_password(&domain)
+                .map_err(|err| err.to_string())?;
+            if !entry.has_username {
+                target
+                    .set_username(&domain, "")
+                    .map_err(|err| err.to_string())?;
+            }
+            target
+                .set_password(&domain, &password)
+                .map_err(|err| err.to_string())?;
+        }
+    }
+
+    // Copy legacy account-keyed secrets as a best-effort fallback.
+    let legacy = source
+        .list_legacy_entries()
+        .map_err(|err| err.to_string())?;
+    let mut by_domain: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for (domain, name) in legacy {
+        let value = source
+            .get_legacy_value(&domain, &name)
+            .map_err(|err| err.to_string())?;
+        by_domain.entry(domain).or_default().push((name, value));
+    }
+    for (domain, pairs) in by_domain {
+        let mut username: Option<String> = None;
+        let mut password: Option<String> = None;
+        for (name, value) in &pairs {
+            match infer_role(name) {
+                "username" => {
+                    if username.is_none() {
+                        username = Some(value.clone());
+                    }
+                }
+                _ => password = Some(value.clone()),
+            }
+        }
+        let username = username.unwrap_or_default();
+        let password = password.unwrap_or_default();
+        if !username.is_empty() || !password.is_empty() {
+            target
+                .set_credentials(&domain, &username, &password)
                 .map_err(|err| err.to_string())?;
         }
     }

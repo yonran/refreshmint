@@ -1,6 +1,9 @@
 {
     "name": "target",
     "secrets": {
-        "www.target.com": ["target_username", "target_password"]
+        "www.target.com": {
+            "username": "target_username",
+            "password": "target_password"
+        }
     }
 }

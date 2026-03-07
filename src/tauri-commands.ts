@@ -54,20 +54,22 @@ export interface PostingRow {
     totals: AmountTotal[] | null;
 }
 
-export interface SecretEntry {
+/** Per-domain credential status returned by list/sync commands. */
+export interface DomainSecretEntry {
     domain: string;
-    name: string;
-}
-
-export interface AccountSecretEntry extends SecretEntry {
-    hasValue: boolean;
+    hasUsername: boolean;
+    hasPassword: boolean;
 }
 
 export interface SecretSyncResult {
-    required: SecretEntry[];
-    added: SecretEntry[];
-    existingRequired: SecretEntry[];
-    extras: SecretEntry[];
+    /** All domains declared in the extension manifest. */
+    required: DomainSecretEntry[];
+    /** Required domains missing a username. */
+    missingUsername: string[];
+    /** Required domains missing a password. */
+    missingPassword: string[];
+    /** Domains in the store that are not declared by the manifest. */
+    extras: string[];
 }
 
 export interface MigratedAccount {
@@ -204,50 +206,6 @@ export async function loadScrapeExtension(
     replace: boolean,
 ): Promise<string> {
     return invoke('load_scrape_extension', { ledger, source, replace });
-}
-
-export async function listAccountSecrets(
-    account: string,
-): Promise<AccountSecretEntry[]> {
-    return invoke('list_account_secrets', { account });
-}
-
-export async function syncAccountSecretsForExtension(
-    ledger: string,
-    account: string,
-    extension: string,
-): Promise<SecretSyncResult> {
-    return invoke('sync_account_secrets_for_extension', {
-        ledger,
-        account,
-        extension,
-    });
-}
-
-export async function addAccountSecret(
-    account: string,
-    domain: string,
-    name: string,
-    value: string,
-): Promise<void> {
-    await invoke('add_account_secret', { account, domain, name, value });
-}
-
-export async function reenterAccountSecret(
-    account: string,
-    domain: string,
-    name: string,
-    value: string,
-): Promise<void> {
-    await invoke('reenter_account_secret', { account, domain, name, value });
-}
-
-export async function removeAccountSecret(
-    account: string,
-    domain: string,
-    name: string,
-): Promise<void> {
-    await invoke('remove_account_secret', { account, domain, name });
 }
 
 export async function startScrapeDebugSession(
@@ -690,7 +648,7 @@ export async function deleteLoginAccount(
 
 export async function listLoginSecrets(
     loginName: string,
-): Promise<AccountSecretEntry[]> {
+): Promise<DomainSecretEntry[]> {
     return invoke('list_login_secrets', { loginName });
 }
 
@@ -706,30 +664,60 @@ export async function syncLoginSecretsForExtension(
     });
 }
 
-export async function addLoginSecret(
+/** Store username + password together (one biometric prompt on macOS). */
+export async function setLoginCredentials(
     loginName: string,
     domain: string,
-    name: string,
-    value: string,
+    username: string,
+    password: string,
 ): Promise<void> {
-    await invoke('add_login_secret', { loginName, domain, name, value });
+    await invoke('set_login_credentials', {
+        loginName,
+        domain,
+        username,
+        password,
+    });
 }
 
-export async function reenterLoginSecret(
+/** Store only the username (no biometric prompt on macOS). */
+export async function setLoginUsername(
     loginName: string,
     domain: string,
-    name: string,
-    value: string,
+    username: string,
 ): Promise<void> {
-    await invoke('reenter_login_secret', { loginName, domain, name, value });
+    await invoke('set_login_username', { loginName, domain, username });
 }
 
-export async function removeLoginSecret(
+/** Store only the password (biometric prompt on macOS). */
+export async function setLoginPassword(
     loginName: string,
     domain: string,
-    name: string,
+    password: string,
 ): Promise<void> {
-    await invoke('remove_login_secret', { loginName, domain, name });
+    await invoke('set_login_password', { loginName, domain, password });
+}
+
+/** Delete all credentials for a domain. */
+export async function removeLoginDomain(
+    loginName: string,
+    domain: string,
+): Promise<void> {
+    await invoke('remove_login_domain', { loginName, domain });
+}
+
+/** Read the username for a domain — no biometric prompt. */
+export async function getLoginUsername(
+    loginName: string,
+    domain: string,
+): Promise<string> {
+    return invoke('get_login_username', { loginName, domain });
+}
+
+/** Migrate legacy keychain entries to the new per-domain scheme. */
+export async function migrateLoginSecrets(
+    loginName: string,
+): Promise<string[]> {
+    return invoke('migrate_login_secrets', { loginName });
 }
 
 export async function clearLoginProfile(
