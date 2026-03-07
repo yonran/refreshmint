@@ -1,11 +1,11 @@
 import { useCallback, useRef, useState } from 'react';
 import { ReportChart } from './ReportChart.tsx';
-import { getCurrentToken, getSearchSuggestions } from './search-utils.ts';
+import { getCurrentToken, getSearchSuggestions } from '../search-utils.ts';
 import {
     type AccountRow,
     type HledgerReportResult,
     runHledgerReport,
-} from './tauri-commands.ts';
+} from '../tauri-commands.ts';
 
 type ReportCommand =
     | 'balance'

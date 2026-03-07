@@ -104,7 +104,7 @@ import {
     getSearchSuggestions,
     quoteHledgerValue,
 } from './search-utils.ts';
-import { ReportsTab } from './ReportsTab.tsx';
+import { ReportsTab } from './tabs/ReportsTab.tsx';
 
 type TransactionDraft = {
     date: string;
