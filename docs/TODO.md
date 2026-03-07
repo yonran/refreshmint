@@ -77,6 +77,72 @@ in-store purchases. We need to decide whether all retail receipt sources should
 normalize to one shared schema or preserve source-specific differences where the
 data is materially different.
 
+## Features Missing vs. Comparable Apps
+
+Compared to apps like YNAB, Monarch Money, Copilot, Mint, Empower, and Firefly III.
+
+### Budgets
+
+- Period budgets (monthly/quarterly/annual spending limits per category)
+- Zero-based / envelope budgeting mode
+- Budget-vs-actual report view in the UI (beyond raw hledger `balance`)
+- Rollover support (carry unspent amounts to next period)
+- Overspending warnings
+
+### Auto-Categorization Rules
+
+- User-defined rules (regex on description/payee → account mapping)
+- Rules applied automatically during pipeline review before ML suggestions
+- Rule management UI (create, edit, prioritize, delete rules)
+- This complements the existing ML suggestions which require manual confirmation
+
+### Net Worth Dashboard
+
+- Overview page showing total assets, liabilities, and net worth
+- Net worth trend chart over time
+- Account balance summary across all logins
+
+### Savings Goals
+
+- Define a goal (target account, target amount, target date)
+- Track current balance / progress toward the goal
+- Link a goal to a specific hledger account or tag
+
+### Recurring Transaction Detection
+
+- Detect repeating transactions (bills, subscriptions) by amount+payee pattern
+- Surface upcoming expected transactions
+- Alert when a recurring charge is missed or amount changes
+
+### Transaction Import (CSV / OFX)
+
+- Import transactions from downloaded CSV or OFX/QFX files
+- Useful for banks and institutions that cannot be scraped
+- Map CSV columns to hledger fields via a configurable profile
+
+### Export
+
+- Export filtered transaction list to CSV
+- Export hledger reports to PDF or CSV for sharing/tax preparation
+
+### Split Transactions
+
+- Split a single bank entry into multiple GL postings with different accounts and amounts
+- Useful for mixed-purpose transactions (e.g., Amazon order with groceries + electronics)
+
+### Alerts and Notifications
+
+- Large transaction alert (over a configurable threshold)
+- Overspending alert (category exceeds budget)
+- Low account balance warning
+- Unusual spending pattern detection
+
+### Tax Tagging
+
+- Mark individual transactions as tax-deductible (with category: home office, medical, charitable, etc.)
+- Annual tax summary report grouping tagged transactions
+- Capital gains tracking for investment accounts (long-term vs. short-term)
+
 ## Major Version Cleanups
 
 ### Remove legacy secret fallback
