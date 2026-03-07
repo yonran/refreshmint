@@ -78,6 +78,17 @@ pub enum GlOperation {
         timestamp: String,
     },
 
+    /// Post an account journal entry to the GL split across multiple counterpart accounts.
+    #[serde(rename = "post-split")]
+    PostSplit {
+        account: String,
+        #[serde(rename = "entryId")]
+        entry_id: String,
+        #[serde(rename = "counterpartAccounts")]
+        counterpart_accounts: Vec<String>,
+        timestamp: String,
+    },
+
     /// Match two entries across accounts as an inter-account transfer.
     #[serde(rename = "transfer-match")]
     TransferMatch {

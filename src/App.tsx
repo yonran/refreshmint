@@ -67,6 +67,7 @@ import {
     type NewTransactionInput,
     type PostingRow,
     postLoginAccountEntry,
+    postLoginAccountEntrySplit,
     postLoginAccountTransfer,
     postTransfer,
     removeLoginDomain,
@@ -119,6 +120,7 @@ type DraftPosting = {
 };
 
 type TransactionEntryMode = 'form' | 'raw';
+type SplitDraftRow = { account: string; amount: string };
 
 type PostDraft = {
     counterpartAccount: string;
@@ -450,6 +452,10 @@ function App() {
     const [transferModalEntryId, setTransferModalEntryId] = useState<
         string | null
     >(null);
+    const [splitModalEntryId, setSplitModalEntryId] = useState<string | null>(
+        null,
+    );
+    const [splitDraftRows, setSplitDraftRows] = useState<SplitDraftRow[]>([]);
     const [transferModalResults, setTransferModalResults] = useState<
         UnpostedTransferResult[]
     >([]);
@@ -3487,6 +3493,45 @@ function App() {
         );
     }
 
+    async function handlePipelinePostSplit(
+        entryId: string,
+        rows: SplitDraftRow[],
+    ) {
+        if (!ledger || !selectedLoginAccount) return;
+        if (rows.length < 2) {
+            setPipelineStatus(
+                'Split requires at least 2 counterpart accounts.',
+            );
+            return;
+        }
+        if (rows.some((r) => r.account.trim() === '')) {
+            setPipelineStatus('All counterpart accounts must be non-empty.');
+            return;
+        }
+        const { loginName, label } = selectedLoginAccount;
+        setBusyPostEntryId(entryId);
+        setSplitModalEntryId(null);
+        try {
+            const glId = await postLoginAccountEntrySplit(
+                ledger.path,
+                loginName,
+                label,
+                entryId,
+                rows.map((r) => ({
+                    account: r.account.trim(),
+                    amount: r.amount.trim() || null,
+                })),
+            );
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(`Split posted ${entryId} to ${glId}.`);
+            void refreshPipelineBulkStats();
+        } catch (error) {
+            setPipelineStatus(`Split post failed: ${String(error)}`);
+        } finally {
+            setBusyPostEntryId(null);
+        }
+    }
+
     async function handlePipelinePostEntry(entryId: string) {
         setBusyPostEntryId(entryId);
         try {
@@ -6415,6 +6460,38 @@ function App() {
                                                                                                     ? 'Posting...'
                                                                                                     : 'Post'}
                                                                                             </button>
+                                                                                            <button
+                                                                                                type="button"
+                                                                                                className="ghost-button"
+                                                                                                disabled={
+                                                                                                    isBusy ||
+                                                                                                    isPipelinePosting ||
+                                                                                                    isPipelinePostingAllLedger ||
+                                                                                                    glLockStatus.locked ||
+                                                                                                    selectedLoginLocked
+                                                                                                }
+                                                                                                onClick={() => {
+                                                                                                    setSplitDraftRows(
+                                                                                                        [
+                                                                                                            {
+                                                                                                                account:
+                                                                                                                    '',
+                                                                                                                amount: '',
+                                                                                                            },
+                                                                                                            {
+                                                                                                                account:
+                                                                                                                    '',
+                                                                                                                amount: '',
+                                                                                                            },
+                                                                                                        ],
+                                                                                                    );
+                                                                                                    setSplitModalEntryId(
+                                                                                                        entry.id,
+                                                                                                    );
+                                                                                                }}
+                                                                                            >
+                                                                                                Split
+                                                                                            </button>
                                                                                             {(entry.isTransfer ||
                                                                                                 transferMatch !==
                                                                                                     null) && (
@@ -6657,6 +6734,216 @@ function App() {
                                                                 </table>
                                                             </div>
                                                         )}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {splitModalEntryId !== null && (
+                                                <div
+                                                    className="modal-overlay"
+                                                    onClick={() => {
+                                                        setSplitModalEntryId(
+                                                            null,
+                                                        );
+                                                    }}
+                                                >
+                                                    <div
+                                                        className="modal-dialog"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                        }}
+                                                    >
+                                                        <div className="modal-header">
+                                                            <h3>
+                                                                Split
+                                                                Transaction
+                                                            </h3>
+                                                            <button
+                                                                type="button"
+                                                                className="ghost-button"
+                                                                onClick={() => {
+                                                                    setSplitModalEntryId(
+                                                                        null,
+                                                                    );
+                                                                }}
+                                                            >
+                                                                Close
+                                                            </button>
+                                                        </div>
+                                                        <p className="status">
+                                                            Assign the full
+                                                            amount across
+                                                            counterpart
+                                                            accounts. Leave the
+                                                            last row&apos;s
+                                                            amount blank to let
+                                                            hledger infer the
+                                                            remainder.
+                                                        </p>
+                                                        <table className="ledger-table">
+                                                            <thead>
+                                                                <tr>
+                                                                    <th>
+                                                                        Account
+                                                                    </th>
+                                                                    <th>
+                                                                        Amount
+                                                                    </th>
+                                                                    <th></th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {splitDraftRows.map(
+                                                                    (
+                                                                        row,
+                                                                        i,
+                                                                    ) => (
+                                                                        <tr
+                                                                            key={
+                                                                                i
+                                                                            }
+                                                                        >
+                                                                            <td>
+                                                                                <input
+                                                                                    type="text"
+                                                                                    placeholder="Expenses:Food"
+                                                                                    value={
+                                                                                        row.account
+                                                                                    }
+                                                                                    onChange={(
+                                                                                        e,
+                                                                                    ) => {
+                                                                                        const v =
+                                                                                            e
+                                                                                                .target
+                                                                                                .value;
+                                                                                        setSplitDraftRows(
+                                                                                            (
+                                                                                                cur,
+                                                                                            ) =>
+                                                                                                cur.map(
+                                                                                                    (
+                                                                                                        r,
+                                                                                                        j,
+                                                                                                    ) =>
+                                                                                                        j ===
+                                                                                                        i
+                                                                                                            ? {
+                                                                                                                  ...r,
+                                                                                                                  account:
+                                                                                                                      v,
+                                                                                                              }
+                                                                                                            : r,
+                                                                                                ),
+                                                                                        );
+                                                                                    }}
+                                                                                />
+                                                                            </td>
+                                                                            <td>
+                                                                                <input
+                                                                                    type="text"
+                                                                                    placeholder={
+                                                                                        i ===
+                                                                                        splitDraftRows.length -
+                                                                                            1
+                                                                                            ? '(remainder)'
+                                                                                            : '0.00 USD'
+                                                                                    }
+                                                                                    value={
+                                                                                        row.amount
+                                                                                    }
+                                                                                    onChange={(
+                                                                                        e,
+                                                                                    ) => {
+                                                                                        const v =
+                                                                                            e
+                                                                                                .target
+                                                                                                .value;
+                                                                                        setSplitDraftRows(
+                                                                                            (
+                                                                                                cur,
+                                                                                            ) =>
+                                                                                                cur.map(
+                                                                                                    (
+                                                                                                        r,
+                                                                                                        j,
+                                                                                                    ) =>
+                                                                                                        j ===
+                                                                                                        i
+                                                                                                            ? {
+                                                                                                                  ...r,
+                                                                                                                  amount: v,
+                                                                                                              }
+                                                                                                            : r,
+                                                                                                ),
+                                                                                        );
+                                                                                    }}
+                                                                                />
+                                                                            </td>
+                                                                            <td>
+                                                                                {splitDraftRows.length >
+                                                                                    2 && (
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        className="ghost-button"
+                                                                                        onClick={() => {
+                                                                                            setSplitDraftRows(
+                                                                                                (
+                                                                                                    cur,
+                                                                                                ) =>
+                                                                                                    cur.filter(
+                                                                                                        (
+                                                                                                            _,
+                                                                                                            j,
+                                                                                                        ) =>
+                                                                                                            j !==
+                                                                                                            i,
+                                                                                                    ),
+                                                                                            );
+                                                                                        }}
+                                                                                    >
+                                                                                        ×
+                                                                                    </button>
+                                                                                )}
+                                                                            </td>
+                                                                        </tr>
+                                                                    ),
+                                                                )}
+                                                            </tbody>
+                                                        </table>
+                                                        <div className="pipeline-row-actions">
+                                                            <button
+                                                                type="button"
+                                                                className="ghost-button"
+                                                                onClick={() => {
+                                                                    setSplitDraftRows(
+                                                                        (
+                                                                            cur,
+                                                                        ) => [
+                                                                            ...cur,
+                                                                            {
+                                                                                account:
+                                                                                    '',
+                                                                                amount: '',
+                                                                            },
+                                                                        ],
+                                                                    );
+                                                                }}
+                                                            >
+                                                                + Add row
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                className="primary-button"
+                                                                onClick={() => {
+                                                                    void handlePipelinePostSplit(
+                                                                        splitModalEntryId,
+                                                                        splitDraftRows,
+                                                                    );
+                                                                }}
+                                                            >
+                                                                Post Split
+                                                            </button>
+                                                        </div>
                                                     </div>
                                                 </div>
                                             )}

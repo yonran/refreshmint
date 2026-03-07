@@ -392,6 +392,27 @@ export async function postLoginAccountEntry(
     });
 }
 
+export interface SplitCounterpart {
+    account: string;
+    amount: string | null;
+}
+
+export async function postLoginAccountEntrySplit(
+    ledger: string,
+    loginName: string,
+    label: string,
+    entryId: string,
+    counterparts: SplitCounterpart[],
+): Promise<string> {
+    return invoke('post_login_account_entry_split', {
+        ledger,
+        loginName,
+        label,
+        entryId,
+        counterparts,
+    });
+}
+
 export async function unpostEntry(
     ledger: string,
     accountName: string,

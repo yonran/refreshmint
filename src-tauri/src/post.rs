@@ -2,9 +2,22 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
+use serde::Deserialize;
+
 use crate::account_journal::{self, AccountEntry};
 use crate::login_config;
 use crate::operations;
+
+/// One leg of a split posting supplied by the caller.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitCounterpart {
+    pub account: String,
+    /// Explicit amount string (e.g. `"100.00 USD"`).  The last leg may omit
+    /// this and hledger will infer the remainder, but callers should always
+    /// supply amounts so the GL is unambiguous.
+    pub amount: Option<String>,
+}
 
 /// Post a single account journal entry to the GL by assigning a counterpart account.
 ///
@@ -202,6 +215,91 @@ pub fn post_login_account_entry(
     if let Err(err) = crate::ledger::commit_post_changes(ledger_dir, login_name, label, &commit_msg)
     {
         eprintln!("warning: git commit failed after post: {err}");
+    }
+
+    Ok(gl_txn_id)
+}
+
+/// Post a single login account journal entry to the GL, splitting the amount
+/// across multiple counterpart accounts.
+pub fn post_login_account_entry_split(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    entry_id: &str,
+    counterparts: Vec<SplitCounterpart>,
+    lock_owner: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if counterparts.len() < 2 {
+        return Err("split requires at least 2 counterpart accounts".into());
+    }
+    if counterparts.iter().any(|c| c.account.trim().is_empty()) {
+        return Err("all counterpart accounts must be non-empty".into());
+    }
+
+    let _gl_lock =
+        login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "post-login-split")?;
+    let _login_lock = login_config::acquire_login_lock_with_metadata(
+        ledger_dir,
+        login_name,
+        lock_owner,
+        "post-login-split",
+    )?;
+    let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
+    let mut entries = account_journal::read_journal_at_path(&journal_path)?;
+    let original_entries = entries.clone();
+    let entry_idx = entries
+        .iter()
+        .position(|e| e.id == entry_id)
+        .ok_or_else(|| format!("entry not found: {entry_id}"))?;
+
+    let entry = &entries[entry_idx];
+
+    if entry.postings.is_empty() {
+        return Err(format!("entry {entry_id} has no postings to post").into());
+    }
+    if entry.posted.is_some() {
+        return Err(format!("entry {entry_id} is already posted").into());
+    }
+
+    let gl_txn_id = uuid::Uuid::new_v4().to_string();
+    let source_locator = format!("logins/{login_name}/accounts/{label}");
+    let gl_text = format_gl_split_transaction(entry, &source_locator, &counterparts, &gl_txn_id);
+
+    let gl_ref = format!("general.journal:{gl_txn_id}");
+    entries[entry_idx].posted = Some(gl_ref);
+
+    account_journal::write_journal_at_path(&journal_path, &entries)?;
+
+    let gl_journal_path = ledger_dir.join("general.journal");
+    if let Err(err) = append_to_journal(&gl_journal_path, &gl_text) {
+        let _ = account_journal::write_journal_at_path(&journal_path, &original_entries);
+        return Err(err.into());
+    }
+
+    let counterpart_accounts: Vec<String> =
+        counterparts.iter().map(|c| c.account.clone()).collect();
+    let op = operations::GlOperation::PostSplit {
+        account: source_locator,
+        entry_id: entry_id.to_string(),
+        counterpart_accounts,
+        timestamp: operations::now_timestamp(),
+    };
+    if let Err(err) = operations::append_gl_operation(ledger_dir, &op) {
+        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
+        let _ = account_journal::write_journal_at_path(&journal_path, &original_entries);
+        return Err(err.into());
+    }
+
+    let counterpart_summary = counterparts
+        .iter()
+        .map(|c| c.account.as_str())
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let commit_msg = format!("post: {entry_id} → {counterpart_summary}");
+    if let Err(err) = crate::ledger::commit_post_changes(ledger_dir, login_name, label, &commit_msg)
+    {
+        eprintln!("warning: git commit failed after split post: {err}");
     }
 
     Ok(gl_txn_id)
@@ -929,6 +1027,48 @@ fn format_gl_transaction(
 
     format!(
         "{}  {}{}  ; id: {}\n{comment_block}\n    {real_account}  {amount_str}\n    {counterpart_account}\n",
+        entry.date, status_marker, entry.description, gl_txn_id,
+    )
+}
+
+/// Format a GL transaction that splits one bank entry across multiple counterpart accounts.
+fn format_gl_split_transaction(
+    entry: &AccountEntry,
+    source_locator: &str,
+    counterparts: &[SplitCounterpart],
+    gl_txn_id: &str,
+) -> String {
+    let source_tag = format!("; source: {}:{}", source_locator, entry.id);
+
+    let first_posting = &entry.postings[0];
+    let real_account = &first_posting.account;
+    let amount_str = first_posting
+        .amount
+        .as_ref()
+        .map(|a| format!("{} {}", a.quantity, a.commodity))
+        .unwrap_or_default();
+
+    let status_marker = entry.status.hledger_marker();
+    let mut comment_lines = vec![
+        "    ; generated-by: refreshmint-post".to_string(),
+        format!("    {source_tag}"),
+    ];
+    for evidence_ref in collect_unique_evidence_refs([entry]) {
+        comment_lines.push(format!("    ; evidence: {evidence_ref}"));
+    }
+    let comment_block = comment_lines.join("\n");
+
+    let mut counterpart_lines = String::new();
+    for c in counterparts {
+        if let Some(amt) = &c.amount {
+            counterpart_lines.push_str(&format!("    {}  {}\n", c.account, amt));
+        } else {
+            counterpart_lines.push_str(&format!("    {}\n", c.account));
+        }
+    }
+
+    format!(
+        "{}  {}{}  ; id: {}\n{comment_block}\n    {real_account}  {amount_str}\n{counterpart_lines}",
         entry.date, status_marker, entry.description, gl_txn_id,
     )
 }

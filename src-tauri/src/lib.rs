@@ -134,6 +134,7 @@ pub fn run_with_context(
             get_login_account_unposted,
             post_entry,
             post_login_account_entry,
+            post_login_account_entry_split,
             unpost_entry,
             unpost_login_account_entry,
             post_transfer,
@@ -1417,6 +1418,33 @@ fn post_login_account_entry(
         &entry_id,
         &counterpart_account,
         posting_index,
+        "gui",
+    )
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn post_login_account_entry_split(
+    ledger: String,
+    login_name: String,
+    label: String,
+    entry_id: String,
+    counterparts: Vec<post::SplitCounterpart>,
+) -> Result<String, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_login_name_input(login_name)?;
+    let label = require_label_input(label)?;
+    let entry_id = require_non_empty_input("entry_id", entry_id)?;
+
+    // Reject reconciliation when this login label's GL mapping is unset or conflicting.
+    let _ = resolve_login_account_gl_account(&target_dir, &login_name, &label)?;
+
+    post::post_login_account_entry_split(
+        &target_dir,
+        &login_name,
+        &label,
+        &entry_id,
+        counterparts,
         "gui",
     )
     .map_err(|err| err.to_string())
