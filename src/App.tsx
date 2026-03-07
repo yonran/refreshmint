@@ -2082,7 +2082,7 @@ function App() {
         try {
             // On macOS, .refreshmint is treated as a package, so directory picker grays it out.
             const chooseDirectory = !navigator.userAgent.includes('Mac');
-            const selection = (await openDialog({
+            const path: string | null = await openDialog({
                 directory: chooseDirectory,
                 multiple: false,
                 title: 'Open Refreshmint ledger',
@@ -2096,13 +2096,12 @@ function App() {
                               },
                           ],
                       }),
-            })) as string | string[] | null;
-            if (selection === null) {
+            });
+            if (path === null) {
                 setOpenStatus(null);
                 return;
             }
-            const path = Array.isArray(selection) ? selection[0] : selection;
-            if (typeof path !== 'string' || path.length === 0) {
+            if (path.length === 0) {
                 setOpenStatus('Open canceled.');
                 return;
             }
@@ -2214,7 +2213,7 @@ function App() {
             return;
         }
 
-        const selection = (await openDialog({
+        const source: string | null = await openDialog({
             directory: sourceType === 'directory',
             multiple: false,
             title:
@@ -2224,12 +2223,11 @@ function App() {
             ...(sourceType === 'zip'
                 ? { filters: [{ name: 'ZIP archive', extensions: ['zip'] }] }
                 : {}),
-        })) as string | string[] | null;
-        if (selection === null) {
+        });
+        if (source === null) {
             return;
         }
-        const source = Array.isArray(selection) ? selection[0] : selection;
-        if (typeof source !== 'string' || source.length === 0) {
+        if (source.length === 0) {
             setScrapeStatus('Extension load canceled.');
             setExtensionLoadStatus('Extension load canceled.');
             return;
@@ -2307,16 +2305,15 @@ function App() {
             return;
         }
 
-        const selection = (await openDialog({
+        const source: string | null = await openDialog({
             directory: true,
             multiple: false,
             title: 'Load unpacked extension directory',
-        })) as string | string[] | null;
-        if (selection === null) {
+        });
+        if (source === null) {
             return;
         }
-        const source = Array.isArray(selection) ? selection[0] : selection;
-        if (typeof source !== 'string' || source.length === 0) {
+        if (source.length === 0) {
             setScrapeStatus('Extension load canceled.');
             setExtensionLoadStatus('Extension load canceled.');
             return;
