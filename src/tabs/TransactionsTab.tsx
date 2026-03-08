@@ -83,6 +83,9 @@ interface TransactionsTabProps {
     onOpenNewRecategorizeTab: (id: number) => void;
     onNavigateToTransactions: () => void;
     recategorizeTabIdRef: { current: number };
+    // Cross-tab navigation: set a search term from outside (e.g. PipelineTab)
+    pendingSearch: string | null;
+    onPendingSearchConsumed: () => void;
 }
 
 function localIsoDate(): string {
@@ -196,6 +199,8 @@ export function TransactionsTab({
     onOpenNewRecategorizeTab,
     onNavigateToTransactions,
     recategorizeTabIdRef,
+    pendingSearch,
+    onPendingSearchConsumed,
 }: TransactionsTabProps) {
     const [unpostedOnly, setUnpostedOnly] = useState(false);
     const [transactionDraft, setTransactionDraft] = useState<TransactionDraft>(
@@ -250,6 +255,14 @@ export function TransactionsTab({
         setSimilarAcActiveIndex(-1);
         setUnpostedOnly(false);
     }, [ledgerPath]);
+
+    // Apply cross-tab search navigation (e.g. from PipelineTab)
+    useEffect(() => {
+        if (pendingSearch !== null) {
+            setTransactionsSearch(pendingSearch);
+            onPendingSearchConsumed();
+        }
+    }, [pendingSearch, onPendingSearchConsumed]);
 
     // Cmd+F focuses search when this tab is active
     useEffect(() => {
