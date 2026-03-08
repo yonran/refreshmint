@@ -75,8 +75,8 @@ Google Chrome for Testing 146.0.7680.31
 ```
 
 - But local `amd64` repro is blocked by emulation:
-  - `rustc -vV` segfaults under the local Podman/QEMU path
-  - therefore the Rust test binary cannot be used as a trustworthy local `amd64` repro on this machine
+    - `rustc -vV` segfaults under the local Podman/QEMU path
+    - therefore the Rust test binary cannot be used as a trustworthy local `amd64` repro on this machine
 
 Conclusion:
 
@@ -231,11 +231,11 @@ These changes were used for investigation, not final resolution.
 2. The problem is not simply missing X11/Xvfb on GitHub.
 3. The problem is not ARM packaging or lack of Chrome alone.
 4. The problem survives:
-   - headed mode
-   - new headless mode
-   - old headless mode
-   - direct `new_page()`
-   - updated chromey commit `16b01771`
+    - headed mode
+    - new headless mode
+    - old headless mode
+    - direct `new_page()`
+    - updated chromey commit `16b01771`
 5. The likely fault boundary is chromey/Chromiumoxide page/session initialization against current Chrome.
 
 ## Best Next Steps
