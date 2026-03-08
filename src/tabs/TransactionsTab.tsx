@@ -250,11 +250,12 @@ export function TransactionsTab({
     const searchInputRef = useRef<HTMLInputElement>(null);
     const similarSearchInputRef = useRef<HTMLInputElement>(null);
     const hasSeenLedgerRef = useRef(false);
+    const sessionRef = useRef<TransactionsTabSession>(session);
 
     const ledgerPath = ledger.path;
 
     useEffect(() => {
-        onSessionChange(() => ({
+        sessionRef.current = {
             unpostedOnly,
             transactionDraft,
             rawDraft,
@@ -263,7 +264,7 @@ export function TransactionsTab({
             isNewTxnExpandedOverride,
             glTransferModalTxnId,
             glTransferModalSearch,
-        }));
+        };
     }, [
         unpostedOnly,
         transactionDraft,
@@ -273,8 +274,14 @@ export function TransactionsTab({
         isNewTxnExpandedOverride,
         glTransferModalTxnId,
         glTransferModalSearch,
-        onSessionChange,
     ]);
+
+    // Persist the latest local tab state when the tab unmounts.
+    useEffect(() => {
+        return () => {
+            onSessionChange(() => sessionRef.current);
+        };
+    }, [onSessionChange]);
 
     // Reset state when ledger changes (but not on first mount).
     useEffect(() => {

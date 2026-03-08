@@ -141,6 +141,7 @@ export function PipelineTab({
 
     const suggestRequestId = useRef(0);
     const hasSeenSelectedLoginAccountRef = useRef(false);
+    const sessionRef = useRef<PipelineTabSession>(session);
 
     // --- Computed values ---
 
@@ -400,7 +401,7 @@ export function PipelineTab({
     // --- Effects ---
 
     useEffect(() => {
-        onSessionChange(() => ({
+        sessionRef.current = {
             selectedLoginAccount,
             pipelineStatus,
             pipelineSubTab,
@@ -411,7 +412,7 @@ export function PipelineTab({
             splitModalEntryId,
             splitDraftRows,
             transferModalSearch,
-        }));
+        };
     }, [
         selectedLoginAccount,
         pipelineStatus,
@@ -423,8 +424,14 @@ export function PipelineTab({
         splitModalEntryId,
         splitDraftRows,
         transferModalSearch,
-        onSessionChange,
     ]);
+
+    // Persist the latest local tab state when the tab unmounts.
+    useEffect(() => {
+        return () => {
+            onSessionChange(() => sessionRef.current);
+        };
+    }, [onSessionChange]);
 
     // Auto-select the first login account whenever the account list changes.
     useEffect(() => {
