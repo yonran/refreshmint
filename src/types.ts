@@ -20,6 +20,11 @@ export type DraftPosting = {
 
 export type TransactionEntryMode = 'form' | 'raw';
 export type SplitDraftRow = { account: string; amount: string };
+export type PipelineSubTab =
+    | 'evidence'
+    | 'evidence-rows'
+    | 'account-rows'
+    | 'gl-rows';
 
 export type PostDraft = {
     counterpartAccount: string;
@@ -49,6 +54,30 @@ export type LoginAccountMapping = {
 export type LoginAccountRef = {
     loginName: string;
     label: string;
+};
+
+export type TransactionsTabSession = {
+    unpostedOnly: boolean;
+    transactionDraft: TransactionDraft | null;
+    rawDraft: string;
+    entryMode: TransactionEntryMode;
+    transactionsSearch: string;
+    isNewTxnExpandedOverride: boolean | null;
+    glTransferModalTxnId: string | null;
+    glTransferModalSearch: string;
+};
+
+export type PipelineTabSession = {
+    selectedLoginAccount: LoginAccountRef | null;
+    pipelineStatus: string | null;
+    pipelineSubTab: PipelineSubTab;
+    evidenceRowsDocument: string;
+    pipelineSelectedEntryIds: string[];
+    pipelineGlAccountDraft: string;
+    transferModalEntryId: string | null;
+    splitModalEntryId: string | null;
+    splitDraftRows: SplitDraftRow[];
+    transferModalSearch: string;
 };
 
 export type PipelineBulkAccountStat = {
@@ -174,5 +203,33 @@ export function createEmptyPipelineBulkSummary(): PipelineBulkSummary {
         skippedNoUnposted: 0,
         inspectFailures: 0,
         lockedAccounts: 0,
+    };
+}
+
+export function createEmptyTransactionsTabSession(): TransactionsTabSession {
+    return {
+        unpostedOnly: false,
+        transactionDraft: null,
+        rawDraft: '',
+        entryMode: 'form',
+        transactionsSearch: '',
+        isNewTxnExpandedOverride: null,
+        glTransferModalTxnId: null,
+        glTransferModalSearch: '',
+    };
+}
+
+export function createEmptyPipelineTabSession(): PipelineTabSession {
+    return {
+        selectedLoginAccount: null,
+        pipelineStatus: null,
+        pipelineSubTab: 'evidence',
+        evidenceRowsDocument: '',
+        pipelineSelectedEntryIds: [],
+        pipelineGlAccountDraft: '',
+        transferModalEntryId: null,
+        splitModalEntryId: null,
+        splitDraftRows: [],
+        transferModalSearch: '',
     };
 }

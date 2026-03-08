@@ -34,10 +34,14 @@ import { ReportsTab } from './tabs/ReportsTab.tsx';
 import { ScrapeTab } from './tabs/ScrapeTab.tsx';
 import { TransactionsTab } from './tabs/TransactionsTab.tsx';
 import {
+    createEmptyPipelineTabSession,
+    createEmptyTransactionsTabSession,
     type SecretPromptState,
     type LoginAccountMapping,
     type LoginAccountRef,
+    type PipelineTabSession,
     type RecategorizeTab,
+    type TransactionsTabSession,
     normalizeLoginConfig,
 } from './types.ts';
 
@@ -89,6 +93,10 @@ function App() {
     const [pendingTransactionSearch, setPendingTransactionSearch] = useState<
         string | null
     >(null);
+    const [transactionsTabSession, setTransactionsTabSession] =
+        useState<TransactionsTabSession>(createEmptyTransactionsTabSession);
+    const [pipelineTabSession, setPipelineTabSession] =
+        useState<PipelineTabSession>(createEmptyPipelineTabSession);
     const [secretPrompt, setSecretPrompt] = useState<SecretPromptState | null>(
         null,
     );
@@ -196,6 +204,9 @@ function App() {
             setLoginConfigsReloadToken(0);
             setLoginAccountMappings({});
             setRecategorizeTabs([]);
+            setPendingTransactionSearch(null);
+            setTransactionsTabSession(createEmptyTransactionsTabSession());
+            setPipelineTabSession(createEmptyPipelineTabSession());
         }
     }, [ledgerPath]);
 
@@ -916,6 +927,8 @@ function App() {
                             onPendingSearchConsumed={() => {
                                 setPendingTransactionSearch(null);
                             }}
+                            session={transactionsTabSession}
+                            onSessionChange={setTransactionsTabSession}
                         />
                     ) : activeTab === 'pipeline' ? (
                         <PipelineTab
@@ -931,6 +944,8 @@ function App() {
                                 setPendingTransactionSearch(id);
                                 setActiveTab('transactions');
                             }}
+                            session={pipelineTabSession}
+                            onSessionChange={setPipelineTabSession}
                         />
                     ) : activeTab === 'reports' ? (
                         <ReportsTab

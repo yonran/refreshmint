@@ -21,6 +21,7 @@ import {
     type SimilarRecategorizePlan,
     type TransactionDraft,
     type TransactionEntryMode,
+    type TransactionsTabSession,
 } from '../types.ts';
 import { AccountInput, TransactionsTable } from './TransactionsTable.tsx';
 
@@ -86,6 +87,10 @@ interface TransactionsTabProps {
     // Cross-tab navigation: set a search term from outside (e.g. PipelineTab)
     pendingSearch: string | null;
     onPendingSearchConsumed: () => void;
+    session: TransactionsTabSession;
+    onSessionChange: (
+        updater: (current: TransactionsTabSession) => TransactionsTabSession,
+    ) => void;
 }
 
 function localIsoDate(): string {
@@ -201,25 +206,31 @@ export function TransactionsTab({
     recategorizeTabIdRef,
     pendingSearch,
     onPendingSearchConsumed,
+    session,
+    onSessionChange,
 }: TransactionsTabProps) {
-    const [unpostedOnly, setUnpostedOnly] = useState(false);
+    const [unpostedOnly, setUnpostedOnly] = useState(session.unpostedOnly);
     const [transactionDraft, setTransactionDraft] = useState<TransactionDraft>(
-        createTransactionDraft,
+        session.transactionDraft ?? createTransactionDraft(),
     );
-    const [rawDraft, setRawDraft] = useState('');
-    const [entryMode, setEntryMode] = useState<TransactionEntryMode>('form');
+    const [rawDraft, setRawDraft] = useState(session.rawDraft);
+    const [entryMode, setEntryMode] = useState<TransactionEntryMode>(
+        session.entryMode,
+    );
     const [addStatus, setAddStatus] = useState<string | null>(null);
     const [isAdding, setIsAdding] = useState(false);
     const [draftStatus, setDraftStatus] = useState<string | null>(null);
     const [isValidatingDraft, setIsValidatingDraft] = useState(false);
-    const [transactionsSearch, setTransactionsSearch] = useState('');
+    const [transactionsSearch, setTransactionsSearch] = useState(
+        session.transactionsSearch,
+    );
     const [queryResults, setQueryResults] = useState<TransactionRow[] | null>(
         null,
     );
     const [queryError, setQueryError] = useState<string | null>(null);
     const [isNewTxnExpandedOverride, setIsNewTxnExpandedOverride] = useState<
         boolean | null
-    >(null);
+    >(session.isNewTxnExpandedOverride);
     const [acSuggestions, setAcSuggestions] = useState<string[]>([]);
     const [acActiveIndex, setAcActiveIndex] = useState(-1);
     const [similarAcSuggestions, setSimilarAcSuggestions] = useState<string[]>(
@@ -231,16 +242,46 @@ export function TransactionsTab({
     >({});
     const [glTransferModalTxnId, setGlTransferModalTxnId] = useState<
         string | null
-    >(null);
-    const [glTransferModalSearch, setGlTransferModalSearch] = useState('');
+    >(session.glTransferModalTxnId);
+    const [glTransferModalSearch, setGlTransferModalSearch] = useState(
+        session.glTransferModalSearch,
+    );
 
     const searchInputRef = useRef<HTMLInputElement>(null);
     const similarSearchInputRef = useRef<HTMLInputElement>(null);
+    const hasSeenLedgerRef = useRef(false);
 
     const ledgerPath = ledger.path;
 
-    // Reset state when ledger changes
     useEffect(() => {
+        onSessionChange(() => ({
+            unpostedOnly,
+            transactionDraft,
+            rawDraft,
+            entryMode,
+            transactionsSearch,
+            isNewTxnExpandedOverride,
+            glTransferModalTxnId,
+            glTransferModalSearch,
+        }));
+    }, [
+        unpostedOnly,
+        transactionDraft,
+        rawDraft,
+        entryMode,
+        transactionsSearch,
+        isNewTxnExpandedOverride,
+        glTransferModalTxnId,
+        glTransferModalSearch,
+        onSessionChange,
+    ]);
+
+    // Reset state when ledger changes (but not on first mount).
+    useEffect(() => {
+        if (!hasSeenLedgerRef.current) {
+            hasSeenLedgerRef.current = true;
+            return;
+        }
         setTransactionDraft(createTransactionDraft());
         setRawDraft('');
         setAddStatus(null);

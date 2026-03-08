@@ -34,8 +34,10 @@ import {
 } from '../tauri-commands.ts';
 import {
     type LoginAccountRef,
+    type PipelineSubTab,
     type PipelineBulkAccountStat,
     type PipelineBulkStats,
+    type PipelineTabSession,
     type SplitDraftRow,
     createEmptyPipelineBulkSummary,
     normalizeLoginConfig,
@@ -53,6 +55,10 @@ interface PipelineTabProps {
     onLedgerRefresh: () => void;
     onLoginConfigChanged: () => void;
     onViewGlTransaction: (glTxnId: string) => void;
+    session: PipelineTabSession;
+    onSessionChange: (
+        updater: (current: PipelineTabSession) => PipelineTabSession,
+    ) => void;
 }
 
 export function PipelineTab({
@@ -65,11 +71,13 @@ export function PipelineTab({
     onLedgerRefresh,
     onLoginConfigChanged,
     onViewGlTransaction,
+    session,
+    onSessionChange,
 }: PipelineTabProps) {
     const ledgerPath = ledger.path;
 
     const [selectedLoginAccount, setSelectedLoginAccount] =
-        useState<LoginAccountRef | null>(null);
+        useState<LoginAccountRef | null>(session.selectedLoginAccount);
     const [documents, setDocuments] = useState<DocumentWithInfo[]>([]);
     const [accountJournalEntries, setAccountJournalEntries] = useState<
         AccountJournalEntry[]
@@ -77,11 +85,15 @@ export function PipelineTab({
     const [unpostedEntries, setUnpostedEntries] = useState<
         AccountJournalEntry[]
     >([]);
-    const [pipelineStatus, setPipelineStatus] = useState<string | null>(null);
-    const [pipelineSubTab, setPipelineSubTab] = useState<
-        'evidence' | 'evidence-rows' | 'account-rows' | 'gl-rows'
-    >('evidence');
-    const [evidenceRowsDocument, setEvidenceRowsDocument] = useState('');
+    const [pipelineStatus, setPipelineStatus] = useState<string | null>(
+        session.pipelineStatus,
+    );
+    const [pipelineSubTab, setPipelineSubTab] = useState<PipelineSubTab>(
+        session.pipelineSubTab,
+    );
+    const [evidenceRowsDocument, setEvidenceRowsDocument] = useState(
+        session.evidenceRowsDocument,
+    );
     const [documentRows, setDocumentRows] = useState<string[][]>([]);
     const [isLoadingDocumentRows, setIsLoadingDocumentRows] = useState(false);
     const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
@@ -91,10 +103,12 @@ export function PipelineTab({
     const [busyPostEntryId, setBusyPostEntryId] = useState<string | null>(null);
     const [pipelineSelectedEntryIds, setPipelineSelectedEntryIds] = useState<
         Set<string>
-    >(new Set());
+    >(new Set(session.pipelineSelectedEntryIds));
     const [pipelineCategorySuggestions, setPipelineCategorySuggestions] =
         useState<Record<string, CategoryResult>>({});
-    const [pipelineGlAccountDraft, setPipelineGlAccountDraft] = useState('');
+    const [pipelineGlAccountDraft, setPipelineGlAccountDraft] = useState(
+        session.pipelineGlAccountDraft,
+    );
     const [isSavingPipelineGlAccount, setIsSavingPipelineGlAccount] =
         useState(false);
     const [isPipelinePosting, setIsPipelinePosting] = useState(false);
@@ -110,18 +124,23 @@ export function PipelineTab({
         useState(false);
     const [transferModalEntryId, setTransferModalEntryId] = useState<
         string | null
-    >(null);
+    >(session.transferModalEntryId);
     const [splitModalEntryId, setSplitModalEntryId] = useState<string | null>(
-        null,
+        session.splitModalEntryId,
     );
-    const [splitDraftRows, setSplitDraftRows] = useState<SplitDraftRow[]>([]);
+    const [splitDraftRows, setSplitDraftRows] = useState<SplitDraftRow[]>(
+        session.splitDraftRows,
+    );
     const [transferModalResults, setTransferModalResults] = useState<
         UnpostedTransferResult[]
     >([]);
     const [isLoadingTransferModal, setIsLoadingTransferModal] = useState(false);
-    const [transferModalSearch, setTransferModalSearch] = useState('');
+    const [transferModalSearch, setTransferModalSearch] = useState(
+        session.transferModalSearch,
+    );
 
     const suggestRequestId = useRef(0);
+    const hasSeenSelectedLoginAccountRef = useRef(false);
 
     // --- Computed values ---
 
@@ -380,6 +399,33 @@ export function PipelineTab({
 
     // --- Effects ---
 
+    useEffect(() => {
+        onSessionChange(() => ({
+            selectedLoginAccount,
+            pipelineStatus,
+            pipelineSubTab,
+            evidenceRowsDocument,
+            pipelineSelectedEntryIds: [...pipelineSelectedEntryIds],
+            pipelineGlAccountDraft,
+            transferModalEntryId,
+            splitModalEntryId,
+            splitDraftRows,
+            transferModalSearch,
+        }));
+    }, [
+        selectedLoginAccount,
+        pipelineStatus,
+        pipelineSubTab,
+        evidenceRowsDocument,
+        pipelineSelectedEntryIds,
+        pipelineGlAccountDraft,
+        transferModalEntryId,
+        splitModalEntryId,
+        splitDraftRows,
+        transferModalSearch,
+        onSessionChange,
+    ]);
+
     // Auto-select the first login account whenever the account list changes.
     useEffect(() => {
         if (loginAccounts.length === 0) return;
@@ -400,6 +446,10 @@ export function PipelineTab({
 
     // Reset per-account UI state when the selected account changes.
     useEffect(() => {
+        if (!hasSeenSelectedLoginAccountRef.current) {
+            hasSeenSelectedLoginAccountRef.current = true;
+            return;
+        }
         setEvidenceRowsDocument('');
         setDocumentRows([]);
         setPipelineSelectedEntryIds(new Set());
