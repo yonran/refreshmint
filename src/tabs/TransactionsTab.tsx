@@ -15,10 +15,14 @@ import {
     validateTransaction,
     validateTransactionText,
 } from '../tauri-commands.ts';
-import { getCurrentToken, getSearchSuggestions } from '../search-utils.ts';
+import {
+    getCurrentToken,
+    getSearchSuggestions,
+    quoteHledgerValue,
+} from '../search-utils.ts';
 import {
     type RecategorizeTab,
-    type SimilarRecategorizePlan,
+    type SimilarRecategorizeSeed,
     type TransactionDraft,
     type TransactionEntryMode,
     type TransactionsTabSession,
@@ -67,6 +71,81 @@ function formatTotals(totals: AmountTotal[] | null): string {
         return 'N/A';
     }
     return totals.map(formatTotal).join(', ');
+}
+
+function joinQueryClauses(...clauses: string[]): string {
+    return clauses
+        .map((clause) => clause.trim())
+        .filter((clause) => clause.length > 0)
+        .join(' ');
+}
+
+function buildRecategorizeSeedQuery(
+    description: string,
+    balancingAccount: string,
+): string {
+    return joinQueryClauses(
+        `desc:${quoteHledgerValue(description)}`,
+        balancingAccount.length > 0
+            ? `acct:${quoteHledgerValue(balancingAccount)}`
+            : '',
+    );
+}
+
+function buildCurrentFilterQuery(
+    transactionsSearch: string,
+    selectedAccount: string | null,
+    unpostedOnly: boolean,
+): string {
+    return joinQueryClauses(
+        transactionsSearch,
+        selectedAccount !== null
+            ? `acct:${quoteHledgerValue(selectedAccount)}`
+            : '',
+        unpostedOnly ? 'acct:^Equity:Unreconciled' : '',
+    );
+}
+
+function buildRecategorizeQuery(
+    seedQuery: string,
+    currentFilterQuery: string,
+    includeAll: boolean,
+): string {
+    return joinQueryClauses(seedQuery, includeAll ? '' : currentFilterQuery);
+}
+
+interface RecategorizePostingOption {
+    account: string;
+    selectable: boolean;
+}
+
+function getRecategorizePostingOptions(
+    txn: TransactionRow,
+): RecategorizePostingOption[] {
+    const accountCounts = new Map<string, number>();
+    for (const posting of txn.postings) {
+        accountCounts.set(
+            posting.account,
+            (accountCounts.get(posting.account) ?? 0) + 1,
+        );
+    }
+    return txn.postings.map((posting) => {
+        const isBalanceSheet =
+            posting.account.startsWith('Assets:') ||
+            posting.account.startsWith('Liabilities:');
+        return {
+            account: posting.account,
+            selectable:
+                !isBalanceSheet &&
+                (accountCounts.get(posting.account) ?? 0) === 1,
+        };
+    });
+}
+
+function getSelectableRecategorizeAccounts(txn: TransactionRow): string[] {
+    return getRecategorizePostingOptions(txn)
+        .filter((posting) => posting.selectable)
+        .map((posting) => posting.account);
 }
 
 interface TransactionsTabProps {
@@ -363,7 +442,11 @@ export function TransactionsTab({
             onRecategorizeTabsChange((current) =>
                 current.map((tab) =>
                     tab.id === activeRecategorizeTab.id
-                        ? { ...tab, queryResults: null, queryError: null }
+                        ? {
+                              ...tab,
+                              queryResults: ledger.transactions,
+                              queryError: null,
+                          }
                         : tab,
                 ),
             );
@@ -402,7 +485,12 @@ export function TransactionsTab({
         return () => {
             clearTimeout(timer);
         };
-    }, [activeRecategorizeTab, ledgerPath, onRecategorizeTabsChange]);
+    }, [
+        activeRecategorizeTab,
+        ledger.transactions,
+        ledgerPath,
+        onRecategorizeTabsChange,
+    ]);
 
     // Load GL category suggestions when this tab is active
     useEffect(() => {
@@ -708,7 +796,11 @@ export function TransactionsTab({
                 tab.id === activeRecategorizeTab.id
                     ? {
                           ...tab,
-                          plan: { ...tab.plan, searchQuery: newValue },
+                          plan: {
+                              ...tab.plan,
+                              searchQuery: newValue,
+                              queryCustomized: true,
+                          },
                       }
                     : tab,
             ),
@@ -726,15 +818,36 @@ export function TransactionsTab({
         setTransactionsSearch(current ? `${current} ${term}` : term);
     }
 
-    function handleOpenSimilarRecategorize(plan: SimilarRecategorizePlan) {
+    function handleOpenSimilarRecategorize(seed: SimilarRecategorizeSeed) {
         const id = recategorizeTabIdRef.current++;
+        const currentFilterQuery = buildCurrentFilterQuery(
+            transactionsSearch,
+            selectedAccount,
+            unpostedOnly,
+        );
+        const seedQuery = buildRecategorizeSeedQuery(
+            seed.description,
+            seed.balancingAccount,
+        );
         onRecategorizeTabsChange((current) => [
             ...current,
             {
                 id,
-                plan,
+                plan: {
+                    ...seed,
+                    searchQuery: buildRecategorizeQuery(
+                        seedQuery,
+                        currentFilterQuery,
+                        false,
+                    ),
+                    seedQuery,
+                    currentFilterQuery,
+                    includeAll: false,
+                    queryCustomized: false,
+                },
                 queryResults: null,
                 queryError: null,
+                selectedOldAccountsByTxn: {},
             },
         ]);
         setSimilarAcSuggestions([]);
@@ -743,21 +856,65 @@ export function TransactionsTab({
     }
 
     if (activeRecategorizeTab !== null) {
-        const baseEntries = activeRecategorizeTab.plan.includeAll
-            ? activeRecategorizeTab.plan.allEntries
-            : activeRecategorizeTab.plan.entries;
-        const similarQueryResultIds = new Set(
-            (activeRecategorizeTab.queryResults ?? []).map((txn) => txn.id),
-        );
-        const matchingEntries =
-            activeRecategorizeTab.queryResults === null
-                ? baseEntries
-                : baseEntries.filter((entry) =>
-                      similarQueryResultIds.has(entry.txnId),
-                  );
-        const txnById = new Map(
-            ledger.transactions.map((txn) => [txn.id, txn]),
-        );
+        const visibleRecategorizeTransactions =
+            activeRecategorizeTab.queryResults ??
+            (activeRecategorizeTab.plan.searchQuery.trim().length === 0
+                ? ledger.transactions
+                : []);
+        const updateActiveRecategorizeTab = (
+            updater: (tab: RecategorizeTab) => RecategorizeTab,
+        ) => {
+            onRecategorizeTabsChange((current) =>
+                current.map((tab) =>
+                    tab.id === activeRecategorizeTab.id ? updater(tab) : tab,
+                ),
+            );
+        };
+        const getSelectedRecategorizeOldAccount = (
+            txn: TransactionRow,
+        ): string | null => {
+            if (
+                Object.prototype.hasOwnProperty.call(
+                    activeRecategorizeTab.selectedOldAccountsByTxn,
+                    txn.id,
+                )
+            ) {
+                return (
+                    activeRecategorizeTab.selectedOldAccountsByTxn[txn.id] ??
+                    null
+                );
+            }
+            const candidateAccounts = getSelectableRecategorizeAccounts(txn);
+            return candidateAccounts.length === 1
+                ? (candidateAccounts[0] ?? null)
+                : null;
+        };
+        const selectedRecategorizeEntries =
+            visibleRecategorizeTransactions.flatMap((txn) => {
+                const oldAccount = getSelectedRecategorizeOldAccount(txn);
+                return oldAccount === null
+                    ? []
+                    : [{ txnId: txn.id, oldAccount }];
+            });
+        const selectableCandidateAccounts =
+            visibleRecategorizeTransactions.flatMap((txn) =>
+                getSelectableRecategorizeAccounts(txn),
+            );
+        const unambiguousRecategorizeTransactions =
+            visibleRecategorizeTransactions.filter(
+                (txn) => getSelectableRecategorizeAccounts(txn).length === 1,
+            );
+        const allUnambiguousSelected =
+            unambiguousRecategorizeTransactions.length > 0 &&
+            unambiguousRecategorizeTransactions.every(
+                (txn) => getSelectedRecategorizeOldAccount(txn) !== null,
+            );
+        const someUnambiguousSelected =
+            unambiguousRecategorizeTransactions.some(
+                (txn) => getSelectedRecategorizeOldAccount(txn) !== null,
+            );
+        const canToggleIncludeAll =
+            activeRecategorizeTab.plan.currentFilterQuery.trim().length > 0;
         return (
             <div className="transactions-panel">
                 {(() => {
@@ -810,20 +967,14 @@ export function TransactionsTab({
                                     }
                                     onChange={(e) => {
                                         const val = e.target.value;
-                                        onRecategorizeTabsChange((current) =>
-                                            current.map((tab) =>
-                                                tab.id ===
-                                                activeRecategorizeTab.id
-                                                    ? {
-                                                          ...tab,
-                                                          plan: {
-                                                              ...tab.plan,
-                                                              searchQuery: val,
-                                                          },
-                                                      }
-                                                    : tab,
-                                            ),
-                                        );
+                                        updateActiveRecategorizeTab((tab) => ({
+                                            ...tab,
+                                            plan: {
+                                                ...tab.plan,
+                                                searchQuery: val,
+                                                queryCustomized: true,
+                                            },
+                                        }));
                                         const cursorPos =
                                             e.target.selectionStart ??
                                             val.length;
@@ -912,8 +1063,14 @@ export function TransactionsTab({
                             )}
                             <p>
                                 Recategorize{' '}
-                                <strong>{matchingEntries.length}</strong>{' '}
-                                transactions matching the current query to{' '}
+                                <strong>
+                                    {selectedRecategorizeEntries.length}
+                                </strong>{' '}
+                                selected postings across{' '}
+                                <strong>
+                                    {visibleRecategorizeTransactions.length}
+                                </strong>{' '}
+                                matching transactions to{' '}
                                 <strong>
                                     {activeRecategorizeTab.plan.newAccount.trim() ||
                                         '(choose category)'}
@@ -923,28 +1080,25 @@ export function TransactionsTab({
                             <AccountInput
                                 value={activeRecategorizeTab.plan.newAccount}
                                 onChange={(v) => {
-                                    onRecategorizeTabsChange((current) =>
-                                        current.map((tab) =>
-                                            tab.id === activeRecategorizeTab.id
-                                                ? {
-                                                      ...tab,
-                                                      plan: {
-                                                          ...tab.plan,
-                                                          newAccount: v,
-                                                      },
-                                                  }
-                                                : tab,
-                                        ),
-                                    );
+                                    updateActiveRecategorizeTab((tab) => ({
+                                        ...tab,
+                                        plan: {
+                                            ...tab.plan,
+                                            newAccount: v,
+                                        },
+                                    }));
                                 }}
                                 accounts={ledger.accounts.map((a) => a.name)}
-                                oldAccount={matchingEntries.map(
-                                    (entry) => entry.oldAccount,
-                                )}
+                                oldAccount={
+                                    selectedRecategorizeEntries.length > 0
+                                        ? selectedRecategorizeEntries.map(
+                                              (entry) => entry.oldAccount,
+                                          )
+                                        : selectableCandidateAccounts
+                                }
                                 placeholder="Destination category…"
                             />
-                            {activeRecategorizeTab.plan.allEntries.length >
-                                activeRecategorizeTab.plan.entries.length && (
+                            {canToggleIncludeAll && (
                                 <label className="checkbox-field">
                                     <input
                                         type="checkbox"
@@ -952,48 +1106,105 @@ export function TransactionsTab({
                                             activeRecategorizeTab.plan
                                                 .includeAll
                                         }
+                                        disabled={
+                                            activeRecategorizeTab.plan
+                                                .queryCustomized
+                                        }
                                         onChange={(e) => {
                                             const checked = e.target.checked;
-                                            onRecategorizeTabsChange(
-                                                (current) =>
-                                                    current.map((tab) =>
-                                                        tab.id ===
-                                                        activeRecategorizeTab.id
-                                                            ? {
-                                                                  ...tab,
-                                                                  plan: {
-                                                                      ...tab.plan,
-                                                                      includeAll:
-                                                                          checked,
-                                                                  },
-                                                              }
-                                                            : tab,
-                                                    ),
+                                            updateActiveRecategorizeTab(
+                                                (tab) => ({
+                                                    ...tab,
+                                                    plan: {
+                                                        ...tab.plan,
+                                                        includeAll: checked,
+                                                        searchQuery:
+                                                            buildRecategorizeQuery(
+                                                                tab.plan
+                                                                    .seedQuery,
+                                                                tab.plan
+                                                                    .currentFilterQuery,
+                                                                checked,
+                                                            ),
+                                                    },
+                                                }),
                                             );
                                         }}
                                     />
                                     <span>
-                                        Include{' '}
-                                        {activeRecategorizeTab.plan.allEntries
-                                            .length -
-                                            activeRecategorizeTab.plan.entries
-                                                .length}{' '}
-                                        more transactions not in current filter
+                                        Include transactions not in current
+                                        filter
                                     </span>
                                 </label>
                             )}
+                            {activeRecategorizeTab.plan.queryCustomized &&
+                                canToggleIncludeAll && (
+                                    <p className="status">
+                                        Query customized. The include toggle no
+                                        longer rewrites it.
+                                    </p>
+                                )}
                             <div className="table-wrap similar-confirm-table-wrap">
                                 <table className="ledger-table">
                                     <thead>
                                         <tr>
                                             <th>Date</th>
                                             <th>Description</th>
-                                            <th>From Account</th>
+                                            <th>
+                                                {unambiguousRecategorizeTransactions.length >
+                                                0 ? (
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={
+                                                            allUnambiguousSelected
+                                                        }
+                                                        ref={(el) => {
+                                                            if (el) {
+                                                                el.indeterminate =
+                                                                    someUnambiguousSelected &&
+                                                                    !allUnambiguousSelected;
+                                                            }
+                                                        }}
+                                                        onChange={() => {
+                                                            const shouldSelect =
+                                                                !allUnambiguousSelected;
+                                                            updateActiveRecategorizeTab(
+                                                                (tab) => {
+                                                                    const nextSelections =
+                                                                        {
+                                                                            ...tab.selectedOldAccountsByTxn,
+                                                                        };
+                                                                    for (const txn of unambiguousRecategorizeTransactions) {
+                                                                        const candidate =
+                                                                            getSelectableRecategorizeAccounts(
+                                                                                txn,
+                                                                            )[0] ??
+                                                                            null;
+                                                                        nextSelections[
+                                                                            txn.id
+                                                                        ] =
+                                                                            shouldSelect
+                                                                                ? candidate
+                                                                                : null;
+                                                                    }
+                                                                    return {
+                                                                        ...tab,
+                                                                        selectedOldAccountsByTxn:
+                                                                            nextSelections,
+                                                                    };
+                                                                },
+                                                            );
+                                                        }}
+                                                    />
+                                                ) : null}{' '}
+                                                Posting
+                                            </th>
                                             <th>Amount</th>
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {matchingEntries.length === 0 ? (
+                                        {visibleRecategorizeTransactions.length ===
+                                        0 ? (
                                             <tr>
                                                 <td
                                                     colSpan={4}
@@ -1004,30 +1215,100 @@ export function TransactionsTab({
                                                 </td>
                                             </tr>
                                         ) : (
-                                            matchingEntries.map((entry) => {
-                                                const txn = txnById.get(
-                                                    entry.txnId,
-                                                );
-                                                if (!txn) return null;
-                                                return (
-                                                    <tr key={entry.txnId}>
-                                                        <td className="mono">
-                                                            {txn.date}
-                                                        </td>
-                                                        <td>
-                                                            {txn.description}
-                                                        </td>
-                                                        <td>
-                                                            {entry.oldAccount}
-                                                        </td>
-                                                        <td className="amount">
-                                                            {formatTotals(
-                                                                txn.totals,
-                                                            )}
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            })
+                                            visibleRecategorizeTransactions.map(
+                                                (txn) => {
+                                                    const postingOptions =
+                                                        getRecategorizePostingOptions(
+                                                            txn,
+                                                        );
+                                                    const selectedOldAccount =
+                                                        getSelectedRecategorizeOldAccount(
+                                                            txn,
+                                                        );
+                                                    return (
+                                                        <tr key={txn.id}>
+                                                            <td className="mono">
+                                                                {txn.date}
+                                                            </td>
+                                                            <td>
+                                                                {
+                                                                    txn.description
+                                                                }
+                                                            </td>
+                                                            <td>
+                                                                {postingOptions.length ===
+                                                                0 ? (
+                                                                    <span className="status">
+                                                                        No
+                                                                        candidate
+                                                                        postings
+                                                                    </span>
+                                                                ) : (
+                                                                    postingOptions.map(
+                                                                        (
+                                                                            posting,
+                                                                            index,
+                                                                        ) => (
+                                                                            <label
+                                                                                key={`${txn.id}:${posting.account}:${index}`}
+                                                                                className="checkbox-field"
+                                                                            >
+                                                                                <input
+                                                                                    type="checkbox"
+                                                                                    disabled={
+                                                                                        !posting.selectable
+                                                                                    }
+                                                                                    checked={
+                                                                                        posting.selectable &&
+                                                                                        selectedOldAccount ===
+                                                                                            posting.account
+                                                                                    }
+                                                                                    onChange={(
+                                                                                        e,
+                                                                                    ) => {
+                                                                                        if (
+                                                                                            !posting.selectable
+                                                                                        ) {
+                                                                                            return;
+                                                                                        }
+                                                                                        updateActiveRecategorizeTab(
+                                                                                            (
+                                                                                                tab,
+                                                                                            ) => ({
+                                                                                                ...tab,
+                                                                                                selectedOldAccountsByTxn:
+                                                                                                    {
+                                                                                                        ...tab.selectedOldAccountsByTxn,
+                                                                                                        [txn.id]:
+                                                                                                            e
+                                                                                                                .target
+                                                                                                                .checked
+                                                                                                                ? posting.account
+                                                                                                                : null,
+                                                                                                    },
+                                                                                            }),
+                                                                                        );
+                                                                                    }}
+                                                                                />
+                                                                                <span className="mono">
+                                                                                    {
+                                                                                        posting.account
+                                                                                    }
+                                                                                </span>
+                                                                            </label>
+                                                                        ),
+                                                                    )
+                                                                )}
+                                                            </td>
+                                                            <td className="amount">
+                                                                {formatTotals(
+                                                                    txn.totals,
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                },
+                                            )
                                         )}
                                     </tbody>
                                 </table>
@@ -1038,11 +1319,11 @@ export function TransactionsTab({
                                     className="primary-button"
                                     disabled={
                                         !activeRecategorizeTab.plan.newAccount.trim() ||
-                                        matchingEntries.length === 0
+                                        selectedRecategorizeEntries.length === 0
                                     }
                                     onClick={() => {
                                         void handleBulkRecategorize(
-                                            matchingEntries,
+                                            selectedRecategorizeEntries,
                                             activeRecategorizeTab.plan.newAccount.trim(),
                                         );
                                         onRecategorizeTabsChange((current) =>
@@ -1606,7 +1887,6 @@ export function TransactionsTab({
             </section>
             <TransactionsTable
                 transactions={filteredTransactions}
-                allTransactions={ledger.transactions}
                 ledgerPath={ledgerPath}
                 accountNames={ledger.accounts.map((a) => a.name)}
                 glCategorySuggestions={glCategorySuggestions}

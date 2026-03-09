@@ -124,14 +124,21 @@ export type PipelineBulkStats = {
     post: PipelineBulkSummary;
 };
 
+export type SimilarRecategorizeSeed = {
+    newAccount: string;
+    description: string;
+    balancingAccount: string;
+};
+
 export type SimilarRecategorizePlan = {
-    entries: Array<{ txnId: string; oldAccount: string }>;
-    allEntries: Array<{ txnId: string; oldAccount: string }>;
     newAccount: string;
     searchQuery: string;
+    seedQuery: string;
+    currentFilterQuery: string;
     description: string;
     balancingAccount: string;
     includeAll: boolean;
+    queryCustomized: boolean;
 };
 
 export type RecategorizeTab = {
@@ -139,6 +146,7 @@ export type RecategorizeTab = {
     plan: SimilarRecategorizePlan;
     queryResults: TransactionRow[] | null;
     queryError: string | null;
+    selectedOldAccountsByTxn: Record<string, string | null>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {

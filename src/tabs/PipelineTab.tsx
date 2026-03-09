@@ -2213,7 +2213,6 @@ export function PipelineTab({
                     <div className="table-wrap">
                         <TransactionsTable
                             transactions={pipelineGlRows}
-                            allTransactions={pipelineGlRows}
                             ledgerPath={ledgerPath}
                             hideObviousAmounts={hideObviousAmounts}
                         />

@@ -13,7 +13,7 @@ import {
     getAccountSuggestions,
     quoteHledgerValue,
 } from '../search-utils.ts';
-import type { SimilarRecategorizePlan } from '../types.ts';
+import type { SimilarRecategorizeSeed } from '../types.ts';
 
 function formatScaled(mantissa: string, scale: number): string {
     let negative = false;
@@ -313,7 +313,6 @@ export function AccountsTable({
 
 export function TransactionsTable({
     transactions,
-    allTransactions,
     ledgerPath,
     accountNames = [],
     glCategorySuggestions = {},
@@ -326,7 +325,6 @@ export function TransactionsTable({
     onAddSearchTerm,
 }: {
     transactions: TransactionRow[];
-    allTransactions: TransactionRow[];
     ledgerPath: string | null;
     accountNames?: string[];
     glCategorySuggestions?: Record<string, GlCategoryResult>;
@@ -341,7 +339,7 @@ export function TransactionsTable({
         entries: Array<{ txnId: string; oldAccount: string }>,
         newAccount: string,
     ) => void;
-    onOpenSimilarRecategorize?: (plan: SimilarRecategorizePlan) => void;
+    onOpenSimilarRecategorize?: (seed: SimilarRecategorizeSeed) => void;
     hideObviousAmounts?: boolean;
     onAddSearchTerm?: (term: string) => void;
 }) {
@@ -376,21 +374,6 @@ export function TransactionsTable({
         }
         return map;
     }, [transactions]);
-
-    const allSimilarGroupIds = useMemo(() => {
-        const map = new Map<string, string[]>();
-        for (const txn of allTransactions) {
-            const key = similarKey(txn);
-            if (key == null) continue;
-            let arr = map.get(key);
-            if (!arr) {
-                arr = [];
-                map.set(key, arr);
-            }
-            arr.push(txn.id);
-        }
-        return map;
-    }, [allTransactions]);
 
     type ContextMenuItem = { label: string; action: () => void };
     const [contextMenu, setContextMenu] = useState<{
@@ -492,18 +475,6 @@ export function TransactionsTable({
     });
     const colCount = 5 + (hasCheckbox ? 1 : 0);
 
-    function toRecategorizeEntries(
-        ids: string[],
-        sourceTransactions: TransactionRow[],
-    ): Array<{ txnId: string; oldAccount: string }> {
-        return ids.flatMap((id) => {
-            const txn = sourceTransactions.find((t) => t.id === id);
-            if (!txn) return [];
-            const posting = singleNonBalancingPosting(txn);
-            if (!posting || posting.account !== 'Expenses:Unknown') return [];
-            return [{ txnId: id, oldAccount: posting.account }];
-        });
-    }
     function openSimilarConfirmForTxn(
         txn: TransactionRow,
         targetAccount: string,
@@ -511,13 +482,7 @@ export function TransactionsTable({
         const key = similarityGroupKey(txn);
         if (key === null || onOpenSimilarRecategorize === undefined) return;
         const filteredSimilarIds = similarGroupIds.get(key) ?? [];
-        const allSimilarIds = allSimilarGroupIds.get(key) ?? [];
-        const entries = toRecategorizeEntries(filteredSimilarIds, transactions);
-        if (entries.length <= 1) return;
-        const allEntries = toRecategorizeEntries(
-            allSimilarIds,
-            allTransactions,
-        );
+        if (filteredSimilarIds.length <= 1) return;
         const balancingAccount =
             txn.postings.find(
                 (posting) =>
@@ -525,14 +490,9 @@ export function TransactionsTable({
                     posting.account.startsWith('Liabilities:'),
             )?.account ?? '';
         onOpenSimilarRecategorize({
-            entries,
-            allEntries:
-                allEntries.length >= entries.length ? allEntries : entries,
             newAccount: targetAccount,
-            searchQuery: `desc:${quoteHledgerValue(txn.description)} acct:${quoteHledgerValue(balancingAccount)} acct:Expenses:Unknown`,
             description: txn.description,
             balancingAccount,
-            includeAll: false,
         });
     }
 
