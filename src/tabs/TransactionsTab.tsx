@@ -116,36 +116,31 @@ function buildRecategorizeQuery(
 
 interface RecategorizePostingOption {
     account: string;
+    postingIndex: number;
     selectable: boolean;
 }
 
 function getRecategorizePostingOptions(
     txn: TransactionRow,
 ): RecategorizePostingOption[] {
-    const accountCounts = new Map<string, number>();
-    for (const posting of txn.postings) {
-        accountCounts.set(
-            posting.account,
-            (accountCounts.get(posting.account) ?? 0) + 1,
-        );
-    }
-    return txn.postings.map((posting) => {
+    return txn.postings.map((posting, postingIndex) => {
         const isBalanceSheet =
             posting.account.startsWith('Assets:') ||
             posting.account.startsWith('Liabilities:');
         return {
             account: posting.account,
-            selectable:
-                !isBalanceSheet &&
-                (accountCounts.get(posting.account) ?? 0) === 1,
+            postingIndex,
+            selectable: !isBalanceSheet,
         };
     });
 }
 
-function getSelectableRecategorizeAccounts(txn: TransactionRow): string[] {
-    return getRecategorizePostingOptions(txn)
-        .filter((posting) => posting.selectable)
-        .map((posting) => posting.account);
+function getSelectableRecategorizePostings(
+    txn: TransactionRow,
+): RecategorizePostingOption[] {
+    return getRecategorizePostingOptions(txn).filter(
+        (posting) => posting.selectable,
+    );
 }
 
 interface TransactionsTabProps {
@@ -676,14 +671,14 @@ export function TransactionsTab({
 
     async function handleRecategorizeGlTransaction(
         txnId: string,
-        oldAccount: string,
+        postingIndex: number,
         newAccount: string,
     ) {
         try {
             await recategorizeGlTransaction(
                 ledgerPath,
                 txnId,
-                oldAccount,
+                postingIndex,
                 newAccount,
             );
             onLedgerRefresh();
@@ -706,15 +701,19 @@ export function TransactionsTab({
     }
 
     async function handleBulkRecategorize(
-        entries: Array<{ txnId: string; oldAccount: string }>,
+        entries: Array<{
+            txnId: string;
+            postingIndex: number;
+            oldAccount: string;
+        }>,
         newAccount: string,
     ) {
         try {
-            for (const { txnId, oldAccount } of entries) {
+            for (const { txnId, postingIndex } of entries) {
                 await recategorizeGlTransaction(
                     ledgerPath,
                     txnId,
-                    oldAccount,
+                    postingIndex,
                     newAccount,
                 );
             }
@@ -847,7 +846,7 @@ export function TransactionsTab({
                 },
                 queryResults: null,
                 queryError: null,
-                selectedOldAccountsByTxn: {},
+                selectedPostingIndexByTxn: {},
             },
         ]);
         setSimilarAcSuggestions([]);
@@ -870,48 +869,60 @@ export function TransactionsTab({
                 ),
             );
         };
-        const getSelectedRecategorizeOldAccount = (
+        const getSelectedRecategorizePostingIndex = (
             txn: TransactionRow,
-        ): string | null => {
+        ): number | null => {
             if (
                 Object.prototype.hasOwnProperty.call(
-                    activeRecategorizeTab.selectedOldAccountsByTxn,
+                    activeRecategorizeTab.selectedPostingIndexByTxn,
                     txn.id,
                 )
             ) {
                 return (
-                    activeRecategorizeTab.selectedOldAccountsByTxn[txn.id] ??
+                    activeRecategorizeTab.selectedPostingIndexByTxn[txn.id] ??
                     null
                 );
             }
-            const candidateAccounts = getSelectableRecategorizeAccounts(txn);
-            return candidateAccounts.length === 1
-                ? (candidateAccounts[0] ?? null)
+            const candidatePostings = getSelectableRecategorizePostings(txn);
+            return candidatePostings.length === 1
+                ? (candidatePostings[0]?.postingIndex ?? null)
                 : null;
         };
         const selectedRecategorizeEntries =
             visibleRecategorizeTransactions.flatMap((txn) => {
-                const oldAccount = getSelectedRecategorizeOldAccount(txn);
-                return oldAccount === null
+                const postingIndex = getSelectedRecategorizePostingIndex(txn);
+                if (postingIndex === null) {
+                    return [];
+                }
+                const posting = txn.postings[postingIndex];
+                return posting === undefined
                     ? []
-                    : [{ txnId: txn.id, oldAccount }];
+                    : [
+                          {
+                              txnId: txn.id,
+                              postingIndex,
+                              oldAccount: posting.account,
+                          },
+                      ];
             });
         const selectableCandidateAccounts =
             visibleRecategorizeTransactions.flatMap((txn) =>
-                getSelectableRecategorizeAccounts(txn),
+                getSelectableRecategorizePostings(txn).map(
+                    (posting) => posting.account,
+                ),
             );
         const unambiguousRecategorizeTransactions =
             visibleRecategorizeTransactions.filter(
-                (txn) => getSelectableRecategorizeAccounts(txn).length === 1,
+                (txn) => getSelectableRecategorizePostings(txn).length === 1,
             );
         const allUnambiguousSelected =
             unambiguousRecategorizeTransactions.length > 0 &&
             unambiguousRecategorizeTransactions.every(
-                (txn) => getSelectedRecategorizeOldAccount(txn) !== null,
+                (txn) => getSelectedRecategorizePostingIndex(txn) !== null,
             );
         const someUnambiguousSelected =
             unambiguousRecategorizeTransactions.some(
-                (txn) => getSelectedRecategorizeOldAccount(txn) !== null,
+                (txn) => getSelectedRecategorizePostingIndex(txn) !== null,
             );
         const canToggleIncludeAll =
             activeRecategorizeTab.plan.currentFilterQuery.trim().length > 0;
@@ -1172,13 +1183,14 @@ export function TransactionsTab({
                                                                 (tab) => {
                                                                     const nextSelections =
                                                                         {
-                                                                            ...tab.selectedOldAccountsByTxn,
+                                                                            ...tab.selectedPostingIndexByTxn,
                                                                         };
                                                                     for (const txn of unambiguousRecategorizeTransactions) {
                                                                         const candidate =
-                                                                            getSelectableRecategorizeAccounts(
+                                                                            getSelectableRecategorizePostings(
                                                                                 txn,
-                                                                            )[0] ??
+                                                                            )[0]
+                                                                                ?.postingIndex ??
                                                                             null;
                                                                         nextSelections[
                                                                             txn.id
@@ -1189,7 +1201,7 @@ export function TransactionsTab({
                                                                     }
                                                                     return {
                                                                         ...tab,
-                                                                        selectedOldAccountsByTxn:
+                                                                        selectedPostingIndexByTxn:
                                                                             nextSelections,
                                                                     };
                                                                 },
@@ -1221,8 +1233,8 @@ export function TransactionsTab({
                                                         getRecategorizePostingOptions(
                                                             txn,
                                                         );
-                                                    const selectedOldAccount =
-                                                        getSelectedRecategorizeOldAccount(
+                                                    const selectedPostingIndex =
+                                                        getSelectedRecategorizePostingIndex(
                                                             txn,
                                                         );
                                                     return (
@@ -1260,8 +1272,8 @@ export function TransactionsTab({
                                                                                     }
                                                                                     checked={
                                                                                         posting.selectable &&
-                                                                                        selectedOldAccount ===
-                                                                                            posting.account
+                                                                                        selectedPostingIndex ===
+                                                                                            posting.postingIndex
                                                                                     }
                                                                                     onChange={(
                                                                                         e,
@@ -1276,14 +1288,14 @@ export function TransactionsTab({
                                                                                                 tab,
                                                                                             ) => ({
                                                                                                 ...tab,
-                                                                                                selectedOldAccountsByTxn:
+                                                                                                selectedPostingIndexByTxn:
                                                                                                     {
-                                                                                                        ...tab.selectedOldAccountsByTxn,
+                                                                                                        ...tab.selectedPostingIndexByTxn,
                                                                                                         [txn.id]:
                                                                                                             e
                                                                                                                 .target
                                                                                                                 .checked
-                                                                                                                ? posting.account
+                                                                                                                ? posting.postingIndex
                                                                                                                 : null,
                                                                                                     },
                                                                                             }),
@@ -1890,10 +1902,10 @@ export function TransactionsTab({
                 ledgerPath={ledgerPath}
                 accountNames={ledger.accounts.map((a) => a.name)}
                 glCategorySuggestions={glCategorySuggestions}
-                onRecategorize={(txnId, oldAccount, newAccount) => {
+                onRecategorize={(txnId, postingIndex, newAccount) => {
                     void handleRecategorizeGlTransaction(
                         txnId,
-                        oldAccount,
+                        postingIndex,
                         newAccount,
                     );
                 }}

@@ -146,7 +146,7 @@ export type RecategorizeTab = {
     plan: SimilarRecategorizePlan;
     queryResults: TransactionRow[] | null;
     queryError: string | null;
-    selectedOldAccountsByTxn: Record<string, string | null>;
+    selectedPostingIndexByTxn: Record<string, number | null>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {

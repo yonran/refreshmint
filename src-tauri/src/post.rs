@@ -1433,14 +1433,52 @@ fn split_journal_blocks(content: &str) -> Vec<String> {
     blocks
 }
 
-/// Replace `Expenses:Unknown` with `new_account` in an existing GL transaction.
+fn replace_posting_account(line: &str, new_account: &str) -> String {
+    let indent_end = line
+        .char_indices()
+        .find(|(_, ch)| !ch.is_whitespace())
+        .map(|(idx, _)| idx)
+        .unwrap_or(line.len());
+    let rest = &line[indent_end..];
+
+    let mut suffix_start = rest.len();
+    let mut prev_was_space = false;
+    for (idx, ch) in rest.char_indices() {
+        if ch == '\t' {
+            suffix_start = idx;
+            break;
+        }
+        if ch == ' ' {
+            if prev_was_space {
+                suffix_start = idx - 1;
+                break;
+            }
+            prev_was_space = true;
+            continue;
+        }
+        if ch == ';' && idx > 0 && rest[..idx].ends_with(' ') {
+            suffix_start = idx - 1;
+            break;
+        }
+        prev_was_space = false;
+    }
+
+    format!(
+        "{}{}{}",
+        &line[..indent_end],
+        new_account,
+        &rest[suffix_start..]
+    )
+}
+
+/// Replace the posting at `posting_index` with `new_account` in an existing GL transaction.
 ///
-/// Finds the block by `txn_id`, replaces the auto-balanced `Expenses:Unknown`
-/// posting line (no explicit amount), writes the updated file, and commits.
+/// Finds the block by `txn_id`, rewrites only the indexed posting account while
+/// preserving the rest of the posting line, writes the updated file, and commits.
 pub fn recategorize_gl_transaction(
     ledger_dir: &Path,
     txn_id: &str,
-    old_account: &str,
+    posting_index: usize,
     new_account: &str,
     lock_owner: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1450,28 +1488,43 @@ pub fn recategorize_gl_transaction(
     let content = fs::read_to_string(&journal_path)?;
     let marker = format!("id: {txn_id}");
     let mut found = false;
+    let mut replaced_any = false;
 
     let blocks: Vec<String> = split_journal_blocks(&content)
         .into_iter()
         .map(|block| {
             if !found && block.contains(&marker) {
                 found = true;
-                // Replace the bare `Expenses:Unknown` posting line.
+                let mut current_posting_index = 0usize;
+                let mut replaced = false;
                 let new_block: String = block
                     .lines()
                     .map(|line| {
                         let is_indented = line.starts_with(' ') || line.starts_with('\t');
-                        if is_indented && line.trim() == old_account {
-                            let indent: String =
-                                line.chars().take_while(|c| c.is_whitespace()).collect();
-                            format!("{indent}{new_account}")
+                        let trimmed = line.trim();
+                        let is_posting_line =
+                            is_indented && !trimmed.is_empty() && !trimmed.starts_with(';');
+                        if !is_posting_line {
+                            return line.to_string();
+                        }
+
+                        let line_result = if current_posting_index == posting_index {
+                            replaced = true;
+                            replace_posting_account(line, new_account)
                         } else {
                             line.to_string()
-                        }
+                        };
+                        current_posting_index += 1;
+                        line_result
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                new_block.trim_end().to_string()
+                if replaced {
+                    replaced_any = true;
+                    new_block.trim_end().to_string()
+                } else {
+                    block
+                }
             } else {
                 block
             }
@@ -1480,6 +1533,9 @@ pub fn recategorize_gl_transaction(
 
     if !found {
         return Err(format!("GL transaction not found: {txn_id}").into());
+    }
+    if !replaced_any {
+        return Err(format!("GL posting index out of bounds: {posting_index}").into());
     }
 
     let mut final_content = blocks.join("\n\n");
@@ -1767,6 +1823,55 @@ mod tests {
         // Check undo operation was logged
         let ops = operations::read_gl_operations(&root).unwrap();
         assert_eq!(ops.len(), 2); // post + undo-post
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recategorize_updates_only_selected_posting_index() {
+        let root = temp_dir("recategorize-posting-index");
+        fs::write(
+            root.join("general.journal"),
+            "2024-01-15 Grocery run  ; id: txn-1\n    Assets:Checking  -10.00 USD\n    Expenses:Food\n    Expenses:Food\n",
+        )
+        .unwrap();
+
+        recategorize_gl_transaction(&root, "txn-1", 2, "Expenses:Dining", "test").unwrap();
+
+        let gl_content = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            gl_content.contains("    Expenses:Food\n    Expenses:Dining\n"),
+            "only the indexed posting should change"
+        );
+        assert_eq!(
+            gl_content.matches("Expenses:Food").count(),
+            1,
+            "one duplicate posting should remain unchanged"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recategorize_preserves_amounts_and_comments_on_selected_posting() {
+        let root = temp_dir("recategorize-preserves-posting-tail");
+        fs::write(
+            root.join("general.journal"),
+            "2024-01-15 Grocery run  ; id: txn-1\n    Assets:Checking  -10.00 USD\n    Expenses:Food  7.00 USD ; note:snack\n    Expenses:Food  3.00 USD\n",
+        )
+        .unwrap();
+
+        recategorize_gl_transaction(&root, "txn-1", 1, "Expenses:Dining", "test").unwrap();
+
+        let gl_content = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            gl_content.contains("    Expenses:Dining  7.00 USD ; note:snack\n"),
+            "the selected posting should keep its amount and comment"
+        );
+        assert!(
+            gl_content.contains("    Expenses:Food  3.00 USD\n"),
+            "other postings should remain unchanged"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

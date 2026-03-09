@@ -557,13 +557,13 @@ export async function suggestGlCategories(
 export async function recategorizeGlTransaction(
     ledger: string,
     txnId: string,
-    oldAccount: string,
+    postingIndex: number,
     newAccount: string,
 ): Promise<void> {
     await invoke('recategorize_gl_transaction', {
         ledger,
         txnId,
-        oldAccount,
+        postingIndex,
         newAccount,
     });
 }

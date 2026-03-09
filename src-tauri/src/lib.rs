@@ -1620,14 +1620,13 @@ fn suggest_gl_categories(
 fn recategorize_gl_transaction(
     ledger: String,
     txn_id: String,
-    old_account: String,
+    posting_index: usize,
     new_account: String,
 ) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let txn_id = require_non_empty_input("txn_id", txn_id)?;
-    let old_account = require_non_empty_input("old_account", old_account)?;
     let new_account = require_non_empty_input("new_account", new_account)?;
-    post::recategorize_gl_transaction(&target_dir, &txn_id, &old_account, &new_account, "gui")
+    post::recategorize_gl_transaction(&target_dir, &txn_id, posting_index, &new_account, "gui")
         .map_err(|err| err.to_string())
 }
 
