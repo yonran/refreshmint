@@ -120,6 +120,12 @@ interface RecategorizePostingOption {
     selectable: boolean;
 }
 
+type RecategorizeSelectionEntry = {
+    txnId: string;
+    postingIndex: number;
+    oldAccount: string;
+};
+
 function getRecategorizePostingOptions(
     txn: TransactionRow,
 ): RecategorizePostingOption[] {
@@ -320,6 +326,10 @@ export function TransactionsTab({
     const [glTransferModalSearch, setGlTransferModalSearch] = useState(
         session.glTransferModalSearch,
     );
+    const [recategorizeBulkConfirm, setRecategorizeBulkConfirm] = useState<{
+        entries: RecategorizeSelectionEntry[];
+        newAccount: string;
+    } | null>(null);
 
     const searchInputRef = useRef<HTMLInputElement>(null);
     const similarSearchInputRef = useRef<HTMLInputElement>(null);
@@ -385,6 +395,10 @@ export function TransactionsTab({
             onPendingSearchConsumed();
         }
     }, [pendingSearch, onPendingSearchConsumed]);
+
+    useEffect(() => {
+        setRecategorizeBulkConfirm(null);
+    }, [activeRecategorizeTab?.id]);
 
     // Cmd+F focuses search when this tab is active
     useEffect(() => {
@@ -701,11 +715,7 @@ export function TransactionsTab({
     }
 
     async function handleBulkRecategorize(
-        entries: Array<{
-            txnId: string;
-            postingIndex: number;
-            oldAccount: string;
-        }>,
+        entries: RecategorizeSelectionEntry[],
         newAccount: string,
     ) {
         try {
@@ -723,6 +733,30 @@ export function TransactionsTab({
         } catch (error) {
             console.error('bulk recategorize failed:', error);
         }
+    }
+
+    function closeActiveRecategorizeTab() {
+        if (activeRecategorizeTab === null) {
+            return;
+        }
+        setRecategorizeBulkConfirm(null);
+        onRecategorizeTabsChange((current) =>
+            current.filter((tab) => tab.id !== activeRecategorizeTab.id),
+        );
+        onNavigateToTransactions();
+    }
+
+    function applyRecategorizeSelection(
+        entries: RecategorizeSelectionEntry[],
+        newAccount: string,
+    ) {
+        const accounts = new Set(entries.map((entry) => entry.oldAccount));
+        if (accounts.size > 1) {
+            setRecategorizeBulkConfirm({ entries, newAccount });
+            return;
+        }
+        void handleBulkRecategorize(entries, newAccount);
+        closeActiveRecategorizeTab();
     }
 
     function applySearchCompletion(suggestion: string) {
@@ -953,15 +987,7 @@ export function TransactionsTab({
                                         type="button"
                                         className="ghost-button"
                                         onClick={() => {
-                                            onRecategorizeTabsChange(
-                                                (current) =>
-                                                    current.filter(
-                                                        (tab) =>
-                                                            tab.id !==
-                                                            activeRecategorizeTab.id,
-                                                    ),
-                                            );
-                                            onNavigateToTransactions();
+                                            closeActiveRecategorizeTab();
                                         }}
                                     >
                                         Close
@@ -1334,23 +1360,116 @@ export function TransactionsTab({
                                         selectedRecategorizeEntries.length === 0
                                     }
                                     onClick={() => {
-                                        void handleBulkRecategorize(
+                                        applyRecategorizeSelection(
                                             selectedRecategorizeEntries,
                                             activeRecategorizeTab.plan.newAccount.trim(),
                                         );
-                                        onRecategorizeTabsChange((current) =>
-                                            current.filter(
-                                                (tab) =>
-                                                    tab.id !==
-                                                    activeRecategorizeTab.id,
-                                            ),
-                                        );
-                                        onNavigateToTransactions();
                                     }}
                                 >
                                     Apply
                                 </button>
                             </div>
+                            {recategorizeBulkConfirm !== null && (
+                                <div
+                                    className="modal-overlay"
+                                    onClick={() => {
+                                        setRecategorizeBulkConfirm(null);
+                                    }}
+                                >
+                                    <div
+                                        className="modal-dialog"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                        }}
+                                    >
+                                        <div className="modal-header">
+                                            <h3>Confirm bulk recategorize</h3>
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                onClick={() => {
+                                                    setRecategorizeBulkConfirm(
+                                                        null,
+                                                    );
+                                                }}
+                                            >
+                                                Close
+                                            </button>
+                                        </div>
+                                        <p>
+                                            The selected rows have different
+                                            current accounts. All will be
+                                            changed to{' '}
+                                            <strong>
+                                                {
+                                                    recategorizeBulkConfirm.newAccount
+                                                }
+                                            </strong>
+                                            :
+                                        </p>
+                                        <ul>
+                                            {[
+                                                ...new Map(
+                                                    recategorizeBulkConfirm.entries.map(
+                                                        (entry) => [
+                                                            entry.oldAccount,
+                                                            0,
+                                                        ],
+                                                    ),
+                                                ).keys(),
+                                            ].map((account) => {
+                                                const count =
+                                                    recategorizeBulkConfirm.entries.filter(
+                                                        (entry) =>
+                                                            entry.oldAccount ===
+                                                            account,
+                                                    ).length;
+                                                return (
+                                                    <li key={account}>
+                                                        {count} x {account}{' '}
+                                                        {'->'}{' '}
+                                                        {
+                                                            recategorizeBulkConfirm.newAccount
+                                                        }
+                                                    </li>
+                                                );
+                                            })}
+                                        </ul>
+                                        <div
+                                            style={{
+                                                display: 'flex',
+                                                gap: '0.5rem',
+                                                justifyContent: 'flex-end',
+                                            }}
+                                        >
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                onClick={() => {
+                                                    setRecategorizeBulkConfirm(
+                                                        null,
+                                                    );
+                                                }}
+                                            >
+                                                Cancel
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                onClick={() => {
+                                                    void handleBulkRecategorize(
+                                                        recategorizeBulkConfirm.entries,
+                                                        recategorizeBulkConfirm.newAccount,
+                                                    );
+                                                    closeActiveRecategorizeTab();
+                                                }}
+                                            >
+                                                Confirm
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
                         </section>
                     );
                 })()}
