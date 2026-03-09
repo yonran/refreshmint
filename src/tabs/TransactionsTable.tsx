@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import {
+    useCallback,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+} from 'react';
 import {
     type AmountStyleHint,
     type AmountTotal,
@@ -329,6 +336,10 @@ export function TransactionsTable({
     ledgerPath,
     accountNames = [],
     glCategorySuggestions = {},
+    selectedTransactionIds,
+    onSelectedTransactionIdsChange,
+    initialScrollTop,
+    onScrollTopChange,
     onRecategorize,
     onMergeTransfer,
     onOpenLinkTransfer,
@@ -341,6 +352,10 @@ export function TransactionsTable({
     ledgerPath: string | null;
     accountNames?: string[];
     glCategorySuggestions?: Record<string, GlCategoryResult>;
+    selectedTransactionIds?: string[];
+    onSelectedTransactionIdsChange?: (ids: string[]) => void;
+    initialScrollTop?: number;
+    onScrollTopChange?: (scrollTop: number) => void;
     onRecategorize?: (
         txnId: string,
         postingIndex: number,
@@ -368,9 +383,9 @@ export function TransactionsTable({
     const [lightboxError, setLightboxError] = useState<string | null>(null);
     const [editingKey, setEditingKey] = useState<string | null>(null); // `${txnId}:${postingIndex}`
     const [categoryDraft, setCategoryDraft] = useState('');
-    const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(
-        new Set(),
-    );
+    const [uncontrolledSelectedIds, setUncontrolledSelectedIds] = useState<
+        ReadonlySet<string>
+    >(new Set());
     const [bulkDraft, setBulkDraft] = useState('');
     const [bulkConfirm, setBulkConfirm] = useState<{
         entries: Array<{
@@ -453,6 +468,53 @@ export function TransactionsTable({
         onMergeTransfer !== undefined ||
         onOpenLinkTransfer !== undefined;
     const hasCheckbox = onBulkRecategorize !== undefined;
+    const tableWrapRef = useRef<HTMLDivElement>(null);
+    const selectedIds = useMemo(
+        () =>
+            selectedTransactionIds !== undefined
+                ? new Set(selectedTransactionIds)
+                : uncontrolledSelectedIds,
+        [selectedTransactionIds, uncontrolledSelectedIds],
+    );
+
+    const updateSelectedIds = useCallback(
+        (updater: (prev: ReadonlySet<string>) => ReadonlySet<string>) => {
+            const next = updater(selectedIds);
+            if (selectedTransactionIds !== undefined) {
+                onSelectedTransactionIdsChange?.([...next]);
+                return;
+            }
+            setUncontrolledSelectedIds(next);
+        },
+        [onSelectedTransactionIdsChange, selectedIds, selectedTransactionIds],
+    );
+
+    useLayoutEffect(() => {
+        if (initialScrollTop === undefined) {
+            return;
+        }
+        const node = tableWrapRef.current;
+        if (!node) {
+            return;
+        }
+        if (Math.abs(node.scrollTop - initialScrollTop) > 1) {
+            node.scrollTop = initialScrollTop;
+        }
+    }, [initialScrollTop]);
+
+    useEffect(() => {
+        if (selectedIds.size === 0) {
+            return;
+        }
+        const visibleIds = new Set(transactions.map((txn) => txn.id));
+        const nextSelectedIds = [...selectedIds].filter((id) =>
+            visibleIds.has(id),
+        );
+        if (nextSelectedIds.length === selectedIds.size) {
+            return;
+        }
+        updateSelectedIds(() => new Set(nextSelectedIds));
+    }, [selectedIds, transactions, updateSelectedIds]);
 
     useEffect(() => {
         if (selectedIds.size === 0 || bulkDraft !== '') return;
@@ -478,7 +540,7 @@ export function TransactionsTable({
         const accounts = new Set(entries.map((e) => e.oldAccount));
         if (accounts.size <= 1) {
             onBulkRecategorize(entries, newAccount);
-            setSelectedIds(new Set());
+            updateSelectedIds(() => new Set());
             setBulkDraft('');
         } else {
             setBulkConfirm({ entries, newAccount });
@@ -551,7 +613,7 @@ export function TransactionsTable({
                             ) {
                                 applyBulk(bulkEntries, bulkDraft.trim());
                             } else if (e.key === 'Escape') {
-                                setSelectedIds(new Set());
+                                updateSelectedIds(() => new Set());
                                 setBulkDraft('');
                             }
                         }}
@@ -573,7 +635,7 @@ export function TransactionsTable({
                         type="button"
                         className="ghost-button"
                         onClick={() => {
-                            setSelectedIds(new Set());
+                            updateSelectedIds(() => new Set());
                             setBulkDraft('');
                         }}
                     >
@@ -581,7 +643,13 @@ export function TransactionsTable({
                     </button>
                 </div>
             )}
-            <div className="table-wrap">
+            <div
+                ref={tableWrapRef}
+                className="table-wrap"
+                onScroll={(e) => {
+                    onScrollTopChange?.(e.currentTarget.scrollTop);
+                }}
+            >
                 <table className="ledger-table">
                     <thead>
                         <tr>
@@ -597,7 +665,7 @@ export function TransactionsTable({
                                                     !allSelected;
                                         }}
                                         onChange={() => {
-                                            setSelectedIds(
+                                            updateSelectedIds(() =>
                                                 allSelected
                                                     ? new Set()
                                                     : new Set(eligibleIds),
@@ -651,7 +719,7 @@ export function TransactionsTable({
                                                             txn.id,
                                                         )}
                                                         onChange={() => {
-                                                            setSelectedIds(
+                                                            updateSelectedIds(
                                                                 (prev) => {
                                                                     const next =
                                                                         new Set(
@@ -743,10 +811,11 @@ export function TransactionsTable({
                                                     items.push({
                                                         label: `Check ${similarIds.length} uncategorized ${txn.description} transactions from ${balancingAccount}`,
                                                         action: () => {
-                                                            setSelectedIds(
-                                                                new Set(
-                                                                    similarIds,
-                                                                ),
+                                                            updateSelectedIds(
+                                                                () =>
+                                                                    new Set(
+                                                                        similarIds,
+                                                                    ),
                                                             );
                                                         },
                                                     });
@@ -1330,7 +1399,7 @@ export function TransactionsTable({
                                         bulkConfirm.entries,
                                         bulkConfirm.newAccount,
                                     );
-                                    setSelectedIds(new Set());
+                                    updateSelectedIds(() => new Set());
                                     setBulkDraft('');
                                     setBulkConfirm(null);
                                 }}

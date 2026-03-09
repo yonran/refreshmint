@@ -62,6 +62,8 @@ export type TransactionsTabSession = {
     rawDraft: string;
     entryMode: TransactionEntryMode;
     transactionsSearch: string;
+    selectedTransactionIds: string[];
+    transactionsTableScrollTop: number;
     isNewTxnExpandedOverride: boolean | null;
     glTransferModalTxnId: string | null;
     glTransferModalSearch: string;
@@ -221,6 +223,8 @@ export function createEmptyTransactionsTabSession(): TransactionsTabSession {
         rawDraft: '',
         entryMode: 'form',
         transactionsSearch: '',
+        selectedTransactionIds: [],
+        transactionsTableScrollTop: 0,
         isNewTxnExpandedOverride: null,
         glTransferModalTxnId: null,
         glTransferModalSearch: '',

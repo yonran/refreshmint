@@ -304,6 +304,9 @@ export function TransactionsTab({
     const [transactionsSearch, setTransactionsSearch] = useState(
         session.transactionsSearch,
     );
+    const [selectedTransactionIds, setSelectedTransactionIds] = useState(
+        session.selectedTransactionIds,
+    );
     const [queryResults, setQueryResults] = useState<TransactionRow[] | null>(
         null,
     );
@@ -335,30 +338,40 @@ export function TransactionsTab({
     const similarSearchInputRef = useRef<HTMLInputElement>(null);
     const hasSeenLedgerRef = useRef(false);
     const sessionRef = useRef<TransactionsTabSession>(session);
+    const transactionsTableScrollTopRef = useRef(
+        session.transactionsTableScrollTop,
+    );
 
     const ledgerPath = ledger.path;
 
-    useEffect(() => {
-        sessionRef.current = {
-            unpostedOnly,
-            transactionDraft,
-            rawDraft,
-            entryMode,
-            transactionsSearch,
-            isNewTxnExpandedOverride,
-            glTransferModalTxnId,
-            glTransferModalSearch,
-        };
-    }, [
+    sessionRef.current = {
         unpostedOnly,
         transactionDraft,
         rawDraft,
         entryMode,
         transactionsSearch,
+        selectedTransactionIds,
+        transactionsTableScrollTop: transactionsTableScrollTopRef.current,
         isNewTxnExpandedOverride,
         glTransferModalTxnId,
         glTransferModalSearch,
-    ]);
+    };
+
+    useEffect(() => {
+        setUnpostedOnly(session.unpostedOnly);
+        setTransactionDraft(
+            session.transactionDraft ?? createTransactionDraft(),
+        );
+        setRawDraft(session.rawDraft);
+        setEntryMode(session.entryMode);
+        setTransactionsSearch(session.transactionsSearch);
+        setSelectedTransactionIds(session.selectedTransactionIds);
+        transactionsTableScrollTopRef.current =
+            session.transactionsTableScrollTop;
+        setIsNewTxnExpandedOverride(session.isNewTxnExpandedOverride);
+        setGlTransferModalTxnId(session.glTransferModalTxnId);
+        setGlTransferModalSearch(session.glTransferModalSearch);
+    }, [session]);
 
     // Persist the latest local tab state when the tab unmounts.
     useEffect(() => {
@@ -381,6 +394,8 @@ export function TransactionsTab({
         setQueryError(null);
         setIsNewTxnExpandedOverride(null);
         setTransactionsSearch('');
+        setSelectedTransactionIds([]);
+        transactionsTableScrollTopRef.current = 0;
         setAcSuggestions([]);
         setAcActiveIndex(-1);
         setSimilarAcSuggestions([]);
@@ -2026,6 +2041,16 @@ export function TransactionsTab({
                 ledgerPath={ledgerPath}
                 accountNames={ledger.accounts.map((a) => a.name)}
                 glCategorySuggestions={glCategorySuggestions}
+                selectedTransactionIds={selectedTransactionIds}
+                onSelectedTransactionIdsChange={setSelectedTransactionIds}
+                initialScrollTop={transactionsTableScrollTopRef.current}
+                onScrollTopChange={(scrollTop) => {
+                    transactionsTableScrollTopRef.current = scrollTop;
+                    sessionRef.current = {
+                        ...sessionRef.current,
+                        transactionsTableScrollTop: scrollTop,
+                    };
+                }}
                 onRecategorize={(txnId, postingIndex, newAccount) => {
                     void handleRecategorizeGlTransaction(
                         txnId,
