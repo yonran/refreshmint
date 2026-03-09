@@ -439,7 +439,7 @@ export function TransactionsTab({
         return () => {
             clearTimeout(timer);
         };
-    }, [transactionsSearch, ledgerPath]);
+    }, [transactionsSearch, ledger.transactions, ledgerPath]);
 
     const activeRecategorizeTabId = activeRecategorizeTab?.id ?? null;
     const activeRecategorizeSearchQuery =
