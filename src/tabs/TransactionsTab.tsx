@@ -441,16 +441,20 @@ export function TransactionsTab({
         };
     }, [transactionsSearch, ledgerPath]);
 
+    const activeRecategorizeTabId = activeRecategorizeTab?.id ?? null;
+    const activeRecategorizeSearchQuery =
+        activeRecategorizeTab?.plan.searchQuery ?? '';
+
     // Query transactions for active recategorize tab
     useEffect(() => {
-        if (activeRecategorizeTab === null) {
+        if (activeRecategorizeTabId === null) {
             return;
         }
-        const q = activeRecategorizeTab.plan.searchQuery.trim();
+        const q = activeRecategorizeSearchQuery.trim();
         if (!q) {
             onRecategorizeTabsChange((current) =>
                 current.map((tab) =>
-                    tab.id === activeRecategorizeTab.id
+                    tab.id === activeRecategorizeTabId
                         ? {
                               ...tab,
                               queryResults: ledger.transactions,
@@ -467,7 +471,7 @@ export function TransactionsTab({
                     const rows = await queryTransactions(ledgerPath, q);
                     onRecategorizeTabsChange((current) =>
                         current.map((tab) =>
-                            tab.id === activeRecategorizeTab.id
+                            tab.id === activeRecategorizeTabId
                                 ? {
                                       ...tab,
                                       queryResults: rows,
@@ -479,7 +483,7 @@ export function TransactionsTab({
                 } catch (err) {
                     onRecategorizeTabsChange((current) =>
                         current.map((tab) =>
-                            tab.id === activeRecategorizeTab.id
+                            tab.id === activeRecategorizeTabId
                                 ? {
                                       ...tab,
                                       queryResults: null,
@@ -495,7 +499,8 @@ export function TransactionsTab({
             clearTimeout(timer);
         };
     }, [
-        activeRecategorizeTab,
+        activeRecategorizeSearchQuery,
+        activeRecategorizeTabId,
         ledger.transactions,
         ledgerPath,
         onRecategorizeTabsChange,
