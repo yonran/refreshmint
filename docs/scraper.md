@@ -370,10 +370,10 @@ Locators provide reusable element finding logic with strictness (fails if multip
 
 ### `browser`
 
-| Method                                    | Description                                                  |
-| ----------------------------------------- | ------------------------------------------------------------ |
-| `await browser.pages()`                   | Return all open pages as `Page[]`.                           |
-| `await browser.waitForEvent('page', ms?)` | Wait for any newly opened page and return its `Page` handle. |
+| Method                                                    | Description                                                                                                                                               |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `await browser.pages()`                                   | Return all open pages as `Page[]`.                                                                                                                        |
+| `await browser.waitForEvent('page', optionsOrPredicate?)` | Wait for any newly opened page and return its `Page` handle. The second arg can be a timeout number, a predicate function, or `{ timeout?, predicate? }`. |
 
 Use the race-safe pattern (start waiting before triggering the popup):
 
@@ -383,6 +383,8 @@ await page.click('#open-popup');
 const popup = await popupPromise;
 await popup.waitForLoadState('domcontentloaded');
 ```
+
+Network objects follow Playwright naming closely. In particular, `request.timing()` returns a Playwright-style `ResourceTiming` object, `await request.allHeaders()` / `await response.allHeaders()` read the latest captured over-the-wire headers, and `await response.serverAddr()` / `await response.securityDetails()` return remote-address / TLS metadata when Chrome exposes it.
 
 Suggested debug helper for state machines:
 

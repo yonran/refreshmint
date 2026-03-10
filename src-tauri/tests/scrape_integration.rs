@@ -283,6 +283,21 @@ try {
     throw new Error(`unexpected request headers: ${JSON.stringify(requestHeaders)}`);
   }
 
+  const requestAllHeaders = await request.allHeaders();
+  if (requestAllHeaders["content-type"] !== "text/plain") {
+    throw new Error(`unexpected request allHeaders: ${JSON.stringify(requestAllHeaders)}`);
+  }
+
+  const requestHeaderValue = await request.headerValue("content-type");
+  if (requestHeaderValue !== "text/plain") {
+    throw new Error(`unexpected request headerValue: ${String(requestHeaderValue)}`);
+  }
+
+  const requestHeadersArray = await request.headersArray();
+  if (!Array.isArray(requestHeadersArray) || !requestHeadersArray.some(header => header.name === "content-type" && header.value === "text/plain")) {
+    throw new Error(`unexpected request headersArray: ${JSON.stringify(requestHeadersArray)}`);
+  }
+
   const postData = await request.postData();
   refreshmint.log("network api: after postData");
   if (postData == null || !postData.includes("\"hello\":\"world\"")) {
@@ -322,10 +337,44 @@ try {
     throw new Error(`unexpected response headers: ${JSON.stringify(responseHeaders)}`);
   }
 
+  const responseAllHeaders = await response.allHeaders();
+  if (responseAllHeaders["x-test-reply"] !== "response-header") {
+    throw new Error(`unexpected response allHeaders: ${JSON.stringify(responseAllHeaders)}`);
+  }
+
+  const responseHeaderValue = await response.headerValue("x-test-reply");
+  if (responseHeaderValue !== "response-header") {
+    throw new Error(`unexpected response headerValue: ${String(responseHeaderValue)}`);
+  }
+
+  const responseHeaderValues = await response.headerValues("x-test-reply");
+  if (!Array.isArray(responseHeaderValues) || responseHeaderValues.length !== 1 || responseHeaderValues[0] !== "response-header") {
+    throw new Error(`unexpected response headerValues: ${JSON.stringify(responseHeaderValues)}`);
+  }
+
+  const responseHeadersArray = await response.headersArray();
+  if (!Array.isArray(responseHeadersArray) || !responseHeadersArray.some(header => header.name === "x-test-reply" && header.value === "response-header")) {
+    throw new Error(`unexpected response headersArray: ${JSON.stringify(responseHeadersArray)}`);
+  }
+
   const linkedRequest = await response.request();
   refreshmint.log("network api: after response.request");
   if (linkedRequest == null || linkedRequest.method() !== "POST") {
     throw new Error("response.request() did not resolve to the request");
+  }
+
+  const timing = linkedRequest.timing();
+  if (typeof timing.startTime !== "number" || timing.startTime <= 0) {
+    throw new Error(`unexpected request timing startTime: ${JSON.stringify(timing)}`);
+  }
+  if (typeof timing.requestStart !== "number" || timing.requestStart < 0) {
+    throw new Error(`unexpected request timing requestStart: ${JSON.stringify(timing)}`);
+  }
+  if (typeof timing.responseStart !== "number" || timing.responseStart < 0) {
+    throw new Error(`unexpected request timing responseStart: ${JSON.stringify(timing)}`);
+  }
+  if (typeof timing.responseEnd !== "number" || timing.responseEnd < timing.responseStart) {
+    throw new Error(`unexpected request timing responseEnd: ${JSON.stringify(timing)}`);
   }
 
   const text = await response.text();
@@ -344,6 +393,18 @@ try {
   refreshmint.log("network api: after response.body");
   if (!(body instanceof Uint8Array) || body.length === 0) {
     throw new Error("response.body() did not return Uint8Array bytes");
+  }
+
+  const serverAddr = await response.serverAddr();
+  refreshmint.log("network api: after response.serverAddr");
+  if (serverAddr == null || typeof serverAddr.ipAddress !== "string" || serverAddr.ipAddress.length === 0 || typeof serverAddr.port !== "number" || serverAddr.port <= 0) {
+    throw new Error(`unexpected response serverAddr: ${JSON.stringify(serverAddr)}`);
+  }
+
+  const securityDetails = await response.securityDetails();
+  refreshmint.log("network api: after response.securityDetails");
+  if (securityDetails !== null) {
+    throw new Error(`expected null securityDetails for local http fixture: ${JSON.stringify(securityDetails)}`);
   }
 
   const responseFrame = response.frame();

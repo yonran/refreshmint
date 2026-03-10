@@ -114,6 +114,12 @@ struct NetworkRequest {
     error: Option<String>,
     #[serde(default)]
     finished: bool,
+    #[serde(default)]
+    timing: RequestTiming,
+    #[serde(default)]
+    server_addr: Option<RemoteAddr>,
+    #[serde(default)]
+    security_details: Option<ResponseSecurityDetails>,
     /// CDP request ID, used by waitForResponseBody to fetch the body.
     /// Not serialized to JS (internal use only).
     #[serde(skip)]
@@ -128,6 +134,7 @@ struct ResponseCaptureState {
 #[derive(Debug, Clone)]
 struct RequestCaptureItem {
     request_id: String,
+    raw_request_id: String,
     url: String,
     method: String,
     headers: BTreeMap<String, String>,
@@ -138,6 +145,7 @@ struct RequestCaptureItem {
     redirected_from: Option<String>,
     error: Option<String>,
     finished: bool,
+    timing: RequestTiming,
 }
 
 struct RequestCaptureState {
@@ -184,6 +192,59 @@ enum JsNetworkMatcher {
 struct EventWaitOptions {
     timeout_ms: u64,
     predicate: Option<Persistent<Function<'static>>>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct RequestTiming {
+    start_time: f64,
+    domain_lookup_start: f64,
+    domain_lookup_end: f64,
+    connect_start: f64,
+    secure_connection_start: f64,
+    connect_end: f64,
+    request_start: f64,
+    response_start: f64,
+    response_end: f64,
+}
+
+impl RequestTiming {
+    fn default_playwright() -> Self {
+        // Matches Playwright's default ResourceTiming shape in client/network.ts.
+        Self {
+            start_time: 0.0,
+            domain_lookup_start: -1.0,
+            domain_lookup_end: -1.0,
+            connect_start: -1.0,
+            secure_connection_start: -1.0,
+            connect_end: -1.0,
+            request_start: -1.0,
+            response_start: -1.0,
+            response_end: -1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteAddr {
+    ip_address: String,
+    port: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponseSecurityDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_from: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_to: Option<f64>,
 }
 
 enum WaiterOutcome<T> {
@@ -347,6 +408,8 @@ pub struct PageApi {
     next_waiter_id: Arc<AtomicU64>,
     #[qjs(skip_trace)]
     snapshot_tracks: Arc<Mutex<BTreeMap<String, Vec<SnapshotNode>>>>,
+    #[qjs(skip_trace)]
+    request_timings: Arc<std::sync::Mutex<BTreeMap<String, RequestTiming>>>,
 }
 
 // Safety: PageApi only contains Arc<Mutex<...>> which is 'static and has no JS lifetimes.
@@ -1083,6 +1146,7 @@ impl PageApi {
             request_lifecycle_waiters: Arc::new(Mutex::new(Vec::new())),
             next_waiter_id: Arc::new(AtomicU64::new(1)),
             snapshot_tracks: Arc::new(Mutex::new(BTreeMap::new())),
+            request_timings: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -1431,6 +1495,7 @@ unsafe impl<'js> JsLifetime<'js> for FrameApi {
 #[derive(Trace, Clone)]
 pub struct RequestApi {
     request_id: String,
+    raw_request_id: String,
     url: String,
     method: String,
     resource_type: String,
@@ -1441,6 +1506,8 @@ pub struct RequestApi {
     redirected_from: Option<String>,
     error: Option<String>,
     finished: bool,
+    #[qjs(skip_trace)]
+    timing: RequestTiming,
     #[qjs(skip_trace)]
     page_api: PageApi,
 }
@@ -1464,6 +1531,10 @@ pub struct ResponseApi {
     from_service_worker: bool,
     error: Option<String>,
     finished: bool,
+    #[qjs(skip_trace)]
+    server_addr: Option<RemoteAddr>,
+    #[qjs(skip_trace)]
+    security_details: Option<ResponseSecurityDetails>,
     #[qjs(skip_trace)]
     request_id_raw: Option<chromiumoxide::cdp::browser_protocol::network::RequestId>,
     #[qjs(skip_trace)]
@@ -1613,18 +1684,33 @@ impl RequestApi {
     }
 
     #[qjs(rename = "allHeaders")]
-    pub fn all_headers(&self) -> JsResult<JsEvalResult> {
-        self.headers()
+    pub async fn all_headers(&self) -> JsResult<JsEvalResult> {
+        let entries = self.page_api.ensure_request_capture().await?;
+        let headers = PageApi::latest_request_entry(&entries, &self.request_id)
+            .await
+            .map(|entry| entry.headers)
+            .unwrap_or_else(|| self.headers.clone());
+        json_string_to_eval_result(headers_to_json_expr(&headers))
     }
 
     #[qjs(rename = "headersArray")]
-    pub fn headers_array(&self) -> JsResult<JsEvalResult> {
-        json_string_to_eval_result(headers_array_json_expr(&self.headers))
+    pub async fn headers_array(&self) -> JsResult<JsEvalResult> {
+        let entries = self.page_api.ensure_request_capture().await?;
+        let headers = PageApi::latest_request_entry(&entries, &self.request_id)
+            .await
+            .map(|entry| entry.headers)
+            .unwrap_or_else(|| self.headers.clone());
+        json_string_to_eval_result(headers_array_json_expr(&headers))
     }
 
     #[qjs(rename = "headerValue")]
-    pub fn header_value(&self, name: String) -> Option<String> {
-        header_value(&self.headers, &name)
+    pub async fn header_value(&self, name: String) -> JsResult<Option<String>> {
+        let entries = self.page_api.ensure_request_capture().await?;
+        let headers = PageApi::latest_request_entry(&entries, &self.request_id)
+            .await
+            .map(|entry| entry.headers)
+            .unwrap_or_else(|| self.headers.clone());
+        Ok(header_value(&headers, &name))
     }
 
     #[qjs(rename = "isNavigationRequest")]
@@ -1638,8 +1724,9 @@ impl RequestApi {
             return Ok(self.post_data.clone());
         }
 
-        let request_id =
-            chromiumoxide::cdp::browser_protocol::network::RequestId::new(self.request_id.clone());
+        let request_id = chromiumoxide::cdp::browser_protocol::network::RequestId::new(
+            self.raw_request_id.clone(),
+        );
         let page = {
             let inner = self.page_api.inner.lock().await;
             inner.page.clone()
@@ -1716,9 +1803,14 @@ impl RequestApi {
     }
 
     pub fn timing(&self) -> JsResult<JsEvalResult> {
-        Ok(JsEvalResult::Json(
-            r#"({"startTime":0,"domainLookupStart":-1,"domainLookupEnd":-1,"connectStart":-1,"secureConnectionStart":-1,"connectEnd":-1,"requestStart":-1,"responseStart":-1,"responseEnd":-1})"#.to_string(),
-        ))
+        let latest = self
+            .page_api
+            .request_timings
+            .lock()
+            .ok()
+            .and_then(|timings| timings.get(&self.request_id).cloned())
+            .unwrap_or_else(|| self.timing.clone());
+        serialize_to_js_eval_result(&latest)
     }
 
     pub fn frame(&self) -> Option<FrameApi> {
@@ -1780,23 +1872,43 @@ impl ResponseApi {
     }
 
     #[qjs(rename = "allHeaders")]
-    pub fn all_headers(&self) -> JsResult<JsEvalResult> {
-        self.headers()
+    pub async fn all_headers(&self) -> JsResult<JsEvalResult> {
+        let entries = self.page_api.ensure_response_capture().await?;
+        let headers = PageApi::latest_response_entry(&entries, &self.request_id)
+            .await
+            .map(|entry| entry.headers)
+            .unwrap_or_else(|| self.headers.clone());
+        json_string_to_eval_result(headers_to_json_expr(&headers))
     }
 
     #[qjs(rename = "headersArray")]
-    pub fn headers_array(&self) -> JsResult<JsEvalResult> {
-        json_string_to_eval_result(headers_array_json_expr(&self.headers))
+    pub async fn headers_array(&self) -> JsResult<JsEvalResult> {
+        let entries = self.page_api.ensure_response_capture().await?;
+        let headers = PageApi::latest_response_entry(&entries, &self.request_id)
+            .await
+            .map(|entry| entry.headers)
+            .unwrap_or_else(|| self.headers.clone());
+        json_string_to_eval_result(headers_array_json_expr(&headers))
     }
 
     #[qjs(rename = "headerValue")]
-    pub fn header_value(&self, name: String) -> Option<String> {
-        header_value(&self.headers, &name)
+    pub async fn header_value(&self, name: String) -> JsResult<Option<String>> {
+        let entries = self.page_api.ensure_response_capture().await?;
+        let headers = PageApi::latest_response_entry(&entries, &self.request_id)
+            .await
+            .map(|entry| entry.headers)
+            .unwrap_or_else(|| self.headers.clone());
+        Ok(header_value(&headers, &name))
     }
 
     #[qjs(rename = "headerValues")]
-    pub fn header_values(&self, name: String) -> Vec<String> {
-        header_values(&self.headers, &name)
+    pub async fn header_values(&self, name: String) -> JsResult<Vec<String>> {
+        let entries = self.page_api.ensure_response_capture().await?;
+        let headers = PageApi::latest_response_entry(&entries, &self.request_id)
+            .await
+            .map(|entry| entry.headers)
+            .unwrap_or_else(|| self.headers.clone());
+        Ok(header_values(&headers, &name))
     }
 
     pub async fn body<'js>(&self, ctx: Ctx<'js>) -> JsResult<TypedArray<'js, u8>> {
@@ -1873,6 +1985,9 @@ impl ResponseApi {
                 ts: 0,
                 error: self.error.clone(),
                 finished: self.finished,
+                timing: RequestTiming::default_playwright(),
+                server_addr: self.server_addr.clone(),
+                security_details: self.security_details.clone(),
                 request_id_raw: self.request_id_raw.clone(),
             });
         if !latest.finished {
@@ -1893,13 +2008,29 @@ impl ResponseApi {
     }
 
     #[qjs(rename = "serverAddr")]
-    pub fn server_addr(&self) -> JsResult<JsEvalResult> {
-        Ok(JsEvalResult::Json("null".to_string()))
+    pub async fn server_addr(&self) -> JsResult<JsEvalResult> {
+        let entries = self.page_api.ensure_response_capture().await?;
+        let latest = PageApi::latest_response_entry(&entries, &self.request_id).await;
+        match latest
+            .and_then(|entry| entry.server_addr)
+            .or_else(|| self.server_addr.clone())
+        {
+            Some(server_addr) => serialize_to_js_eval_result(&server_addr),
+            None => Ok(JsEvalResult::Json("null".to_string())),
+        }
     }
 
     #[qjs(rename = "securityDetails")]
-    pub fn security_details(&self) -> JsResult<JsEvalResult> {
-        Ok(JsEvalResult::Json("null".to_string()))
+    pub async fn security_details(&self) -> JsResult<JsEvalResult> {
+        let entries = self.page_api.ensure_response_capture().await?;
+        let latest = PageApi::latest_response_entry(&entries, &self.request_id).await;
+        match latest
+            .and_then(|entry| entry.security_details)
+            .or_else(|| self.security_details.clone())
+        {
+            Some(security_details) => serialize_to_js_eval_result(&security_details),
+            None => Ok(JsEvalResult::Json("null".to_string())),
+        }
     }
 }
 
@@ -3470,10 +3601,11 @@ impl BrowserApi {
     ///
     /// Currently supports only `page`.
     #[qjs(rename = "waitForEvent")]
-    pub async fn js_wait_for_event(
+    pub async fn js_wait_for_event<'js>(
         &self,
+        ctx: Ctx<'js>,
         event: String,
-        timeout_ms: Option<u64>,
+        options_or_predicate: Opt<Value<'js>>,
     ) -> JsResult<PageApi> {
         let normalized = event.trim().to_ascii_lowercase();
         if normalized != "page" {
@@ -3481,8 +3613,12 @@ impl BrowserApi {
                 "browser.waitForEvent currently supports only \"page\" (got {event})"
             )));
         }
-        self.wait_for_page(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS))
-            .await
+        let options = parse_wait_for_event_options(
+            &ctx,
+            options_or_predicate.0.as_ref(),
+            "browser.waitForEvent",
+        )?;
+        self.wait_for_page_event(&ctx, &options).await
     }
 }
 
@@ -3905,6 +4041,7 @@ impl PageApi {
     fn request_api_from_entry(&self, entry: RequestCaptureItem) -> RequestApi {
         RequestApi {
             request_id: entry.request_id,
+            raw_request_id: entry.raw_request_id,
             url: entry.url,
             method: entry.method,
             resource_type: entry.resource_type,
@@ -3915,6 +4052,7 @@ impl PageApi {
             redirected_from: entry.redirected_from,
             error: entry.error,
             finished: entry.finished,
+            timing: entry.timing,
             page_api: self.clone(),
         }
     }
@@ -3932,6 +4070,8 @@ impl PageApi {
             from_service_worker: entry.from_service_worker,
             error: entry.error,
             finished: entry.finished,
+            server_addr: entry.server_addr,
+            security_details: entry.security_details,
             request_id_raw: entry.request_id_raw,
             page_api: self.clone(),
         }
@@ -3981,6 +4121,7 @@ impl PageApi {
 
         let entries = Arc::new(Mutex::new(Vec::new()));
         let entries_for_task = entries.clone();
+        let request_timings_for_task = self.request_timings.clone();
         let request_waiters = self.request_waiters.clone();
         let request_lifecycle_waiters = self.request_lifecycle_waiters.clone();
         let task = tokio::spawn(async move {
@@ -3998,6 +4139,7 @@ impl PageApi {
                         };
                         let item = RequestCaptureItem {
                             request_id: ev.request_id.as_ref().to_string(),
+                            raw_request_id: ev.request_id.as_ref().to_string(),
                             url: ev.request.url.clone(),
                             method: ev.request.method.clone(),
                             headers: headers_to_map(Some(&ev.request.headers)),
@@ -4011,10 +4153,11 @@ impl PageApi {
                                 .frame_id
                                 .as_ref()
                                 .map(|frame_id| frame_id.as_ref().to_string()),
-                            is_navigation_request: false,
+                            is_navigation_request: is_navigation_request(&ev),
                             redirected_from: None,
                             error: None,
                             finished: false,
+                            timing: RequestTiming::default_playwright(),
                         };
 
                         let mut guard = entries_for_task.lock().await;
@@ -4024,6 +4167,13 @@ impl PageApi {
                             guard.drain(0..drop_count);
                         }
                         drop(guard);
+
+                        if let Ok(mut timings) = request_timings_for_task.lock() {
+                            timings.insert(
+                                item.request_id.clone(),
+                                RequestTiming::default_playwright(),
+                            );
+                        }
 
                         let matched_waiters = {
                             let mut waiters = request_waiters.lock().await;
@@ -4177,6 +4327,7 @@ impl PageApi {
 
         use chromiumoxide::cdp::browser_protocol::network::{
             EnableParams, EventLoadingFailed, EventLoadingFinished, EventResponseReceived,
+            EventResponseReceivedExtraInfo,
         };
         page.execute(EnableParams::default())
             .await
@@ -4194,15 +4345,26 @@ impl PageApi {
             .event_listener::<EventLoadingFailed>()
             .await
             .map_err(|e| js_err(format!("failed to attach response failed listener: {e}")))?;
+        let extra_events = page
+            .event_listener::<EventResponseReceivedExtraInfo>()
+            .await
+            .map_err(|e| {
+                js_err(format!(
+                    "failed to attach response extra-info listener: {e}"
+                ))
+            })?;
 
         let entries = Arc::new(Mutex::new(Vec::new()));
         let entries_for_task = entries.clone();
+        let request_entries_for_task = self.ensure_request_capture().await?;
+        let request_timings_for_task = self.request_timings.clone();
         let response_waiters = self.response_waiters.clone();
         let task = tokio::spawn(async move {
             use futures::StreamExt;
             tokio::pin!(events);
             tokio::pin!(loading_finished_events);
             tokio::pin!(loading_failed_events);
+            tokio::pin!(extra_events);
 
             loop {
                 tokio::select! {
@@ -4213,6 +4375,8 @@ impl PageApi {
                         let status = ev.response.status;
                         let method = network_method_from_headers(ev.response.request_headers.as_ref());
                         let ts = (*ev.timestamp.inner() * 1000.0) as i64;
+                        // Keep the field mapping aligned with Playwright's ResourceTiming shape.
+                        let timing = response_timing_to_request_timing(ev.response.timing.as_ref());
                         let item = NetworkRequest {
                             request_id: ev.request_id.as_ref().to_string(),
                             url: ev.response.url.clone(),
@@ -4229,6 +4393,9 @@ impl PageApi {
                             ts,
                             error: None,
                             finished: false,
+                            timing: timing.clone(),
+                            server_addr: remote_addr_from_response(&ev.response),
+                            security_details: response_security_details(&ev.response),
                             request_id_raw: Some(ev.request_id.clone()),
                         };
 
@@ -4240,6 +4407,21 @@ impl PageApi {
                         }
                         let latest = guard.last().cloned();
                         drop(guard);
+
+                        let request_id = ev.request_id.as_ref().to_string();
+                        let mut request_guard = request_entries_for_task.lock().await;
+                        if let Some(entry) = request_guard
+                            .iter_mut()
+                            .rev()
+                            .find(|entry| entry.request_id == request_id)
+                        {
+                            entry.timing = timing.clone();
+                        }
+                        drop(request_guard);
+
+                        if let Ok(mut timings) = request_timings_for_task.lock() {
+                            timings.insert(request_id, timing);
+                        }
 
                         if let Some(latest) = latest {
                             let matched_waiters = {
@@ -4275,6 +4457,35 @@ impl PageApi {
                         {
                             entry.finished = true;
                             entry.error = None;
+                            entry.timing.response_end = timing_response_end_from_timestamp(
+                                &entry.timing,
+                                *ev.timestamp.inner(),
+                            );
+                        }
+                        drop(guard);
+
+                        let mut request_guard = request_entries_for_task.lock().await;
+                        if let Some(entry) = request_guard
+                            .iter_mut()
+                            .rev()
+                            .find(|entry| entry.request_id == request_id)
+                        {
+                            entry.finished = true;
+                            entry.error = None;
+                            entry.timing.response_end = timing_response_end_from_timestamp(
+                                &entry.timing,
+                                *ev.timestamp.inner(),
+                            );
+                        }
+                        drop(request_guard);
+
+                        if let Ok(mut timings) = request_timings_for_task.lock() {
+                            if let Some(timing) = timings.get_mut(&request_id) {
+                                timing.response_end = timing_response_end_from_timestamp(
+                                    timing,
+                                    *ev.timestamp.inner(),
+                                );
+                            }
                         }
                     }
                     ev = loading_failed_events.next() => {
@@ -4291,6 +4502,50 @@ impl PageApi {
                         {
                             entry.finished = true;
                             entry.error = Some(error_text);
+                            entry.timing.response_end = timing_response_end_from_timestamp(
+                                &entry.timing,
+                                *ev.timestamp.inner(),
+                            );
+                        }
+                        drop(guard);
+
+                        let mut request_guard = request_entries_for_task.lock().await;
+                        if let Some(entry) = request_guard
+                            .iter_mut()
+                            .rev()
+                            .find(|entry| entry.request_id == request_id)
+                        {
+                            entry.finished = true;
+                            entry.error = Some(ev.error_text.clone());
+                            entry.timing.response_end = timing_response_end_from_timestamp(
+                                &entry.timing,
+                                *ev.timestamp.inner(),
+                            );
+                        }
+                        drop(request_guard);
+
+                        if let Ok(mut timings) = request_timings_for_task.lock() {
+                            if let Some(timing) = timings.get_mut(&request_id) {
+                                timing.response_end = timing_response_end_from_timestamp(
+                                    timing,
+                                    *ev.timestamp.inner(),
+                                );
+                            }
+                        }
+                    }
+                    ev = extra_events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        let request_id = ev.request_id.as_ref().to_string();
+                        let merged_headers = headers_to_map(Some(&ev.headers));
+                        let mut guard = entries_for_task.lock().await;
+                        if let Some(entry) = guard
+                            .iter_mut()
+                            .rev()
+                            .find(|entry| entry.request_id == request_id)
+                        {
+                            entry.headers = merged_headers;
                         }
                     }
                 }
@@ -4306,28 +4561,34 @@ impl PageApi {
 }
 
 impl BrowserApi {
-    async fn wait_for_page(&self, timeout_ms: u64) -> JsResult<PageApi> {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    async fn wait_for_page_event<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        options: &EventWaitOptions,
+    ) -> JsResult<PageApi> {
         let watcher = PageApi::new(self.page_inner.clone());
         let baseline_tabs = watcher.fetch_open_tabs().await?;
-        let baseline_ids = baseline_tabs
+        let mut seen_ids = baseline_tabs
             .into_iter()
             .map(|tab| tab.target_id)
             .collect::<BTreeSet<_>>();
+        let started_at = tokio::time::Instant::now();
 
         loop {
             let tabs = watcher.fetch_open_tabs().await?;
-            if let Some(new_tab) = tabs
-                .into_iter()
-                .find(|tab| !baseline_ids.contains(&tab.target_id))
-            {
-                return Ok(build_page_api_from_template(&self.page_inner, new_tab.page).await);
+            for tab in tabs {
+                if seen_ids.contains(&tab.target_id) {
+                    continue;
+                }
+                seen_ids.insert(tab.target_id.clone());
+                let candidate = build_page_api_from_template(&self.page_inner, tab.page).await;
+                if page_matches_event_predicate(ctx, options.predicate.as_ref(), &candidate).await?
+                {
+                    return Ok(candidate);
+                }
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(js_err(format!(
-                    "TimeoutError: browser.waitForEvent(\"page\") timed out after {timeout_ms}ms"
-                )));
-            }
+
+            let _ = remaining_timeout_ms(options.timeout_ms, started_at, "browser page event")?;
             tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
         }
     }
@@ -4943,7 +5204,17 @@ fn header_value(headers: &BTreeMap<String, String>, name: &str) -> Option<String
 }
 
 fn header_values(headers: &BTreeMap<String, String>, name: &str) -> Vec<String> {
-    header_value(headers, name).into_iter().collect()
+    header_value(headers, name)
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split('\n')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn headers_to_json_expr(headers: &BTreeMap<String, String>) -> String {
@@ -4966,6 +5237,14 @@ fn json_string_to_eval_result(json: String) -> JsResult<JsEvalResult> {
     Ok(JsEvalResult::Json(json))
 }
 
+fn serialize_to_js_eval_result<T: serde::Serialize>(value: &T) -> JsResult<JsEvalResult> {
+    let json_value =
+        serde_json::to_value(value).map_err(|e| js_err(format!("serialization failed: {e}")))?;
+    let json = serde_json::to_string(&json_value)
+        .map_err(|e| js_err(format!("serialization failed: {e}")))?;
+    Ok(JsEvalResult::Json(wrap_json_for_eval(&json_value, json)))
+}
+
 fn wrap_json_for_eval(value: &serde_json::Value, json: String) -> String {
     if matches!(value, serde_json::Value::Object(_)) {
         format!("({json})")
@@ -4983,6 +5262,71 @@ fn parse_form_urlencoded_simple(input: &str) -> Vec<(String, String)> {
             (key.replace('+', " "), value.replace('+', " "))
         })
         .collect()
+}
+
+fn response_timing_to_request_timing(
+    timing: Option<&chromiumoxide::cdp::browser_protocol::network::ResourceTiming>,
+) -> RequestTiming {
+    let Some(timing) = timing else {
+        return RequestTiming::default_playwright();
+    };
+    // Keep this mapping aligned with Playwright's ResourceTiming shape in
+    // third-party/js/playwright/packages/playwright-core/src/client/network.ts.
+    RequestTiming {
+        start_time: timing.request_time * 1000.0,
+        domain_lookup_start: timing.dns_start,
+        domain_lookup_end: timing.dns_end,
+        connect_start: timing.connect_start,
+        secure_connection_start: timing.ssl_start,
+        connect_end: timing.connect_end,
+        request_start: timing.send_start,
+        response_start: timing.receive_headers_end,
+        response_end: timing.receive_headers_end,
+    }
+}
+
+fn is_navigation_request(
+    event: &chromiumoxide::cdp::browser_protocol::network::EventRequestWillBeSent,
+) -> bool {
+    // Keep this aligned with Chromium Playwright's navigation-request check in
+    // third-party/js/playwright/packages/playwright-core/src/server/chromium/crNetworkManager.ts.
+    event.request_id.as_ref() == event.loader_id.as_ref()
+        && event
+            .r#type
+            .as_ref()
+            .is_some_and(|resource_type| resource_type.as_ref().eq_ignore_ascii_case("document"))
+}
+
+fn timing_response_end_from_timestamp(request_timing: &RequestTiming, timestamp_secs: f64) -> f64 {
+    if request_timing.start_time <= 0.0 {
+        return request_timing
+            .response_end
+            .max(request_timing.response_start);
+    }
+    let response_end = timestamp_secs * 1000.0 - request_timing.start_time;
+    response_end.max(request_timing.response_start)
+}
+
+fn remote_addr_from_response(
+    response: &chromiumoxide::cdp::browser_protocol::network::Response,
+) -> Option<RemoteAddr> {
+    Some(RemoteAddr {
+        ip_address: response.remote_ip_address.clone()?,
+        port: response.remote_port?,
+    })
+}
+
+fn response_security_details(
+    response: &chromiumoxide::cdp::browser_protocol::network::Response,
+) -> Option<ResponseSecurityDetails> {
+    let details = response.security_details.as_ref()?;
+    Some(ResponseSecurityDetails {
+        protocol: Some(details.protocol.clone()),
+        subject_name: Some(details.subject_name.clone()),
+        issuer: Some(details.issuer.clone()),
+        valid_from: Some(*details.valid_from.inner()),
+        valid_to: Some(*details.valid_to.inner()),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -6296,6 +6640,120 @@ mod tests {
             "https://example.com/signout/callback",
             "https://example.com/{login,signin}/callback"
         ));
+    }
+
+    #[test]
+    fn response_timing_maps_to_playwright_shape() {
+        use chromiumoxide::cdp::browser_protocol::network::ResourceTiming;
+
+        let timing = ResourceTiming::builder()
+            .request_time(123.5)
+            .proxy_start(-1.0)
+            .proxy_end(-1.0)
+            .dns_start(2.0)
+            .dns_end(3.0)
+            .connect_start(4.0)
+            .connect_end(5.0)
+            .ssl_start(4.5)
+            .ssl_end(4.9)
+            .worker_start(-1.0)
+            .worker_ready(-1.0)
+            .worker_fetch_start(-1.0)
+            .worker_respond_with_settled(-1.0)
+            .send_start(6.0)
+            .send_end(7.0)
+            .push_start(-1.0)
+            .push_end(-1.0)
+            .receive_headers_start(8.0)
+            .receive_headers_end(9.0)
+            .build()
+            .unwrap_or_else(|err| panic!("timing should build: {err}"));
+
+        let mapped = response_timing_to_request_timing(Some(&timing));
+        assert_eq!(
+            mapped,
+            RequestTiming {
+                start_time: 123_500.0,
+                domain_lookup_start: 2.0,
+                domain_lookup_end: 3.0,
+                connect_start: 4.0,
+                secure_connection_start: 4.5,
+                connect_end: 5.0,
+                request_start: 6.0,
+                response_start: 9.0,
+                response_end: 9.0,
+            }
+        );
+    }
+
+    #[test]
+    fn timing_response_end_uses_monotonic_timestamp_relative_to_start_time() {
+        let timing = RequestTiming {
+            start_time: 1000.0,
+            response_start: 120.0,
+            response_end: 120.0,
+            ..RequestTiming::default_playwright()
+        };
+        let response_end = timing_response_end_from_timestamp(&timing, 1.250);
+        assert_eq!(response_end, 250.0);
+    }
+
+    #[test]
+    fn header_values_splits_newline_joined_values() {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "set-cookie".to_string(),
+            "a=1; Path=/\nb=2; Path=/".to_string(),
+        );
+        assert_eq!(
+            header_values(&headers, "set-cookie"),
+            vec!["a=1; Path=/".to_string(), "b=2; Path=/".to_string()]
+        );
+    }
+
+    #[test]
+    fn navigation_request_matches_playwright_chromium_rule() {
+        use chromiumoxide::cdp::browser_protocol::network::EventRequestWillBeSent;
+
+        let navigation_event: EventRequestWillBeSent = serde_json::from_value(serde_json::json!({
+            "requestId": "loader-1",
+            "loaderId": "loader-1",
+            "documentURL": "https://example.com/start",
+            "request": {
+                "url": "https://example.com/start",
+                "method": "GET",
+                "headers": {},
+                "initialPriority": "Medium",
+                "referrerPolicy": "strict-origin-when-cross-origin"
+            },
+            "timestamp": 1.0,
+            "wallTime": 1.0,
+            "initiator": { "type": "parser" },
+            "redirectHasExtraInfo": false,
+            "type": "Document"
+        }))
+        .unwrap_or_else(|err| panic!("navigation event should deserialize: {err}"));
+        assert!(is_navigation_request(&navigation_event));
+
+        let subresource_event: EventRequestWillBeSent = serde_json::from_value(serde_json::json!({
+            "requestId": "request-2",
+            "loaderId": "loader-1",
+            "documentURL": "https://example.com/start",
+            "request": {
+                "url": "https://example.com/app.js",
+                "method": "GET",
+                "headers": {},
+                "initialPriority": "Medium",
+                "referrerPolicy": "strict-origin-when-cross-origin"
+            },
+            "timestamp": 2.0,
+            "wallTime": 2.0,
+            "initiator": { "type": "script" },
+            "redirectHasExtraInfo": false,
+            "type": "Script"
+        }))
+        .unwrap_or_else(|err| panic!("subresource event should deserialize: {err}"));
+        assert!(!is_navigation_request(&subresource_event));
     }
 
     #[test]

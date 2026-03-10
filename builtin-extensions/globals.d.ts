@@ -39,6 +39,31 @@ type PageEventValueMap = {
 type WaitForEventPredicate<E extends keyof PageEventValueMap> = (
     value: PageEventValueMap[E],
 ) => boolean | Promise<boolean>;
+
+type ResourceTiming = {
+    startTime: number;
+    domainLookupStart: number;
+    domainLookupEnd: number;
+    connectStart: number;
+    secureConnectionStart: number;
+    connectEnd: number;
+    requestStart: number;
+    responseStart: number;
+    responseEnd: number;
+};
+
+type RemoteAddr = {
+    ipAddress: string;
+    port: number;
+};
+
+type SecurityDetails = {
+    protocol?: string;
+    subjectName?: string;
+    issuer?: string;
+    validFrom?: number;
+    validTo?: number;
+};
 type WaitForEventOptions<E extends keyof PageEventValueMap> = {
     timeout?: number;
     predicate?: WaitForEventPredicate<E>;
@@ -98,16 +123,16 @@ interface Request {
     method(): string;
     resourceType(): string;
     headers(): Record<string, string>;
-    allHeaders(): Record<string, string>;
-    headersArray(): Array<{ name: string; value: string }>;
-    headerValue(name: string): string | null;
+    allHeaders(): Promise<Record<string, string>>;
+    headersArray(): Promise<Array<{ name: string; value: string }>>;
+    headerValue(name: string): Promise<string | null>;
     isNavigationRequest(): boolean;
     postData(): Promise<string | null>;
     postDataBuffer(): Promise<Uint8Array | null>;
     postDataJSON(): Promise<unknown>;
     failure(): Promise<Record<string, unknown> | null>;
     response(): Promise<Response | null>;
-    timing(): Record<string, number>;
+    timing(): ResourceTiming;
     frame(): Frame | null;
     redirectedFrom(): Promise<Request | null>;
     redirectedTo(): Promise<Request | null>;
@@ -119,10 +144,10 @@ interface Response {
     ok(): boolean;
     statusText(): string;
     headers(): Record<string, string>;
-    allHeaders(): Record<string, string>;
-    headersArray(): Array<{ name: string; value: string }>;
-    headerValue(name: string): string | null;
-    headerValues(name: string): string[];
+    allHeaders(): Promise<Record<string, string>>;
+    headersArray(): Promise<Array<{ name: string; value: string }>>;
+    headerValue(name: string): Promise<string | null>;
+    headerValues(name: string): Promise<string[]>;
     body(): Promise<Uint8Array>;
     text(): Promise<string>;
     json(): Promise<unknown>;
@@ -130,8 +155,8 @@ interface Response {
     frame(): Frame | null;
     finished(): Promise<Record<string, unknown> | null>;
     fromServiceWorker(): boolean;
-    serverAddr(): Record<string, unknown> | null;
-    securityDetails(): Record<string, unknown> | null;
+    serverAddr(): Promise<RemoteAddr | null>;
+    securityDetails(): Promise<SecurityDetails | null>;
 }
 
 interface PageApi {
@@ -213,7 +238,16 @@ interface PageApi {
 
 interface BrowserApi {
     pages(): Promise<PageApi[]>;
-    waitForEvent(event: 'page', timeoutMs?: number): Promise<PageApi>;
+    waitForEvent(
+        event: 'page',
+        optionsOrPredicate?:
+            | number
+            | ((page: PageApi) => boolean | Promise<boolean>)
+            | {
+                  timeout?: number;
+                  predicate?: (page: PageApi) => boolean | Promise<boolean>;
+              },
+    ): Promise<PageApi>;
 }
 
 interface SaveResourceOptions {
