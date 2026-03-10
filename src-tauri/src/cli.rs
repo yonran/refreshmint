@@ -205,6 +205,14 @@ struct DebugExecArgs {
         help = "Answer override for refreshmint.prompt(message). Repeat for multiple prompts."
     )]
     prompt: Vec<String>,
+    #[arg(
+        long,
+        value_name = "KEY=VALUE",
+        action = clap::ArgAction::Append,
+        help = "Key/value option for refreshmint.getOptions(). VALUE is parsed as JSON; \
+                falls back to string. Repeat for multiple options."
+    )]
+    option: Vec<String>,
 }
 
 #[derive(Args)]
@@ -729,6 +737,7 @@ fn run_debug_start(
 
 fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
     let prompt_overrides = parse_prompt_overrides(&args.prompt)?;
+    let script_options = parse_script_options(&args.option)?;
     let (script_source, declared_secrets) = if let Some(extension_dir) = args.extension_dir {
         if !extension_dir.is_dir() {
             return Err(std::io::Error::new(
@@ -769,6 +778,7 @@ fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
         declared_secrets,
         Some(prompt_overrides),
         Some(true),
+        Some(script_options),
     )?;
     Ok(())
 }
@@ -1427,6 +1437,25 @@ fn parse_prompt_overrides(
         }
     }
     Ok(overrides)
+}
+
+fn parse_script_options(
+    entries: &[String],
+) -> Result<crate::scrape::js_api::ScriptOptions, Box<dyn Error>> {
+    let mut map = crate::scrape::js_api::ScriptOptions::new();
+    for entry in entries {
+        let Some((key, val_str)) = entry.split_once('=') else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid --option value '{entry}', expected KEY=VALUE"),
+            )
+            .into());
+        };
+        let value = serde_json::from_str(val_str)
+            .unwrap_or_else(|_| serde_json::Value::String(val_str.to_string()));
+        map.insert(key.to_string(), value);
+    }
+    Ok(map)
 }
 
 fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Box<dyn Error>> {

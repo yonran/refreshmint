@@ -495,6 +495,7 @@ pub async fn run_scrape_async(
         output_dir,
         prompt_overrides: config.prompt_overrides.clone(),
         prompt_requires_override: config.prompt_requires_override,
+        script_options: js_api::ScriptOptions::new(),
         debug_output_sink: None,
         session_metadata: js_api::SessionMetadata::default(),
         staged_resources: Vec::new(),
@@ -580,7 +581,7 @@ mod tests {
     };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
-        PromptOverrides, RefreshmintInner, SessionMetadata, StagedResource,
+        PromptOverrides, RefreshmintInner, ScriptOptions, SessionMetadata, StagedResource,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -733,6 +734,7 @@ mod tests {
             output_dir: root.join("output"),
             prompt_overrides: PromptOverrides::new(),
             prompt_requires_override: false,
+            script_options: ScriptOptions::new(),
             debug_output_sink: None,
             session_metadata: SessionMetadata::default(),
             staged_resources: vec![StagedResource {
@@ -790,6 +792,7 @@ mod tests {
             output_dir: root.join("output"),
             prompt_overrides: PromptOverrides::new(),
             prompt_requires_override: false,
+            script_options: ScriptOptions::new(),
             debug_output_sink: None,
             session_metadata: SessionMetadata::default(),
             staged_resources: vec![StagedResource {

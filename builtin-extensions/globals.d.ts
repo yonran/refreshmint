@@ -162,6 +162,8 @@ interface RefreshmintApi {
     reportValue(key: string, value: string): void;
     log(message: string): void;
     prompt(message: string): Promise<string>;
+    /** Returns CLI --option key/value pairs as a JS object. Returns {} when no options are supplied. */
+    getOptions(): Record<string, unknown>;
 }
 
 declare const page: PageApi;

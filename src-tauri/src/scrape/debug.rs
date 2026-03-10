@@ -61,7 +61,7 @@ pub fn run_debug_session(config: DebugStartConfig) -> Result<(), Box<dyn Error>>
 }
 
 pub fn exec_debug_script(socket_path: &Path, script_source: &str) -> Result<(), Box<dyn Error>> {
-    exec_debug_script_with_options(socket_path, script_source, None, None, None)
+    exec_debug_script_with_options(socket_path, script_source, None, None, None, None)
 }
 
 pub fn exec_debug_script_with_options(
@@ -70,6 +70,7 @@ pub fn exec_debug_script_with_options(
     declared_secrets: Option<super::js_api::SecretDeclarations>,
     prompt_overrides: Option<super::js_api::PromptOverrides>,
     prompt_requires_override: Option<bool>,
+    script_options: Option<super::js_api::ScriptOptions>,
 ) -> Result<(), Box<dyn Error>> {
     #[cfg(unix)]
     {
@@ -79,6 +80,7 @@ pub fn exec_debug_script_with_options(
             declared_secrets,
             prompt_overrides,
             prompt_requires_override,
+            script_options,
         )
     }
 
@@ -90,6 +92,7 @@ pub fn exec_debug_script_with_options(
             declared_secrets,
             prompt_overrides,
             prompt_requires_override,
+            script_options,
         );
         Err("debug sockets are currently supported only on unix platforms".into())
     }
@@ -113,6 +116,7 @@ fn exec_debug_script_with_options_unix(
     declared_secrets: Option<super::js_api::SecretDeclarations>,
     prompt_overrides: Option<super::js_api::PromptOverrides>,
     prompt_requires_override: Option<bool>,
+    script_options: Option<super::js_api::ScriptOptions>,
 ) -> Result<(), Box<dyn Error>> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
@@ -122,6 +126,7 @@ fn exec_debug_script_with_options_unix(
         declared_secrets,
         prompt_overrides,
         prompt_requires_override,
+        script_options,
     };
 
     let connect_path = resolve_socket_bind_path(socket_path);
@@ -189,6 +194,8 @@ enum Request {
         prompt_overrides: Option<super::js_api::PromptOverrides>,
         #[serde(default)]
         prompt_requires_override: Option<bool>,
+        #[serde(default)]
+        script_options: Option<super::js_api::ScriptOptions>,
     },
     Stop,
 }
@@ -364,6 +371,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                 output_dir,
                 prompt_overrides: super::js_api::PromptOverrides::new(),
                 prompt_requires_override: config.prompt_requires_override,
+                script_options: super::js_api::ScriptOptions::new(),
                 debug_output_sink: None,
                 session_metadata: super::js_api::SessionMetadata::default(),
                 staged_resources: Vec::new(),
@@ -413,6 +421,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                                 declared_secrets,
                                 prompt_overrides,
                                 prompt_requires_override,
+                                script_options,
                             }) => {
                                 if let Err(err) = handle_exec_request_async(
                                     &mut stream,
@@ -422,6 +431,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                                     declared_secrets,
                                     prompt_overrides,
                                     prompt_requires_override,
+                                    script_options,
                                 )
                                 .await
                                 {
@@ -481,6 +491,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 async fn handle_exec_request_async(
     stream: &mut tokio::net::UnixStream,
     page_inner: std::sync::Arc<tokio::sync::Mutex<super::js_api::PageInner>>,
@@ -489,6 +500,7 @@ async fn handle_exec_request_async(
     declared_secrets: Option<super::js_api::SecretDeclarations>,
     prompt_overrides: Option<super::js_api::PromptOverrides>,
     prompt_requires_override: Option<bool>,
+    script_options: Option<super::js_api::ScriptOptions>,
 ) -> std::io::Result<()> {
     if let Some(declared) = declared_secrets {
         let mut page_inner = page_inner.lock().await;
@@ -502,6 +514,9 @@ async fn handle_exec_request_async(
         refreshmint.prompt_overrides = prompt_overrides.unwrap_or_default();
         if let Some(require_override) = prompt_requires_override {
             refreshmint.prompt_requires_override = require_override;
+        }
+        if let Some(options) = script_options {
+            refreshmint.script_options = options;
         }
         refreshmint.debug_output_sink = Some(output_sender);
     }
@@ -777,7 +792,7 @@ mod tests {
     };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
-        PromptOverrides, RefreshmintInner, SessionMetadata, StagedResource,
+        PromptOverrides, RefreshmintInner, ScriptOptions, SessionMetadata, StagedResource,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -848,6 +863,7 @@ mod tests {
             output_dir: root.join("output"),
             prompt_overrides: PromptOverrides::new(),
             prompt_requires_override: false,
+            script_options: ScriptOptions::new(),
             debug_output_sink: None,
             session_metadata: SessionMetadata::default(),
             staged_resources: vec![StagedResource {

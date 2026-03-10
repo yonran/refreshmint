@@ -205,6 +205,7 @@ pub struct DomainCredentials {
 /// Maps each declared domain to its credential role assignments.
 pub type SecretDeclarations = BTreeMap<String, DomainCredentials>;
 pub type PromptOverrides = BTreeMap<String, String>;
+pub type ScriptOptions = serde_json::Map<String, serde_json::Value>;
 
 // Transitional policy: keep legacy secret fallback enabled until the
 // `migrate_login_secrets` flow is considered fully rolled out.
@@ -3256,6 +3257,7 @@ pub struct RefreshmintInner {
     pub output_dir: PathBuf,
     pub prompt_overrides: PromptOverrides,
     pub prompt_requires_override: bool,
+    pub script_options: ScriptOptions,
     pub debug_output_sink: Option<tokio::sync::mpsc::UnboundedSender<DebugOutputEvent>>,
     pub session_metadata: SessionMetadata,
     pub staged_resources: Vec<StagedResource>,
@@ -3858,6 +3860,19 @@ impl RefreshmintApi {
             .map_err(|e| js_err(format!("prompt read failed: {e}")))?;
         Ok(line.trim_end().to_string())
     }
+
+    /// Return CLI `--option` key/value pairs as a native JS object.
+    /// Returns `{}` when no options were supplied.
+    #[qjs(rename = "getOptions")]
+    pub fn get_options(&self) -> JsResult<JsEvalResult> {
+        let inner = self
+            .inner
+            .try_lock()
+            .map_err(|_| js_err("getOptions unavailable: state is busy".to_string()))?;
+        let json = serde_json::to_string(&inner.script_options)
+            .map_err(|e| js_err(format!("getOptions serialization: {e}")))?;
+        Ok(JsEvalResult::Json(json))
+    }
 }
 
 impl RefreshmintApi {
@@ -4328,6 +4343,7 @@ mod tests {
             output_dir: PathBuf::new(),
             prompt_overrides: overrides,
             prompt_requires_override: true,
+            script_options: ScriptOptions::new(),
             debug_output_sink: None,
             session_metadata: SessionMetadata::default(),
             staged_resources: Vec::new(),
