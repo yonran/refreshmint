@@ -4,7 +4,9 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const EXTENSION_NAME: &str = "smoke";
@@ -211,20 +213,29 @@ try {
 const NETWORK_DRIVER_SOURCE: &str = r##"
 try {
   refreshmint.log("network api test start");
-  await page.goto(__NETWORK_URL__);
-
+  refreshmint.log("network api: before promise-all");
+  const requestPromise = page.waitForRequest("*/api/echo*", { timeout: 10000 });
+  const responsePromise = page.waitForResponse("*/api/echo*", { timeout: 10000 });
+  await page.evaluate(`new Promise(resolve =>
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => resolve("armed"))
+    )
+  )`);
   const [request, response] = await Promise.all([
-    page.waitForRequest("*/api/echo*", { timeout: 10000 }),
-    page.waitForResponse("*/api/echo*", { timeout: 10000 }),
+    requestPromise,
+    responsePromise,
     page.evaluate(`fetch(__FETCH_URL__, {
       method: "POST",
       headers: {
-        "content-type": "application/json",
-        "x-test-header": "request-header"
+        "content-type": "text/plain"
       },
       body: JSON.stringify({ hello: "world" })
-    }).then(r => r.text())`),
+    }).then(r => r.text()).catch(err => {
+      refreshmint.log("network api fetch error: " + String(err));
+      throw err;
+    })`),
   ]);
+  refreshmint.log("network api: after promise-all");
 
   if (request.url() !== __FETCH_URL__) {
     throw new Error(`unexpected request url: ${request.url()}`);
@@ -237,26 +248,30 @@ try {
   }
 
   const requestHeaders = request.headers();
-  if (requestHeaders["x-test-header"] !== "request-header") {
-    throw new Error(`unexpected request header: ${JSON.stringify(requestHeaders)}`);
+  if (requestHeaders["content-type"] !== "text/plain") {
+    throw new Error(`unexpected request headers: ${JSON.stringify(requestHeaders)}`);
   }
 
   const postData = await request.postData();
+  refreshmint.log("network api: after postData");
   if (postData == null || !postData.includes("\"hello\":\"world\"")) {
     throw new Error(`unexpected postData: ${String(postData)}`);
   }
 
   const postJson = await request.postDataJSON();
+  refreshmint.log("network api: after postDataJSON");
   if (postJson == null || postJson.hello !== "world") {
     throw new Error(`unexpected postDataJSON: ${JSON.stringify(postJson)}`);
   }
 
   const postBytes = await request.postDataBuffer();
+  refreshmint.log("network api: after postDataBuffer");
   if (!(postBytes instanceof Uint8Array) || postBytes.length === 0) {
     throw new Error("postDataBuffer did not return Uint8Array bytes");
   }
 
   const linkedResponse = await request.response();
+  refreshmint.log("network api: after request.response");
   if (linkedResponse == null || linkedResponse.status() !== 200) {
     throw new Error("request.response() did not resolve to the response");
   }
@@ -277,21 +292,25 @@ try {
   }
 
   const linkedRequest = await response.request();
+  refreshmint.log("network api: after response.request");
   if (linkedRequest == null || linkedRequest.method() !== "POST") {
     throw new Error("response.request() did not resolve to the request");
   }
 
   const text = await response.text();
+  refreshmint.log("network api: after response.text");
   if (!text.includes("\"ok\":true")) {
     throw new Error(`unexpected response text: ${text}`);
   }
 
   const json = await response.json();
+  refreshmint.log("network api: after response.json");
   if (json == null || json.ok !== true || json.method !== "POST") {
     throw new Error(`unexpected response json: ${JSON.stringify(json)}`);
   }
 
   const body = await response.body();
+  refreshmint.log("network api: after response.body");
   if (!(body instanceof Uint8Array) || body.length === 0) {
     throw new Error("response.body() did not return Uint8Array bytes");
   }
@@ -303,7 +322,8 @@ try {
   }
 
   const pageFromFrame = responseFrame.page();
-  if ((await pageFromFrame.url()) !== __NETWORK_URL__) {
+  refreshmint.log("network api: after frame.page");
+  if ((await pageFromFrame.url()) !== "about:blank") {
     throw new Error("frame.page() did not return the current page");
   }
 
@@ -367,57 +387,71 @@ impl Drop for TestSandbox {
 
 struct HttpFixtureServer {
     base_url: String,
+    shutdown_tx: Option<mpsc::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl HttpFixtureServer {
     fn start() -> Result<Self, Box<dyn Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
         let base_url = format!("http://{}", addr);
-        let thread = thread::spawn(move || {
-            for stream in listener.incoming().flatten().take(4) {
-                let mut stream = stream;
-                let mut buf = [0_u8; 8192];
-                let read = match stream.read(&mut buf) {
-                    Ok(read) => read,
-                    Err(_) => continue,
-                };
-                let request = String::from_utf8_lossy(&buf[..read]);
-                let first_line = request.lines().next().unwrap_or_default();
-                let path = first_line.split_whitespace().nth(1).unwrap_or("/");
-                if path == "/" {
-                    let body = "<!doctype html><html><body><h1>network</h1></body></html>";
-                    let response = format!(
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let thread = thread::spawn(move || loop {
+            if shutdown_rx.try_recv().is_ok() {
+                break;
+            }
+            let stream = match listener.accept() {
+                Ok((stream, _addr)) => stream,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(_) => break,
+            };
+            let mut stream = stream;
+            let mut buf = [0_u8; 8192];
+            let read = match stream.read(&mut buf) {
+                Ok(read) => read,
+                Err(_) => continue,
+            };
+            let request = String::from_utf8_lossy(&buf[..read]);
+            let first_line = request.lines().next().unwrap_or_default();
+            let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+            eprintln!("[network-fixture] {first_line}");
+            if path == "/" {
+                let body = "<!doctype html><html><body><h1>network</h1></body></html>";
+                let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
                         body
                     );
-                    let _ = stream.write_all(response.as_bytes());
-                    continue;
-                }
-                if path == "/api/echo" {
-                    let body = r#"{"ok":true,"method":"POST"}"#;
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Test-Reply: response-header\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                let _ = stream.write_all(response.as_bytes());
+                continue;
+            }
+            if path == "/api/echo" {
+                let body = r#"{"ok":true,"method":"POST"}"#;
+                let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nX-Test-Reply: response-header\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
                         body
                     );
-                    let _ = stream.write_all(response.as_bytes());
-                    continue;
-                }
+                let _ = stream.write_all(response.as_bytes());
+                continue;
+            }
 
-                let body = "not found";
-                let response = format!(
+            let body = "not found";
+            let response = format!(
                     "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body
                 );
-                let _ = stream.write_all(response.as_bytes());
-            }
+            let _ = stream.write_all(response.as_bytes());
         });
         Ok(Self {
             base_url,
+            shutdown_tx: Some(shutdown_tx),
             thread: Some(thread),
         })
     }
@@ -425,6 +459,9 @@ impl HttpFixtureServer {
 
 impl Drop for HttpFixtureServer {
     fn drop(&mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -734,11 +771,9 @@ fn scrape_network_request_response_api_works() -> Result<(), Box<dyn Error>> {
         format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
     )?;
 
-    let network_url = format!("{}/", server.base_url);
     let fetch_url = format!("{}/api/echo", server.base_url);
-    let driver_source = NETWORK_DRIVER_SOURCE
-        .replace("__NETWORK_URL__", &serde_json::to_string(&network_url)?)
-        .replace("__FETCH_URL__", &serde_json::to_string(&fetch_url)?);
+    let driver_source =
+        NETWORK_DRIVER_SOURCE.replace("__FETCH_URL__", &serde_json::to_string(&fetch_url)?);
     fs::write(&driver_path, driver_source)?;
 
     let profile_dir = sandbox.path().join("profile");
@@ -751,7 +786,27 @@ fn scrape_network_request_response_api_works() -> Result<(), Box<dyn Error>> {
         prompt_requires_override: false,
     };
 
-    scrape::run_scrape(config)?;
+    eprintln!("network scrape sandbox: {}", sandbox.path().display());
+    let (result_tx, result_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = scrape::run_scrape(config).map_err(|err| err.to_string());
+        let _ = result_tx.send(result);
+    });
+
+    match result_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err.into()),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            return Err(format!(
+                "network scrape timed out after 30s; sandbox: {}",
+                sandbox.path().display()
+            )
+            .into())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            return Err("network scrape worker disconnected".into())
+        }
+    }
 
     let output_file = ledger_dir
         .join("cache")

@@ -22,6 +22,7 @@ const BROWSER_DISCONNECTED_ERROR: &str =
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const POLL_INTERVAL_MS: u64 = 100;
+const REQUEST_CAPTURE_SETTLE_MS: u64 = 25;
 const TAB_QUERY_TIMEOUT_MS: u64 = 5_000;
 
 #[derive(Debug, Clone)]
@@ -389,6 +390,19 @@ impl PageApi {
         if let Some(index) = waiters.iter().position(|waiter| waiter.id == waiter_id) {
             waiters.swap_remove(index);
         }
+    }
+
+    async fn latest_request_entry(
+        entries: &Arc<Mutex<Vec<RequestCaptureItem>>>,
+        request_id: &str,
+    ) -> Option<RequestCaptureItem> {
+        entries
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find(|entry| entry.request_id == request_id)
+            .cloned()
     }
 
     async fn refresh_page_handle(&self) -> Result<chromiumoxide::Page, String> {
@@ -1666,8 +1680,14 @@ impl PageApi {
             .find(|req| url_matches_pattern(&req.url, &url_pattern))
             .cloned()
         {
-            let _ = self.fulfill_request_waiter(waiter_id, found.clone()).await;
-            return Ok(self.request_api_from_entry(found));
+            tokio::time::sleep(std::time::Duration::from_millis(REQUEST_CAPTURE_SETTLE_MS)).await;
+            let settled = Self::latest_request_entry(&entries, &found.request_id)
+                .await
+                .unwrap_or(found);
+            let _ = self
+                .fulfill_request_waiter(waiter_id, settled.clone())
+                .await;
+            return Ok(self.request_api_from_entry(settled));
         }
 
         let timeout = std::time::Duration::from_millis(timeout_ms);
@@ -3212,69 +3232,111 @@ impl PageApi {
             inner.page.clone()
         };
 
-        use chromiumoxide::cdp::browser_protocol::network::{EnableParams, EventRequestWillBeSent};
+        use chromiumoxide::cdp::browser_protocol::network::{
+            EnableParams, EventRequestWillBeSent, EventRequestWillBeSentExtraInfo,
+        };
         page.execute(EnableParams::default())
             .await
             .map_err(|e| js_err(format!("failed to enable Network domain: {e}")))?;
 
-        let mut events = page
+        let events = page
             .event_listener::<EventRequestWillBeSent>()
             .await
             .map_err(|e| js_err(format!("failed to attach request listener: {e}")))?;
+        let extra_events = page
+            .event_listener::<EventRequestWillBeSentExtraInfo>()
+            .await
+            .map_err(|e| js_err(format!("failed to attach request extra-info listener: {e}")))?;
 
         let entries = Arc::new(Mutex::new(Vec::new()));
         let entries_for_task = entries.clone();
         let request_waiters = self.request_waiters.clone();
         let task = tokio::spawn(async move {
             use futures::StreamExt;
+            tokio::pin!(events);
+            tokio::pin!(extra_events);
 
-            while let Some(ev) = events.next().await {
-                let item = RequestCaptureItem {
-                    request_id: ev.request_id.as_ref().to_string(),
-                    url: ev.request.url.clone(),
-                    method: ev.request.method.clone(),
-                    headers: headers_to_map(Some(&ev.request.headers)),
-                    resource_type: ev
-                        .r#type
-                        .as_ref()
-                        .map(|resource_type| resource_type.as_ref().to_string())
-                        .unwrap_or_else(|| "other".to_string()),
-                    post_data: None,
-                    frame_id: ev
-                        .frame_id
-                        .as_ref()
-                        .map(|frame_id| frame_id.as_ref().to_string()),
-                    is_navigation_request: false,
-                    redirected_from: None,
-                };
+            loop {
+                tokio::select! {
+                    ev = events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        let item = RequestCaptureItem {
+                            request_id: ev.request_id.as_ref().to_string(),
+                            url: ev.request.url.clone(),
+                            method: ev.request.method.clone(),
+                            headers: headers_to_map(Some(&ev.request.headers)),
+                            resource_type: ev
+                                .r#type
+                                .as_ref()
+                                .map(|resource_type| resource_type.as_ref().to_ascii_lowercase())
+                                .unwrap_or_else(|| "other".to_string()),
+                            post_data: None,
+                            frame_id: ev
+                                .frame_id
+                                .as_ref()
+                                .map(|frame_id| frame_id.as_ref().to_string()),
+                            is_navigation_request: false,
+                            redirected_from: None,
+                        };
 
-                let mut guard = entries_for_task.lock().await;
-                guard.push(item);
-                if guard.len() > 5_000 {
-                    let drop_count = guard.len() - 5_000;
-                    guard.drain(0..drop_count);
-                }
-                let latest = guard.last().cloned();
-                drop(guard);
-
-                if let Some(latest) = latest {
-                    let matched_waiters = {
-                        let mut waiters = request_waiters.lock().await;
-                        let mut matched = Vec::new();
-                        let mut remaining = Vec::with_capacity(waiters.len());
-                        for waiter in waiters.drain(..) {
-                            if url_matches_pattern(&latest.url, &waiter.url_pattern) {
-                                matched.push(waiter);
-                            } else {
-                                remaining.push(waiter);
-                            }
+                        let mut guard = entries_for_task.lock().await;
+                        guard.push(item.clone());
+                        if guard.len() > 5_000 {
+                            let drop_count = guard.len() - 5_000;
+                            guard.drain(0..drop_count);
                         }
-                        *waiters = remaining;
-                        matched
-                    };
+                        drop(guard);
 
-                    for waiter in matched_waiters {
-                        let _ = waiter.sender.send(latest.clone());
+                        let matched_waiters = {
+                            let mut waiters = request_waiters.lock().await;
+                            let mut matched = Vec::new();
+                            let mut remaining = Vec::with_capacity(waiters.len());
+                            for waiter in waiters.drain(..) {
+                                if url_matches_pattern(&item.url, &waiter.url_pattern) {
+                                    matched.push(waiter);
+                                } else {
+                                    remaining.push(waiter);
+                                }
+                            }
+                            *waiters = remaining;
+                            matched
+                        };
+
+                        for waiter in matched_waiters {
+                            let entries_for_waiter = entries_for_task.clone();
+                            let request_id = item.request_id.clone();
+                            let fallback = item.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    REQUEST_CAPTURE_SETTLE_MS,
+                                ))
+                                .await;
+                                let latest = PageApi::latest_request_entry(
+                                    &entries_for_waiter,
+                                    &request_id,
+                                )
+                                .await
+                                .unwrap_or(fallback);
+                                let _ = waiter.sender.send(latest);
+                            });
+                        }
+                    }
+                    ev = extra_events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        let request_id = ev.request_id.as_ref().to_string();
+                        let merged_headers = headers_to_map(Some(&ev.headers));
+                        let mut guard = entries_for_task.lock().await;
+                        if let Some(entry) = guard
+                            .iter_mut()
+                            .rev()
+                            .find(|entry| entry.request_id == request_id)
+                        {
+                            entry.headers = merged_headers;
+                        }
                     }
                 }
             }
