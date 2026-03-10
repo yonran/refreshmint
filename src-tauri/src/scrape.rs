@@ -581,11 +581,16 @@ mod tests {
     };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
-        PromptOverrides, RefreshmintInner, ScriptOptions, SessionMetadata, StagedResource,
+        PageInner, PromptOverrides, RefreshmintInner, ScriptOptions, SessionMetadata,
+        StagedResource,
     };
+    use crate::scrape::{browser, sandbox};
+    use crate::secret::SecretStore;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::Mutex;
 
     fn create_temp_dir(prefix: &str) -> PathBuf {
         let now = SystemTime::now()
@@ -819,5 +824,112 @@ mod tests {
         assert!(message.contains("bad/label"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+    fn network_waiter_rejects_when_browser_disconnects() {
+        if browser::find_chrome_binary().is_err() {
+            eprintln!("skipping browser disconnect scrape test: Chrome/Edge binary not found");
+            return;
+        }
+
+        let rt = tokio::runtime::Runtime::new()
+            .unwrap_or_else(|err| panic!("failed to create tokio runtime: {err}"));
+        rt.block_on(async {
+            let root = create_temp_dir("scrape-browser-disconnect");
+            let profile_dir = root.join("profile");
+            let download_dir = root.join("downloads");
+            let output_dir = root.join("output");
+            fs::create_dir_all(&profile_dir)
+                .unwrap_or_else(|err| panic!("failed to create profile dir: {err}"));
+            fs::create_dir_all(&download_dir)
+                .unwrap_or_else(|err| panic!("failed to create download dir: {err}"));
+            fs::create_dir_all(&output_dir)
+                .unwrap_or_else(|err| panic!("failed to create output dir: {err}"));
+
+            let chrome_path = browser::find_chrome_binary()
+                .unwrap_or_else(|err| panic!("failed to find browser binary: {err}"));
+            let (browser_instance, handler_handle) =
+                browser::launch_browser(&chrome_path, &profile_dir)
+                    .await
+                    .unwrap_or_else(|err| panic!("failed to launch browser: {err}"));
+            let browser = Arc::new(Mutex::new(browser_instance));
+            let page = {
+                let mut guard = browser.lock().await;
+                browser::open_start_page(&mut guard)
+                    .await
+                    .unwrap_or_else(|err| panic!("failed to open start page: {err}"))
+            };
+
+            let page_inner = Arc::new(Mutex::new(PageInner {
+                target_id: page.target_id().as_ref().to_string(),
+                page,
+                browser: browser.clone(),
+                secret_store: Arc::new(SecretStore::new(
+                    "login/test-browser-disconnect".to_string(),
+                )),
+                declared_secrets: Arc::new(crate::scrape::js_api::SecretDeclarations::new()),
+                download_dir,
+                target_frame_id: None,
+            }));
+
+            let refreshmint_inner = Arc::new(Mutex::new(RefreshmintInner {
+                output_dir,
+                prompt_overrides: PromptOverrides::new(),
+                prompt_requires_override: false,
+                script_options: ScriptOptions::new(),
+                debug_output_sink: None,
+                session_metadata: SessionMetadata::default(),
+                staged_resources: Vec::new(),
+                scrape_session_id: "browser-disconnect-test".to_string(),
+                extension_name: "smoke".to_string(),
+                account_name: "smoke-account".to_string(),
+                login_name: "smoke-account".to_string(),
+                ledger_dir: root.join("ledger.refreshmint"),
+            }));
+
+            let browser_for_close = browser.clone();
+            let close_task = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let guard = browser_for_close.lock().await;
+                let _ = guard.close().await;
+            });
+
+            let script = r#"
+try {
+  const message = await page.waitForResponse("**/never", { timeout: 10000 })
+    .then(() => "resolved-unexpectedly")
+    .catch(error => String(error && error.message ? error.message : error));
+  if (!message.includes("BrowserDisconnectedError")) {
+    throw new Error(`expected BrowserDisconnectedError, got: ${message}`);
+  }
+} catch (e) {
+  throw e;
+}
+"#;
+
+            let result = sandbox::run_script_source_with_options(
+                script,
+                page_inner,
+                refreshmint_inner,
+                sandbox::SandboxRunOptions {
+                    emit_diagnostics: false,
+                },
+            )
+            .await;
+
+            close_task
+                .await
+                .unwrap_or_else(|err| panic!("close task join failed: {err}"));
+            drop(browser);
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handler_handle).await;
+
+            if let Err(err) = result {
+                panic!("browser disconnect waiter test failed: {err}");
+            }
+
+            let _ = fs::remove_dir_all(&root);
+        });
     }
 }
