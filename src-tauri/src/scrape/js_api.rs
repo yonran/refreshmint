@@ -3871,7 +3871,8 @@ impl RefreshmintApi {
             .map_err(|_| js_err("getOptions unavailable: state is busy".to_string()))?;
         let json = serde_json::to_string(&inner.script_options)
             .map_err(|e| js_err(format!("getOptions serialization: {e}")))?;
-        Ok(JsEvalResult::Json(json))
+        // Wrap in parens so `{}` is parsed as an object literal, not a block statement.
+        Ok(JsEvalResult::Json(format!("({json})")))
     }
 }
 
