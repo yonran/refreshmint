@@ -1,7 +1,10 @@
 use app_lib::scrape::{self, ScrapeConfig};
 use std::error::Error;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const EXTENSION_NAME: &str = "smoke";
@@ -205,6 +208,114 @@ try {
 }
 "##;
 
+const NETWORK_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("network api test start");
+  await page.goto(__NETWORK_URL__);
+
+  const [request, response] = await Promise.all([
+    page.waitForRequest("*/api/echo*", { timeout: 10000 }),
+    page.waitForResponse("*/api/echo*", { timeout: 10000 }),
+    page.evaluate(`fetch(__FETCH_URL__, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-test-header": "request-header"
+      },
+      body: JSON.stringify({ hello: "world" })
+    }).then(r => r.text())`),
+  ]);
+
+  if (request.url() !== __FETCH_URL__) {
+    throw new Error(`unexpected request url: ${request.url()}`);
+  }
+  if (request.method() !== "POST") {
+    throw new Error(`unexpected request method: ${request.method()}`);
+  }
+  if (request.resourceType() !== "fetch") {
+    throw new Error(`unexpected request resource type: ${request.resourceType()}`);
+  }
+
+  const requestHeaders = request.headers();
+  if (requestHeaders["x-test-header"] !== "request-header") {
+    throw new Error(`unexpected request header: ${JSON.stringify(requestHeaders)}`);
+  }
+
+  const postData = await request.postData();
+  if (postData == null || !postData.includes("\"hello\":\"world\"")) {
+    throw new Error(`unexpected postData: ${String(postData)}`);
+  }
+
+  const postJson = await request.postDataJSON();
+  if (postJson == null || postJson.hello !== "world") {
+    throw new Error(`unexpected postDataJSON: ${JSON.stringify(postJson)}`);
+  }
+
+  const postBytes = await request.postDataBuffer();
+  if (!(postBytes instanceof Uint8Array) || postBytes.length === 0) {
+    throw new Error("postDataBuffer did not return Uint8Array bytes");
+  }
+
+  const linkedResponse = await request.response();
+  if (linkedResponse == null || linkedResponse.status() !== 200) {
+    throw new Error("request.response() did not resolve to the response");
+  }
+
+  if (response.url() !== __FETCH_URL__) {
+    throw new Error(`unexpected response url: ${response.url()}`);
+  }
+  if (response.status() !== 200 || !response.ok()) {
+    throw new Error(`unexpected response status: ${response.status()} ok=${response.ok()}`);
+  }
+  if (response.statusText() !== "OK") {
+    throw new Error(`unexpected response statusText: ${response.statusText()}`);
+  }
+
+  const responseHeaders = response.headers();
+  if (!String(responseHeaders["content-type"] || "").includes("application/json")) {
+    throw new Error(`unexpected response headers: ${JSON.stringify(responseHeaders)}`);
+  }
+
+  const linkedRequest = await response.request();
+  if (linkedRequest == null || linkedRequest.method() !== "POST") {
+    throw new Error("response.request() did not resolve to the request");
+  }
+
+  const text = await response.text();
+  if (!text.includes("\"ok\":true")) {
+    throw new Error(`unexpected response text: ${text}`);
+  }
+
+  const json = await response.json();
+  if (json == null || json.ok !== true || json.method !== "POST") {
+    throw new Error(`unexpected response json: ${JSON.stringify(json)}`);
+  }
+
+  const body = await response.body();
+  if (!(body instanceof Uint8Array) || body.length === 0) {
+    throw new Error("response.body() did not return Uint8Array bytes");
+  }
+
+  const responseFrame = response.frame();
+  const requestFrame = request.frame();
+  if (responseFrame == null || requestFrame == null) {
+    throw new Error("expected request/response frames to be available");
+  }
+
+  const pageFromFrame = responseFrame.page();
+  if ((await pageFromFrame.url()) !== __NETWORK_URL__) {
+    throw new Error("frame.page() did not return the current page");
+  }
+
+  await refreshmint.saveResource("network.bin", [111, 107]);
+  refreshmint.log("network api test done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("network api test error: " + msg);
+  throw e;
+}
+"##;
+
 struct TestSandbox {
     root: PathBuf,
 }
@@ -251,6 +362,72 @@ fn file_url(path: &Path) -> Result<String, Box<dyn Error>> {
 impl Drop for TestSandbox {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+struct HttpFixtureServer {
+    base_url: String,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl HttpFixtureServer {
+    fn start() -> Result<Self, Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let base_url = format!("http://{}", addr);
+        let thread = thread::spawn(move || {
+            for stream in listener.incoming().flatten().take(4) {
+                let mut stream = stream;
+                let mut buf = [0_u8; 8192];
+                let read = match stream.read(&mut buf) {
+                    Ok(read) => read,
+                    Err(_) => continue,
+                };
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let first_line = request.lines().next().unwrap_or_default();
+                let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+                if path == "/" {
+                    let body = "<!doctype html><html><body><h1>network</h1></body></html>";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+                if path == "/api/echo" {
+                    let body = r#"{"ok":true,"method":"POST"}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Test-Reply: response-header\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                let body = "not found";
+                let response = format!(
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        Ok(Self {
+            base_url,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for HttpFixtureServer {
+    fn drop(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -526,6 +703,62 @@ fn scrape_frame_methods_switch_context() -> Result<(), Box<dyn Error>> {
         .join(EXTENSION_NAME)
         .join("output")
         .join("frame_test.bin");
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn scrape_network_request_response_api_works() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping network api scrape test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let server = HttpFixtureServer::start()?;
+    let sandbox = TestSandbox::new("scrape-network")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
+
+    let network_url = format!("{}/", server.base_url);
+    let fetch_url = format!("{}/api/echo", server.base_url);
+    let driver_source = NETWORK_DRIVER_SOURCE
+        .replace("__NETWORK_URL__", &serde_json::to_string(&network_url)?)
+        .replace("__FETCH_URL__", &serde_json::to_string(&fetch_url)?);
+    fs::write(&driver_path, driver_source)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        login_name: LOGIN_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    scrape::run_scrape(config)?;
+
+    let output_file = ledger_dir
+        .join("cache")
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("network.bin");
     let bytes = fs::read(&output_file)?;
     assert_eq!(bytes, b"ok");
 

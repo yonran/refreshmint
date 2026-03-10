@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rquickjs::class::Trace;
@@ -7,7 +8,7 @@ use rquickjs::{
     function::Opt, Class, Ctx, FromJs, IntoJs, JsLifetime, Object, Result as JsResult, TypedArray,
     Value,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use super::locator::{build_role_selector, Locator};
 use crate::secret::SecretStore;
@@ -136,6 +137,18 @@ struct RequestCaptureItem {
 struct RequestCaptureState {
     entries: Arc<Mutex<Vec<RequestCaptureItem>>>,
     task: tokio::task::JoinHandle<()>,
+}
+
+struct RequestWaiter {
+    id: u64,
+    url_pattern: String,
+    sender: oneshot::Sender<RequestCaptureItem>,
+}
+
+struct ResponseWaiter {
+    id: u64,
+    url_pattern: String,
+    sender: oneshot::Sender<NetworkRequest>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -283,6 +296,12 @@ pub struct PageApi {
     #[qjs(skip_trace)]
     request_capture: Arc<Mutex<Option<RequestCaptureState>>>,
     #[qjs(skip_trace)]
+    request_waiters: Arc<Mutex<Vec<RequestWaiter>>>,
+    #[qjs(skip_trace)]
+    response_waiters: Arc<Mutex<Vec<ResponseWaiter>>>,
+    #[qjs(skip_trace)]
+    next_waiter_id: Arc<AtomicU64>,
+    #[qjs(skip_trace)]
     snapshot_tracks: Arc<Mutex<BTreeMap<String, Vec<SnapshotNode>>>>,
 }
 
@@ -306,6 +325,72 @@ unsafe impl<'js> JsLifetime<'js> for BrowserApi {
 }
 
 impl PageApi {
+    fn allocate_waiter_id(&self) -> u64 {
+        self.next_waiter_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    async fn register_request_waiter(
+        &self,
+        id: u64,
+        url_pattern: String,
+        sender: oneshot::Sender<RequestCaptureItem>,
+    ) {
+        self.request_waiters.lock().await.push(RequestWaiter {
+            id,
+            url_pattern,
+            sender,
+        });
+    }
+
+    async fn register_response_waiter(
+        &self,
+        id: u64,
+        url_pattern: String,
+        sender: oneshot::Sender<NetworkRequest>,
+    ) {
+        self.response_waiters.lock().await.push(ResponseWaiter {
+            id,
+            url_pattern,
+            sender,
+        });
+    }
+
+    async fn fulfill_request_waiter(&self, waiter_id: u64, item: RequestCaptureItem) -> bool {
+        let waiter = {
+            let mut waiters = self.request_waiters.lock().await;
+            let Some(index) = waiters.iter().position(|waiter| waiter.id == waiter_id) else {
+                return false;
+            };
+            waiters.swap_remove(index)
+        };
+        waiter.sender.send(item).is_ok()
+    }
+
+    async fn fulfill_response_waiter(&self, waiter_id: u64, item: NetworkRequest) -> bool {
+        let waiter = {
+            let mut waiters = self.response_waiters.lock().await;
+            let Some(index) = waiters.iter().position(|waiter| waiter.id == waiter_id) else {
+                return false;
+            };
+            waiters.swap_remove(index)
+        };
+        waiter.sender.send(item).is_ok()
+    }
+
+    async fn cancel_request_waiter(&self, waiter_id: u64) {
+        let mut waiters = self.request_waiters.lock().await;
+        if let Some(index) = waiters.iter().position(|waiter| waiter.id == waiter_id) {
+            waiters.swap_remove(index);
+        }
+    }
+
+    async fn cancel_response_waiter(&self, waiter_id: u64) {
+        let mut waiters = self.response_waiters.lock().await;
+        if let Some(index) = waiters.iter().position(|waiter| waiter.id == waiter_id) {
+            waiters.swap_remove(index);
+        }
+    }
+
     async fn refresh_page_handle(&self) -> Result<chromiumoxide::Page, String> {
         let (browser, target_id) = {
             let inner = self.inner.lock().await;
@@ -331,6 +416,9 @@ impl PageApi {
             inner,
             response_capture: Arc::new(Mutex::new(None)),
             request_capture: Arc::new(Mutex::new(None)),
+            request_waiters: Arc::new(Mutex::new(Vec::new())),
+            response_waiters: Arc::new(Mutex::new(Vec::new())),
+            next_waiter_id: Arc::new(AtomicU64::new(1)),
             snapshot_tracks: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -1524,25 +1612,35 @@ impl PageApi {
         let timeout_ms = parse_timeout_option(options.0.as_ref())?;
         let entries = self.ensure_response_capture().await?;
         let baseline_len = entries.lock().await.len();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let waiter_id = self.allocate_waiter_id();
+        let (sender, receiver) = oneshot::channel();
+        self.register_response_waiter(waiter_id, url_pattern.clone(), sender)
+            .await;
 
-        loop {
-            let found = entries
-                .lock()
-                .await
-                .iter()
-                .skip(baseline_len)
-                .find(|req| url_matches_pattern(&req.url, &url_pattern))
-                .cloned();
-            if let Some(found) = found {
-                return Ok(self.response_api_from_entry(found));
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(js_err(format!(
+        if let Some(found) = entries
+            .lock()
+            .await
+            .iter()
+            .skip(baseline_len)
+            .find(|req| url_matches_pattern(&req.url, &url_pattern))
+            .cloned()
+        {
+            let _ = self.fulfill_response_waiter(waiter_id, found.clone()).await;
+            return Ok(self.response_api_from_entry(found));
+        }
+
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        match tokio::time::timeout(timeout, receiver).await {
+            Ok(Ok(found)) => Ok(self.response_api_from_entry(found)),
+            Ok(Err(_)) => Err(js_err(format!(
+                "waitForResponse failed for pattern \"{url_pattern}\": response waiter channel closed"
+            ))),
+            Err(_) => {
+                self.cancel_response_waiter(waiter_id).await;
+                Err(js_err(format!(
                     "TimeoutError: waiting for response pattern \"{url_pattern}\" failed: timeout {timeout_ms}ms exceeded"
-                )));
+                )))
             }
-            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
         }
     }
 
@@ -1555,25 +1653,35 @@ impl PageApi {
         let timeout_ms = parse_timeout_option(options.0.as_ref())?;
         let entries = self.ensure_request_capture().await?;
         let baseline_len = entries.lock().await.len();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let waiter_id = self.allocate_waiter_id();
+        let (sender, receiver) = oneshot::channel();
+        self.register_request_waiter(waiter_id, url_pattern.clone(), sender)
+            .await;
 
-        loop {
-            let found = entries
-                .lock()
-                .await
-                .iter()
-                .skip(baseline_len)
-                .find(|req| url_matches_pattern(&req.url, &url_pattern))
-                .cloned();
-            if let Some(found) = found {
-                return Ok(self.request_api_from_entry(found));
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(js_err(format!(
+        if let Some(found) = entries
+            .lock()
+            .await
+            .iter()
+            .skip(baseline_len)
+            .find(|req| url_matches_pattern(&req.url, &url_pattern))
+            .cloned()
+        {
+            let _ = self.fulfill_request_waiter(waiter_id, found.clone()).await;
+            return Ok(self.request_api_from_entry(found));
+        }
+
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        match tokio::time::timeout(timeout, receiver).await {
+            Ok(Ok(found)) => Ok(self.request_api_from_entry(found)),
+            Ok(Err(_)) => Err(js_err(format!(
+                "waitForRequest failed for pattern \"{url_pattern}\": request waiter channel closed"
+            ))),
+            Err(_) => {
+                self.cancel_request_waiter(waiter_id).await;
+                Err(js_err(format!(
                     "TimeoutError: waiting for request pattern \"{url_pattern}\" failed: timeout {timeout_ms}ms exceeded"
-                )));
+                )))
             }
-            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
         }
     }
 
@@ -3116,6 +3224,7 @@ impl PageApi {
 
         let entries = Arc::new(Mutex::new(Vec::new()));
         let entries_for_task = entries.clone();
+        let request_waiters = self.request_waiters.clone();
         let task = tokio::spawn(async move {
             use futures::StreamExt;
 
@@ -3144,6 +3253,29 @@ impl PageApi {
                 if guard.len() > 5_000 {
                     let drop_count = guard.len() - 5_000;
                     guard.drain(0..drop_count);
+                }
+                let latest = guard.last().cloned();
+                drop(guard);
+
+                if let Some(latest) = latest {
+                    let matched_waiters = {
+                        let mut waiters = request_waiters.lock().await;
+                        let mut matched = Vec::new();
+                        let mut remaining = Vec::with_capacity(waiters.len());
+                        for waiter in waiters.drain(..) {
+                            if url_matches_pattern(&latest.url, &waiter.url_pattern) {
+                                matched.push(waiter);
+                            } else {
+                                remaining.push(waiter);
+                            }
+                        }
+                        *waiters = remaining;
+                        matched
+                    };
+
+                    for waiter in matched_waiters {
+                        let _ = waiter.sender.send(latest.clone());
+                    }
                 }
             }
         });
@@ -3184,6 +3316,7 @@ impl PageApi {
 
         let entries = Arc::new(Mutex::new(Vec::new()));
         let entries_for_task = entries.clone();
+        let response_waiters = self.response_waiters.clone();
         let task = tokio::spawn(async move {
             use futures::StreamExt;
 
@@ -3214,6 +3347,29 @@ impl PageApi {
                 if guard.len() > 5_000 {
                     let drop_count = guard.len() - 5_000;
                     guard.drain(0..drop_count);
+                }
+                let latest = guard.last().cloned();
+                drop(guard);
+
+                if let Some(latest) = latest {
+                    let matched_waiters = {
+                        let mut waiters = response_waiters.lock().await;
+                        let mut matched = Vec::new();
+                        let mut remaining = Vec::with_capacity(waiters.len());
+                        for waiter in waiters.drain(..) {
+                            if url_matches_pattern(&latest.url, &waiter.url_pattern) {
+                                matched.push(waiter);
+                            } else {
+                                remaining.push(waiter);
+                            }
+                        }
+                        *waiters = remaining;
+                        matched
+                    };
+
+                    for waiter in matched_waiters {
+                        let _ = waiter.sender.send(latest.clone());
+                    }
                 }
             }
         });
