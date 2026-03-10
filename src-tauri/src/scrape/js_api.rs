@@ -537,6 +537,19 @@ impl PageApi {
             .cloned()
     }
 
+    async fn latest_request_entry_for_raw(
+        entries: &Arc<Mutex<Vec<RequestCaptureItem>>>,
+        raw_request_id: &str,
+    ) -> Option<RequestCaptureItem> {
+        entries
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find(|entry| entry.raw_request_id == raw_request_id)
+            .cloned()
+    }
+
     async fn latest_response_entry(
         entries: &Arc<Mutex<Vec<NetworkRequest>>>,
         request_id: &str,
@@ -548,6 +561,69 @@ impl PageApi {
             .rev()
             .find(|entry| entry.request_id == request_id)
             .cloned()
+    }
+
+    async fn resolve_response_request_id(
+        request_entries: &Arc<Mutex<Vec<RequestCaptureItem>>>,
+        response_entries: &Arc<Mutex<Vec<NetworkRequest>>>,
+        raw_request_current_ids: &Arc<std::sync::Mutex<BTreeMap<String, String>>>,
+        raw_request_id: &str,
+        status: i64,
+    ) -> Option<String> {
+        let current_request_id = Self::settle_request_id_for_raw(
+            request_entries,
+            raw_request_current_ids,
+            raw_request_id,
+        )
+        .await;
+        if !(300..400).contains(&status) {
+            return Some(current_request_id);
+        }
+
+        let redirected_from = request_entries
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find(|entry| entry.request_id == current_request_id)
+            .and_then(|entry| entry.redirected_from.clone());
+
+        let Some(previous_request_id) = redirected_from else {
+            return Some(current_request_id);
+        };
+
+        let previous_response_exists = response_entries
+            .lock()
+            .await
+            .iter()
+            .any(|entry| entry.request_id == previous_request_id);
+        if previous_response_exists {
+            None
+        } else {
+            Some(previous_request_id)
+        }
+    }
+
+    async fn settle_request_id_for_raw(
+        entries: &Arc<Mutex<Vec<RequestCaptureItem>>>,
+        raw_request_current_ids: &Arc<std::sync::Mutex<BTreeMap<String, String>>>,
+        raw_request_id: &str,
+    ) -> String {
+        for _ in 0..REQUEST_LINK_SETTLE_ATTEMPTS {
+            let request_id = current_request_id_for_raw(raw_request_current_ids, raw_request_id);
+            if request_id != raw_request_id {
+                return request_id;
+            }
+            if let Some(entry) = Self::latest_request_entry_for_raw(entries, raw_request_id).await {
+                return entry.request_id;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(REQUEST_CAPTURE_SETTLE_MS)).await;
+        }
+
+        Self::latest_request_entry_for_raw(entries, raw_request_id)
+            .await
+            .map(|entry| entry.request_id)
+            .unwrap_or_else(|| current_request_id_for_raw(raw_request_current_ids, raw_request_id))
     }
 
     async fn wait_for_response_pattern(
@@ -1841,12 +1917,16 @@ impl RequestApi {
 
     pub async fn response(&self) -> JsResult<Option<ResponseApi>> {
         let entries = self.page_api.ensure_response_capture().await?;
-        let found = entries
-            .lock()
-            .await
-            .iter()
-            .find(|entry| entry.request_id == self.request_id)
-            .cloned();
+        let found = {
+            let guard = entries.lock().await;
+            linked_response_for_request(
+                &guard,
+                &self.request_id,
+                &self.raw_request_id,
+                &self.url,
+                self.redirected_from.as_ref(),
+            )
+        };
         let found = match found {
             Some(found) => Some(found),
             None => PageApi::settle_response_entry(&entries, &self.request_id).await,
@@ -1874,28 +1954,26 @@ impl RequestApi {
 
     #[qjs(rename = "redirectedFrom")]
     pub async fn redirected_from(&self) -> JsResult<Option<RequestApi>> {
-        let Some(previous_id) = &self.redirected_from else {
-            return Ok(None);
-        };
         let entries = self.page_api.ensure_request_capture().await?;
-        let found = entries
-            .lock()
-            .await
-            .iter()
-            .find(|entry| &entry.request_id == previous_id)
-            .cloned();
+        let found = {
+            let guard = entries.lock().await;
+            linked_redirected_from_request(
+                &guard,
+                &self.request_id,
+                &self.raw_request_id,
+                self.redirected_from.as_ref(),
+            )
+        };
         Ok(found.map(|entry| self.page_api.request_api_from_entry(entry)))
     }
 
     #[qjs(rename = "redirectedTo")]
     pub async fn redirected_to(&self) -> JsResult<Option<RequestApi>> {
         let entries = self.page_api.ensure_request_capture().await?;
-        let found = entries
-            .lock()
-            .await
-            .iter()
-            .find(|entry| entry.redirected_from.as_ref() == Some(&self.request_id))
-            .cloned();
+        let found = {
+            let guard = entries.lock().await;
+            linked_redirected_to_request(&guard, &self.request_id, &self.raw_request_id)
+        };
         let found = match found {
             Some(found) => Some(found),
             None => PageApi::settle_redirected_request_entry(&entries, &self.request_id).await,
@@ -2008,12 +2086,16 @@ impl ResponseApi {
 
     pub async fn request(&self) -> JsResult<Option<RequestApi>> {
         let entries = self.page_api.ensure_request_capture().await?;
-        let found = entries
-            .lock()
-            .await
-            .iter()
-            .find(|entry| entry.request_id == self.request_id)
-            .cloned();
+        let found = {
+            let guard = entries.lock().await;
+            linked_request_for_response(
+                &guard,
+                &self.request_id,
+                self.request_id_raw.as_ref(),
+                &self.url,
+                self.status,
+            )
+        };
         Ok(found.map(|entry| self.page_api.request_api_from_entry(entry)))
     }
 
@@ -4327,7 +4409,12 @@ impl PageApi {
                         let Some(ev) = ev else {
                             break;
                         };
-                        let request_id = ev.request_id.as_ref().to_string();
+                        let raw_request_id = ev.request_id.as_ref().to_string();
+                        let request_id = PageApi::settle_request_id_for_raw(
+                            &entries_for_task,
+                            &raw_request_current_ids,
+                            &raw_request_id,
+                        ).await;
                         let merged_headers = headers_to_map(Some(&ev.headers));
                         let mut guard = entries_for_task.lock().await;
                         if let Some(entry) = guard
@@ -4342,7 +4429,12 @@ impl PageApi {
                         let Some(ev) = ev else {
                             break;
                         };
-                        let request_id = ev.request_id.as_ref().to_string();
+                        let raw_request_id = ev.request_id.as_ref().to_string();
+                        let request_id = PageApi::settle_request_id_for_raw(
+                            &entries_for_task,
+                            &raw_request_current_ids,
+                            &raw_request_id,
+                        ).await;
                         let mut guard = entries_for_task.lock().await;
                         let latest = if let Some(entry) = guard
                             .iter_mut()
@@ -4382,7 +4474,12 @@ impl PageApi {
                         let Some(ev) = ev else {
                             break;
                         };
-                        let request_id = ev.request_id.as_ref().to_string();
+                        let raw_request_id = ev.request_id.as_ref().to_string();
+                        let request_id = PageApi::settle_request_id_for_raw(
+                            &entries_for_task,
+                            &raw_request_current_ids,
+                            &raw_request_id,
+                        ).await;
                         let error_text = ev.error_text.clone();
                         let mut guard = entries_for_task.lock().await;
                         let latest = if let Some(entry) = guard
@@ -4502,11 +4599,15 @@ impl PageApi {
                         // Keep the field mapping aligned with Playwright's ResourceTiming shape.
                         let timing = response_timing_to_request_timing(ev.response.timing.as_ref());
                         let raw_request_id = ev.request_id.as_ref().to_string();
-                        let request_id = raw_request_current_ids
-                            .lock()
-                            .ok()
-                            .and_then(|ids| ids.get(&raw_request_id).cloned())
-                            .unwrap_or_else(|| raw_request_id.clone());
+                        let Some(request_id) = PageApi::resolve_response_request_id(
+                            &request_entries_for_task,
+                            &entries_for_task,
+                            &raw_request_current_ids,
+                            &raw_request_id,
+                            status,
+                        ).await else {
+                            continue;
+                        };
                         let item = NetworkRequest {
                             request_id: request_id.clone(),
                             url: ev.response.url.clone(),
@@ -4579,11 +4680,11 @@ impl PageApi {
                             break;
                         };
                         let request_id = ev.request_id.as_ref().to_string();
-                        let request_id = raw_request_current_ids
-                            .lock()
-                            .ok()
-                            .and_then(|ids| ids.get(&request_id).cloned())
-                            .unwrap_or(request_id);
+                        let request_id = PageApi::settle_request_id_for_raw(
+                            &request_entries_for_task,
+                            &raw_request_current_ids,
+                            &request_id,
+                        ).await;
                         let mut guard = entries_for_task.lock().await;
                         if let Some(entry) = guard
                             .iter_mut()
@@ -4628,11 +4729,11 @@ impl PageApi {
                             break;
                         };
                         let request_id = ev.request_id.as_ref().to_string();
-                        let request_id = raw_request_current_ids
-                            .lock()
-                            .ok()
-                            .and_then(|ids| ids.get(&request_id).cloned())
-                            .unwrap_or(request_id);
+                        let request_id = PageApi::settle_request_id_for_raw(
+                            &request_entries_for_task,
+                            &raw_request_current_ids,
+                            &request_id,
+                        ).await;
                         let error_text = ev.error_text.clone();
                         let mut guard = entries_for_task.lock().await;
                         if let Some(entry) = guard
@@ -4678,11 +4779,11 @@ impl PageApi {
                             break;
                         };
                         let request_id = ev.request_id.as_ref().to_string();
-                        let request_id = raw_request_current_ids
-                            .lock()
-                            .ok()
-                            .and_then(|ids| ids.get(&request_id).cloned())
-                            .unwrap_or(request_id);
+                        let request_id = PageApi::settle_request_id_for_raw(
+                            &request_entries_for_task,
+                            &raw_request_current_ids,
+                            &request_id,
+                        ).await;
                         let merged_headers = headers_to_map(Some(&ev.headers));
                         let mut guard = entries_for_task.lock().await;
                         if let Some(entry) = guard
@@ -5446,6 +5547,176 @@ fn allocate_request_hop(
     (request_id, previous_request_id)
 }
 
+fn current_request_id_for_raw(
+    current_ids: &Arc<std::sync::Mutex<BTreeMap<String, String>>>,
+    raw_request_id: &str,
+) -> String {
+    current_ids
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(raw_request_id)
+        .cloned()
+        .unwrap_or_else(|| raw_request_id.to_string())
+}
+
+fn linked_response_for_request(
+    entries: &[NetworkRequest],
+    request_id: &str,
+    raw_request_id: &str,
+    request_url: &str,
+    redirected_from: Option<&String>,
+) -> Option<NetworkRequest> {
+    let exact = entries
+        .iter()
+        .find(|entry| entry.request_id == request_id)
+        .cloned();
+    if exact.as_ref().is_some_and(|entry| entry.url == request_url) {
+        return exact;
+    }
+
+    let raw_matches: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .request_id_raw
+                .as_ref()
+                .is_some_and(|raw| raw.as_ref() == raw_request_id)
+        })
+        .cloned()
+        .collect();
+    if raw_matches.is_empty() {
+        return None;
+    }
+
+    if let Some(found) = raw_matches.iter().find(|entry| entry.url == request_url) {
+        return Some(found.clone());
+    }
+
+    if exact.is_some() {
+        return exact;
+    }
+
+    if redirected_from.is_some() {
+        raw_matches
+            .iter()
+            .rev()
+            .find(|entry| !(300..400).contains(&entry.status))
+            .cloned()
+            .or_else(|| raw_matches.last().cloned())
+    } else {
+        raw_matches
+            .iter()
+            .find(|entry| (300..400).contains(&entry.status))
+            .cloned()
+            .or_else(|| raw_matches.first().cloned())
+    }
+}
+
+fn linked_request_for_response(
+    entries: &[RequestCaptureItem],
+    request_id: &str,
+    raw_request_id: Option<&chromiumoxide::cdp::browser_protocol::network::RequestId>,
+    response_url: &str,
+    status: i64,
+) -> Option<RequestCaptureItem> {
+    let exact = entries
+        .iter()
+        .find(|entry| entry.request_id == request_id)
+        .cloned();
+    if exact
+        .as_ref()
+        .is_some_and(|entry| entry.url == response_url)
+    {
+        return exact;
+    }
+
+    let Some(raw_request_id) = raw_request_id else {
+        return exact;
+    };
+    let raw_matches: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.raw_request_id == raw_request_id.as_ref())
+        .cloned()
+        .collect();
+    if raw_matches.is_empty() {
+        return None;
+    }
+
+    if let Some(found) = raw_matches.iter().find(|entry| entry.url == response_url) {
+        return Some(found.clone());
+    }
+
+    if exact.is_some() {
+        return exact;
+    }
+
+    if (300..400).contains(&status) {
+        raw_matches
+            .iter()
+            .find(|entry| entry.redirected_from.is_none())
+            .cloned()
+            .or_else(|| raw_matches.first().cloned())
+    } else {
+        raw_matches
+            .iter()
+            .rev()
+            .find(|entry| entry.redirected_from.is_some())
+            .cloned()
+            .or_else(|| raw_matches.last().cloned())
+    }
+}
+
+fn linked_redirected_from_request(
+    entries: &[RequestCaptureItem],
+    request_id: &str,
+    raw_request_id: &str,
+    redirected_from: Option<&String>,
+) -> Option<RequestCaptureItem> {
+    if let Some(previous_id) = redirected_from {
+        if let Some(found) = entries
+            .iter()
+            .find(|entry| &entry.request_id == previous_id)
+        {
+            return Some(found.clone());
+        }
+    }
+
+    let raw_matches: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.raw_request_id == raw_request_id && entry.request_id != request_id)
+        .cloned()
+        .collect();
+    raw_matches
+        .iter()
+        .find(|entry| entry.redirected_from.is_none())
+        .cloned()
+        .or_else(|| raw_matches.first().cloned())
+}
+
+fn linked_redirected_to_request(
+    entries: &[RequestCaptureItem],
+    request_id: &str,
+    raw_request_id: &str,
+) -> Option<RequestCaptureItem> {
+    if let Some(found) = entries
+        .iter()
+        .find(|entry| entry.redirected_from.as_ref() == Some(&request_id.to_string()))
+    {
+        return Some(found.clone());
+    }
+
+    let raw_matches: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.raw_request_id == raw_request_id && entry.request_id != request_id)
+        .cloned()
+        .collect();
+    raw_matches
+        .iter()
+        .find(|entry| entry.redirected_from.is_some())
+        .cloned()
+        .or_else(|| raw_matches.last().cloned())
+}
+
 fn build_redirect_response_entry(
     previous_request_id: String,
     request_item: &RequestCaptureItem,
@@ -5473,7 +5744,11 @@ fn build_redirect_response_entry(
         timing: response_timing_to_request_timing(redirect_response.timing.as_ref()),
         server_addr: remote_addr_from_response(redirect_response),
         security_details: response_security_details(redirect_response),
-        request_id_raw: None,
+        request_id_raw: Some(
+            chromiumoxide::cdp::browser_protocol::network::RequestId::new(
+                request_item.raw_request_id.clone(),
+            ),
+        ),
     }
 }
 
@@ -6924,6 +7199,25 @@ mod tests {
     }
 
     #[test]
+    fn current_request_id_for_raw_uses_latest_redirect_hop() {
+        let next_request_id = AtomicU64::new(1);
+        let mut current_ids = BTreeMap::new();
+
+        let _ = allocate_request_hop("raw-1", false, &mut current_ids, &next_request_id);
+        let _ = allocate_request_hop("raw-1", true, &mut current_ids, &next_request_id);
+
+        let current_ids = Arc::new(std::sync::Mutex::new(current_ids));
+        assert_eq!(
+            current_request_id_for_raw(&current_ids, "raw-1"),
+            "request-2"
+        );
+        assert_eq!(
+            current_request_id_for_raw(&current_ids, "raw-missing"),
+            "raw-missing"
+        );
+    }
+
+    #[test]
     fn build_redirect_response_entry_uses_previous_request_identity() {
         let request_item = RequestCaptureItem {
             request_id: "request-2".to_string(),
@@ -6972,7 +7266,202 @@ mod tests {
         assert_eq!(redirect_entry.url, "https://example.com/start");
         assert_eq!(redirect_entry.method, "GET");
         assert!(redirect_entry.finished);
-        assert!(redirect_entry.request_id_raw.is_none());
+        assert_eq!(
+            redirect_entry.request_id_raw.as_ref().map(|id| id.as_ref()),
+            Some("raw-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_response_request_id_prefers_previous_redirect_hop() {
+        let request_entries = Arc::new(Mutex::new(vec![
+            RequestCaptureItem {
+                request_id: "request-1".to_string(),
+                raw_request_id: "raw-1".to_string(),
+                url: "https://example.com/start".to_string(),
+                method: "GET".to_string(),
+                headers: BTreeMap::new(),
+                resource_type: "document".to_string(),
+                post_data: None,
+                frame_id: Some("frame-1".to_string()),
+                is_navigation_request: true,
+                redirected_from: None,
+                error: None,
+                finished: false,
+                timing: RequestTiming::default_playwright(),
+            },
+            RequestCaptureItem {
+                request_id: "request-2".to_string(),
+                raw_request_id: "raw-1".to_string(),
+                url: "https://example.com/final".to_string(),
+                method: "GET".to_string(),
+                headers: BTreeMap::new(),
+                resource_type: "document".to_string(),
+                post_data: None,
+                frame_id: Some("frame-1".to_string()),
+                is_navigation_request: true,
+                redirected_from: Some("request-1".to_string()),
+                error: None,
+                finished: false,
+                timing: RequestTiming::default_playwright(),
+            },
+        ]));
+        let response_entries = Arc::new(Mutex::new(Vec::new()));
+        let raw_request_current_ids = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
+            "raw-1".to_string(),
+            "request-2".to_string(),
+        )])));
+
+        let resolved = PageApi::resolve_response_request_id(
+            &request_entries,
+            &response_entries,
+            &raw_request_current_ids,
+            "raw-1",
+            302,
+        )
+        .await;
+        assert_eq!(resolved.as_deref(), Some("request-1"));
+
+        response_entries.lock().await.push(NetworkRequest {
+            request_id: "request-1".to_string(),
+            url: "https://example.com/start".to_string(),
+            status: 302,
+            ok: false,
+            method: "GET".to_string(),
+            status_text: "Found".to_string(),
+            headers: BTreeMap::new(),
+            frame_id: Some("frame-1".to_string()),
+            from_service_worker: false,
+            ts: 0,
+            error: None,
+            finished: true,
+            timing: RequestTiming::default_playwright(),
+            server_addr: None,
+            security_details: None,
+            request_id_raw: Some(
+                chromiumoxide::cdp::browser_protocol::network::RequestId::new("raw-1"),
+            ),
+        });
+
+        let duplicate = PageApi::resolve_response_request_id(
+            &request_entries,
+            &response_entries,
+            &raw_request_current_ids,
+            "raw-1",
+            302,
+        )
+        .await;
+        assert!(duplicate.is_none());
+    }
+
+    #[test]
+    fn linked_response_for_request_falls_back_to_raw_request_id() {
+        let response = NetworkRequest {
+            request_id: "84477.1".to_string(),
+            url: "https://example.com/final".to_string(),
+            status: 200,
+            ok: true,
+            method: "POST".to_string(),
+            status_text: "OK".to_string(),
+            headers: BTreeMap::new(),
+            frame_id: Some("frame-1".to_string()),
+            from_service_worker: false,
+            ts: 0,
+            error: None,
+            finished: true,
+            timing: RequestTiming::default_playwright(),
+            server_addr: None,
+            security_details: None,
+            request_id_raw: Some(
+                chromiumoxide::cdp::browser_protocol::network::RequestId::new("84477.1"),
+            ),
+        };
+        let linked = linked_response_for_request(
+            std::slice::from_ref(&response),
+            "request-1",
+            "84477.1",
+            "https://example.com/final",
+            None,
+        );
+        assert_eq!(linked.map(|entry| entry.status), Some(200));
+    }
+
+    #[test]
+    fn linked_request_for_response_falls_back_to_raw_request_id() {
+        let request = RequestCaptureItem {
+            request_id: "request-1".to_string(),
+            raw_request_id: "84477.1".to_string(),
+            url: "https://example.com/final".to_string(),
+            method: "POST".to_string(),
+            headers: BTreeMap::new(),
+            resource_type: "fetch".to_string(),
+            post_data: None,
+            frame_id: Some("frame-1".to_string()),
+            is_navigation_request: false,
+            redirected_from: None,
+            error: None,
+            finished: false,
+            timing: RequestTiming::default_playwright(),
+        };
+        let linked = linked_request_for_response(
+            std::slice::from_ref(&request),
+            "84477.1",
+            Some(&chromiumoxide::cdp::browser_protocol::network::RequestId::new("84477.1")),
+            "https://example.com/final",
+            200,
+        );
+        assert_eq!(
+            linked.map(|entry| entry.request_id),
+            Some("request-1".to_string())
+        );
+    }
+
+    #[test]
+    fn linked_redirected_requests_fall_back_to_raw_request_id() {
+        let initial = RequestCaptureItem {
+            request_id: "request-1".to_string(),
+            raw_request_id: "84477.1".to_string(),
+            url: "https://example.com/start".to_string(),
+            method: "GET".to_string(),
+            headers: BTreeMap::new(),
+            resource_type: "document".to_string(),
+            post_data: None,
+            frame_id: Some("frame-1".to_string()),
+            is_navigation_request: true,
+            redirected_from: None,
+            error: None,
+            finished: false,
+            timing: RequestTiming::default_playwright(),
+        };
+        let redirected = RequestCaptureItem {
+            request_id: "request-2".to_string(),
+            raw_request_id: "84477.1".to_string(),
+            url: "https://example.com/final".to_string(),
+            method: "GET".to_string(),
+            headers: BTreeMap::new(),
+            resource_type: "document".to_string(),
+            post_data: None,
+            frame_id: Some("frame-1".to_string()),
+            is_navigation_request: true,
+            redirected_from: Some("request-1".to_string()),
+            error: None,
+            finished: false,
+            timing: RequestTiming::default_playwright(),
+        };
+
+        let entries = vec![initial.clone(), redirected.clone()];
+        let linked_to =
+            linked_redirected_to_request(&entries, "84477.1", "84477.1").map(|entry| entry.url);
+        assert_eq!(linked_to.as_deref(), Some("https://example.com/final"));
+
+        let linked_from = linked_redirected_from_request(
+            &entries,
+            "84477.1",
+            "84477.1",
+            Some(&"request-1".to_string()),
+        )
+        .map(|entry| entry.url);
+        assert_eq!(linked_from.as_deref(), Some("https://example.com/start"));
     }
 
     #[test]

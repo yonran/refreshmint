@@ -245,8 +245,8 @@ const NETWORK_DRIVER_SOURCE: &str = r##"
 try {
   refreshmint.log("network api test start");
   refreshmint.log("network api: before promise-all");
-  const requestPromise = page.waitForRequest("*/api/echo*", { timeout: 10000 });
-  const responsePromise = page.waitForResponse("*/api/echo*", { timeout: 10000 });
+  const requestPromise = page.waitForRequest("**/api/echo*", { timeout: 10000 });
+  const responsePromise = page.waitForResponse("**/api/echo*", { timeout: 10000 });
   await page.evaluate(`new Promise(resolve =>
     requestAnimationFrame(() =>
       requestAnimationFrame(() => resolve("armed"))
@@ -605,7 +605,7 @@ try {
   refreshmint.log("network lifecycle test start");
 
   const finishedRequestPromise = page.waitForEvent("requestfinished", 10000);
-  const responsePromise = page.waitForResponse("*/api/echo*", { timeout: 10000 });
+  const responsePromise = page.waitForResponse("**/api/echo*", { timeout: 10000 });
   const failedRequestPromise = page.waitForEvent("requestfailed", 10000);
 
   await page.evaluate(`new Promise(resolve =>
