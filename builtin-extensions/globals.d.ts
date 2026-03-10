@@ -63,6 +63,54 @@ interface ElementHandle extends JSHandle {
     $$(selector: string): Promise<ElementHandle[]>;
 }
 
+interface Frame {
+    url(): Promise<string>;
+    name(): Promise<string>;
+    parentFrame(): Promise<Frame | null>;
+    page(): PageApi;
+}
+
+interface Request {
+    url(): string;
+    method(): string;
+    resourceType(): string;
+    headers(): Record<string, string>;
+    allHeaders(): Record<string, string>;
+    headersArray(): Array<{ name: string; value: string }>;
+    headerValue(name: string): string | null;
+    isNavigationRequest(): boolean;
+    postData(): Promise<string | null>;
+    postDataBuffer(): Promise<Uint8Array | null>;
+    postDataJSON(): Promise<unknown>;
+    failure(): Record<string, unknown> | null;
+    response(): Promise<Response | null>;
+    timing(): Record<string, number>;
+    frame(): Frame | null;
+    redirectedFrom(): Promise<Request | null>;
+    redirectedTo(): Promise<Request | null>;
+}
+
+interface Response {
+    url(): string;
+    status(): number;
+    ok(): boolean;
+    statusText(): string;
+    headers(): Record<string, string>;
+    allHeaders(): Record<string, string>;
+    headersArray(): Array<{ name: string; value: string }>;
+    headerValue(name: string): string | null;
+    headerValues(name: string): string[];
+    body(): Promise<Uint8Array>;
+    text(): Promise<string>;
+    json(): Promise<unknown>;
+    request(): Promise<Request | null>;
+    frame(): Frame | null;
+    finished(): null;
+    fromServiceWorker(): boolean;
+    serverAddr(): Record<string, unknown> | null;
+    securityDetails(): Record<string, unknown> | null;
+}
+
 interface PageApi {
     locator(selector: string): Locator;
     getByRole(role: string, options?: ByRoleOptions): Locator;
@@ -82,7 +130,20 @@ interface PageApi {
         state?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit',
         timeoutMs?: number,
     ): Promise<void>;
-    waitForResponse(urlPattern: string, timeoutMs?: number): Promise<string>;
+    waitForResponse(
+        urlPattern: string,
+        options?: { timeout?: number } | number,
+    ): Promise<Response>;
+    /** Waits for a response matching urlPattern and returns its decoded body string.
+     *  Works for cross-origin OOP iframes (uses CDP Network.getResponseBody). */
+    waitForResponseBody(
+        urlPattern: string,
+        timeoutMs?: number,
+    ): Promise<string>;
+    waitForRequest(
+        urlPattern: string,
+        options?: { timeout?: number } | number,
+    ): Promise<Request>;
     networkRequests(): Promise<string>;
     responsesReceived(): Promise<string>;
     clearNetworkRequests(): Promise<void>;

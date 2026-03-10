@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rquickjs::class::Trace;
-use rquickjs::{function::Opt, Class, Ctx, IntoJs, JsLifetime, Result as JsResult, Value};
+use rquickjs::{
+    function::Opt, Class, Ctx, FromJs, IntoJs, JsLifetime, Object, Result as JsResult, TypedArray,
+    Value,
+};
 use tokio::sync::Mutex;
 
 use super::locator::{build_role_selector, Locator};
@@ -85,6 +88,8 @@ fn is_cdp_request_timeout(err: &str) -> bool {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct NetworkRequest {
     #[serde(default)]
+    request_id: String,
+    #[serde(default)]
     url: String,
     #[serde(default)]
     status: i64,
@@ -93,13 +98,43 @@ struct NetworkRequest {
     #[serde(default)]
     method: String,
     #[serde(default)]
+    status_text: String,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    frame_id: Option<String>,
+    #[serde(default)]
+    from_service_worker: bool,
+    #[serde(default)]
     ts: i64,
     #[serde(default)]
     error: Option<String>,
+    /// CDP request ID, used by waitForResponseBody to fetch the body.
+    /// Not serialized to JS (internal use only).
+    #[serde(skip)]
+    request_id_raw: Option<chromiumoxide::cdp::browser_protocol::network::RequestId>,
 }
 
 struct ResponseCaptureState {
     entries: Arc<Mutex<Vec<NetworkRequest>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Debug, Clone)]
+struct RequestCaptureItem {
+    request_id: String,
+    url: String,
+    method: String,
+    headers: BTreeMap<String, String>,
+    resource_type: String,
+    post_data: Option<String>,
+    frame_id: Option<String>,
+    is_navigation_request: bool,
+    redirected_from: Option<String>,
+}
+
+struct RequestCaptureState {
+    entries: Arc<Mutex<Vec<RequestCaptureItem>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -239,12 +274,14 @@ pub struct PageInner {
 ///
 /// All methods are async and return Promises in JS.
 #[rquickjs::class(rename = "Page")]
-#[derive(Trace)]
+#[derive(Trace, Clone)]
 pub struct PageApi {
     #[qjs(skip_trace)]
     inner: Arc<Mutex<PageInner>>,
     #[qjs(skip_trace)]
     response_capture: Arc<Mutex<Option<ResponseCaptureState>>>,
+    #[qjs(skip_trace)]
+    request_capture: Arc<Mutex<Option<RequestCaptureState>>>,
     #[qjs(skip_trace)]
     snapshot_tracks: Arc<Mutex<BTreeMap<String, Vec<SnapshotNode>>>>,
 }
@@ -293,6 +330,7 @@ impl PageApi {
         Self {
             inner,
             response_capture: Arc::new(Mutex::new(None)),
+            request_capture: Arc::new(Mutex::new(None)),
             snapshot_tracks: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -625,6 +663,63 @@ impl ElementHandle {
     }
 }
 
+#[rquickjs::class(rename = "Frame")]
+#[derive(Trace, Clone)]
+pub struct FrameApi {
+    frame_id: String,
+    #[qjs(skip_trace)]
+    page_inner: Arc<Mutex<PageInner>>,
+}
+
+#[allow(unsafe_code)]
+unsafe impl<'js> JsLifetime<'js> for FrameApi {
+    type Changed<'to> = FrameApi;
+}
+
+#[rquickjs::class(rename = "Request")]
+#[derive(Trace, Clone)]
+pub struct RequestApi {
+    request_id: String,
+    url: String,
+    method: String,
+    resource_type: String,
+    headers: BTreeMap<String, String>,
+    frame_id: Option<String>,
+    is_navigation_request: bool,
+    post_data: Option<String>,
+    redirected_from: Option<String>,
+    #[qjs(skip_trace)]
+    page_api: PageApi,
+}
+
+#[allow(unsafe_code)]
+unsafe impl<'js> JsLifetime<'js> for RequestApi {
+    type Changed<'to> = RequestApi;
+}
+
+#[rquickjs::class(rename = "Response")]
+#[derive(Trace, Clone)]
+pub struct ResponseApi {
+    request_id: String,
+    url: String,
+    status: i64,
+    ok: bool,
+    method: String,
+    status_text: String,
+    headers: BTreeMap<String, String>,
+    frame_id: Option<String>,
+    from_service_worker: bool,
+    #[qjs(skip_trace)]
+    request_id_raw: Option<chromiumoxide::cdp::browser_protocol::network::RequestId>,
+    #[qjs(skip_trace)]
+    page_api: PageApi,
+}
+
+#[allow(unsafe_code)]
+unsafe impl<'js> JsLifetime<'js> for ResponseApi {
+    type Changed<'to> = ResponseApi;
+}
+
 /// Return value from `evaluate` / `evaluateHandle` / `callFunction`.
 ///
 /// Serialisable primitives and JSON-safe objects are returned as their native
@@ -682,7 +777,392 @@ impl<'js> IntoJs<'js> for JsEvalResult {
 }
 
 #[rquickjs::methods]
+impl FrameApi {
+    pub async fn url(&self) -> JsResult<String> {
+        let page = {
+            let inner = self.page_inner.lock().await;
+            inner.page.clone()
+        };
+        let info = lookup_frame_info(&page, &self.frame_id)
+            .await
+            .map_err(|e| js_err(format!("Frame.url failed: {e}")))?;
+        Ok(info.map(|frame| frame.url).unwrap_or_default())
+    }
+
+    pub async fn name(&self) -> JsResult<String> {
+        let page = {
+            let inner = self.page_inner.lock().await;
+            inner.page.clone()
+        };
+        let info = lookup_frame_info(&page, &self.frame_id)
+            .await
+            .map_err(|e| js_err(format!("Frame.name failed: {e}")))?;
+        Ok(info.map(|frame| frame.name).unwrap_or_default())
+    }
+
+    #[qjs(rename = "parentFrame")]
+    pub async fn parent_frame(&self) -> JsResult<Option<FrameApi>> {
+        let page = {
+            let inner = self.page_inner.lock().await;
+            inner.page.clone()
+        };
+        let info = lookup_frame_info(&page, &self.frame_id)
+            .await
+            .map_err(|e| js_err(format!("Frame.parentFrame failed: {e}")))?;
+        Ok(info.and_then(|frame| {
+            frame.parent_id.map(|parent_id| FrameApi {
+                frame_id: parent_id,
+                page_inner: self.page_inner.clone(),
+            })
+        }))
+    }
+
+    pub fn page(&self) -> PageApi {
+        PageApi::new(self.page_inner.clone())
+    }
+}
+
+#[rquickjs::methods]
+impl RequestApi {
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    pub fn method(&self) -> String {
+        self.method.clone()
+    }
+
+    #[qjs(rename = "resourceType")]
+    pub fn resource_type(&self) -> String {
+        self.resource_type.clone()
+    }
+
+    pub fn headers(&self) -> JsResult<JsEvalResult> {
+        json_string_to_eval_result(headers_to_json_expr(&self.headers))
+    }
+
+    #[qjs(rename = "allHeaders")]
+    pub fn all_headers(&self) -> JsResult<JsEvalResult> {
+        self.headers()
+    }
+
+    #[qjs(rename = "headersArray")]
+    pub fn headers_array(&self) -> JsResult<JsEvalResult> {
+        json_string_to_eval_result(headers_array_json_expr(&self.headers))
+    }
+
+    #[qjs(rename = "headerValue")]
+    pub fn header_value(&self, name: String) -> Option<String> {
+        header_value(&self.headers, &name)
+    }
+
+    #[qjs(rename = "isNavigationRequest")]
+    pub fn is_navigation_request(&self) -> bool {
+        self.is_navigation_request
+    }
+
+    #[qjs(rename = "postData")]
+    pub async fn post_data(&self) -> JsResult<Option<String>> {
+        if self.post_data.is_some() {
+            return Ok(self.post_data.clone());
+        }
+
+        let request_id =
+            chromiumoxide::cdp::browser_protocol::network::RequestId::new(self.request_id.clone());
+        let page = {
+            let inner = self.page_api.inner.lock().await;
+            inner.page.clone()
+        };
+        match get_request_post_data(&page, request_id).await {
+            Ok(post_data) => Ok(Some(post_data)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    #[qjs(rename = "postDataBuffer")]
+    pub async fn post_data_buffer<'js>(
+        &self,
+        ctx: Ctx<'js>,
+    ) -> JsResult<Option<TypedArray<'js, u8>>> {
+        let Some(post_data) = self.post_data().await? else {
+            return Ok(None);
+        };
+        TypedArray::new_copy(ctx, post_data.into_bytes())
+            .map(Some)
+            .map_err(|e| js_err(format!("Request.postDataBuffer failed: {e}")))
+    }
+
+    #[qjs(rename = "postDataJSON")]
+    pub async fn post_data_json(&self) -> JsResult<JsEvalResult> {
+        let Some(post_data) = self.post_data().await? else {
+            return Ok(JsEvalResult::Json("null".to_string()));
+        };
+        if self
+            .headers
+            .get("content-type")
+            .is_some_and(|content_type| content_type.contains("application/x-www-form-urlencoded"))
+        {
+            let mut map = serde_json::Map::new();
+            for (key, value) in parse_form_urlencoded_simple(&post_data) {
+                map.insert(key, serde_json::Value::String(value));
+            }
+            let value = serde_json::Value::Object(map);
+            let json = serde_json::to_string(&value)
+                .map_err(|e| js_err(format!("Request.postDataJSON serialization failed: {e}")))?;
+            return Ok(JsEvalResult::Json(wrap_json_for_eval(&value, json)));
+        }
+        let value: serde_json::Value = serde_json::from_str(&post_data)
+            .map_err(|e| js_err(format!("Request.postDataJSON parse failed: {e}")))?;
+        let json = serde_json::to_string(&value)
+            .map_err(|e| js_err(format!("Request.postDataJSON serialization failed: {e}")))?;
+        Ok(JsEvalResult::Json(wrap_json_for_eval(&value, json)))
+    }
+
+    pub fn failure(&self) -> JsResult<JsEvalResult> {
+        Ok(JsEvalResult::Json("null".to_string()))
+    }
+
+    pub async fn response(&self) -> JsResult<Option<ResponseApi>> {
+        let entries = self.page_api.ensure_response_capture().await?;
+        let found = entries
+            .lock()
+            .await
+            .iter()
+            .find(|entry| entry.request_id == self.request_id)
+            .cloned();
+        Ok(found.map(|entry| self.page_api.response_api_from_entry(entry)))
+    }
+
+    pub fn timing(&self) -> JsResult<JsEvalResult> {
+        Ok(JsEvalResult::Json(
+            r#"({"startTime":0,"domainLookupStart":-1,"domainLookupEnd":-1,"connectStart":-1,"secureConnectionStart":-1,"connectEnd":-1,"requestStart":-1,"responseStart":-1,"responseEnd":-1})"#.to_string(),
+        ))
+    }
+
+    pub fn frame(&self) -> Option<FrameApi> {
+        self.frame_id.as_ref().map(|frame_id| FrameApi {
+            frame_id: frame_id.clone(),
+            page_inner: self.page_api.inner.clone(),
+        })
+    }
+
+    #[qjs(rename = "redirectedFrom")]
+    pub async fn redirected_from(&self) -> JsResult<Option<RequestApi>> {
+        let Some(previous_id) = &self.redirected_from else {
+            return Ok(None);
+        };
+        let entries = self.page_api.ensure_request_capture().await?;
+        let found = entries
+            .lock()
+            .await
+            .iter()
+            .find(|entry| &entry.request_id == previous_id)
+            .cloned();
+        Ok(found.map(|entry| self.page_api.request_api_from_entry(entry)))
+    }
+
+    #[qjs(rename = "redirectedTo")]
+    pub async fn redirected_to(&self) -> JsResult<Option<RequestApi>> {
+        let entries = self.page_api.ensure_request_capture().await?;
+        let found = entries
+            .lock()
+            .await
+            .iter()
+            .find(|entry| entry.redirected_from.as_ref() == Some(&self.request_id))
+            .cloned();
+        Ok(found.map(|entry| self.page_api.request_api_from_entry(entry)))
+    }
+}
+
+#[rquickjs::methods]
+impl ResponseApi {
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    pub fn status(&self) -> i64 {
+        self.status
+    }
+
+    pub fn ok(&self) -> bool {
+        self.ok
+    }
+
+    #[qjs(rename = "statusText")]
+    pub fn status_text(&self) -> String {
+        self.status_text.clone()
+    }
+
+    pub fn headers(&self) -> JsResult<JsEvalResult> {
+        json_string_to_eval_result(headers_to_json_expr(&self.headers))
+    }
+
+    #[qjs(rename = "allHeaders")]
+    pub fn all_headers(&self) -> JsResult<JsEvalResult> {
+        self.headers()
+    }
+
+    #[qjs(rename = "headersArray")]
+    pub fn headers_array(&self) -> JsResult<JsEvalResult> {
+        json_string_to_eval_result(headers_array_json_expr(&self.headers))
+    }
+
+    #[qjs(rename = "headerValue")]
+    pub fn header_value(&self, name: String) -> Option<String> {
+        header_value(&self.headers, &name)
+    }
+
+    #[qjs(rename = "headerValues")]
+    pub fn header_values(&self, name: String) -> Vec<String> {
+        header_values(&self.headers, &name)
+    }
+
+    pub async fn body<'js>(&self, ctx: Ctx<'js>) -> JsResult<TypedArray<'js, u8>> {
+        let request_id = self
+            .request_id_raw
+            .clone()
+            .ok_or_else(|| js_err("Response.body failed: missing request id".to_string()))?;
+        let page = {
+            let inner = self.page_api.inner.lock().await;
+            inner.page.clone()
+        };
+        let body = get_response_body_bytes(&page, request_id)
+            .await
+            .map_err(|e| js_err(format!("Response.body failed: {e}")))?;
+        TypedArray::new_copy(ctx, body).map_err(|e| js_err(format!("Response.body failed: {e}")))
+    }
+
+    pub async fn text(&self) -> JsResult<String> {
+        let request_id = self
+            .request_id_raw
+            .clone()
+            .ok_or_else(|| js_err("Response.text failed: missing request id".to_string()))?;
+        let page = {
+            let inner = self.page_api.inner.lock().await;
+            inner.page.clone()
+        };
+        let body = get_response_body_bytes(&page, request_id)
+            .await
+            .map_err(|e| js_err(format!("Response.text failed: {e}")))?;
+        String::from_utf8(body).map_err(|e| js_err(format!("Response.text utf8 failed: {e}")))
+    }
+
+    pub async fn json(&self) -> JsResult<JsEvalResult> {
+        let text = self.text().await?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| js_err(format!("Response.json parse failed: {e}")))?;
+        let json = serde_json::to_string(&value)
+            .map_err(|e| js_err(format!("Response.json serialization failed: {e}")))?;
+        Ok(JsEvalResult::Json(wrap_json_for_eval(&value, json)))
+    }
+
+    pub async fn request(&self) -> JsResult<Option<RequestApi>> {
+        let entries = self.page_api.ensure_request_capture().await?;
+        let found = entries
+            .lock()
+            .await
+            .iter()
+            .find(|entry| entry.request_id == self.request_id)
+            .cloned();
+        Ok(found.map(|entry| self.page_api.request_api_from_entry(entry)))
+    }
+
+    pub fn frame(&self) -> Option<FrameApi> {
+        self.frame_id.as_ref().map(|frame_id| FrameApi {
+            frame_id: frame_id.clone(),
+            page_inner: self.page_api.inner.clone(),
+        })
+    }
+
+    pub fn finished(&self) -> JsResult<JsEvalResult> {
+        Ok(JsEvalResult::Json("null".to_string()))
+    }
+
+    #[qjs(rename = "fromServiceWorker")]
+    pub fn from_service_worker(&self) -> bool {
+        self.from_service_worker
+    }
+
+    #[qjs(rename = "serverAddr")]
+    pub fn server_addr(&self) -> JsResult<JsEvalResult> {
+        Ok(JsEvalResult::Json("null".to_string()))
+    }
+
+    #[qjs(rename = "securityDetails")]
+    pub fn security_details(&self) -> JsResult<JsEvalResult> {
+        Ok(JsEvalResult::Json("null".to_string()))
+    }
+}
+
+#[rquickjs::methods]
 impl PageApi {
+    /// Wait for a response matching `url_pattern` and return its body as a string.
+    ///
+    /// Uses `Network.getResponseBody` (CDP) which works across all frames including
+    /// cross-origin OOP iframes. Returns the decoded body (base64 is handled automatically).
+    /// Throws `TimeoutError` if no matching response is received within `timeout_ms`.
+    #[qjs(rename = "waitForResponseBody")]
+    pub async fn js_wait_for_response_body(
+        &self,
+        url_pattern: String,
+        timeout_ms: Option<u64>,
+    ) -> JsResult<String> {
+        use chromiumoxide::cdp::browser_protocol::network::GetResponseBodyParams;
+
+        let timeout_ms = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        let entries = self.ensure_response_capture().await?;
+        let baseline_len = entries.lock().await.len();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+
+        let page = {
+            let inner = self.inner.lock().await;
+            inner.page.clone()
+        };
+
+        loop {
+            let maybe_request_id = {
+                let guard = entries.lock().await;
+                guard
+                    .iter()
+                    .skip(baseline_len)
+                    .find(|req| url_matches_pattern(&req.url, &url_pattern))
+                    .and_then(|req| req.request_id_raw.clone())
+            };
+
+            if let Some(request_id) = maybe_request_id {
+                let result = page
+                    .execute(GetResponseBodyParams::new(request_id))
+                    .await
+                    .map_err(|e| {
+                        js_err(format!("waitForResponseBody getResponseBody failed: {e}"))
+                    })?;
+
+                let body = if result.result.base64_encoded {
+                    let decoded = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &result.result.body,
+                    )
+                    .map_err(|e| {
+                        js_err(format!("waitForResponseBody base64 decode failed: {e}"))
+                    })?;
+                    String::from_utf8(decoded).map_err(|e| {
+                        js_err(format!("waitForResponseBody UTF-8 decode failed: {e}"))
+                    })?
+                } else {
+                    result.result.body.clone()
+                };
+                return Ok(body);
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(js_err(format!(
+                    "TimeoutError: waiting for response body for pattern \"{url_pattern}\" failed: timeout {timeout_ms}ms exceeded"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+        }
+    }
+
     /// Create a locator for the given selector.
     pub fn locator(&self, selector: String) -> Locator {
         Locator::new(self.inner.clone(), selector)
@@ -1039,26 +1519,58 @@ impl PageApi {
     pub async fn js_wait_for_response(
         &self,
         url_pattern: String,
-        timeout_ms: Option<u64>,
-    ) -> JsResult<String> {
-        let timeout_ms = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        options: Opt<rquickjs::Value<'_>>,
+    ) -> JsResult<ResponseApi> {
+        let timeout_ms = parse_timeout_option(options.0.as_ref())?;
         let entries = self.ensure_response_capture().await?;
         let baseline_len = entries.lock().await.len();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
 
         loop {
-            let requests = entries.lock().await.clone();
-            if let Some(found) = requests
+            let found = entries
+                .lock()
+                .await
                 .iter()
                 .skip(baseline_len)
                 .find(|req| url_matches_pattern(&req.url, &url_pattern))
-            {
-                return serde_json::to_string(found)
-                    .map_err(|e| js_err(format!("waitForResponse serialization failed: {e}")));
+                .cloned();
+            if let Some(found) = found {
+                return Ok(self.response_api_from_entry(found));
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(js_err(format!(
                     "TimeoutError: waiting for response pattern \"{url_pattern}\" failed: timeout {timeout_ms}ms exceeded"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+        }
+    }
+
+    #[qjs(rename = "waitForRequest")]
+    pub async fn js_wait_for_request(
+        &self,
+        url_pattern: String,
+        options: Opt<rquickjs::Value<'_>>,
+    ) -> JsResult<RequestApi> {
+        let timeout_ms = parse_timeout_option(options.0.as_ref())?;
+        let entries = self.ensure_request_capture().await?;
+        let baseline_len = entries.lock().await.len();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            let found = entries
+                .lock()
+                .await
+                .iter()
+                .skip(baseline_len)
+                .find(|req| url_matches_pattern(&req.url, &url_pattern))
+                .cloned();
+            if let Some(found) = found {
+                return Ok(self.request_api_from_entry(found));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(js_err(format!(
+                    "TimeoutError: waiting for request pattern \"{url_pattern}\" failed: timeout {timeout_ms}ms exceeded"
                 )));
             }
             tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
@@ -2544,6 +3056,105 @@ impl PageApi {
         .await
     }
 
+    fn request_api_from_entry(&self, entry: RequestCaptureItem) -> RequestApi {
+        RequestApi {
+            request_id: entry.request_id,
+            url: entry.url,
+            method: entry.method,
+            resource_type: entry.resource_type,
+            headers: entry.headers,
+            frame_id: entry.frame_id,
+            is_navigation_request: entry.is_navigation_request,
+            post_data: entry.post_data,
+            redirected_from: entry.redirected_from,
+            page_api: self.clone(),
+        }
+    }
+
+    fn response_api_from_entry(&self, entry: NetworkRequest) -> ResponseApi {
+        ResponseApi {
+            request_id: entry.request_id.clone(),
+            url: entry.url,
+            status: entry.status,
+            ok: entry.status == 0 || (200..300).contains(&entry.status),
+            method: entry.method,
+            status_text: entry.status_text,
+            headers: entry.headers,
+            frame_id: entry.frame_id,
+            from_service_worker: entry.from_service_worker,
+            request_id_raw: entry.request_id_raw,
+            page_api: self.clone(),
+        }
+    }
+
+    async fn ensure_request_capture(&self) -> JsResult<Arc<Mutex<Vec<RequestCaptureItem>>>> {
+        let mut guard = self.request_capture.lock().await;
+        if let Some(state) = guard.as_ref() {
+            if !state.task.is_finished() {
+                return Ok(state.entries.clone());
+            }
+        }
+
+        if let Some(previous) = guard.take() {
+            previous.task.abort();
+        }
+
+        let page = {
+            let inner = self.inner.lock().await;
+            inner.page.clone()
+        };
+
+        use chromiumoxide::cdp::browser_protocol::network::{EnableParams, EventRequestWillBeSent};
+        page.execute(EnableParams::default())
+            .await
+            .map_err(|e| js_err(format!("failed to enable Network domain: {e}")))?;
+
+        let mut events = page
+            .event_listener::<EventRequestWillBeSent>()
+            .await
+            .map_err(|e| js_err(format!("failed to attach request listener: {e}")))?;
+
+        let entries = Arc::new(Mutex::new(Vec::new()));
+        let entries_for_task = entries.clone();
+        let task = tokio::spawn(async move {
+            use futures::StreamExt;
+
+            while let Some(ev) = events.next().await {
+                let item = RequestCaptureItem {
+                    request_id: ev.request_id.as_ref().to_string(),
+                    url: ev.request.url.clone(),
+                    method: ev.request.method.clone(),
+                    headers: headers_to_map(Some(&ev.request.headers)),
+                    resource_type: ev
+                        .r#type
+                        .as_ref()
+                        .map(|resource_type| resource_type.as_ref().to_string())
+                        .unwrap_or_else(|| "other".to_string()),
+                    post_data: None,
+                    frame_id: ev
+                        .frame_id
+                        .as_ref()
+                        .map(|frame_id| frame_id.as_ref().to_string()),
+                    is_navigation_request: false,
+                    redirected_from: None,
+                };
+
+                let mut guard = entries_for_task.lock().await;
+                guard.push(item);
+                if guard.len() > 5_000 {
+                    let drop_count = guard.len() - 5_000;
+                    guard.drain(0..drop_count);
+                }
+            }
+        });
+
+        *guard = Some(RequestCaptureState {
+            entries: entries.clone(),
+            task,
+        });
+        Ok(entries)
+    }
+
     async fn ensure_response_capture(&self) -> JsResult<Arc<Mutex<Vec<NetworkRequest>>>> {
         let mut guard = self.response_capture.lock().await;
         if let Some(state) = guard.as_ref() {
@@ -2581,12 +3192,21 @@ impl PageApi {
                 let method = network_method_from_headers(ev.response.request_headers.as_ref());
                 let ts = (*ev.timestamp.inner() * 1000.0) as i64;
                 let item = NetworkRequest {
+                    request_id: ev.request_id.as_ref().to_string(),
                     url: ev.response.url.clone(),
                     status,
-                    ok: (200..400).contains(&status),
+                    ok: status == 0 || (200..300).contains(&status),
                     method,
+                    status_text: ev.response.status_text.clone(),
+                    headers: headers_to_map(Some(&ev.response.headers)),
+                    frame_id: ev
+                        .frame_id
+                        .as_ref()
+                        .map(|frame_id| frame_id.as_ref().to_string()),
+                    from_service_worker: ev.response.from_service_worker.unwrap_or(false),
                     ts,
                     error: None,
+                    request_id_raw: Some(ev.request_id.clone()),
                 };
 
                 let mut guard = entries_for_task.lock().await;
@@ -2905,6 +3525,155 @@ fn network_method_from_headers(
     }
 
     "GET".to_string()
+}
+
+fn parse_timeout_option(option: Option<&Value<'_>>) -> JsResult<u64> {
+    let Some(option) = option else {
+        return Ok(DEFAULT_TIMEOUT_MS);
+    };
+    if let Ok(timeout_ms) = i32::from_js(&option.ctx().clone(), option.clone()) {
+        return Ok(timeout_ms.max(0) as u64);
+    }
+    let object = Object::from_value(option.clone())
+        .map_err(|_| js_err("expected timeout number or options object".to_string()))?;
+    let timeout = object
+        .get::<_, Option<i32>>("timeout")
+        .map_err(|e| js_err(format!("invalid timeout option: {e}")))?;
+    Ok(timeout.unwrap_or(DEFAULT_TIMEOUT_MS as i32).max(0) as u64)
+}
+
+fn headers_to_map(
+    headers: Option<&chromiumoxide::cdp::browser_protocol::network::Headers>,
+) -> BTreeMap<String, String> {
+    let Some(headers) = headers else {
+        return BTreeMap::new();
+    };
+    let Some(map) = headers.inner().as_object() else {
+        return BTreeMap::new();
+    };
+    map.iter()
+        .map(|(name, value)| {
+            let rendered = value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string());
+            (name.to_ascii_lowercase(), rendered)
+        })
+        .collect()
+}
+
+fn header_value(headers: &BTreeMap<String, String>, name: &str) -> Option<String> {
+    headers.get(&name.to_ascii_lowercase()).cloned()
+}
+
+fn header_values(headers: &BTreeMap<String, String>, name: &str) -> Vec<String> {
+    header_value(headers, name).into_iter().collect()
+}
+
+fn headers_to_json_expr(headers: &BTreeMap<String, String>) -> String {
+    let json = serde_json::to_string(headers).unwrap_or_else(|_| "{}".to_string());
+    format!("({json})")
+}
+
+fn headers_array_json_expr(headers: &BTreeMap<String, String>) -> String {
+    let array = headers
+        .iter()
+        .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+        .collect::<Vec<_>>();
+    serde_json::to_string(&array).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn json_string_to_eval_result(json: String) -> JsResult<JsEvalResult> {
+    if json.trim().is_empty() {
+        return Err(js_err("empty JSON expression".to_string()));
+    }
+    Ok(JsEvalResult::Json(json))
+}
+
+fn wrap_json_for_eval(value: &serde_json::Value, json: String) -> String {
+    if matches!(value, serde_json::Value::Object(_)) {
+        format!("({json})")
+    } else {
+        json
+    }
+}
+
+fn parse_form_urlencoded_simple(input: &str) -> Vec<(String, String)> {
+    input
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (key, value) = part.split_once('=').unwrap_or((part, ""));
+            (key.replace('+', " "), value.replace('+', " "))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct FrameMetadata {
+    name: String,
+    url: String,
+    parent_id: Option<String>,
+}
+
+async fn lookup_frame_info(
+    page: &chromiumoxide::Page,
+    wanted_frame_id: &str,
+) -> Result<Option<FrameMetadata>, String> {
+    use chromiumoxide::cdp::browser_protocol::page::GetFrameTreeParams;
+    let tree = page
+        .execute(GetFrameTreeParams::default())
+        .await
+        .map_err(|e| format!("failed to get frame tree: {e}"))?;
+
+    let mut stack = vec![tree.result.frame_tree];
+    while let Some(node) = stack.pop() {
+        if node.frame.id.as_ref() == wanted_frame_id {
+            return Ok(Some(FrameMetadata {
+                name: node.frame.name.unwrap_or_default(),
+                url: node.frame.url,
+                parent_id: node.frame.parent_id.map(|id| id.as_ref().to_string()),
+            }));
+        }
+        if let Some(children) = node.child_frames {
+            for child in children {
+                stack.push(child);
+            }
+        }
+    }
+    Ok(None)
+}
+
+async fn get_response_body_bytes(
+    page: &chromiumoxide::Page,
+    request_id: chromiumoxide::cdp::browser_protocol::network::RequestId,
+) -> Result<Vec<u8>, String> {
+    use chromiumoxide::cdp::browser_protocol::network::GetResponseBodyParams;
+    let result = page
+        .execute(GetResponseBodyParams::new(request_id))
+        .await
+        .map_err(|e| format!("getResponseBody failed: {e}"))?;
+    if result.result.base64_encoded {
+        base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &result.result.body,
+        )
+        .map_err(|e| format!("base64 decode failed: {e}"))
+    } else {
+        Ok(result.result.body.into_bytes())
+    }
+}
+
+async fn get_request_post_data(
+    page: &chromiumoxide::Page,
+    request_id: chromiumoxide::cdp::browser_protocol::network::RequestId,
+) -> Result<String, String> {
+    use chromiumoxide::cdp::browser_protocol::network::GetRequestPostDataParams;
+    let result = page
+        .execute(GetRequestPostDataParams::new(request_id))
+        .await
+        .map_err(|e| format!("getRequestPostData failed: {e}"))?;
+    Ok(result.result.post_data)
 }
 
 async fn resolve_frame_id(

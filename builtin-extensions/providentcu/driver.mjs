@@ -309,9 +309,7 @@ async function handleAccountSummary(context) {
     }
 
     if (!context.zelleDone && context.checkingLabel != null) {
-        await page.goto(ZELLE_URL);
-        await waitMs(page, 3000);
-        return { progressName: 'navigating to zelle' };
+        return await handleZelle(context);
     }
     return { progressName: 'all tasks complete', done: true };
 }
@@ -1929,99 +1927,23 @@ async function handleZelle(context) {
         return { progressName: 'zelle already downloaded' };
     }
 
-    // Wait for iframe to load in the DOM
-    await waitMs(page, 3000);
-    const domFramesJson = await page.evaluate(`(function() {
-        return JSON.stringify(Array.from(document.querySelectorAll('iframe')).map(f => ({ id: f.id, name: f.name, src: f.src })));
-    })()`);
-    refreshmint.log(`Available frames from DOM: ${domFramesJson}`);
-
-    const hasFrame = await page.evaluate(`(function() {
-        return !!document.querySelector('iframe#M_layout_content_PCDZ_MW53FMO_ctl00_iframeZelleDirect');
-    })()`);
-
-    if (!hasFrame) {
-        refreshmint.log('Zelle iframe not found in DOM, skipping');
-        context.zelleDone = true;
-        await page.goto(SUMMARY_URL);
-        return { progressName: 'zelle iframe not found' };
-    }
-
-    // UNTESTED: Inject fetch interceptor into the Zelle iframe to capture the
-    // /v2/activity response body. (waitForResponse only returns metadata, not body.)
-    const iframeId = 'M_layout_content_PCDZ_MW53FMO_ctl00_iframeZelleDirect';
-    await page.frameEvaluate(
-        iframeId,
-        `(function() {
-            if (window.__rmFetchHooked) return;
-            window.__rmFetchHooked = true;
-            const origFetch = window.fetch;
-            window.fetch = async function(...args) {
-                const resp = await origFetch.apply(this, args);
-                try {
-                    const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url ?? '');
-                    if (url.includes('/v2/activity')) {
-                        const clone = resp.clone();
-                        clone.text().then(function(t) { window.__rmActivityData = t; }).catch(function() {});
-                    }
-                } catch (_) {}
-                return resp;
-            };
-        })()`,
-    );
-
-    // Click Send first (to trigger iframe load), then Activity to fetch data
+    let response = null;
     try {
-        await page.frameEvaluate(
-            iframeId,
-            `(function() {
-                const btn = Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim() === 'Send');
-                if (btn) btn.click();
-            })()`,
-        );
-        await waitMs(page, 2000);
-
-        await page.frameEvaluate(
-            iframeId,
-            `(function() {
-                const btn = Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim() === 'Activity');
-                if (btn) btn.click();
-            })()`,
-        );
+        [response] = await Promise.all([
+            page.waitForResponse('/v2/activity', { timeout: 15000 }),
+            page.goto(ZELLE_URL),
+        ]);
     } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
         refreshmint.log(
-            `Zelle nav click failed: ${msg}, trying Activity directly`,
-        );
-        await page.frameEvaluate(
-            iframeId,
-            `(function() {
-                const btn = Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim() === 'Activity');
-                if (btn) btn.click();
-            })()`,
-        );
-    }
-
-    // Poll for captured activity response body (up to 20 s)
-    let activityText = null;
-    const deadline = Date.now() + 20000;
-    while (activityText == null && Date.now() < deadline) {
-        await waitMs(page, 500);
-        const result = await page.frameEvaluate(
-            iframeId,
-            `window.__rmActivityData ?? null`,
-        );
-        if (result != null && result !== 'null') activityText = String(result);
-    }
-
-    if (!activityText) {
-        refreshmint.log(
-            'Zelle activity response not captured (timeout), skipping',
+            `Zelle activity not captured: ${e instanceof Error ? e.message : String(e)}`,
         );
         context.zelleDone = true;
         await page.goto(SUMMARY_URL);
         return { progressName: 'zelle activity timeout' };
     }
+
+    const activityText = await response.text();
+    refreshmint.log(`Zelle activity captured (${activityText.length} bytes)`);
 
     const json = JSON.parse(activityText);
     refreshmint.log(`Zelle activity: ${json?.activities?.length ?? 0} items`);
