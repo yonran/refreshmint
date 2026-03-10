@@ -655,6 +655,64 @@ try {
 }
 "##;
 
+const NETWORK_REDIRECT_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("network redirect test start");
+  const initialRequestPromise = page.waitForRequest("**/api/redirect-start", { timeout: 10000 });
+  const finalRequestPromise = page.waitForRequest("**/api/redirect-final", { timeout: 10000 });
+  const finalResponsePromise = page.waitForResponse("**/api/redirect-final", { timeout: 10000 });
+
+  await page.evaluate(`new Promise(resolve =>
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => resolve("armed"))
+    )
+  )`);
+
+  await page.evaluate(`fetch(__REDIRECT_URL__).then(r => r.text())`);
+
+  const initialRequest = await initialRequestPromise;
+  const finalRequest = await finalRequestPromise;
+  const finalResponse = await finalResponsePromise;
+
+  const initialResponse = await initialRequest.response();
+  if (initialResponse == null || initialResponse.status() !== 302 || initialResponse.ok()) {
+    throw new Error(`unexpected redirect response: ${initialResponse ? initialResponse.status() : "null"}`);
+  }
+
+  const redirectedTo = await initialRequest.redirectedTo();
+  if (redirectedTo == null || redirectedTo.url() !== __FINAL_URL__) {
+    throw new Error(`redirectedTo mismatch: ${redirectedTo ? redirectedTo.url() : "null"}`);
+  }
+
+  const redirectedFrom = await finalRequest.redirectedFrom();
+  if (redirectedFrom == null || redirectedFrom.url() !== __REDIRECT_URL__) {
+    throw new Error(`redirectedFrom mismatch: ${redirectedFrom ? redirectedFrom.url() : "null"}`);
+  }
+
+  const finalLinkedResponse = await finalRequest.response();
+  if (finalLinkedResponse == null || finalLinkedResponse.status() !== 200 || !finalLinkedResponse.ok()) {
+    throw new Error(`unexpected final linked response: ${finalLinkedResponse ? finalLinkedResponse.status() : "null"}`);
+  }
+
+  const responseRequest = await finalResponse.request();
+  if (responseRequest == null || responseRequest.url() !== __FINAL_URL__) {
+    throw new Error(`response.request mismatch: ${responseRequest ? responseRequest.url() : "null"}`);
+  }
+
+  const finalText = await finalResponse.text();
+  if (!finalText.includes("\"redirect\":true")) {
+    throw new Error(`unexpected final redirect text: ${finalText}`);
+  }
+
+  await refreshmint.saveResource("network_redirect.bin", [111, 107]);
+  refreshmint.log("network redirect test done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("network redirect test error: " + msg);
+  throw e;
+}
+"##;
+
 struct TestSandbox {
     root: PathBuf,
 }
@@ -716,6 +774,7 @@ impl HttpFixtureServer {
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
         let base_url = format!("http://{}", addr);
+        let thread_base_url = base_url.clone();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let thread = thread::spawn(move || loop {
             if shutdown_rx.try_recv().is_ok() {
@@ -756,6 +815,24 @@ impl HttpFixtureServer {
                         body.len(),
                         body
                     );
+                let _ = stream.write_all(response.as_bytes());
+                continue;
+            }
+            if path == "/api/redirect-start" {
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {}/api/redirect-final\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    thread_base_url
+                );
+                let _ = stream.write_all(response.as_bytes());
+                continue;
+            }
+            if path == "/api/redirect-final" {
+                let body = r#"{"redirect":true,"ok":true}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
                 let _ = stream.write_all(response.as_bytes());
                 continue;
             }
@@ -1492,6 +1569,77 @@ fn scrape_network_lifecycle_events_work() -> Result<(), Box<dyn Error>> {
         .join(EXTENSION_NAME)
         .join("output")
         .join("network_lifecycle.bin");
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn scrape_network_redirects_work() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping network redirect scrape test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let server = HttpFixtureServer::start()?;
+    let sandbox = TestSandbox::new("scrape-network-redirect")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
+
+    let redirect_url = format!("{}/api/redirect-start", server.base_url);
+    let final_url = format!("{}/api/redirect-final", server.base_url);
+    let driver_source = NETWORK_REDIRECT_DRIVER_SOURCE
+        .replace("__REDIRECT_URL__", &serde_json::to_string(&redirect_url)?)
+        .replace("__FINAL_URL__", &serde_json::to_string(&final_url)?);
+    fs::write(&driver_path, driver_source)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        login_name: LOGIN_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    let (result_tx, result_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = scrape::run_scrape(config).map_err(|err| err.to_string());
+        let _ = result_tx.send(result);
+    });
+
+    match result_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err.into()),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            return Err("network redirect scrape timed out after 30s".into());
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            return Err("network redirect scrape worker disconnected".into());
+        }
+    }
+
+    let output_file = ledger_dir
+        .join("cache")
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("network_redirect.bin");
     let bytes = fs::read(&output_file)?;
     assert_eq!(bytes, b"ok");
 

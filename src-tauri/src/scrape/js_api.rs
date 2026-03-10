@@ -24,6 +24,7 @@ const BROWSER_DISCONNECTED_ERROR: &str =
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const POLL_INTERVAL_MS: u64 = 100;
 const REQUEST_CAPTURE_SETTLE_MS: u64 = 25;
+const REQUEST_LINK_SETTLE_ATTEMPTS: usize = 8;
 const TAB_QUERY_TIMEOUT_MS: u64 = 5_000;
 
 #[derive(Debug, Clone)]
@@ -127,7 +128,6 @@ struct NetworkRequest {
 }
 
 struct ResponseCaptureState {
-    entries: Arc<Mutex<Vec<NetworkRequest>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -149,7 +149,6 @@ struct RequestCaptureItem {
 }
 
 struct RequestCaptureState {
-    entries: Arc<Mutex<Vec<RequestCaptureItem>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -395,6 +394,10 @@ pub struct PageApi {
     #[qjs(skip_trace)]
     inner: Arc<Mutex<PageInner>>,
     #[qjs(skip_trace)]
+    request_entries: Arc<Mutex<Vec<RequestCaptureItem>>>,
+    #[qjs(skip_trace)]
+    response_entries: Arc<Mutex<Vec<NetworkRequest>>>,
+    #[qjs(skip_trace)]
     response_capture: Arc<Mutex<Option<ResponseCaptureState>>>,
     #[qjs(skip_trace)]
     request_capture: Arc<Mutex<Option<RequestCaptureState>>>,
@@ -410,6 +413,10 @@ pub struct PageApi {
     snapshot_tracks: Arc<Mutex<BTreeMap<String, Vec<SnapshotNode>>>>,
     #[qjs(skip_trace)]
     request_timings: Arc<std::sync::Mutex<BTreeMap<String, RequestTiming>>>,
+    #[qjs(skip_trace)]
+    raw_request_current_ids: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
+    #[qjs(skip_trace)]
+    next_request_id: Arc<AtomicU64>,
 }
 
 // Safety: PageApi only contains Arc<Mutex<...>> which is 'static and has no JS lifetimes.
@@ -660,6 +667,43 @@ impl PageApi {
         Self::latest_request_entry(entries, &found.request_id)
             .await
             .unwrap_or(found)
+    }
+
+    async fn settle_response_entry(
+        entries: &Arc<Mutex<Vec<NetworkRequest>>>,
+        request_id: &str,
+    ) -> Option<NetworkRequest> {
+        for _ in 0..REQUEST_LINK_SETTLE_ATTEMPTS {
+            if let Some(found) = Self::latest_response_entry(entries, request_id).await {
+                return Some(found);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(REQUEST_CAPTURE_SETTLE_MS)).await;
+        }
+        Self::latest_response_entry(entries, request_id).await
+    }
+
+    async fn settle_redirected_request_entry(
+        entries: &Arc<Mutex<Vec<RequestCaptureItem>>>,
+        request_id: &str,
+    ) -> Option<RequestCaptureItem> {
+        for _ in 0..REQUEST_LINK_SETTLE_ATTEMPTS {
+            if let Some(found) = entries
+                .lock()
+                .await
+                .iter()
+                .find(|entry| entry.redirected_from.as_ref() == Some(&request_id.to_string()))
+                .cloned()
+            {
+                return Some(found);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(REQUEST_CAPTURE_SETTLE_MS)).await;
+        }
+        entries
+            .lock()
+            .await
+            .iter()
+            .find(|entry| entry.redirected_from.as_ref() == Some(&request_id.to_string()))
+            .cloned()
     }
 
     async fn advance_request_cursor(
@@ -1139,6 +1183,8 @@ impl PageApi {
     pub fn new(inner: Arc<Mutex<PageInner>>) -> Self {
         Self {
             inner,
+            request_entries: Arc::new(Mutex::new(Vec::new())),
+            response_entries: Arc::new(Mutex::new(Vec::new())),
             response_capture: Arc::new(Mutex::new(None)),
             request_capture: Arc::new(Mutex::new(None)),
             request_waiters: Arc::new(Mutex::new(Vec::new())),
@@ -1147,6 +1193,8 @@ impl PageApi {
             next_waiter_id: Arc::new(AtomicU64::new(1)),
             snapshot_tracks: Arc::new(Mutex::new(BTreeMap::new())),
             request_timings: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            raw_request_current_ids: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            next_request_id: Arc::new(AtomicU64::new(1)),
         }
     }
 }
@@ -1799,6 +1847,10 @@ impl RequestApi {
             .iter()
             .find(|entry| entry.request_id == self.request_id)
             .cloned();
+        let found = match found {
+            Some(found) => Some(found),
+            None => PageApi::settle_response_entry(&entries, &self.request_id).await,
+        };
         Ok(found.map(|entry| self.page_api.response_api_from_entry(entry)))
     }
 
@@ -1844,6 +1896,10 @@ impl RequestApi {
             .iter()
             .find(|entry| entry.redirected_from.as_ref() == Some(&self.request_id))
             .cloned();
+        let found = match found {
+            Some(found) => Some(found),
+            None => PageApi::settle_redirected_request_entry(&entries, &self.request_id).await,
+        };
         Ok(found.map(|entry| self.page_api.request_api_from_entry(entry)))
     }
 }
@@ -4079,9 +4135,10 @@ impl PageApi {
 
     async fn ensure_request_capture(&self) -> JsResult<Arc<Mutex<Vec<RequestCaptureItem>>>> {
         let mut guard = self.request_capture.lock().await;
+        let had_previous = guard.is_some();
         if let Some(state) = guard.as_ref() {
             if !state.task.is_finished() {
-                return Ok(state.entries.clone());
+                return Ok(self.request_entries.clone());
             }
         }
 
@@ -4119,10 +4176,27 @@ impl PageApi {
             .await
             .map_err(|e| js_err(format!("failed to attach request failed listener: {e}")))?;
 
-        let entries = Arc::new(Mutex::new(Vec::new()));
-        let entries_for_task = entries.clone();
+        if had_previous {
+            let mut entries = self.request_entries.lock().await;
+            entries.clear();
+        }
+        if had_previous {
+            if let Ok(mut timings) = self.request_timings.lock() {
+                timings.clear();
+            }
+            if let Ok(mut ids) = self.raw_request_current_ids.lock() {
+                ids.clear();
+            }
+            self.next_request_id.store(1, Ordering::Relaxed);
+        }
+
+        let entries_for_task = self.request_entries.clone();
+        let response_entries_for_task = self.response_entries.clone();
         let request_timings_for_task = self.request_timings.clone();
+        let raw_request_current_ids = self.raw_request_current_ids.clone();
+        let next_request_id = self.next_request_id.clone();
         let request_waiters = self.request_waiters.clone();
+        let response_waiters = self.response_waiters.clone();
         let request_lifecycle_waiters = self.request_lifecycle_waiters.clone();
         let task = tokio::spawn(async move {
             use futures::StreamExt;
@@ -4137,9 +4211,21 @@ impl PageApi {
                         let Some(ev) = ev else {
                             break;
                         };
+                        let raw_request_id = ev.request_id.as_ref().to_string();
+                        let (request_id, previous_request_id) = {
+                            let mut ids = raw_request_current_ids
+                                .lock()
+                                .unwrap_or_else(|err| err.into_inner());
+                            allocate_request_hop(
+                                &raw_request_id,
+                                ev.redirect_response.is_some(),
+                                &mut ids,
+                                &next_request_id,
+                            )
+                        };
                         let item = RequestCaptureItem {
-                            request_id: ev.request_id.as_ref().to_string(),
-                            raw_request_id: ev.request_id.as_ref().to_string(),
+                            request_id: request_id.clone(),
+                            raw_request_id: raw_request_id.clone(),
                             url: ev.request.url.clone(),
                             method: ev.request.method.clone(),
                             headers: headers_to_map(Some(&ev.request.headers)),
@@ -4154,11 +4240,48 @@ impl PageApi {
                                 .as_ref()
                                 .map(|frame_id| frame_id.as_ref().to_string()),
                             is_navigation_request: is_navigation_request(&ev),
-                            redirected_from: None,
+                            redirected_from: previous_request_id.clone(),
                             error: None,
                             finished: false,
                             timing: RequestTiming::default_playwright(),
                         };
+
+                        if let (Some(previous_request_id), Some(redirect_response)) =
+                            (previous_request_id, ev.redirect_response.as_ref())
+                        {
+                            let redirect_item = build_redirect_response_entry(
+                                previous_request_id,
+                                &item,
+                                redirect_response,
+                                (*ev.timestamp.inner() * 1000.0) as i64,
+                            );
+                            let mut response_guard = response_entries_for_task.lock().await;
+                            response_guard.push(redirect_item.clone());
+                            if response_guard.len() > 5_000 {
+                                let drop_count = response_guard.len() - 5_000;
+                                response_guard.drain(0..drop_count);
+                            }
+                            drop(response_guard);
+
+                            let matched_waiters = {
+                                let mut waiters = response_waiters.lock().await;
+                                let mut matched = Vec::new();
+                                let mut remaining = Vec::with_capacity(waiters.len());
+                                for waiter in waiters.drain(..) {
+                                    if url_waiter_matches(&redirect_item.url, &waiter.matcher) {
+                                        matched.push(waiter);
+                                    } else {
+                                        remaining.push(waiter);
+                                    }
+                                }
+                                *waiters = remaining;
+                                matched
+                            };
+
+                            for waiter in matched_waiters {
+                                let _ = waiter.sender.send(redirect_item.clone());
+                            }
+                        }
 
                         let mut guard = entries_for_task.lock().await;
                         guard.push(item.clone());
@@ -4174,7 +4297,6 @@ impl PageApi {
                                 RequestTiming::default_playwright(),
                             );
                         }
-
                         let matched_waiters = {
                             let mut waiters = request_waiters.lock().await;
                             let mut matched = Vec::new();
@@ -4301,18 +4423,16 @@ impl PageApi {
             }
         });
 
-        *guard = Some(RequestCaptureState {
-            entries: entries.clone(),
-            task,
-        });
-        Ok(entries)
+        *guard = Some(RequestCaptureState { task });
+        Ok(self.request_entries.clone())
     }
 
     async fn ensure_response_capture(&self) -> JsResult<Arc<Mutex<Vec<NetworkRequest>>>> {
         let mut guard = self.response_capture.lock().await;
+        let had_previous = guard.is_some();
         if let Some(state) = guard.as_ref() {
             if !state.task.is_finished() {
-                return Ok(state.entries.clone());
+                return Ok(self.response_entries.clone());
             }
         }
 
@@ -4354,10 +4474,14 @@ impl PageApi {
                 ))
             })?;
 
-        let entries = Arc::new(Mutex::new(Vec::new()));
-        let entries_for_task = entries.clone();
+        if had_previous {
+            let mut entries = self.response_entries.lock().await;
+            entries.clear();
+        }
+        let entries_for_task = self.response_entries.clone();
         let request_entries_for_task = self.ensure_request_capture().await?;
         let request_timings_for_task = self.request_timings.clone();
+        let raw_request_current_ids = self.raw_request_current_ids.clone();
         let response_waiters = self.response_waiters.clone();
         let task = tokio::spawn(async move {
             use futures::StreamExt;
@@ -4377,8 +4501,14 @@ impl PageApi {
                         let ts = (*ev.timestamp.inner() * 1000.0) as i64;
                         // Keep the field mapping aligned with Playwright's ResourceTiming shape.
                         let timing = response_timing_to_request_timing(ev.response.timing.as_ref());
+                        let raw_request_id = ev.request_id.as_ref().to_string();
+                        let request_id = raw_request_current_ids
+                            .lock()
+                            .ok()
+                            .and_then(|ids| ids.get(&raw_request_id).cloned())
+                            .unwrap_or_else(|| raw_request_id.clone());
                         let item = NetworkRequest {
-                            request_id: ev.request_id.as_ref().to_string(),
+                            request_id: request_id.clone(),
                             url: ev.response.url.clone(),
                             status,
                             ok: status == 0 || (200..300).contains(&status),
@@ -4408,7 +4538,7 @@ impl PageApi {
                         let latest = guard.last().cloned();
                         drop(guard);
 
-                        let request_id = ev.request_id.as_ref().to_string();
+                        let request_id = request_id.clone();
                         let mut request_guard = request_entries_for_task.lock().await;
                         if let Some(entry) = request_guard
                             .iter_mut()
@@ -4449,6 +4579,11 @@ impl PageApi {
                             break;
                         };
                         let request_id = ev.request_id.as_ref().to_string();
+                        let request_id = raw_request_current_ids
+                            .lock()
+                            .ok()
+                            .and_then(|ids| ids.get(&request_id).cloned())
+                            .unwrap_or(request_id);
                         let mut guard = entries_for_task.lock().await;
                         if let Some(entry) = guard
                             .iter_mut()
@@ -4493,6 +4628,11 @@ impl PageApi {
                             break;
                         };
                         let request_id = ev.request_id.as_ref().to_string();
+                        let request_id = raw_request_current_ids
+                            .lock()
+                            .ok()
+                            .and_then(|ids| ids.get(&request_id).cloned())
+                            .unwrap_or(request_id);
                         let error_text = ev.error_text.clone();
                         let mut guard = entries_for_task.lock().await;
                         if let Some(entry) = guard
@@ -4538,6 +4678,11 @@ impl PageApi {
                             break;
                         };
                         let request_id = ev.request_id.as_ref().to_string();
+                        let request_id = raw_request_current_ids
+                            .lock()
+                            .ok()
+                            .and_then(|ids| ids.get(&request_id).cloned())
+                            .unwrap_or(request_id);
                         let merged_headers = headers_to_map(Some(&ev.headers));
                         let mut guard = entries_for_task.lock().await;
                         if let Some(entry) = guard
@@ -4552,11 +4697,8 @@ impl PageApi {
             }
         });
 
-        *guard = Some(ResponseCaptureState {
-            entries: entries.clone(),
-            task,
-        });
-        Ok(entries)
+        *guard = Some(ResponseCaptureState { task });
+        Ok(self.response_entries.clone())
     }
 }
 
@@ -5282,6 +5424,56 @@ fn response_timing_to_request_timing(
         request_start: timing.send_start,
         response_start: timing.receive_headers_end,
         response_end: timing.receive_headers_end,
+    }
+}
+
+fn allocate_request_hop(
+    raw_request_id: &str,
+    has_redirect_response: bool,
+    current_ids: &mut BTreeMap<String, String>,
+    next_request_id: &AtomicU64,
+) -> (String, Option<String>) {
+    let previous_request_id = if has_redirect_response {
+        current_ids.get(raw_request_id).cloned()
+    } else {
+        None
+    };
+    let request_id = format!(
+        "request-{}",
+        next_request_id.fetch_add(1, Ordering::Relaxed)
+    );
+    current_ids.insert(raw_request_id.to_string(), request_id.clone());
+    (request_id, previous_request_id)
+}
+
+fn build_redirect_response_entry(
+    previous_request_id: String,
+    request_item: &RequestCaptureItem,
+    redirect_response: &chromiumoxide::cdp::browser_protocol::network::Response,
+    timestamp_ms: i64,
+) -> NetworkRequest {
+    let redirect_status = redirect_response.status;
+    NetworkRequest {
+        request_id: previous_request_id,
+        url: redirect_response.url.clone(),
+        status: redirect_status,
+        ok: redirect_status == 0 || (200..300).contains(&redirect_status),
+        method: redirect_response
+            .request_headers
+            .as_ref()
+            .map(|headers| network_method_from_headers(Some(headers)))
+            .unwrap_or_else(|| request_item.method.clone()),
+        status_text: redirect_response.status_text.clone(),
+        headers: headers_to_map(Some(&redirect_response.headers)),
+        frame_id: request_item.frame_id.clone(),
+        from_service_worker: redirect_response.from_service_worker.unwrap_or(false),
+        ts: timestamp_ms,
+        error: None,
+        finished: true,
+        timing: response_timing_to_request_timing(redirect_response.timing.as_ref()),
+        server_addr: remote_addr_from_response(redirect_response),
+        security_details: response_security_details(redirect_response),
+        request_id_raw: None,
     }
 }
 
@@ -6709,6 +6901,78 @@ mod tests {
             header_values(&headers, "set-cookie"),
             vec!["a=1; Path=/".to_string(), "b=2; Path=/".to_string()]
         );
+    }
+
+    #[test]
+    fn allocate_request_hop_reuses_raw_id_but_rotates_public_id_on_redirect() {
+        let next_request_id = AtomicU64::new(1);
+        let mut current_ids = BTreeMap::new();
+
+        let (first_id, first_previous) =
+            allocate_request_hop("raw-1", false, &mut current_ids, &next_request_id);
+        assert_eq!(first_id, "request-1");
+        assert_eq!(first_previous, None);
+
+        let (second_id, second_previous) =
+            allocate_request_hop("raw-1", true, &mut current_ids, &next_request_id);
+        assert_eq!(second_id, "request-2");
+        assert_eq!(second_previous.as_deref(), Some("request-1"));
+        assert_eq!(
+            current_ids.get("raw-1").map(String::as_str),
+            Some("request-2")
+        );
+    }
+
+    #[test]
+    fn build_redirect_response_entry_uses_previous_request_identity() {
+        let request_item = RequestCaptureItem {
+            request_id: "request-2".to_string(),
+            raw_request_id: "raw-1".to_string(),
+            url: "https://example.com/final".to_string(),
+            method: "GET".to_string(),
+            headers: BTreeMap::new(),
+            resource_type: "document".to_string(),
+            post_data: None,
+            frame_id: Some("frame-1".to_string()),
+            is_navigation_request: true,
+            redirected_from: Some("request-1".to_string()),
+            error: None,
+            finished: false,
+            timing: RequestTiming::default_playwright(),
+        };
+        let redirect_response: chromiumoxide::cdp::browser_protocol::network::Response =
+            serde_json::from_value(serde_json::json!({
+                "url": "https://example.com/start",
+                "status": 302,
+                "statusText": "Found",
+                "headers": {
+                    "location": "https://example.com/final"
+                },
+                "mimeType": "text/html",
+                "charset": "utf-8",
+                "connectionReused": false,
+                "connectionId": 1,
+                "encodedDataLength": 0,
+                "securityState": "neutral",
+                "requestHeaders": {
+                    ":method": "GET"
+                }
+            }))
+            .unwrap_or_else(|err| panic!("redirect response should deserialize: {err}"));
+
+        let redirect_entry = build_redirect_response_entry(
+            "request-1".to_string(),
+            &request_item,
+            &redirect_response,
+            1234,
+        );
+        assert_eq!(redirect_entry.request_id, "request-1");
+        assert_eq!(redirect_entry.status, 302);
+        assert!(!redirect_entry.ok);
+        assert_eq!(redirect_entry.url, "https://example.com/start");
+        assert_eq!(redirect_entry.method, "GET");
+        assert!(redirect_entry.finished);
+        assert!(redirect_entry.request_id_raw.is_none());
     }
 
     #[test]
