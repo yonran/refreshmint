@@ -173,6 +173,7 @@ dependencies = [
  "log",
  "lopdf",
  "notify",
+ "regex",
  "rquickjs",
  "security-framework 3.7.0",
  "serde",

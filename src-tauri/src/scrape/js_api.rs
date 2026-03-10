@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rquickjs::class::Trace;
+use rquickjs::promise::MaybePromise;
 use rquickjs::{
-    function::Opt, Class, Ctx, FromJs, IntoJs, JsLifetime, Object, Result as JsResult, TypedArray,
-    Value,
+    function::Opt, Class, Ctx, FromJs, Function, IntoJs, JsLifetime, Object, Persistent,
+    Result as JsResult, TypedArray, Value,
 };
 use tokio::sync::{oneshot, Mutex};
 
@@ -146,14 +147,50 @@ struct RequestCaptureState {
 
 struct RequestWaiter {
     id: u64,
-    url_pattern: String,
+    matcher: UrlWaiterMatcher,
     sender: oneshot::Sender<RequestCaptureItem>,
 }
 
 struct ResponseWaiter {
     id: u64,
-    url_pattern: String,
+    matcher: UrlWaiterMatcher,
     sender: oneshot::Sender<NetworkRequest>,
+}
+
+struct RequestLifecycleWaiter {
+    id: u64,
+    event: RequestLifecycleEvent,
+    sender: oneshot::Sender<RequestCaptureItem>,
+}
+
+#[derive(Debug, Clone)]
+enum UrlWaiterMatcher {
+    Any,
+    Pattern(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestLifecycleEvent {
+    Finished,
+    Failed,
+}
+
+enum JsNetworkMatcher {
+    String(String),
+    RegExp(Persistent<Value<'static>>),
+    Predicate(Persistent<Function<'static>>),
+}
+
+struct EventWaitOptions {
+    timeout_ms: u64,
+    predicate: Option<Persistent<Function<'static>>>,
+}
+
+enum WaiterOutcome<T> {
+    Value(T),
+    Timeout,
+    ChannelClosed,
+    PageGone(rquickjs::Error),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -305,6 +342,8 @@ pub struct PageApi {
     #[qjs(skip_trace)]
     response_waiters: Arc<Mutex<Vec<ResponseWaiter>>>,
     #[qjs(skip_trace)]
+    request_lifecycle_waiters: Arc<Mutex<Vec<RequestLifecycleWaiter>>>,
+    #[qjs(skip_trace)]
     next_waiter_id: Arc<AtomicU64>,
     #[qjs(skip_trace)]
     snapshot_tracks: Arc<Mutex<BTreeMap<String, Vec<SnapshotNode>>>>,
@@ -337,12 +376,12 @@ impl PageApi {
     async fn register_request_waiter(
         &self,
         id: u64,
-        url_pattern: String,
+        matcher: UrlWaiterMatcher,
         sender: oneshot::Sender<RequestCaptureItem>,
     ) {
         self.request_waiters.lock().await.push(RequestWaiter {
             id,
-            url_pattern,
+            matcher,
             sender,
         });
     }
@@ -350,14 +389,26 @@ impl PageApi {
     async fn register_response_waiter(
         &self,
         id: u64,
-        url_pattern: String,
+        matcher: UrlWaiterMatcher,
         sender: oneshot::Sender<NetworkRequest>,
     ) {
         self.response_waiters.lock().await.push(ResponseWaiter {
             id,
-            url_pattern,
+            matcher,
             sender,
         });
+    }
+
+    async fn register_request_lifecycle_waiter(
+        &self,
+        id: u64,
+        event: RequestLifecycleEvent,
+        sender: oneshot::Sender<RequestCaptureItem>,
+    ) {
+        self.request_lifecycle_waiters
+            .lock()
+            .await
+            .push(RequestLifecycleWaiter { id, event, sender });
     }
 
     async fn fulfill_request_waiter(&self, waiter_id: u64, item: RequestCaptureItem) -> bool {
@@ -391,6 +442,13 @@ impl PageApi {
 
     async fn cancel_response_waiter(&self, waiter_id: u64) {
         let mut waiters = self.response_waiters.lock().await;
+        if let Some(index) = waiters.iter().position(|waiter| waiter.id == waiter_id) {
+            waiters.swap_remove(index);
+        }
+    }
+
+    async fn cancel_request_lifecycle_waiter(&self, waiter_id: u64) {
+        let mut waiters = self.request_lifecycle_waiters.lock().await;
         if let Some(index) = waiters.iter().position(|waiter| waiter.id == waiter_id) {
             waiters.swap_remove(index);
         }
@@ -431,8 +489,12 @@ impl PageApi {
         let baseline_len = entries.lock().await.len();
         let waiter_id = self.allocate_waiter_id();
         let (sender, receiver) = oneshot::channel();
-        self.register_response_waiter(waiter_id, url_pattern.clone(), sender)
-            .await;
+        self.register_response_waiter(
+            waiter_id,
+            UrlWaiterMatcher::Pattern(url_pattern.clone()),
+            sender,
+        )
+        .await;
 
         if let Some(found) = entries
             .lock()
@@ -446,17 +508,27 @@ impl PageApi {
             return Ok(self.response_api_from_entry(found));
         }
 
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-        match tokio::time::timeout(timeout, receiver).await {
-            Ok(Ok(found)) => Ok(self.response_api_from_entry(found)),
-            Ok(Err(_)) => Err(js_err(format!(
+        match self
+            .wait_for_receiver_with_page_liveness(
+                receiver,
+                timeout_ms,
+                &format!("response pattern \"{url_pattern}\""),
+            )
+            .await
+        {
+            WaiterOutcome::Value(found) => Ok(self.response_api_from_entry(found)),
+            WaiterOutcome::ChannelClosed => Err(js_err(format!(
                 "waitForResponse failed for pattern \"{url_pattern}\": response waiter channel closed"
             ))),
-            Err(_) => {
+            WaiterOutcome::Timeout => {
                 self.cancel_response_waiter(waiter_id).await;
                 Err(js_err(format!(
                     "TimeoutError: waiting for response pattern \"{url_pattern}\" failed: timeout {timeout_ms}ms exceeded"
                 )))
+            }
+            WaiterOutcome::PageGone(err) => {
+                self.cancel_response_waiter(waiter_id).await;
+                Err(err)
             }
         }
     }
@@ -470,8 +542,12 @@ impl PageApi {
         let baseline_len = entries.lock().await.len();
         let waiter_id = self.allocate_waiter_id();
         let (sender, receiver) = oneshot::channel();
-        self.register_request_waiter(waiter_id, url_pattern.clone(), sender)
-            .await;
+        self.register_request_waiter(
+            waiter_id,
+            UrlWaiterMatcher::Pattern(url_pattern.clone()),
+            sender,
+        )
+        .await;
 
         if let Some(found) = entries
             .lock()
@@ -481,27 +557,218 @@ impl PageApi {
             .find(|req| url_matches_pattern(&req.url, &url_pattern))
             .cloned()
         {
-            tokio::time::sleep(std::time::Duration::from_millis(REQUEST_CAPTURE_SETTLE_MS)).await;
-            let settled = Self::latest_request_entry(&entries, &found.request_id)
-                .await
-                .unwrap_or(found);
+            let settled = Self::settle_request_entry(&entries, found).await;
             let _ = self
                 .fulfill_request_waiter(waiter_id, settled.clone())
                 .await;
             return Ok(self.request_api_from_entry(settled));
         }
 
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-        match tokio::time::timeout(timeout, receiver).await {
-            Ok(Ok(found)) => Ok(self.request_api_from_entry(found)),
-            Ok(Err(_)) => Err(js_err(format!(
+        match self
+            .wait_for_receiver_with_page_liveness(
+                receiver,
+                timeout_ms,
+                &format!("request pattern \"{url_pattern}\""),
+            )
+            .await
+        {
+            WaiterOutcome::Value(found) => Ok(self.request_api_from_entry(found)),
+            WaiterOutcome::ChannelClosed => Err(js_err(format!(
                 "waitForRequest failed for pattern \"{url_pattern}\": request waiter channel closed"
             ))),
-            Err(_) => {
+            WaiterOutcome::Timeout => {
                 self.cancel_request_waiter(waiter_id).await;
                 Err(js_err(format!(
                     "TimeoutError: waiting for request pattern \"{url_pattern}\" failed: timeout {timeout_ms}ms exceeded"
                 )))
+            }
+            WaiterOutcome::PageGone(err) => {
+                self.cancel_request_waiter(waiter_id).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn settle_request_entry(
+        entries: &Arc<Mutex<Vec<RequestCaptureItem>>>,
+        found: RequestCaptureItem,
+    ) -> RequestCaptureItem {
+        tokio::time::sleep(std::time::Duration::from_millis(REQUEST_CAPTURE_SETTLE_MS)).await;
+        Self::latest_request_entry(entries, &found.request_id)
+            .await
+            .unwrap_or(found)
+    }
+
+    async fn advance_request_cursor(
+        entries: &Arc<Mutex<Vec<RequestCaptureItem>>>,
+        cursor: &mut usize,
+        request_id: &str,
+    ) {
+        let guard = entries.lock().await;
+        if *cursor > guard.len() {
+            *cursor = guard.len();
+        }
+        if let Some((index, _)) = guard
+            .iter()
+            .enumerate()
+            .skip(*cursor)
+            .find(|(_, entry)| entry.request_id == request_id)
+        {
+            *cursor = index + 1;
+        } else {
+            *cursor = guard.len();
+        }
+    }
+
+    async fn advance_response_cursor(
+        entries: &Arc<Mutex<Vec<NetworkRequest>>>,
+        cursor: &mut usize,
+        request_id: &str,
+    ) {
+        let guard = entries.lock().await;
+        if *cursor > guard.len() {
+            *cursor = guard.len();
+        }
+        if let Some((index, _)) = guard
+            .iter()
+            .enumerate()
+            .skip(*cursor)
+            .find(|(_, entry)| entry.request_id == request_id)
+        {
+            *cursor = index + 1;
+        } else {
+            *cursor = guard.len();
+        }
+    }
+
+    async fn wait_for_next_request_entry(
+        &self,
+        entries: &Arc<Mutex<Vec<RequestCaptureItem>>>,
+        cursor: &mut usize,
+        timeout_ms: u64,
+    ) -> JsResult<RequestCaptureItem> {
+        let waiter_id = self.allocate_waiter_id();
+        let (sender, receiver) = oneshot::channel();
+        self.register_request_waiter(waiter_id, UrlWaiterMatcher::Any, sender)
+            .await;
+
+        if let Some(found) = entries.lock().await.get(*cursor).cloned() {
+            self.cancel_request_waiter(waiter_id).await;
+            *cursor += 1;
+            return Ok(Self::settle_request_entry(entries, found).await);
+        }
+
+        match self
+            .wait_for_receiver_with_page_liveness(receiver, timeout_ms, "request")
+            .await
+        {
+            WaiterOutcome::Value(found) => {
+                Self::advance_request_cursor(entries, cursor, &found.request_id).await;
+                Ok(found)
+            }
+            WaiterOutcome::ChannelClosed => Err(js_err(
+                "waitForRequest failed: request waiter channel closed".to_string(),
+            )),
+            WaiterOutcome::Timeout => {
+                self.cancel_request_waiter(waiter_id).await;
+                Err(js_err(format!(
+                    "TimeoutError: waiting for request failed: timeout {timeout_ms}ms exceeded"
+                )))
+            }
+            WaiterOutcome::PageGone(err) => {
+                self.cancel_request_waiter(waiter_id).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn wait_for_next_response_entry(
+        &self,
+        entries: &Arc<Mutex<Vec<NetworkRequest>>>,
+        cursor: &mut usize,
+        timeout_ms: u64,
+    ) -> JsResult<NetworkRequest> {
+        let waiter_id = self.allocate_waiter_id();
+        let (sender, receiver) = oneshot::channel();
+        self.register_response_waiter(waiter_id, UrlWaiterMatcher::Any, sender)
+            .await;
+
+        if let Some(found) = entries.lock().await.get(*cursor).cloned() {
+            self.cancel_response_waiter(waiter_id).await;
+            *cursor += 1;
+            return Ok(found);
+        }
+
+        match self
+            .wait_for_receiver_with_page_liveness(receiver, timeout_ms, "response")
+            .await
+        {
+            WaiterOutcome::Value(found) => {
+                Self::advance_response_cursor(entries, cursor, &found.request_id).await;
+                Ok(found)
+            }
+            WaiterOutcome::ChannelClosed => Err(js_err(
+                "waitForResponse failed: response waiter channel closed".to_string(),
+            )),
+            WaiterOutcome::Timeout => {
+                self.cancel_response_waiter(waiter_id).await;
+                Err(js_err(format!(
+                    "TimeoutError: waiting for response failed: timeout {timeout_ms}ms exceeded"
+                )))
+            }
+            WaiterOutcome::PageGone(err) => {
+                self.cancel_response_waiter(waiter_id).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn wait_for_next_request_lifecycle_entry(
+        &self,
+        entries: &Arc<Mutex<Vec<RequestCaptureItem>>>,
+        lifecycle_event: RequestLifecycleEvent,
+        cursor: &mut usize,
+        timeout_ms: u64,
+    ) -> JsResult<RequestCaptureItem> {
+        let waiter_id = self.allocate_waiter_id();
+        let (sender, receiver) = oneshot::channel();
+        self.register_request_lifecycle_waiter(waiter_id, lifecycle_event, sender)
+            .await;
+
+        if let Some((index, found)) = entries
+            .lock()
+            .await
+            .iter()
+            .enumerate()
+            .skip(*cursor)
+            .find(|(_, entry)| request_entry_matches_lifecycle_event(entry, lifecycle_event))
+            .map(|(index, entry)| (index, entry.clone()))
+        {
+            self.cancel_request_lifecycle_waiter(waiter_id).await;
+            *cursor = index + 1;
+            return Ok(found);
+        }
+
+        match self
+            .wait_for_receiver_with_page_liveness(receiver, timeout_ms, "lifecycle event")
+            .await
+        {
+            WaiterOutcome::Value(found) => {
+                Self::advance_request_cursor(entries, cursor, &found.request_id).await;
+                Ok(found)
+            }
+            WaiterOutcome::ChannelClosed => Err(js_err(
+                "waitForEvent lifecycle waiter channel closed".to_string(),
+            )),
+            WaiterOutcome::Timeout => {
+                self.cancel_request_lifecycle_waiter(waiter_id).await;
+                Err(js_err(format!(
+                    "TimeoutError: waiting for lifecycle event failed: timeout {timeout_ms}ms exceeded"
+                )))
+            }
+            WaiterOutcome::PageGone(err) => {
+                self.cancel_request_lifecycle_waiter(waiter_id).await;
+                Err(err)
             }
         }
     }
@@ -513,31 +780,50 @@ impl PageApi {
     ) -> JsResult<RequestApi> {
         let entries = self.ensure_request_capture().await?;
         let baseline_len = entries.lock().await.len();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let event = parse_request_lifecycle_event_name(lifecycle_event).ok_or_else(|| {
+            js_err(format!(
+                "unsupported request lifecycle event \"{lifecycle_event}\""
+            ))
+        })?;
+        let waiter_id = self.allocate_waiter_id();
+        let (sender, receiver) = oneshot::channel();
+        self.register_request_lifecycle_waiter(waiter_id, event, sender)
+            .await;
 
-        loop {
-            let matched = entries
-                .lock()
-                .await
-                .iter()
-                .skip(baseline_len)
-                .find(|entry| match lifecycle_event {
-                    "requestfinished" => entry.finished && entry.error.is_none(),
-                    "requestfailed" => entry.finished && entry.error.is_some(),
-                    _ => false,
-                })
-                .cloned();
+        if let Some(entry) = entries
+            .lock()
+            .await
+            .iter()
+            .skip(baseline_len)
+            .find(|entry| request_entry_matches_lifecycle_event(entry, event))
+            .cloned()
+        {
+            self.cancel_request_lifecycle_waiter(waiter_id).await;
+            return Ok(self.request_api_from_entry(entry));
+        }
 
-            if let Some(entry) = matched {
-                return Ok(self.request_api_from_entry(entry));
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                return Err(js_err(format!(
+        match self
+            .wait_for_receiver_with_page_liveness(
+                receiver,
+                timeout_ms,
+                &format!("event \"{lifecycle_event}\""),
+            )
+            .await
+        {
+            WaiterOutcome::Value(entry) => Ok(self.request_api_from_entry(entry)),
+            WaiterOutcome::ChannelClosed => Err(js_err(format!(
+                "waitForEvent(\"{lifecycle_event}\") failed: lifecycle waiter channel closed"
+            ))),
+            WaiterOutcome::Timeout => {
+                self.cancel_request_lifecycle_waiter(waiter_id).await;
+                Err(js_err(format!(
                     "TimeoutError: waiting for event \"{lifecycle_event}\" failed: timeout {timeout_ms}ms exceeded"
-                )));
+                )))
             }
-            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+            WaiterOutcome::PageGone(err) => {
+                self.cancel_request_lifecycle_waiter(waiter_id).await;
+                Err(err)
+            }
         }
     }
 
@@ -561,6 +847,232 @@ impl PageApi {
         Ok(refreshed)
     }
 
+    async fn ensure_page_waiter_alive(&self, wait_context: &str) -> JsResult<()> {
+        let (browser, target_id) = {
+            let inner = self.inner.lock().await;
+            (inner.browser.clone(), inner.target_id.clone())
+        };
+
+        let pages = {
+            let guard = browser.lock().await;
+            guard.pages().await.map_err(|err| {
+                let err_text = err.to_string();
+                js_err(format_browser_error(wait_context, &err_text))
+            })?
+        };
+
+        if pages
+            .iter()
+            .any(|candidate| candidate.target_id().as_ref() == target_id.as_str())
+        {
+            return Ok(());
+        }
+
+        Err(js_err(format!(
+            "TargetClosedError: page was closed while waiting for {wait_context}"
+        )))
+    }
+
+    async fn wait_for_receiver_with_page_liveness<T>(
+        &self,
+        mut receiver: oneshot::Receiver<T>,
+        timeout_ms: u64,
+        wait_context: &str,
+    ) -> WaiterOutcome<T> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return WaiterOutcome::Timeout;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let poll_for = remaining.min(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+
+            tokio::select! {
+                result = &mut receiver => {
+                    return match result {
+                        Ok(value) => WaiterOutcome::Value(value),
+                        Err(_) => WaiterOutcome::ChannelClosed,
+                    };
+                }
+                _ = tokio::time::sleep(poll_for) => {
+                    if let Err(err) = self.ensure_page_waiter_alive(wait_context).await {
+                        return WaiterOutcome::PageGone(err);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn wait_for_popup_event<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        options: &EventWaitOptions,
+    ) -> JsResult<PageApi> {
+        if options.predicate.is_none() {
+            return self.wait_for_popup_page(options.timeout_ms).await;
+        }
+
+        let opener_target = {
+            let inner = self.inner.lock().await;
+            inner.page.target_id().as_ref().to_string()
+        };
+        let baseline_tabs = self.fetch_open_tabs().await?;
+        let mut seen_ids = baseline_tabs
+            .into_iter()
+            .map(|tab| tab.target_id)
+            .collect::<BTreeSet<_>>();
+        let started_at = tokio::time::Instant::now();
+
+        loop {
+            let tabs = self.fetch_open_tabs().await?;
+            if !tabs.iter().any(|tab| tab.target_id == opener_target) {
+                return Err(js_err(
+                    "TargetClosedError: page was closed while waiting for popup".to_string(),
+                ));
+            }
+            for tab in tabs {
+                if seen_ids.contains(&tab.target_id) {
+                    continue;
+                }
+                seen_ids.insert(tab.target_id.clone());
+                let candidate = build_page_api_from_template(&self.inner, tab.page).await;
+                if page_matches_event_predicate(ctx, options.predicate.as_ref(), &candidate).await?
+                {
+                    return Ok(candidate);
+                }
+            }
+
+            let _ = remaining_timeout_ms(options.timeout_ms, started_at, "popup")?;
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+        }
+    }
+
+    async fn wait_for_request_event<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        options: &EventWaitOptions,
+    ) -> JsResult<RequestApi> {
+        if options.predicate.is_none() {
+            return self
+                .wait_for_request_pattern("*".to_string(), options.timeout_ms)
+                .await;
+        }
+
+        let entries = self.ensure_request_capture().await?;
+        let mut cursor = entries.lock().await.len();
+        let started_at = tokio::time::Instant::now();
+        loop {
+            while let Some(entry) = entries.lock().await.get(cursor).cloned() {
+                cursor += 1;
+                let candidate = self.request_api_from_entry(entry);
+                if request_matches_event_predicate(ctx, options.predicate.as_ref(), &candidate)
+                    .await?
+                {
+                    return Ok(candidate);
+                }
+            }
+
+            let remaining = remaining_timeout_ms(options.timeout_ms, started_at, "request event")?;
+            let next = self
+                .wait_for_next_request_entry(&entries, &mut cursor, remaining)
+                .await?;
+            let candidate = self.request_api_from_entry(next);
+            if request_matches_event_predicate(ctx, options.predicate.as_ref(), &candidate).await? {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    async fn wait_for_response_event<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        options: &EventWaitOptions,
+    ) -> JsResult<ResponseApi> {
+        if options.predicate.is_none() {
+            return self
+                .wait_for_response_pattern("*".to_string(), options.timeout_ms)
+                .await;
+        }
+
+        let entries = self.ensure_response_capture().await?;
+        let mut cursor = entries.lock().await.len();
+        let started_at = tokio::time::Instant::now();
+        loop {
+            while let Some(entry) = entries.lock().await.get(cursor).cloned() {
+                cursor += 1;
+                let candidate = self.response_api_from_entry(entry);
+                if response_matches_event_predicate(ctx, options.predicate.as_ref(), &candidate)
+                    .await?
+                {
+                    return Ok(candidate);
+                }
+            }
+
+            let remaining = remaining_timeout_ms(options.timeout_ms, started_at, "response event")?;
+            let next = self
+                .wait_for_next_response_entry(&entries, &mut cursor, remaining)
+                .await?;
+            let candidate = self.response_api_from_entry(next);
+            if response_matches_event_predicate(ctx, options.predicate.as_ref(), &candidate).await?
+            {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    async fn wait_for_request_lifecycle_event_filtered<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        lifecycle_event: &str,
+        options: &EventWaitOptions,
+    ) -> JsResult<RequestApi> {
+        if options.predicate.is_none() {
+            return self
+                .wait_for_request_lifecycle_event(lifecycle_event, options.timeout_ms)
+                .await;
+        }
+
+        let entries = self.ensure_request_capture().await?;
+        let mut cursor = entries.lock().await.len();
+        let started_at = tokio::time::Instant::now();
+        let event = parse_request_lifecycle_event_name(lifecycle_event).ok_or_else(|| {
+            js_err(format!(
+                "unsupported request lifecycle event \"{lifecycle_event}\""
+            ))
+        })?;
+
+        loop {
+            while let Some((index, entry)) = entries
+                .lock()
+                .await
+                .iter()
+                .enumerate()
+                .skip(cursor)
+                .find(|(_, entry)| request_entry_matches_lifecycle_event(entry, event))
+                .map(|(index, entry)| (index, entry.clone()))
+            {
+                cursor = index + 1;
+                let candidate = self.request_api_from_entry(entry);
+                if request_matches_event_predicate(ctx, options.predicate.as_ref(), &candidate)
+                    .await?
+                {
+                    return Ok(candidate);
+                }
+            }
+
+            let remaining = remaining_timeout_ms(options.timeout_ms, started_at, lifecycle_event)?;
+            let next = self
+                .wait_for_next_request_lifecycle_entry(&entries, event, &mut cursor, remaining)
+                .await?;
+            let candidate = self.request_api_from_entry(next);
+            if request_matches_event_predicate(ctx, options.predicate.as_ref(), &candidate).await? {
+                return Ok(candidate);
+            }
+        }
+    }
+
     pub fn new(inner: Arc<Mutex<PageInner>>) -> Self {
         Self {
             inner,
@@ -568,6 +1080,7 @@ impl PageApi {
             request_capture: Arc::new(Mutex::new(None)),
             request_waiters: Arc::new(Mutex::new(Vec::new())),
             response_waiters: Arc::new(Mutex::new(Vec::new())),
+            request_lifecycle_waiters: Arc::new(Mutex::new(Vec::new())),
             next_waiter_id: Arc::new(AtomicU64::new(1)),
             snapshot_tracks: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -1810,26 +2323,84 @@ impl PageApi {
         }
     }
 
-    /// Wait for a network response URL matching a pattern (`*` wildcard supported).
+    /// Wait for a network response URL matching a string glob, RegExp, or predicate.
     #[qjs(rename = "waitForResponse")]
-    pub async fn js_wait_for_response(
+    pub async fn js_wait_for_response<'js>(
         &self,
-        url_pattern: String,
+        ctx: Ctx<'js>,
+        url_or_predicate: Value<'js>,
         options: Opt<rquickjs::Value<'_>>,
     ) -> JsResult<ResponseApi> {
         let timeout_ms = parse_timeout_option(options.0.as_ref())?;
-        self.wait_for_response_pattern(url_pattern, timeout_ms)
-            .await
+        let matcher = parse_wait_for_network_matcher(&ctx, url_or_predicate, "waitForResponse")?;
+        match matcher {
+            JsNetworkMatcher::String(url_pattern) => {
+                self.wait_for_response_pattern(url_pattern, timeout_ms)
+                    .await
+            }
+            JsNetworkMatcher::RegExp(_) | JsNetworkMatcher::Predicate(_) => {
+                let entries = self.ensure_response_capture().await?;
+                let mut cursor = entries.lock().await.len();
+                let started_at = tokio::time::Instant::now();
+                loop {
+                    while let Some(entry) = entries.lock().await.get(cursor).cloned() {
+                        cursor += 1;
+                        let candidate = self.response_api_from_entry(entry);
+                        if response_matches_js_matcher(&ctx, &matcher, &candidate).await? {
+                            return Ok(candidate);
+                        }
+                    }
+
+                    let remaining = remaining_timeout_ms(timeout_ms, started_at, "response")?;
+                    let next = self
+                        .wait_for_next_response_entry(&entries, &mut cursor, remaining)
+                        .await?;
+                    let candidate = self.response_api_from_entry(next);
+                    if response_matches_js_matcher(&ctx, &matcher, &candidate).await? {
+                        return Ok(candidate);
+                    }
+                }
+            }
+        }
     }
 
     #[qjs(rename = "waitForRequest")]
-    pub async fn js_wait_for_request(
+    pub async fn js_wait_for_request<'js>(
         &self,
-        url_pattern: String,
+        ctx: Ctx<'js>,
+        url_or_predicate: Value<'js>,
         options: Opt<rquickjs::Value<'_>>,
     ) -> JsResult<RequestApi> {
         let timeout_ms = parse_timeout_option(options.0.as_ref())?;
-        self.wait_for_request_pattern(url_pattern, timeout_ms).await
+        let matcher = parse_wait_for_network_matcher(&ctx, url_or_predicate, "waitForRequest")?;
+        match matcher {
+            JsNetworkMatcher::String(url_pattern) => {
+                self.wait_for_request_pattern(url_pattern, timeout_ms).await
+            }
+            JsNetworkMatcher::RegExp(_) | JsNetworkMatcher::Predicate(_) => {
+                let entries = self.ensure_request_capture().await?;
+                let mut cursor = entries.lock().await.len();
+                let started_at = tokio::time::Instant::now();
+                loop {
+                    while let Some(entry) = entries.lock().await.get(cursor).cloned() {
+                        cursor += 1;
+                        let candidate = self.request_api_from_entry(entry);
+                        if request_matches_js_matcher(&ctx, &matcher, &candidate).await? {
+                            return Ok(candidate);
+                        }
+                    }
+
+                    let remaining = remaining_timeout_ms(timeout_ms, started_at, "request")?;
+                    let next = self
+                        .wait_for_next_request_entry(&entries, &mut cursor, remaining)
+                        .await?;
+                    let candidate = self.request_api_from_entry(next);
+                    if request_matches_js_matcher(&ctx, &matcher, &candidate).await? {
+                        return Ok(candidate);
+                    }
+                }
+            }
+        }
     }
 
     /// List captured network requests as JSON.
@@ -2048,25 +2619,27 @@ impl PageApi {
     /// Currently supports `popup`, `request`, `response`, `requestfinished`,
     /// and `requestfailed`.
     #[qjs(rename = "waitForEvent")]
-    pub async fn js_wait_for_event(
+    pub async fn js_wait_for_event<'js>(
         &self,
+        ctx: Ctx<'js>,
         event: String,
-        timeout_ms: Option<u64>,
+        options_or_predicate: Opt<Value<'js>>,
     ) -> JsResult<JsEvalResult> {
         let normalized = event.trim().to_ascii_lowercase();
-        let timeout = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        let options =
+            parse_wait_for_event_options(&ctx, options_or_predicate.0.as_ref(), "waitForEvent")?;
         match normalized.as_str() {
             "popup" => Ok(JsEvalResult::PageResult(
-                self.wait_for_popup_page(timeout).await?,
+                self.wait_for_popup_event(&ctx, &options).await?,
             )),
             "request" => Ok(JsEvalResult::RequestResult(
-                self.wait_for_request_pattern("*".to_string(), timeout).await?,
+                self.wait_for_request_event(&ctx, &options).await?,
             )),
             "response" => Ok(JsEvalResult::ResponseResult(
-                self.wait_for_response_pattern("*".to_string(), timeout).await?,
+                self.wait_for_response_event(&ctx, &options).await?,
             )),
             "requestfinished" | "requestfailed" => Ok(JsEvalResult::RequestResult(
-                self.wait_for_request_lifecycle_event(normalized.as_str(), timeout)
+                self.wait_for_request_lifecycle_event_filtered(&ctx, normalized.as_str(), &options)
                     .await?,
             )),
             _ => Err(js_err(format!(
@@ -3185,6 +3758,11 @@ impl PageApi {
 
         loop {
             let tabs = self.fetch_open_tabs().await?;
+            if !tabs.iter().any(|tab| tab.target_id == opener_target) {
+                return Err(js_err(
+                    "TargetClosedError: page was closed while waiting for popup".to_string(),
+                ));
+            }
             if let Some(popup_tab) = tabs.iter().find(|tab| {
                 tab.target_id != opener_target
                     && tab.opener_target_id.as_deref() == Some(opener_target.as_str())
@@ -3404,6 +3982,7 @@ impl PageApi {
         let entries = Arc::new(Mutex::new(Vec::new()));
         let entries_for_task = entries.clone();
         let request_waiters = self.request_waiters.clone();
+        let request_lifecycle_waiters = self.request_lifecycle_waiters.clone();
         let task = tokio::spawn(async move {
             use futures::StreamExt;
             tokio::pin!(events);
@@ -3451,7 +4030,7 @@ impl PageApi {
                             let mut matched = Vec::new();
                             let mut remaining = Vec::with_capacity(waiters.len());
                             for waiter in waiters.drain(..) {
-                                if url_matches_pattern(&item.url, &waiter.url_pattern) {
+                                if url_waiter_matches(&item.url, &waiter.matcher) {
                                     matched.push(waiter);
                                 } else {
                                     remaining.push(waiter);
@@ -3461,21 +4040,13 @@ impl PageApi {
                             matched
                         };
 
-                        for waiter in matched_waiters {
-                            let entries_for_waiter = entries_for_task.clone();
-                            let request_id = item.request_id.clone();
-                            let fallback = item.clone();
-                            tokio::spawn(async move {
-                                tokio::time::sleep(std::time::Duration::from_millis(
-                                    REQUEST_CAPTURE_SETTLE_MS,
-                                ))
-                                .await;
-                                let latest = PageApi::latest_request_entry(
-                                    &entries_for_waiter,
-                                    &request_id,
-                                )
-                                .await
-                                .unwrap_or(fallback);
+                            for waiter in matched_waiters {
+                                let entries_for_waiter = entries_for_task.clone();
+                                let fallback = item.clone();
+                                tokio::spawn(async move {
+                                let latest =
+                                    PageApi::settle_request_entry(&entries_for_waiter, fallback)
+                                        .await;
                                 let _ = waiter.sender.send(latest);
                             });
                         }
@@ -3501,13 +4072,38 @@ impl PageApi {
                         };
                         let request_id = ev.request_id.as_ref().to_string();
                         let mut guard = entries_for_task.lock().await;
-                        if let Some(entry) = guard
+                        let latest = if let Some(entry) = guard
                             .iter_mut()
                             .rev()
                             .find(|entry| entry.request_id == request_id)
                         {
                             entry.finished = true;
                             entry.error = None;
+                            Some(entry.clone())
+                        } else {
+                            None
+                        };
+                        drop(guard);
+
+                        if let Some(latest) = latest {
+                            let matched_waiters = {
+                                let mut waiters = request_lifecycle_waiters.lock().await;
+                                let mut matched = Vec::new();
+                                let mut remaining = Vec::with_capacity(waiters.len());
+                                for waiter in waiters.drain(..) {
+                                    if waiter.event == RequestLifecycleEvent::Finished {
+                                        matched.push(waiter);
+                                    } else {
+                                        remaining.push(waiter);
+                                    }
+                                }
+                                *waiters = remaining;
+                                matched
+                            };
+
+                            for waiter in matched_waiters {
+                                let _ = waiter.sender.send(latest.clone());
+                            }
                         }
                     }
                     ev = loading_failed_events.next() => {
@@ -3517,13 +4113,38 @@ impl PageApi {
                         let request_id = ev.request_id.as_ref().to_string();
                         let error_text = ev.error_text.clone();
                         let mut guard = entries_for_task.lock().await;
-                        if let Some(entry) = guard
+                        let latest = if let Some(entry) = guard
                             .iter_mut()
                             .rev()
                             .find(|entry| entry.request_id == request_id)
                         {
                             entry.finished = true;
                             entry.error = Some(error_text);
+                            Some(entry.clone())
+                        } else {
+                            None
+                        };
+                        drop(guard);
+
+                        if let Some(latest) = latest {
+                            let matched_waiters = {
+                                let mut waiters = request_lifecycle_waiters.lock().await;
+                                let mut matched = Vec::new();
+                                let mut remaining = Vec::with_capacity(waiters.len());
+                                for waiter in waiters.drain(..) {
+                                    if waiter.event == RequestLifecycleEvent::Failed {
+                                        matched.push(waiter);
+                                    } else {
+                                        remaining.push(waiter);
+                                    }
+                                }
+                                *waiters = remaining;
+                                matched
+                            };
+
+                            for waiter in matched_waiters {
+                                let _ = waiter.sender.send(latest.clone());
+                            }
                         }
                     }
                 }
@@ -3626,7 +4247,7 @@ impl PageApi {
                                 let mut matched = Vec::new();
                                 let mut remaining = Vec::with_capacity(waiters.len());
                                 for waiter in waiters.drain(..) {
-                                    if url_matches_pattern(&latest.url, &waiter.url_pattern) {
+                                    if url_waiter_matches(&latest.url, &waiter.matcher) {
                                         matched.push(waiter);
                                     } else {
                                         remaining.push(waiter);
@@ -3915,52 +4536,301 @@ fn parse_runtime_location_href(value: Option<&serde_json::Value>) -> Option<Stri
         .map(str::to_string)
 }
 
-fn url_matches_pattern(url: &str, pattern: &str) -> bool {
-    if pattern == "*" || pattern == "**" {
-        return true;
+// Keep this matcher parsing aligned with Playwright's waitForRequest/waitForResponse
+// contract in local notes at docs/playwright.md and playwright-core client/page.ts.
+fn parse_wait_for_network_matcher<'js>(
+    ctx: &Ctx<'js>,
+    value: Value<'js>,
+    api_name: &str,
+) -> JsResult<JsNetworkMatcher> {
+    if value.is_function() {
+        let function = value
+            .into_function()
+            .ok_or_else(|| js_err(format!("{api_name} matcher was not callable")))?;
+        return Ok(JsNetworkMatcher::Predicate(Persistent::save(ctx, function)));
     }
-    if !pattern.contains('*') {
-        return url == pattern;
+    if js_value_is_regexp(ctx, &value)? {
+        return Ok(JsNetworkMatcher::RegExp(Persistent::save(ctx, value)));
     }
+    if value.is_string() {
+        let pattern = String::from_js(ctx, value)
+            .map_err(|e| js_err(format!("{api_name} matcher string decode failed: {e}")))?;
+        return Ok(JsNetworkMatcher::String(pattern));
+    }
+    Err(js_err(format!(
+        "{api_name} matcher must be a string, RegExp, or predicate function"
+    )))
+}
 
-    let parts: Vec<&str> = pattern.split('*').collect();
-    let mut cursor = 0usize;
-    let mut start_index = 0usize;
+fn js_value_is_regexp<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> JsResult<bool> {
+    let detector: Function<'js> = ctx
+        .eval("(value) => value instanceof RegExp")
+        .map_err(|e| js_err(format!("failed to build RegExp detector: {e}")))?;
+    detector
+        .call((value.clone(),))
+        .map_err(|e| js_err(format!("failed to evaluate RegExp matcher: {e}")))
+}
 
-    if !pattern.starts_with('*') {
-        let Some(first) = parts.first() else {
-            return false;
-        };
-        if !url.starts_with(first) {
-            return false;
+fn js_regexp_matches<'js>(ctx: &Ctx<'js>, matcher: &Value<'js>, url: &str) -> JsResult<bool> {
+    let tester: Function<'js> = ctx
+        .eval("(matcher, url) => new RegExp(matcher.source, matcher.flags).test(url)")
+        .map_err(|e| js_err(format!("failed to build RegExp tester: {e}")))?;
+    tester
+        .call((matcher.clone(), url.to_string()))
+        .map_err(|e| js_err(format!("failed to test RegExp matcher: {e}")))
+}
+
+fn js_value_to_bool<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> JsResult<bool> {
+    let coercer: Function<'js> = ctx
+        .eval("(value) => Boolean(value)")
+        .map_err(|e| js_err(format!("failed to build boolean coercer: {e}")))?;
+    coercer
+        .call((value,))
+        .map_err(|e| js_err(format!("failed to coerce predicate result to boolean: {e}")))
+}
+
+async fn call_event_predicate<'js>(
+    ctx: &Ctx<'js>,
+    predicate: Option<&Persistent<Function<'static>>>,
+    value: Value<'js>,
+    predicate_name: &str,
+) -> JsResult<bool> {
+    let Some(predicate) = predicate else {
+        return Ok(true);
+    };
+    let predicate = predicate
+        .clone()
+        .restore(ctx)
+        .map_err(|e| js_err(format!("failed to restore {predicate_name} predicate: {e}")))?;
+    let result: MaybePromise<'js> = predicate
+        .call((value,))
+        .map_err(|e| js_err(format!("{predicate_name} predicate threw: {e}")))?;
+    let resolved = result
+        .into_future::<Value<'js>>()
+        .await
+        .map_err(|e| js_err(format!("{predicate_name} predicate rejected: {e}")))?;
+    js_value_to_bool(ctx, resolved)
+}
+
+async fn page_matches_event_predicate<'js>(
+    ctx: &Ctx<'js>,
+    predicate: Option<&Persistent<Function<'static>>>,
+    page: &PageApi,
+) -> JsResult<bool> {
+    let page_value = Class::instance(ctx.clone(), page.clone())
+        .map(|instance| instance.into_value())
+        .map_err(|e| js_err(format!("failed to materialize page for predicate: {e}")))?;
+    call_event_predicate(ctx, predicate, page_value, "page event").await
+}
+
+async fn request_matches_event_predicate<'js>(
+    ctx: &Ctx<'js>,
+    predicate: Option<&Persistent<Function<'static>>>,
+    request: &RequestApi,
+) -> JsResult<bool> {
+    let request_value = Class::instance(ctx.clone(), request.clone())
+        .map(|instance| instance.into_value())
+        .map_err(|e| js_err(format!("failed to materialize request for predicate: {e}")))?;
+    call_event_predicate(ctx, predicate, request_value, "request event").await
+}
+
+async fn response_matches_event_predicate<'js>(
+    ctx: &Ctx<'js>,
+    predicate: Option<&Persistent<Function<'static>>>,
+    response: &ResponseApi,
+) -> JsResult<bool> {
+    let response_value = Class::instance(ctx.clone(), response.clone())
+        .map(|instance| instance.into_value())
+        .map_err(|e| js_err(format!("failed to materialize response for predicate: {e}")))?;
+    call_event_predicate(ctx, predicate, response_value, "response event").await
+}
+
+async fn request_matches_js_matcher<'js>(
+    ctx: &Ctx<'js>,
+    matcher: &JsNetworkMatcher,
+    request: &RequestApi,
+) -> JsResult<bool> {
+    match matcher {
+        JsNetworkMatcher::String(pattern) => Ok(url_matches_pattern(&request.url, pattern)),
+        JsNetworkMatcher::RegExp(regexp) => {
+            let regexp = regexp
+                .clone()
+                .restore(ctx)
+                .map_err(|e| js_err(format!("failed to restore request RegExp matcher: {e}")))?;
+            js_regexp_matches(ctx, &regexp, &request.url)
         }
-        cursor = first.len();
-        start_index = 1;
+        JsNetworkMatcher::Predicate(predicate) => {
+            let predicate = predicate
+                .clone()
+                .restore(ctx)
+                .map_err(|e| js_err(format!("failed to restore request predicate matcher: {e}")))?;
+            let request_value = Class::instance(ctx.clone(), request.clone())
+                .map(|instance| instance.into_value())
+                .map_err(|e| js_err(format!("failed to materialize request for predicate: {e}")))?;
+            let result: MaybePromise<'js> = predicate
+                .call((request_value,))
+                .map_err(|e| js_err(format!("request predicate threw: {e}")))?;
+            let resolved = result
+                .into_future::<Value<'js>>()
+                .await
+                .map_err(|e| js_err(format!("request predicate rejected: {e}")))?;
+            js_value_to_bool(ctx, resolved)
+        }
     }
+}
 
-    let mut end_index = parts.len();
-    if !pattern.ends_with('*') && end_index > 0 {
-        end_index -= 1;
+async fn response_matches_js_matcher<'js>(
+    ctx: &Ctx<'js>,
+    matcher: &JsNetworkMatcher,
+    response: &ResponseApi,
+) -> JsResult<bool> {
+    match matcher {
+        JsNetworkMatcher::String(pattern) => Ok(url_matches_pattern(&response.url, pattern)),
+        JsNetworkMatcher::RegExp(regexp) => {
+            let regexp = regexp
+                .clone()
+                .restore(ctx)
+                .map_err(|e| js_err(format!("failed to restore response RegExp matcher: {e}")))?;
+            js_regexp_matches(ctx, &regexp, &response.url)
+        }
+        JsNetworkMatcher::Predicate(predicate) => {
+            let predicate = predicate.clone().restore(ctx).map_err(|e| {
+                js_err(format!("failed to restore response predicate matcher: {e}"))
+            })?;
+            let response_value = Class::instance(ctx.clone(), response.clone())
+                .map(|instance| instance.into_value())
+                .map_err(|e| {
+                    js_err(format!("failed to materialize response for predicate: {e}"))
+                })?;
+            let result: MaybePromise<'js> = predicate
+                .call((response_value,))
+                .map_err(|e| js_err(format!("response predicate threw: {e}")))?;
+            let resolved = result
+                .into_future::<Value<'js>>()
+                .await
+                .map_err(|e| js_err(format!("response predicate rejected: {e}")))?;
+            js_value_to_bool(ctx, resolved)
+        }
     }
+}
 
-    for part in &parts[start_index..end_index] {
-        if part.is_empty() {
+fn remaining_timeout_ms(
+    timeout_ms: u64,
+    started_at: tokio::time::Instant,
+    kind: &str,
+) -> JsResult<u64> {
+    let elapsed = started_at.elapsed();
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let Some(remaining) = timeout.checked_sub(elapsed) else {
+        return Err(js_err(format!(
+            "TimeoutError: waiting for {kind} failed: timeout {timeout_ms}ms exceeded"
+        )));
+    };
+    Ok(remaining.as_millis().try_into().unwrap_or(u64::MAX).max(1))
+}
+
+fn parse_request_lifecycle_event_name(event: &str) -> Option<RequestLifecycleEvent> {
+    match event {
+        "requestfinished" => Some(RequestLifecycleEvent::Finished),
+        "requestfailed" => Some(RequestLifecycleEvent::Failed),
+        _ => None,
+    }
+}
+
+fn request_entry_matches_lifecycle_event(
+    entry: &RequestCaptureItem,
+    event: RequestLifecycleEvent,
+) -> bool {
+    match event {
+        RequestLifecycleEvent::Finished => entry.finished && entry.error.is_none(),
+        RequestLifecycleEvent::Failed => entry.finished && entry.error.is_some(),
+    }
+}
+
+fn url_waiter_matches(url: &str, matcher: &UrlWaiterMatcher) -> bool {
+    match matcher {
+        UrlWaiterMatcher::Any => true,
+        UrlWaiterMatcher::Pattern(pattern) => url_matches_pattern(url, pattern),
+    }
+}
+
+// Keep string-glob semantics aligned with Playwright's
+// packages/playwright-core/src/utils/isomorphic/urlMatch.ts `globToRegexPattern`.
+fn glob_to_regex_pattern(glob: &str) -> String {
+    let mut tokens = String::from("^");
+    let mut in_group = false;
+    let chars = glob.chars().collect::<Vec<_>>();
+    let escaped_chars = [
+        '$', '^', '+', '.', '*', '(', ')', '|', '\\', '?', '{', '}', '[', ']',
+    ];
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            let escaped = chars[i + 1];
+            if escaped_chars.contains(&escaped) {
+                tokens.push('\\');
+            }
+            tokens.push(escaped);
+            i += 2;
             continue;
         }
-        let Some(found_at) = url[cursor..].find(part) else {
-            return false;
-        };
-        cursor += found_at + part.len();
+        if c == '*' {
+            let char_before = i.checked_sub(1).and_then(|index| chars.get(index)).copied();
+            let mut star_count = 1usize;
+            while i + 1 < chars.len() && chars[i + 1] == '*' {
+                star_count += 1;
+                i += 1;
+            }
+            if star_count > 1 {
+                let char_after = chars.get(i + 1).copied();
+                if char_after == Some('/') {
+                    if char_before == Some('/') {
+                        tokens.push_str("((.+/)|)");
+                    } else {
+                        tokens.push_str("(.*/)");
+                    }
+                    i += 2;
+                    continue;
+                }
+                tokens.push_str("(.*)");
+                i += 1;
+                continue;
+            }
+            tokens.push_str("([^/]*)");
+            i += 1;
+            continue;
+        }
+
+        match c {
+            '{' => {
+                in_group = true;
+                tokens.push('(');
+            }
+            '}' => {
+                in_group = false;
+                tokens.push(')');
+            }
+            ',' if in_group => tokens.push('|'),
+            _ => {
+                if escaped_chars.contains(&c) {
+                    tokens.push('\\');
+                }
+                tokens.push(c);
+            }
+        }
+        i += 1;
     }
 
-    if !pattern.ends_with('*') {
-        let Some(last) = parts.last() else {
-            return false;
-        };
-        return url[cursor..].ends_with(last);
-    }
+    tokens.push('$');
+    tokens
+}
 
-    true
+fn url_matches_pattern(url: &str, pattern: &str) -> bool {
+    regex::Regex::new(&glob_to_regex_pattern(pattern))
+        .map(|regex| regex.is_match(url))
+        .unwrap_or(false)
 }
 
 fn network_method_from_headers(
@@ -3998,6 +4868,54 @@ fn parse_timeout_option(option: Option<&Value<'_>>) -> JsResult<u64> {
         .get::<_, Option<i32>>("timeout")
         .map_err(|e| js_err(format!("invalid timeout option: {e}")))?;
     Ok(timeout.unwrap_or(DEFAULT_TIMEOUT_MS as i32).max(0) as u64)
+}
+
+fn parse_wait_for_event_options<'js>(
+    ctx: &Ctx<'js>,
+    option: Option<&Value<'js>>,
+    api_name: &str,
+) -> JsResult<EventWaitOptions> {
+    let Some(option) = option else {
+        return Ok(EventWaitOptions {
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            predicate: None,
+        });
+    };
+
+    if let Ok(timeout_ms) = i32::from_js(&option.ctx().clone(), option.clone()) {
+        return Ok(EventWaitOptions {
+            timeout_ms: timeout_ms.max(0) as u64,
+            predicate: None,
+        });
+    }
+
+    if option.is_function() {
+        let predicate = option
+            .clone()
+            .into_function()
+            .ok_or_else(|| js_err(format!("{api_name} predicate was not callable")))?;
+        return Ok(EventWaitOptions {
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            predicate: Some(Persistent::save(ctx, predicate)),
+        });
+    }
+
+    let object = Object::from_value(option.clone()).map_err(|_| {
+        js_err(format!(
+            "{api_name} expected a timeout number, predicate function, or options object"
+        ))
+    })?;
+    let timeout = object
+        .get::<_, Option<i32>>("timeout")
+        .map_err(|e| js_err(format!("invalid timeout option: {e}")))?;
+    let predicate = object
+        .get::<_, Option<Function<'js>>>("predicate")
+        .map_err(|e| js_err(format!("invalid predicate option: {e}")))?
+        .map(|predicate| Persistent::save(ctx, predicate));
+    Ok(EventWaitOptions {
+        timeout_ms: timeout.unwrap_or(DEFAULT_TIMEOUT_MS as i32).max(0) as u64,
+        predicate,
+    })
 }
 
 fn headers_to_map(
@@ -5352,11 +6270,31 @@ mod tests {
         ));
         assert!(url_matches_pattern(
             "https://example.com/a/b/c",
+            "https://example.com/**"
+        ));
+        assert!(!url_matches_pattern(
+            "https://example.com/a/b/c",
             "https://example.com/*"
         ));
         assert!(!url_matches_pattern(
             "https://example.com/a/b/c",
             "https://example.org/*"
+        ));
+    }
+
+    #[test]
+    fn url_matches_pattern_groups_and_escaped_literals() {
+        assert!(url_matches_pattern(
+            "https://example.com/login/callback",
+            "https://example.com/{login,signin}/callback"
+        ));
+        assert!(url_matches_pattern(
+            "https://example.com/file[1].csv",
+            r"https://example.com/file\[1\].csv"
+        ));
+        assert!(!url_matches_pattern(
+            "https://example.com/signout/callback",
+            "https://example.com/{login,signin}/callback"
         ));
     }
 

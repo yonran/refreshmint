@@ -21,6 +21,29 @@ interface ByRoleOptions {
     selected?: boolean;
 }
 
+type RequestUrlMatcher =
+    | string
+    | RegExp
+    | ((request: Request) => boolean | Promise<boolean>);
+type ResponseUrlMatcher =
+    | string
+    | RegExp
+    | ((response: Response) => boolean | Promise<boolean>);
+type PageEventValueMap = {
+    popup: PageApi;
+    request: Request;
+    response: Response;
+    requestfinished: Request;
+    requestfailed: Request;
+};
+type WaitForEventPredicate<E extends keyof PageEventValueMap> = (
+    value: PageEventValueMap[E],
+) => boolean | Promise<boolean>;
+type WaitForEventOptions<E extends keyof PageEventValueMap> = {
+    timeout?: number;
+    predicate?: WaitForEventPredicate<E>;
+};
+
 interface Locator {
     readonly selector: string;
     locator(selector: string): Locator;
@@ -131,7 +154,7 @@ interface PageApi {
         timeoutMs?: number,
     ): Promise<void>;
     waitForResponse(
-        urlPattern: string,
+        urlOrPredicate: ResponseUrlMatcher,
         options?: { timeout?: number } | number,
     ): Promise<Response>;
     /** Waits for a response matching urlPattern and returns its decoded body string.
@@ -141,22 +164,20 @@ interface PageApi {
         timeoutMs?: number,
     ): Promise<string>;
     waitForRequest(
-        urlPattern: string,
+        urlOrPredicate: RequestUrlMatcher,
         options?: { timeout?: number } | number,
     ): Promise<Request>;
     networkRequests(): Promise<string>;
     responsesReceived(): Promise<string>;
     clearNetworkRequests(): Promise<void>;
     waitForPopup(timeoutMs?: number): Promise<PageApi>;
-    waitForEvent(
-        event:
-            | 'popup'
-            | 'request'
-            | 'response'
-            | 'requestfinished'
-            | 'requestfailed',
-        timeoutMs?: number,
-    ): Promise<PageApi | Request | Response>;
+    waitForEvent<E extends keyof PageEventValueMap>(
+        event: E,
+        optionsOrPredicate?:
+            | number
+            | WaitForEventPredicate<E>
+            | WaitForEventOptions<E>,
+    ): Promise<PageEventValueMap[E]>;
     /** @deprecated Removed. Use browser.pages(). */
     tabs(): Promise<never>;
     /** @deprecated Removed. Use browser.pages() and direct Page handles. */

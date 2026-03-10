@@ -49,6 +49,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 fs2 = "0.4"
 notify = "8.2"
 base64 = "0.22"
+regex = "1.12"
 
 [lints.rust]
 unsafe_code = "deny"

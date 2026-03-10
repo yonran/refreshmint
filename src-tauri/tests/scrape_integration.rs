@@ -61,6 +61,37 @@ try {
 }
 "##;
 
+const POPUP_CLOSE_WAITER_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("popup close waiter test start");
+  await page.goto(__OPENER_URL__);
+  const popup = await Promise.all([
+    page.waitForEvent("popup", 10000),
+    page.evaluate(`document.getElementById('open').click()`),
+  ]).then(([popup]) => popup);
+
+  await popup.waitForLoadState("domcontentloaded", 10000);
+
+  const waitForResponse = popup
+    .waitForResponse("**/never", { timeout: 10000 })
+    .then(() => "resolved-unexpectedly")
+    .catch(error => String(error && error.message ? error.message : error));
+  await popup.evaluate("window.close()");
+  const errorMessage = await waitForResponse;
+
+  if (!errorMessage.includes("TargetClosedError")) {
+    throw new Error(`expected TargetClosedError after popup close, got: ${errorMessage}`);
+  }
+
+  await refreshmint.saveResource("popup_close_waiter.bin", [111, 107]);
+  refreshmint.log("popup close waiter test done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("popup close waiter test error: " + msg);
+  throw e;
+}
+"##;
+
 const OVERLAY_DRIVER_SOURCE: &str = r##"
 try {
   refreshmint.log("integration overlay start");
@@ -336,6 +367,79 @@ try {
 }
 "##;
 
+const NETWORK_MATCHER_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("network matcher test start");
+  const requestByStringPromise = page.waitForRequest("**/api/{echo,drop}", { timeout: 10000 });
+  const requestByRegexPromise = page.waitForRequest(/\/api\/echo$/, { timeout: 10000 });
+  const requestByPredicatePromise = page.waitForRequest(async request => {
+    if (request.method() !== "POST") {
+      return false;
+    }
+    const payload = await request.postDataJSON();
+    return payload != null && payload.hello === "matchers";
+  }, { timeout: 10000 });
+  const responseByStringPromise = page.waitForResponse("**/api/{echo,drop}", { timeout: 10000 });
+  const responseByRegexPromise = page.waitForResponse(/\/api\/echo$/, { timeout: 10000 });
+  const responseByPredicatePromise = page.waitForResponse(async response => {
+    if (!response.ok() || response.status() !== 200) {
+      return false;
+    }
+    const body = await response.json();
+    return body != null && body.ok === true && body.method === "POST";
+  }, { timeout: 10000 });
+
+  await page.evaluate(`new Promise(resolve =>
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => resolve("armed"))
+    )
+  )`);
+
+  const [requestByString, requestByRegex, requestByPredicate, responseByString, responseByRegex, responseByPredicate] =
+    await Promise.all([
+      requestByStringPromise,
+      requestByRegexPromise,
+      requestByPredicatePromise,
+      responseByStringPromise,
+      responseByRegexPromise,
+      responseByPredicatePromise,
+      page.evaluate(`fetch(__FETCH_URL__, {
+        method: "POST",
+        headers: {
+          "content-type": "text/plain"
+        },
+        body: JSON.stringify({ hello: "matchers" })
+      }).then(r => r.text())`),
+    ]);
+
+  if (requestByString.url() !== __FETCH_URL__) {
+    throw new Error(`string request matcher saw unexpected url: ${requestByString.url()}`);
+  }
+  if (requestByRegex.url() !== __FETCH_URL__) {
+    throw new Error(`regex request matcher saw unexpected url: ${requestByRegex.url()}`);
+  }
+  if (requestByPredicate.url() !== __FETCH_URL__) {
+    throw new Error(`predicate request matcher saw unexpected url: ${requestByPredicate.url()}`);
+  }
+  if (responseByString.url() !== __FETCH_URL__) {
+    throw new Error(`string response matcher saw unexpected url: ${responseByString.url()}`);
+  }
+  if (responseByRegex.url() !== __FETCH_URL__) {
+    throw new Error(`regex response matcher saw unexpected url: ${responseByRegex.url()}`);
+  }
+  if (responseByPredicate.url() !== __FETCH_URL__) {
+    throw new Error(`predicate response matcher saw unexpected url: ${responseByPredicate.url()}`);
+  }
+
+  await refreshmint.saveResource("network_matchers.bin", [111, 107]);
+  refreshmint.log("network matcher test done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("network matcher test error: " + msg);
+  throw e;
+}
+"##;
+
 const NETWORK_EVENT_DRIVER_SOURCE: &str = r##"
 try {
   refreshmint.log("network event api test start");
@@ -376,6 +480,61 @@ try {
 } catch (e) {
   const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
   refreshmint.log("network event api test error: " + msg);
+  throw e;
+}
+"##;
+
+const NETWORK_EVENT_OPTIONS_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("network event options test start");
+  const requestPromise = page.waitForEvent("request", {
+    timeout: 10000,
+    predicate: async request => {
+      if (request.method() !== "POST") {
+        return false;
+      }
+      const payload = await request.postDataJSON();
+      return payload != null && payload.hello === "event-options";
+    }
+  });
+  const responsePromise = page.waitForEvent("response", async response => {
+    if (response.status() !== 200) {
+      return false;
+    }
+    const body = await response.json();
+    return body != null && body.ok === true && body.method === "POST";
+  });
+
+  await page.evaluate(`new Promise(resolve =>
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => resolve("armed"))
+    )
+  )`);
+
+  const [request, response] = await Promise.all([
+    requestPromise,
+    responsePromise,
+    page.evaluate(`fetch(__FETCH_URL__, {
+      method: "POST",
+      headers: {
+        "content-type": "text/plain"
+      },
+      body: JSON.stringify({ hello: "event-options" })
+    }).then(r => r.text())`),
+  ]);
+
+  if (request.url() !== __FETCH_URL__) {
+    throw new Error(`event options request saw unexpected url: ${request.url()}`);
+  }
+  if (response.url() !== __FETCH_URL__) {
+    throw new Error(`event options response saw unexpected url: ${response.url()}`);
+  }
+
+  await refreshmint.saveResource("network_event_options.bin", [111, 107]);
+  refreshmint.log("network event options test done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("network event options test error: " + msg);
   throw e;
 }
 "##;
@@ -683,6 +842,67 @@ fn scrape_popup_wait_for_event_switches_tab() -> Result<(), Box<dyn Error>> {
 
 #[test]
 #[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn scrape_popup_waiter_rejects_when_popup_closes() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping popup close scrape test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let sandbox = TestSandbox::new("scrape-popup-close")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+    let popup_url = write_fixture_file(
+        &sandbox,
+        "popup-close.html",
+        "<!doctype html><html><body><div id=\"popup-close-marker\">popup</div></body></html>",
+    )?;
+    let opener_html = format!(
+        "<!doctype html><html><body><button id=\"open\" type=\"button\">Open Popup</button><script>document.getElementById('open').addEventListener('click', () => window.open({}, '_blank'));</script></body></html>",
+        serde_json::to_string(&popup_url)?,
+    );
+    let opener_url = write_fixture_file(&sandbox, "popup-close-opener.html", &opener_html)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
+    let driver_source = POPUP_CLOSE_WAITER_DRIVER_SOURCE
+        .replace("__OPENER_URL__", &serde_json::to_string(&opener_url)?);
+    fs::write(&driver_path, driver_source)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        login_name: LOGIN_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    scrape::run_scrape(config)?;
+
+    let output_file = ledger_dir
+        .join("cache")
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("popup_close_waiter.bin");
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
 fn scrape_click_reports_overlay_interception() -> Result<(), Box<dyn Error>> {
     if scrape::browser::find_chrome_binary().is_err() {
         eprintln!("skipping overlay scrape test: Chrome/Edge binary not found");
@@ -925,6 +1145,83 @@ fn scrape_network_request_response_api_works() -> Result<(), Box<dyn Error>> {
 
 #[test]
 #[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn scrape_network_matchers_work() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping network matcher scrape test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let server = HttpFixtureServer::start()?;
+    let sandbox = TestSandbox::new("scrape-network-matchers")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
+
+    let fetch_url = format!("{}/api/echo", server.base_url);
+    let driver_source =
+        NETWORK_MATCHER_DRIVER_SOURCE.replace("__FETCH_URL__", &serde_json::to_string(&fetch_url)?);
+    fs::write(&driver_path, driver_source)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        login_name: LOGIN_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    eprintln!(
+        "network matcher scrape sandbox: {}",
+        sandbox.path().display()
+    );
+    let (result_tx, result_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = scrape::run_scrape(config).map_err(|err| err.to_string());
+        let _ = result_tx.send(result);
+    });
+
+    match result_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err.into()),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            return Err(format!(
+                "network matcher scrape timed out after 30s; sandbox: {}",
+                sandbox.path().display()
+            )
+            .into())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            return Err("network matcher scrape worker disconnected".into())
+        }
+    }
+
+    let output_file = ledger_dir
+        .join("cache")
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("network_matchers.bin");
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
 fn scrape_network_wait_for_event_aliases_work() -> Result<(), Box<dyn Error>> {
     if scrape::browser::find_chrome_binary().is_err() {
         eprintln!("skipping network event scrape test: Chrome/Edge binary not found");
@@ -990,6 +1287,75 @@ fn scrape_network_wait_for_event_aliases_work() -> Result<(), Box<dyn Error>> {
         .join(EXTENSION_NAME)
         .join("output")
         .join("network_event.bin");
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn scrape_network_wait_for_event_options_work() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping network event options scrape test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let server = HttpFixtureServer::start()?;
+    let sandbox = TestSandbox::new("scrape-network-event-options")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
+
+    let fetch_url = format!("{}/api/echo", server.base_url);
+    let driver_source = NETWORK_EVENT_OPTIONS_DRIVER_SOURCE
+        .replace("__FETCH_URL__", &serde_json::to_string(&fetch_url)?);
+    fs::write(&driver_path, driver_source)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        login_name: LOGIN_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    let (result_tx, result_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = scrape::run_scrape(config).map_err(|err| err.to_string());
+        let _ = result_tx.send(result);
+    });
+
+    match result_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err.into()),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            return Err("network event options scrape timed out after 30s".into());
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            return Err("network event options scrape worker disconnected".into());
+        }
+    }
+
+    let output_file = ledger_dir
+        .join("cache")
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("network_event_options.bin");
     let bytes = fs::read(&output_file)?;
     assert_eq!(bytes, b"ok");
 
