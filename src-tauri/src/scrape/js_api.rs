@@ -111,6 +111,8 @@ struct NetworkRequest {
     ts: i64,
     #[serde(default)]
     error: Option<String>,
+    #[serde(default)]
+    finished: bool,
     /// CDP request ID, used by waitForResponseBody to fetch the body.
     /// Not serialized to JS (internal use only).
     #[serde(skip)]
@@ -133,6 +135,8 @@ struct RequestCaptureItem {
     frame_id: Option<String>,
     is_navigation_request: bool,
     redirected_from: Option<String>,
+    error: Option<String>,
+    finished: bool,
 }
 
 struct RequestCaptureState {
@@ -405,6 +409,19 @@ impl PageApi {
             .cloned()
     }
 
+    async fn latest_response_entry(
+        entries: &Arc<Mutex<Vec<NetworkRequest>>>,
+        request_id: &str,
+    ) -> Option<NetworkRequest> {
+        entries
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find(|entry| entry.request_id == request_id)
+            .cloned()
+    }
+
     async fn wait_for_response_pattern(
         &self,
         url_pattern: String,
@@ -486,6 +503,41 @@ impl PageApi {
                     "TimeoutError: waiting for request pattern \"{url_pattern}\" failed: timeout {timeout_ms}ms exceeded"
                 )))
             }
+        }
+    }
+
+    async fn wait_for_request_lifecycle_event(
+        &self,
+        lifecycle_event: &str,
+        timeout_ms: u64,
+    ) -> JsResult<RequestApi> {
+        let entries = self.ensure_request_capture().await?;
+        let baseline_len = entries.lock().await.len();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            let matched = entries
+                .lock()
+                .await
+                .iter()
+                .skip(baseline_len)
+                .find(|entry| match lifecycle_event {
+                    "requestfinished" => entry.finished && entry.error.is_none(),
+                    "requestfailed" => entry.finished && entry.error.is_some(),
+                    _ => false,
+                })
+                .cloned();
+
+            if let Some(entry) = matched {
+                return Ok(self.request_api_from_entry(entry));
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(js_err(format!(
+                    "TimeoutError: waiting for event \"{lifecycle_event}\" failed: timeout {timeout_ms}ms exceeded"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
         }
     }
 
@@ -874,6 +926,8 @@ pub struct RequestApi {
     is_navigation_request: bool,
     post_data: Option<String>,
     redirected_from: Option<String>,
+    error: Option<String>,
+    finished: bool,
     #[qjs(skip_trace)]
     page_api: PageApi,
 }
@@ -895,6 +949,8 @@ pub struct ResponseApi {
     headers: BTreeMap<String, String>,
     frame_id: Option<String>,
     from_service_worker: bool,
+    error: Option<String>,
+    finished: bool,
     #[qjs(skip_trace)]
     request_id_raw: Option<chromiumoxide::cdp::browser_protocol::network::RequestId>,
     #[qjs(skip_trace)]
@@ -1120,8 +1176,19 @@ impl RequestApi {
         Ok(JsEvalResult::Json(wrap_json_for_eval(&value, json)))
     }
 
-    pub fn failure(&self) -> JsResult<JsEvalResult> {
-        Ok(JsEvalResult::Json("null".to_string()))
+    pub async fn failure(&self) -> JsResult<JsEvalResult> {
+        let entries = self.page_api.ensure_request_capture().await?;
+        let error = PageApi::latest_request_entry(&entries, &self.request_id)
+            .await
+            .and_then(|entry| entry.error)
+            .or_else(|| self.error.clone());
+        match error {
+            Some(error_text) => json_string_to_eval_result(format!(
+                r#"({{"errorText":{}}})"#,
+                serde_json::to_string(&error_text).unwrap_or_else(|_| "\"\"".to_string())
+            )),
+            None => Ok(JsEvalResult::Json("null".to_string())),
+        }
     }
 
     pub async fn response(&self) -> JsResult<Option<ResponseApi>> {
@@ -1276,8 +1343,35 @@ impl ResponseApi {
         })
     }
 
-    pub fn finished(&self) -> JsResult<JsEvalResult> {
-        Ok(JsEvalResult::Json("null".to_string()))
+    pub async fn finished(&self) -> JsResult<JsEvalResult> {
+        let entries = self.page_api.ensure_response_capture().await?;
+        let latest = PageApi::latest_response_entry(&entries, &self.request_id)
+            .await
+            .unwrap_or_else(|| NetworkRequest {
+                request_id: self.request_id.clone(),
+                url: self.url.clone(),
+                status: self.status,
+                ok: self.ok,
+                method: self.method.clone(),
+                status_text: self.status_text.clone(),
+                headers: self.headers.clone(),
+                frame_id: self.frame_id.clone(),
+                from_service_worker: self.from_service_worker,
+                ts: 0,
+                error: self.error.clone(),
+                finished: self.finished,
+                request_id_raw: self.request_id_raw.clone(),
+            });
+        if !latest.finished {
+            return Ok(JsEvalResult::Json("null".to_string()));
+        }
+        match latest.error {
+            Some(error_text) => json_string_to_eval_result(format!(
+                r#"({{"errorText":{}}})"#,
+                serde_json::to_string(&error_text).unwrap_or_else(|_| "\"\"".to_string())
+            )),
+            None => Ok(JsEvalResult::Json("null".to_string())),
+        }
     }
 
     #[qjs(rename = "fromServiceWorker")]
@@ -1951,7 +2045,8 @@ impl PageApi {
 
     /// Playwright-style event waiter.
     ///
-    /// Currently supports `popup`, `request`, and `response`.
+    /// Currently supports `popup`, `request`, `response`, `requestfinished`,
+    /// and `requestfailed`.
     #[qjs(rename = "waitForEvent")]
     pub async fn js_wait_for_event(
         &self,
@@ -1970,8 +2065,12 @@ impl PageApi {
             "response" => Ok(JsEvalResult::ResponseResult(
                 self.wait_for_response_pattern("*".to_string(), timeout).await?,
             )),
+            "requestfinished" | "requestfailed" => Ok(JsEvalResult::RequestResult(
+                self.wait_for_request_lifecycle_event(normalized.as_str(), timeout)
+                    .await?,
+            )),
             _ => Err(js_err(format!(
-                "waitForEvent currently supports only \"popup\", \"request\", and \"response\" (got {event})"
+                "waitForEvent currently supports only \"popup\", \"request\", \"response\", \"requestfinished\", and \"requestfailed\" (got {event})"
             ))),
         }
     }
@@ -3236,6 +3335,8 @@ impl PageApi {
             is_navigation_request: entry.is_navigation_request,
             post_data: entry.post_data,
             redirected_from: entry.redirected_from,
+            error: entry.error,
+            finished: entry.finished,
             page_api: self.clone(),
         }
     }
@@ -3251,6 +3352,8 @@ impl PageApi {
             headers: entry.headers,
             frame_id: entry.frame_id,
             from_service_worker: entry.from_service_worker,
+            error: entry.error,
+            finished: entry.finished,
             request_id_raw: entry.request_id_raw,
             page_api: self.clone(),
         }
@@ -3274,7 +3377,8 @@ impl PageApi {
         };
 
         use chromiumoxide::cdp::browser_protocol::network::{
-            EnableParams, EventRequestWillBeSent, EventRequestWillBeSentExtraInfo,
+            EnableParams, EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent,
+            EventRequestWillBeSentExtraInfo,
         };
         page.execute(EnableParams::default())
             .await
@@ -3288,6 +3392,14 @@ impl PageApi {
             .event_listener::<EventRequestWillBeSentExtraInfo>()
             .await
             .map_err(|e| js_err(format!("failed to attach request extra-info listener: {e}")))?;
+        let loading_finished_events = page
+            .event_listener::<EventLoadingFinished>()
+            .await
+            .map_err(|e| js_err(format!("failed to attach request finished listener: {e}")))?;
+        let loading_failed_events = page
+            .event_listener::<EventLoadingFailed>()
+            .await
+            .map_err(|e| js_err(format!("failed to attach request failed listener: {e}")))?;
 
         let entries = Arc::new(Mutex::new(Vec::new()));
         let entries_for_task = entries.clone();
@@ -3296,6 +3408,8 @@ impl PageApi {
             use futures::StreamExt;
             tokio::pin!(events);
             tokio::pin!(extra_events);
+            tokio::pin!(loading_finished_events);
+            tokio::pin!(loading_failed_events);
 
             loop {
                 tokio::select! {
@@ -3320,6 +3434,8 @@ impl PageApi {
                                 .map(|frame_id| frame_id.as_ref().to_string()),
                             is_navigation_request: false,
                             redirected_from: None,
+                            error: None,
+                            finished: false,
                         };
 
                         let mut guard = entries_for_task.lock().await;
@@ -3379,6 +3495,37 @@ impl PageApi {
                             entry.headers = merged_headers;
                         }
                     }
+                    ev = loading_finished_events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        let request_id = ev.request_id.as_ref().to_string();
+                        let mut guard = entries_for_task.lock().await;
+                        if let Some(entry) = guard
+                            .iter_mut()
+                            .rev()
+                            .find(|entry| entry.request_id == request_id)
+                        {
+                            entry.finished = true;
+                            entry.error = None;
+                        }
+                    }
+                    ev = loading_failed_events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        let request_id = ev.request_id.as_ref().to_string();
+                        let error_text = ev.error_text.clone();
+                        let mut guard = entries_for_task.lock().await;
+                        if let Some(entry) = guard
+                            .iter_mut()
+                            .rev()
+                            .find(|entry| entry.request_id == request_id)
+                        {
+                            entry.finished = true;
+                            entry.error = Some(error_text);
+                        }
+                    }
                 }
             }
         });
@@ -3407,71 +3554,123 @@ impl PageApi {
             inner.page.clone()
         };
 
-        use chromiumoxide::cdp::browser_protocol::network::{EnableParams, EventResponseReceived};
+        use chromiumoxide::cdp::browser_protocol::network::{
+            EnableParams, EventLoadingFailed, EventLoadingFinished, EventResponseReceived,
+        };
         page.execute(EnableParams::default())
             .await
             .map_err(|e| js_err(format!("failed to enable Network domain: {e}")))?;
 
-        let mut events = page
+        let events = page
             .event_listener::<EventResponseReceived>()
             .await
             .map_err(|e| js_err(format!("failed to attach response listener: {e}")))?;
+        let loading_finished_events = page
+            .event_listener::<EventLoadingFinished>()
+            .await
+            .map_err(|e| js_err(format!("failed to attach response finished listener: {e}")))?;
+        let loading_failed_events = page
+            .event_listener::<EventLoadingFailed>()
+            .await
+            .map_err(|e| js_err(format!("failed to attach response failed listener: {e}")))?;
 
         let entries = Arc::new(Mutex::new(Vec::new()));
         let entries_for_task = entries.clone();
         let response_waiters = self.response_waiters.clone();
         let task = tokio::spawn(async move {
             use futures::StreamExt;
+            tokio::pin!(events);
+            tokio::pin!(loading_finished_events);
+            tokio::pin!(loading_failed_events);
 
-            while let Some(ev) = events.next().await {
-                let status = ev.response.status;
-                let method = network_method_from_headers(ev.response.request_headers.as_ref());
-                let ts = (*ev.timestamp.inner() * 1000.0) as i64;
-                let item = NetworkRequest {
-                    request_id: ev.request_id.as_ref().to_string(),
-                    url: ev.response.url.clone(),
-                    status,
-                    ok: status == 0 || (200..300).contains(&status),
-                    method,
-                    status_text: ev.response.status_text.clone(),
-                    headers: headers_to_map(Some(&ev.response.headers)),
-                    frame_id: ev
-                        .frame_id
-                        .as_ref()
-                        .map(|frame_id| frame_id.as_ref().to_string()),
-                    from_service_worker: ev.response.from_service_worker.unwrap_or(false),
-                    ts,
-                    error: None,
-                    request_id_raw: Some(ev.request_id.clone()),
-                };
+            loop {
+                tokio::select! {
+                    ev = events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        let status = ev.response.status;
+                        let method = network_method_from_headers(ev.response.request_headers.as_ref());
+                        let ts = (*ev.timestamp.inner() * 1000.0) as i64;
+                        let item = NetworkRequest {
+                            request_id: ev.request_id.as_ref().to_string(),
+                            url: ev.response.url.clone(),
+                            status,
+                            ok: status == 0 || (200..300).contains(&status),
+                            method,
+                            status_text: ev.response.status_text.clone(),
+                            headers: headers_to_map(Some(&ev.response.headers)),
+                            frame_id: ev
+                                .frame_id
+                                .as_ref()
+                                .map(|frame_id| frame_id.as_ref().to_string()),
+                            from_service_worker: ev.response.from_service_worker.unwrap_or(false),
+                            ts,
+                            error: None,
+                            finished: false,
+                            request_id_raw: Some(ev.request_id.clone()),
+                        };
 
-                let mut guard = entries_for_task.lock().await;
-                guard.push(item);
-                if guard.len() > 5_000 {
-                    let drop_count = guard.len() - 5_000;
-                    guard.drain(0..drop_count);
-                }
-                let latest = guard.last().cloned();
-                drop(guard);
+                        let mut guard = entries_for_task.lock().await;
+                        guard.push(item);
+                        if guard.len() > 5_000 {
+                            let drop_count = guard.len() - 5_000;
+                            guard.drain(0..drop_count);
+                        }
+                        let latest = guard.last().cloned();
+                        drop(guard);
 
-                if let Some(latest) = latest {
-                    let matched_waiters = {
-                        let mut waiters = response_waiters.lock().await;
-                        let mut matched = Vec::new();
-                        let mut remaining = Vec::with_capacity(waiters.len());
-                        for waiter in waiters.drain(..) {
-                            if url_matches_pattern(&latest.url, &waiter.url_pattern) {
-                                matched.push(waiter);
-                            } else {
-                                remaining.push(waiter);
+                        if let Some(latest) = latest {
+                            let matched_waiters = {
+                                let mut waiters = response_waiters.lock().await;
+                                let mut matched = Vec::new();
+                                let mut remaining = Vec::with_capacity(waiters.len());
+                                for waiter in waiters.drain(..) {
+                                    if url_matches_pattern(&latest.url, &waiter.url_pattern) {
+                                        matched.push(waiter);
+                                    } else {
+                                        remaining.push(waiter);
+                                    }
+                                }
+                                *waiters = remaining;
+                                matched
+                            };
+
+                            for waiter in matched_waiters {
+                                let _ = waiter.sender.send(latest.clone());
                             }
                         }
-                        *waiters = remaining;
-                        matched
-                    };
-
-                    for waiter in matched_waiters {
-                        let _ = waiter.sender.send(latest.clone());
+                    }
+                    ev = loading_finished_events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        let request_id = ev.request_id.as_ref().to_string();
+                        let mut guard = entries_for_task.lock().await;
+                        if let Some(entry) = guard
+                            .iter_mut()
+                            .rev()
+                            .find(|entry| entry.request_id == request_id)
+                        {
+                            entry.finished = true;
+                            entry.error = None;
+                        }
+                    }
+                    ev = loading_failed_events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        let request_id = ev.request_id.as_ref().to_string();
+                        let error_text = ev.error_text.clone();
+                        let mut guard = entries_for_task.lock().await;
+                        if let Some(entry) = guard
+                            .iter_mut()
+                            .rev()
+                            .find(|entry| entry.request_id == request_id)
+                        {
+                            entry.finished = true;
+                            entry.error = Some(error_text);
+                        }
                     }
                 }
             }

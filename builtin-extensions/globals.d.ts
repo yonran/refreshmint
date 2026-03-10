@@ -82,7 +82,7 @@ interface Request {
     postData(): Promise<string | null>;
     postDataBuffer(): Promise<Uint8Array | null>;
     postDataJSON(): Promise<unknown>;
-    failure(): Record<string, unknown> | null;
+    failure(): Promise<Record<string, unknown> | null>;
     response(): Promise<Response | null>;
     timing(): Record<string, number>;
     frame(): Frame | null;
@@ -105,7 +105,7 @@ interface Response {
     json(): Promise<unknown>;
     request(): Promise<Request | null>;
     frame(): Frame | null;
-    finished(): null;
+    finished(): Promise<Record<string, unknown> | null>;
     fromServiceWorker(): boolean;
     serverAddr(): Record<string, unknown> | null;
     securityDetails(): Record<string, unknown> | null;
@@ -149,7 +149,12 @@ interface PageApi {
     clearNetworkRequests(): Promise<void>;
     waitForPopup(timeoutMs?: number): Promise<PageApi>;
     waitForEvent(
-        event: 'popup' | 'request' | 'response',
+        event:
+            | 'popup'
+            | 'request'
+            | 'response'
+            | 'requestfinished'
+            | 'requestfailed',
         timeoutMs?: number,
     ): Promise<PageApi | Request | Response>;
     /** @deprecated Removed. Use browser.pages(). */
