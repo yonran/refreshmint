@@ -167,40 +167,28 @@ pub async fn launch_browser(
 
     let handle = tokio::spawn(async move {
         eprintln!("[browser] Handler loop starting...");
-        let mut count = 0u64;
-        loop {
-            match handler.next().await {
-                Some(Ok(())) => {
-                    count += 1;
-                    if count <= 5 || count % 100 == 0 {
-                        eprintln!("[browser] Handler event #{count}");
+        while let Some(result) = handler.next().await {
+            if let Err(err) = result {
+                match &err {
+                    // Fatal: underlying transport or process is gone.
+                    CdpError::Ws(_)
+                    | CdpError::Io(_)
+                    | CdpError::ChannelSendError(_)
+                    | CdpError::LaunchExit(_, _)
+                    | CdpError::LaunchTimeout(_)
+                    | CdpError::LaunchIo(_, _) => {
+                        eprintln!("[browser] Fatal handler error: {err}");
+                        return;
                     }
-                }
-                Some(Err(err)) => {
-                    match &err {
-                        // Fatal: underlying transport or process is gone.
-                        CdpError::Ws(_)
-                        | CdpError::Io(_)
-                        | CdpError::ChannelSendError(_)
-                        | CdpError::LaunchExit(_, _)
-                        | CdpError::LaunchTimeout(_)
-                        | CdpError::LaunchIo(_, _) => {
-                            eprintln!("[browser] Fatal handler error after {count} events: {err}");
-                            break;
-                        }
-                        // Non-fatal: a single malformed/unexpected CDP message.
-                        // Log and keep processing so the session stays alive.
-                        _ => {
-                            eprintln!("[browser] Non-fatal handler error after {count} events (continuing): {err}");
-                        }
+                    // Non-fatal: a single malformed/unexpected CDP message.
+                    // Log and keep processing so the session stays alive.
+                    _ => {
+                        eprintln!("[browser] Non-fatal handler error (continuing): {err}");
                     }
-                }
-                None => {
-                    eprintln!("[browser] Handler stream ended after {count} events.");
-                    break;
                 }
             }
         }
+        eprintln!("[browser] Handler loop ended.");
     });
 
     Ok((browser, handle))
