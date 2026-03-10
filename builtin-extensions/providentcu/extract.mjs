@@ -10,6 +10,9 @@ export async function extract(context) {
     if (context.pdf) {
         return extractPdf(context);
     }
+    if (context.json && /zelle/.test(context.document.name)) {
+        return extractZelleJson(context);
+    }
     return [];
 }
 
@@ -239,4 +242,70 @@ function invertAmount(amount) {
 
 function buildCheckAttachmentKey(checkNumber, dateIso, amount) {
     return `check:${checkNumber}|${dateIso}|${amount}`;
+}
+
+// UNTESTED: verify field names (activityType, paymentType, personName, transferAmount,
+// zellePaymentID, sendEmailBody) against a live Zelle activity response before removing.
+async function extractZelleJson(context) {
+    const data = context.json;
+    if (!Array.isArray(data?.activities)) return [];
+
+    // Collect transactionIds from scheduledPayment.detailTransfersList to deduplicate
+    const scheduledIds = new Set();
+    for (const act of data.activities) {
+        if (act.activityType === 'scheduledPayment') {
+            for (const t of act.detailTransfersList ?? []) {
+                if (t.transactionId) scheduledIds.add(String(t.transactionId));
+            }
+        }
+    }
+
+    const transactions = [];
+    for (const act of data.activities) {
+        if (act.activityType !== 'payment') continue;
+        // Skip if this payment is already represented as a detail of a scheduledPayment
+        if (scheduledIds.has(String(act.transactionId))) continue;
+
+        const dateRaw = act.sendDate?.value ?? act.creationDate?.value ?? null;
+        if (!dateRaw) continue;
+        const tdate = parseZelleDate(dateRaw);
+        if (!tdate) continue;
+
+        const personName = act.personName ?? 'Unknown';
+        const paymentType = act.paymentType ?? ''; // "sender" or "receiver"
+        const amount = act.transferAmount?.value;
+        if (amount == null) continue;
+
+        // Positive for received, negative for sent (matches checking account perspective)
+        const normalizedAmount =
+            paymentType === 'receiver'
+                ? String(Math.abs(amount).toFixed(2))
+                : `-${Math.abs(amount).toFixed(2)}`;
+
+        const tdescription = `Zelle ${personName}`;
+        const tcomment = act.sendEmailBody?.trim() ?? '';
+
+        const ttags = [
+            ['evidence', `${context.document.name}:${act.transactionId}`],
+            ['amount', `${normalizedAmount} USD`],
+            ['zellePaymentId', act.zellePaymentID ?? ''],
+            ['zelleTransactionId', String(act.transactionId)],
+        ];
+
+        transactions.push({
+            tdate,
+            tstatus: 'Cleared',
+            tdescription,
+            tcomment,
+            ttags,
+        });
+    }
+    return transactions;
+}
+
+function parseZelleDate(dateStr) {
+    // "2025-08-31 00:00:00.0" → "2025-08-31"
+    if (!dateStr) return null;
+    const m = String(dateStr).match(/^(\d{4}-\d{2}-\d{2})/);
+    return m ? m[1] : null;
 }

@@ -14,6 +14,8 @@
  * @property {Set<string>} completedAccounts
  * @property {boolean} accountsDone
  * @property {boolean} statementsDone
+ * @property {boolean} zelleDone
+ * @property {string|null} checkingLabel
  *
  * @typedef {object} StepReturn
  * @property {string} progressName
@@ -24,10 +26,17 @@ const BASE_URL = 'https://accountmanager.providentcu.org';
 const SIGN_IN_URL = `${BASE_URL}/ProvidentOnlineBanking/SignIn.aspx`;
 const STATEMENTS_URL = `${BASE_URL}/ProvidentOnlineBanking/statements.aspx`;
 const SUMMARY_URL = `${BASE_URL}/ProvidentOnlineBanking/Accounts/AccountSummary.aspx`;
+const ZELLE_URL = `${BASE_URL}/ProvidentOnlineBanking/ZelleDirect.aspx`;
 
 // Configuration for efficient scraping and debugging
 const DOWNLOAD_LIMIT = null; // Set to number to limit downloads per run
 const SKIP_BEFORE_DATE = null; // Format: YYYY-MM-DD e.g. "2026-01-01"
+// Phases to run: comma-separated subset of 'accounts,statements,zelle', or null = all.
+// Override without editing via: --option phases=zelle
+const PHASES = null;
+// Checking account label used when 'accounts' phase is skipped (e.g. 'checking-x1234').
+// Override without editing via: --option checkingLabel=checking-x1234
+const DEBUG_CHECKING_LABEL = null;
 const ATTACHMENT_TYPE_CHECK_IMAGE = 'check-image';
 const ATTACHMENT_CHECKPOINT_VERSION = 'v1';
 const ATTACHMENT_CHECKPOINT_SCOPE = 'providentcu-history-module';
@@ -227,6 +236,11 @@ async function handleAccountSummary(context) {
             })()`)
         );
         context.pendingAccounts = [...new Set(JSON.parse(accountsJson))];
+        for (const acc of context.pendingAccounts) {
+            if (/checking/i.test(acc) && context.checkingLabel == null) {
+                context.checkingLabel = getLabel(acc);
+            }
+        }
         refreshmint.log(
             `Discovered ${context.pendingAccounts.length} accounts: ${context.pendingAccounts.join(', ')}`,
         );
@@ -294,6 +308,11 @@ async function handleAccountSummary(context) {
         }
     }
 
+    if (!context.zelleDone && context.checkingLabel != null) {
+        await page.goto(ZELLE_URL);
+        await waitMs(page, 3000);
+        return { progressName: 'navigating to zelle' };
+    }
     return { progressName: 'all tasks complete', done: true };
 }
 
@@ -1892,6 +1911,134 @@ async function handleStatements(context) {
     return { progressName: 'statements downloaded' };
 }
 
+async function handleZelle(context) {
+    const page = context.mainPage;
+    refreshmint.log('State: Zelle Activity');
+
+    // Dedup check: if today's file already exists, skip
+    const today = new Date().toISOString().slice(0, 10);
+    const label = context.checkingLabel;
+    const filename = `zelle-activity-${today}.json`;
+    const existingDocsJson = await refreshmint.listAccountDocuments({ label });
+    const existingDocs = JSON.parse(existingDocsJson || '[]');
+    const existingFilenames = new Set(existingDocs.map((d) => d.filename));
+    if (hasSavedDocument(existingFilenames, today, filename)) {
+        refreshmint.log('Zelle activity already downloaded today, skipping');
+        context.zelleDone = true;
+        await page.goto(SUMMARY_URL);
+        return { progressName: 'zelle already downloaded' };
+    }
+
+    // Wait for iframe to load in the DOM
+    await waitMs(page, 3000);
+    const domFramesJson = await page.evaluate(`(function() {
+        return JSON.stringify(Array.from(document.querySelectorAll('iframe')).map(f => ({ id: f.id, name: f.name, src: f.src })));
+    })()`);
+    refreshmint.log(`Available frames from DOM: ${domFramesJson}`);
+
+    const hasFrame = await page.evaluate(`(function() {
+        return !!document.querySelector('iframe#M_layout_content_PCDZ_MW53FMO_ctl00_iframeZelleDirect');
+    })()`);
+
+    if (!hasFrame) {
+        refreshmint.log('Zelle iframe not found in DOM, skipping');
+        context.zelleDone = true;
+        await page.goto(SUMMARY_URL);
+        return { progressName: 'zelle iframe not found' };
+    }
+
+    // UNTESTED: Inject fetch interceptor into the Zelle iframe to capture the
+    // /v2/activity response body. (waitForResponse only returns metadata, not body.)
+    const iframeId = 'M_layout_content_PCDZ_MW53FMO_ctl00_iframeZelleDirect';
+    await page.frameEvaluate(
+        iframeId,
+        `(function() {
+            if (window.__rmFetchHooked) return;
+            window.__rmFetchHooked = true;
+            const origFetch = window.fetch;
+            window.fetch = async function(...args) {
+                const resp = await origFetch.apply(this, args);
+                try {
+                    const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url ?? '');
+                    if (url.includes('/v2/activity')) {
+                        const clone = resp.clone();
+                        clone.text().then(function(t) { window.__rmActivityData = t; }).catch(function() {});
+                    }
+                } catch (_) {}
+                return resp;
+            };
+        })()`,
+    );
+
+    // Click Send first (to trigger iframe load), then Activity to fetch data
+    try {
+        await page.frameEvaluate(
+            iframeId,
+            `(function() {
+                const btn = Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim() === 'Send');
+                if (btn) btn.click();
+            })()`,
+        );
+        await waitMs(page, 2000);
+
+        await page.frameEvaluate(
+            iframeId,
+            `(function() {
+                const btn = Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim() === 'Activity');
+                if (btn) btn.click();
+            })()`,
+        );
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        refreshmint.log(
+            `Zelle nav click failed: ${msg}, trying Activity directly`,
+        );
+        await page.frameEvaluate(
+            iframeId,
+            `(function() {
+                const btn = Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim() === 'Activity');
+                if (btn) btn.click();
+            })()`,
+        );
+    }
+
+    // Poll for captured activity response body (up to 20 s)
+    let activityText = null;
+    const deadline = Date.now() + 20000;
+    while (activityText == null && Date.now() < deadline) {
+        await waitMs(page, 500);
+        const result = await page.frameEvaluate(
+            iframeId,
+            `window.__rmActivityData ?? null`,
+        );
+        if (result != null && result !== 'null') activityText = String(result);
+    }
+
+    if (!activityText) {
+        refreshmint.log(
+            'Zelle activity response not captured (timeout), skipping',
+        );
+        context.zelleDone = true;
+        await page.goto(SUMMARY_URL);
+        return { progressName: 'zelle activity timeout' };
+    }
+
+    const json = JSON.parse(activityText);
+    refreshmint.log(`Zelle activity: ${json?.activities?.length ?? 0} items`);
+
+    const payload = stringToUtf8Bytes(JSON.stringify(json, null, 2));
+    await refreshmint.saveResource(filename, payload, {
+        mimeType: 'application/json',
+        label,
+        coverageEndDate: today,
+    });
+    refreshmint.log(`Saved Zelle activity to ${filename}`);
+
+    context.zelleDone = true;
+    await page.goto(SUMMARY_URL);
+    return { progressName: 'zelle downloaded' };
+}
+
 async function main() {
     refreshmint.log('Provident scraper starting');
     const pages = await browser.pages();
@@ -1909,7 +2056,46 @@ async function main() {
         completedAccounts: new Set(),
         accountsDone: false,
         statementsDone: false,
+        zelleDone: false,
+        checkingLabel: null,
     };
+
+    // Apply phase/label overrides from --option CLI flags or in-file constants.
+    const opts = refreshmint.getOptions();
+    const phasesStr =
+        (opts['phases'] != null ? String(opts['phases']) : null) ?? PHASES;
+    const activePhases = phasesStr
+        ? new Set(phasesStr.split(',').map((s) => s.trim()))
+        : null; // null = all phases
+    const checkingLabelOpt =
+        (opts['checkingLabel'] != null
+            ? String(opts['checkingLabel'])
+            : null) ?? DEBUG_CHECKING_LABEL;
+    if (activePhases && !activePhases.has('accounts')) {
+        context.accountsDone = true;
+    }
+    if (activePhases && !activePhases.has('statements')) {
+        context.statementsDone = true;
+    }
+    if (activePhases && !activePhases.has('zelle')) {
+        context.zelleDone = true;
+    }
+    if (checkingLabelOpt != null) {
+        context.checkingLabel = checkingLabelOpt;
+    }
+    if (
+        context.accountsDone &&
+        !context.zelleDone &&
+        context.checkingLabel == null
+    ) {
+        refreshmint.log(
+            'WARNING: accounts phase skipped but no checkingLabel provided; ' +
+                'Zelle will be skipped. Pass --option checkingLabel=<label>.',
+        );
+    }
+    refreshmint.log(
+        `Active phases: ${activePhases ? [...activePhases].join(', ') : 'all'}`,
+    );
 
     while (true) {
         context.currentStep++;
@@ -1944,6 +2130,8 @@ async function main() {
             stepReturn = await handleAccountSummary(context);
         } else if (urlWithoutFragment.includes('statements.aspx')) {
             stepReturn = await handleStatements(context);
+        } else if (urlWithoutFragment.includes('ZelleDirect.aspx')) {
+            stepReturn = await handleZelle(context);
         } else if (
             urlWithoutFragment === 'about:blank' ||
             urlWithoutFragment === 'chrome://new-tab-page/'

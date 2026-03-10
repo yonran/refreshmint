@@ -291,6 +291,11 @@ where
                 if is_more_finalized(&action.proposed.status(), &entries[*existing_index].status) {
                     entries[*existing_index].status = action.proposed.status();
                 }
+                if !action.proposed.tcomment.is_empty()
+                    && entries[*existing_index].comment.is_empty()
+                {
+                    entries[*existing_index].comment = action.proposed.tcomment.clone();
+                }
                 if !amounts_equal(
                     &entry_primary_amount(&entries[*existing_index]),
                     &txn_primary_amount(&action.proposed),
@@ -1066,5 +1071,41 @@ mod tests {
         let actions = run_dedup(&existing, &[proposed], "doc-b.csv", &DedupConfig::default());
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0].result, DedupResult::Ambiguous { .. }));
+    }
+
+    #[test]
+    fn apply_dedup_actions_merges_tcomment_on_fuzzy_match() {
+        let root = temp_dir("dedup-tcomment-merge");
+
+        let existing = vec![make_entry(
+            "e1",
+            "2024-01-01",
+            "Zelle Alice",
+            EntryStatus::Cleared,
+            "-50.00",
+            &["doc-a.csv:1:1"],
+        )];
+
+        let mut txn = make_txn("2024-01-01", "Zelle Alice", "Cleared", "doc-b.json:1001");
+        txn.ttags
+            .push(("amount".to_string(), "-50.00 USD".to_string()));
+        txn.tcomment = "Pizza".to_string();
+
+        let actions = run_dedup(&existing, &[txn], "doc-b.json", &DedupConfig::default());
+        let updated = apply_dedup_actions(
+            &root,
+            "test-acct",
+            existing,
+            &actions,
+            "Assets:Checking",
+            "Equity:Unreconciled:Checking",
+            Some("test:latest"),
+        )
+        .expect("apply_dedup_actions");
+
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].comment, "Pizza");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

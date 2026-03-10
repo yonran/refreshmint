@@ -42,6 +42,8 @@ struct ExtractScriptContext {
     csv: Option<Vec<Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pdf: Option<PdfExtractContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    json: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +84,7 @@ struct PdfTextItemContext {
 enum DocumentFormat {
     Csv,
     Pdf,
+    Json,
     Other,
 }
 
@@ -90,6 +93,7 @@ impl DocumentFormat {
         match self {
             Self::Csv => "csv",
             Self::Pdf => "pdf",
+            Self::Json => "json",
             Self::Other => "other",
         }
     }
@@ -550,6 +554,13 @@ fn build_extract_script_context(
         DocumentFormat::Pdf => Some(read_pdf_context(doc_path)?),
         _ => None,
     };
+    let json = match format {
+        DocumentFormat::Json => {
+            let bytes = std::fs::read(doc_path)?;
+            Some(serde_json::from_slice::<serde_json::Value>(&bytes)?)
+        }
+        _ => None,
+    };
 
     Ok(ExtractScriptContext {
         ledger_dir: ledger_dir.display().to_string(),
@@ -564,6 +575,7 @@ fn build_extract_script_context(
         document_info,
         csv,
         pdf,
+        json,
     })
 }
 
@@ -597,6 +609,9 @@ fn detect_document_format(
     if lower_name.ends_with(".pdf") {
         return DocumentFormat::Pdf;
     }
+    if lower_name.ends_with(".json") {
+        return DocumentFormat::Json;
+    }
 
     if let Some(info) = document_info {
         let mime = info.mime_type.to_ascii_lowercase();
@@ -605,6 +620,9 @@ fn detect_document_format(
         }
         if mime.contains("pdf") {
             return DocumentFormat::Pdf;
+        }
+        if mime.contains("json") {
+            return DocumentFormat::Json;
         }
     }
 
