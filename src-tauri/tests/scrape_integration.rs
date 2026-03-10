@@ -336,6 +336,50 @@ try {
 }
 "##;
 
+const NETWORK_EVENT_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("network event api test start");
+  const requestPromise = page.waitForEvent("request", 10000);
+  const responsePromise = page.waitForEvent("response", 10000);
+  await page.evaluate(`new Promise(resolve =>
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => resolve("armed"))
+    )
+  )`);
+
+  const [request, response] = await Promise.all([
+    requestPromise,
+    responsePromise,
+    page.evaluate(`fetch(__FETCH_URL__, {
+      method: "POST",
+      headers: {
+        "content-type": "text/plain"
+      },
+      body: JSON.stringify({ hello: "events" })
+    }).then(r => r.text())`),
+  ]);
+
+  if (request.url() !== __FETCH_URL__ || request.method() !== "POST") {
+    throw new Error(`unexpected request alias result: ${request.method()} ${request.url()}`);
+  }
+  if (response.url() !== __FETCH_URL__ || response.status() !== 200) {
+    throw new Error(`unexpected response alias result: ${response.status()} ${response.url()}`);
+  }
+
+  const text = await response.text();
+  if (!text.includes("\"ok\":true")) {
+    throw new Error(`unexpected response text via waitForEvent: ${text}`);
+  }
+
+  await refreshmint.saveResource("network_event.bin", [111, 107]);
+  refreshmint.log("network event api test done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("network event api test error: " + msg);
+  throw e;
+}
+"##;
+
 struct TestSandbox {
     root: PathBuf,
 }
@@ -814,6 +858,79 @@ fn scrape_network_request_response_api_works() -> Result<(), Box<dyn Error>> {
         .join(EXTENSION_NAME)
         .join("output")
         .join("network.bin");
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn scrape_network_wait_for_event_aliases_work() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping network event scrape test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let server = HttpFixtureServer::start()?;
+    let sandbox = TestSandbox::new("scrape-network-event")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
+
+    let fetch_url = format!("{}/api/echo", server.base_url);
+    let driver_source =
+        NETWORK_EVENT_DRIVER_SOURCE.replace("__FETCH_URL__", &serde_json::to_string(&fetch_url)?);
+    fs::write(&driver_path, driver_source)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        login_name: LOGIN_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    let (result_tx, result_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = scrape::run_scrape(config).map_err(|err| err.to_string());
+        let _ = result_tx.send(result);
+    });
+
+    match result_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err.into()),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            return Err(format!(
+                "network event scrape timed out after 30s; sandbox: {}",
+                sandbox.path().display()
+            )
+            .into())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            return Err("network event scrape worker disconnected".into())
+        }
+    }
+
+    let output_file = ledger_dir
+        .join("cache")
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("network_event.bin");
     let bytes = fs::read(&output_file)?;
     assert_eq!(bytes, b"ok");
 

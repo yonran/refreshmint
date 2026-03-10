@@ -405,6 +405,90 @@ impl PageApi {
             .cloned()
     }
 
+    async fn wait_for_response_pattern(
+        &self,
+        url_pattern: String,
+        timeout_ms: u64,
+    ) -> JsResult<ResponseApi> {
+        let entries = self.ensure_response_capture().await?;
+        let baseline_len = entries.lock().await.len();
+        let waiter_id = self.allocate_waiter_id();
+        let (sender, receiver) = oneshot::channel();
+        self.register_response_waiter(waiter_id, url_pattern.clone(), sender)
+            .await;
+
+        if let Some(found) = entries
+            .lock()
+            .await
+            .iter()
+            .skip(baseline_len)
+            .find(|req| url_matches_pattern(&req.url, &url_pattern))
+            .cloned()
+        {
+            let _ = self.fulfill_response_waiter(waiter_id, found.clone()).await;
+            return Ok(self.response_api_from_entry(found));
+        }
+
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        match tokio::time::timeout(timeout, receiver).await {
+            Ok(Ok(found)) => Ok(self.response_api_from_entry(found)),
+            Ok(Err(_)) => Err(js_err(format!(
+                "waitForResponse failed for pattern \"{url_pattern}\": response waiter channel closed"
+            ))),
+            Err(_) => {
+                self.cancel_response_waiter(waiter_id).await;
+                Err(js_err(format!(
+                    "TimeoutError: waiting for response pattern \"{url_pattern}\" failed: timeout {timeout_ms}ms exceeded"
+                )))
+            }
+        }
+    }
+
+    async fn wait_for_request_pattern(
+        &self,
+        url_pattern: String,
+        timeout_ms: u64,
+    ) -> JsResult<RequestApi> {
+        let entries = self.ensure_request_capture().await?;
+        let baseline_len = entries.lock().await.len();
+        let waiter_id = self.allocate_waiter_id();
+        let (sender, receiver) = oneshot::channel();
+        self.register_request_waiter(waiter_id, url_pattern.clone(), sender)
+            .await;
+
+        if let Some(found) = entries
+            .lock()
+            .await
+            .iter()
+            .skip(baseline_len)
+            .find(|req| url_matches_pattern(&req.url, &url_pattern))
+            .cloned()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(REQUEST_CAPTURE_SETTLE_MS)).await;
+            let settled = Self::latest_request_entry(&entries, &found.request_id)
+                .await
+                .unwrap_or(found);
+            let _ = self
+                .fulfill_request_waiter(waiter_id, settled.clone())
+                .await;
+            return Ok(self.request_api_from_entry(settled));
+        }
+
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        match tokio::time::timeout(timeout, receiver).await {
+            Ok(Ok(found)) => Ok(self.request_api_from_entry(found)),
+            Ok(Err(_)) => Err(js_err(format!(
+                "waitForRequest failed for pattern \"{url_pattern}\": request waiter channel closed"
+            ))),
+            Err(_) => {
+                self.cancel_request_waiter(waiter_id).await;
+                Err(js_err(format!(
+                    "TimeoutError: waiting for request pattern \"{url_pattern}\" failed: timeout {timeout_ms}ms exceeded"
+                )))
+            }
+        }
+    }
+
     async fn refresh_page_handle(&self) -> Result<chromiumoxide::Page, String> {
         let (browser, target_id) = {
             let inner = self.inner.lock().await;
@@ -840,6 +924,12 @@ pub enum JsEvalResult {
     JsHandleResult(JsHandle),
     /// A DOM element remote object.
     ElementHandleResult(ElementHandle),
+    /// A page handle.
+    PageResult(PageApi),
+    /// A captured network request.
+    RequestResult(RequestApi),
+    /// A captured network response.
+    ResponseResult(ResponseApi),
     /// `undefined`.
     Undefined,
 }
@@ -856,6 +946,9 @@ impl JsEvalResult {
             JsEvalResult::ElementHandleResult(h) => {
                 format!("ElementHandle@{}", h.description)
             }
+            JsEvalResult::PageResult(_) => "Page".to_string(),
+            JsEvalResult::RequestResult(_) => "Request".to_string(),
+            JsEvalResult::ResponseResult(_) => "Response".to_string(),
             JsEvalResult::Undefined => "undefined".to_string(),
         }
     }
@@ -872,6 +965,13 @@ impl<'js> IntoJs<'js> for JsEvalResult {
             }
             JsEvalResult::ElementHandleResult(h) => {
                 Class::instance(ctx.clone(), h).map(|c| c.into_value())
+            }
+            JsEvalResult::PageResult(p) => Class::instance(ctx.clone(), p).map(|c| c.into_value()),
+            JsEvalResult::RequestResult(r) => {
+                Class::instance(ctx.clone(), r).map(|c| c.into_value())
+            }
+            JsEvalResult::ResponseResult(r) => {
+                Class::instance(ctx.clone(), r).map(|c| c.into_value())
             }
             JsEvalResult::Undefined => Ok(Value::new_undefined(ctx.clone())),
         }
@@ -1624,38 +1724,8 @@ impl PageApi {
         options: Opt<rquickjs::Value<'_>>,
     ) -> JsResult<ResponseApi> {
         let timeout_ms = parse_timeout_option(options.0.as_ref())?;
-        let entries = self.ensure_response_capture().await?;
-        let baseline_len = entries.lock().await.len();
-        let waiter_id = self.allocate_waiter_id();
-        let (sender, receiver) = oneshot::channel();
-        self.register_response_waiter(waiter_id, url_pattern.clone(), sender)
-            .await;
-
-        if let Some(found) = entries
-            .lock()
+        self.wait_for_response_pattern(url_pattern, timeout_ms)
             .await
-            .iter()
-            .skip(baseline_len)
-            .find(|req| url_matches_pattern(&req.url, &url_pattern))
-            .cloned()
-        {
-            let _ = self.fulfill_response_waiter(waiter_id, found.clone()).await;
-            return Ok(self.response_api_from_entry(found));
-        }
-
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-        match tokio::time::timeout(timeout, receiver).await {
-            Ok(Ok(found)) => Ok(self.response_api_from_entry(found)),
-            Ok(Err(_)) => Err(js_err(format!(
-                "waitForResponse failed for pattern \"{url_pattern}\": response waiter channel closed"
-            ))),
-            Err(_) => {
-                self.cancel_response_waiter(waiter_id).await;
-                Err(js_err(format!(
-                    "TimeoutError: waiting for response pattern \"{url_pattern}\" failed: timeout {timeout_ms}ms exceeded"
-                )))
-            }
-        }
     }
 
     #[qjs(rename = "waitForRequest")]
@@ -1665,44 +1735,7 @@ impl PageApi {
         options: Opt<rquickjs::Value<'_>>,
     ) -> JsResult<RequestApi> {
         let timeout_ms = parse_timeout_option(options.0.as_ref())?;
-        let entries = self.ensure_request_capture().await?;
-        let baseline_len = entries.lock().await.len();
-        let waiter_id = self.allocate_waiter_id();
-        let (sender, receiver) = oneshot::channel();
-        self.register_request_waiter(waiter_id, url_pattern.clone(), sender)
-            .await;
-
-        if let Some(found) = entries
-            .lock()
-            .await
-            .iter()
-            .skip(baseline_len)
-            .find(|req| url_matches_pattern(&req.url, &url_pattern))
-            .cloned()
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(REQUEST_CAPTURE_SETTLE_MS)).await;
-            let settled = Self::latest_request_entry(&entries, &found.request_id)
-                .await
-                .unwrap_or(found);
-            let _ = self
-                .fulfill_request_waiter(waiter_id, settled.clone())
-                .await;
-            return Ok(self.request_api_from_entry(settled));
-        }
-
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-        match tokio::time::timeout(timeout, receiver).await {
-            Ok(Ok(found)) => Ok(self.request_api_from_entry(found)),
-            Ok(Err(_)) => Err(js_err(format!(
-                "waitForRequest failed for pattern \"{url_pattern}\": request waiter channel closed"
-            ))),
-            Err(_) => {
-                self.cancel_request_waiter(waiter_id).await;
-                Err(js_err(format!(
-                    "TimeoutError: waiting for request pattern \"{url_pattern}\" failed: timeout {timeout_ms}ms exceeded"
-                )))
-            }
-        }
+        self.wait_for_request_pattern(url_pattern, timeout_ms).await
     }
 
     /// List captured network requests as JSON.
@@ -1918,21 +1951,29 @@ impl PageApi {
 
     /// Playwright-style event waiter.
     ///
-    /// Currently supports only `popup`.
+    /// Currently supports `popup`, `request`, and `response`.
     #[qjs(rename = "waitForEvent")]
     pub async fn js_wait_for_event(
         &self,
         event: String,
         timeout_ms: Option<u64>,
-    ) -> JsResult<PageApi> {
+    ) -> JsResult<JsEvalResult> {
         let normalized = event.trim().to_ascii_lowercase();
-        if normalized != "popup" {
-            return Err(js_err(format!(
-                "waitForEvent currently supports only \"popup\" (got {event})"
-            )));
+        let timeout = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        match normalized.as_str() {
+            "popup" => Ok(JsEvalResult::PageResult(
+                self.wait_for_popup_page(timeout).await?,
+            )),
+            "request" => Ok(JsEvalResult::RequestResult(
+                self.wait_for_request_pattern("*".to_string(), timeout).await?,
+            )),
+            "response" => Ok(JsEvalResult::ResponseResult(
+                self.wait_for_response_pattern("*".to_string(), timeout).await?,
+            )),
+            _ => Err(js_err(format!(
+                "waitForEvent currently supports only \"popup\", \"request\", and \"response\" (got {event})"
+            ))),
         }
-        self.wait_for_popup_page(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS))
-            .await
     }
 
     /// Click an element matching the CSS selector.

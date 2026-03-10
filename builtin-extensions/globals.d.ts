@@ -148,7 +148,10 @@ interface PageApi {
     responsesReceived(): Promise<string>;
     clearNetworkRequests(): Promise<void>;
     waitForPopup(timeoutMs?: number): Promise<PageApi>;
-    waitForEvent(event: 'popup', timeoutMs?: number): Promise<PageApi>;
+    waitForEvent(
+        event: 'popup' | 'request' | 'response',
+        timeoutMs?: number,
+    ): Promise<PageApi | Request | Response>;
     /** @deprecated Removed. Use browser.pages(). */
     tabs(): Promise<never>;
     /** @deprecated Removed. Use browser.pages() and direct Page handles. */

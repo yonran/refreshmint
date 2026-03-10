@@ -134,7 +134,6 @@ pub async fn launch_browser(
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg("--disable-extensions")
-        .enable_request_intercept()
         .launch_timeout(std::time::Duration::from_secs(30));
 
     let force_headless = std::env::var_os("REFRESHMINT_BROWSER_HEADLESS").is_some();
