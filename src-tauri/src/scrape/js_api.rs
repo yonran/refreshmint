@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use base64::Engine;
 use rquickjs::class::Trace;
 use rquickjs::promise::MaybePromise;
 use rquickjs::{
@@ -26,6 +28,56 @@ const POLL_INTERVAL_MS: u64 = 100;
 const REQUEST_CAPTURE_SETTLE_MS: u64 = 25;
 const REQUEST_LINK_SETTLE_ATTEMPTS: usize = 8;
 const TAB_QUERY_TIMEOUT_MS: u64 = 5_000;
+const SCREENSHOT_PREPARE_STATE_KEY: &str = "__refreshmintScreenshotState";
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScreenshotClip {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScreenshotImageFormat {
+    Png,
+    Jpeg,
+}
+
+#[derive(Clone)]
+pub(crate) struct ParsedScreenshotOptions {
+    pub format: ScreenshotImageFormat,
+    pub quality: Option<i64>,
+    pub full_page: bool,
+    pub clip: Option<ScreenshotClip>,
+    pub omit_background: bool,
+    pub caret: String,
+    pub animations: String,
+    pub scale: String,
+    pub path: Option<String>,
+    pub style: Option<String>,
+    pub mask_color: String,
+    pub mask_locators: Vec<Locator>,
+}
+
+impl Default for ParsedScreenshotOptions {
+    fn default() -> Self {
+        Self {
+            format: ScreenshotImageFormat::Png,
+            quality: None,
+            full_page: false,
+            clip: None,
+            omit_background: false,
+            caret: "hide".to_string(),
+            animations: "allow".to_string(),
+            scale: "device".to_string(),
+            path: None,
+            style: None,
+            mask_color: "#FF00FF".to_string(),
+            mask_locators: Vec::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct GotoOptions {
@@ -1539,6 +1591,24 @@ impl ElementHandle {
             .as_ref()
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false))
+    }
+
+    pub async fn screenshot<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        options: Opt<Value<'js>>,
+    ) -> JsResult<TypedArray<'js, u8>> {
+        let parsed = parse_screenshot_options(options.0.as_ref(), false)?;
+        let (page, download_dir) = {
+            let inner = self.page_inner.lock().await;
+            (inner.page.clone(), inner.download_dir.clone())
+        };
+        let clip = screenshot_clip_for_object_id(&page, self.object_id.clone()).await?;
+        let path = resolve_screenshot_output_path(&download_dir, parsed.path.as_deref())?;
+        let bytes =
+            run_screenshot_capture(self.page_inner.clone(), &parsed, Some(clip), &[], path).await?;
+        TypedArray::new_copy(ctx, bytes)
+            .map_err(|e| js_err(format!("ElementHandle.screenshot failed: {e}")))
     }
 
     /// Return the first descendant element matching `selector`, or `null`.
@@ -3635,16 +3705,27 @@ impl PageApi {
             .map_err(|e| js_err(format!("$$({selector}) collect: {e}")))
     }
 
-    /// Take a screenshot and return the PNG bytes as a base64 string.
-    pub async fn screenshot(&self) -> JsResult<String> {
-        let inner = self.inner.lock().await;
-        use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotParams;
-        let screenshot = inner
-            .page
-            .execute(CaptureScreenshotParams::default())
-            .await
-            .map_err(|e| js_err(format!("screenshot failed: {e}")))?;
-        Ok(screenshot.result.data.into())
+    /// Take a screenshot and return image bytes as Uint8Array.
+    pub async fn screenshot<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        options: Opt<Value<'js>>,
+    ) -> JsResult<TypedArray<'js, u8>> {
+        let parsed = parse_screenshot_options(options.0.as_ref(), true)?;
+        let mask_clips = {
+            let mut clips = Vec::with_capacity(parsed.mask_locators.len());
+            for mask in &parsed.mask_locators {
+                clips.push(mask.screenshot_clip().await?);
+            }
+            clips
+        };
+        let path = {
+            let inner = self.inner.lock().await;
+            resolve_screenshot_output_path(&inner.download_dir, parsed.path.as_deref())?
+        };
+        let bytes =
+            run_screenshot_capture(self.inner.clone(), &parsed, None, &mask_clips, path).await?;
+        TypedArray::new_copy(ctx, bytes).map_err(|e| js_err(format!("Page.screenshot failed: {e}")))
     }
 
     /// Wait for the next download to complete and return its info.
@@ -5420,6 +5501,507 @@ fn parse_wait_for_event_options<'js>(
         timeout_ms: timeout.unwrap_or(DEFAULT_TIMEOUT_MS as i32).max(0) as u64,
         predicate,
     })
+}
+
+pub(crate) fn parse_screenshot_options(
+    option: Option<&Value<'_>>,
+    allow_full_page: bool,
+) -> JsResult<ParsedScreenshotOptions> {
+    let Some(option) = option else {
+        return Ok(ParsedScreenshotOptions::default());
+    };
+    let object = Object::from_value(option.clone())
+        .map_err(|_| js_err("screenshot options must be an object".to_string()))?;
+    let mut parsed = ParsedScreenshotOptions::default();
+
+    if let Some(type_name) = object
+        .get::<_, Option<String>>("type")
+        .map_err(|e| js_err(format!("invalid screenshot.type: {e}")))?
+    {
+        parsed.format = match type_name.as_str() {
+            "png" => ScreenshotImageFormat::Png,
+            "jpeg" => ScreenshotImageFormat::Jpeg,
+            other => {
+                return Err(js_err(format!(
+                    "Unknown screenshot type: {other}. Expected 'png' or 'jpeg'"
+                )))
+            }
+        };
+    }
+
+    parsed.quality = object
+        .get::<_, Option<i64>>("quality")
+        .map_err(|e| js_err(format!("invalid screenshot.quality: {e}")))?;
+    if parsed.quality.is_some() && parsed.format != ScreenshotImageFormat::Jpeg {
+        return Err(js_err(
+            "options.quality is unsupported for png screenshots".to_string(),
+        ));
+    }
+    if let Some(quality) = parsed.quality {
+        if !(0..=100).contains(&quality) {
+            return Err(js_err(format!(
+                "Expected screenshot quality to be between 0 and 100, got {quality}"
+            )));
+        }
+    }
+
+    parsed.full_page = object
+        .get::<_, Option<bool>>("fullPage")
+        .map_err(|e| js_err(format!("invalid screenshot.fullPage: {e}")))?
+        .unwrap_or(false);
+    if parsed.full_page && !allow_full_page {
+        return Err(js_err(
+            "options.fullPage is only supported for page screenshots".to_string(),
+        ));
+    }
+
+    if let Some(clip) = object
+        .get::<_, Option<Object<'_>>>("clip")
+        .map_err(|e| js_err(format!("invalid screenshot.clip: {e}")))?
+    {
+        let clip = ScreenshotClip {
+            x: clip
+                .get("x")
+                .map_err(|e| js_err(format!("invalid screenshot.clip.x: {e}")))?,
+            y: clip
+                .get("y")
+                .map_err(|e| js_err(format!("invalid screenshot.clip.y: {e}")))?,
+            width: clip
+                .get("width")
+                .map_err(|e| js_err(format!("invalid screenshot.clip.width: {e}")))?,
+            height: clip
+                .get("height")
+                .map_err(|e| js_err(format!("invalid screenshot.clip.height: {e}")))?,
+        };
+        if clip.width <= 0.0 || clip.height <= 0.0 {
+            return Err(js_err(
+                "Expected screenshot clip width and height to be greater than 0".to_string(),
+            ));
+        }
+        parsed.clip = Some(clip);
+    }
+
+    parsed.omit_background = object
+        .get::<_, Option<bool>>("omitBackground")
+        .map_err(|e| js_err(format!("invalid screenshot.omitBackground: {e}")))?
+        .unwrap_or(false);
+    parsed.caret = object
+        .get::<_, Option<String>>("caret")
+        .map_err(|e| js_err(format!("invalid screenshot.caret: {e}")))?
+        .unwrap_or_else(|| "hide".to_string());
+    if !matches!(parsed.caret.as_str(), "hide" | "initial") {
+        return Err(js_err(
+            "options.caret must be 'hide' or 'initial'".to_string(),
+        ));
+    }
+    parsed.animations = object
+        .get::<_, Option<String>>("animations")
+        .map_err(|e| js_err(format!("invalid screenshot.animations: {e}")))?
+        .unwrap_or_else(|| "allow".to_string());
+    if !matches!(parsed.animations.as_str(), "allow" | "disabled") {
+        return Err(js_err(
+            "options.animations must be 'allow' or 'disabled'".to_string(),
+        ));
+    }
+    parsed.scale = object
+        .get::<_, Option<String>>("scale")
+        .map_err(|e| js_err(format!("invalid screenshot.scale: {e}")))?
+        .unwrap_or_else(|| "device".to_string());
+    if !matches!(parsed.scale.as_str(), "device" | "css") {
+        return Err(js_err(
+            "options.scale must be 'device' or 'css'".to_string(),
+        ));
+    }
+    parsed.path = object
+        .get::<_, Option<String>>("path")
+        .map_err(|e| js_err(format!("invalid screenshot.path: {e}")))?;
+    parsed.style = object
+        .get::<_, Option<String>>("style")
+        .map_err(|e| js_err(format!("invalid screenshot.style: {e}")))?;
+    parsed.mask_color = object
+        .get::<_, Option<String>>("maskColor")
+        .map_err(|e| js_err(format!("invalid screenshot.maskColor: {e}")))?
+        .unwrap_or_else(|| "#FF00FF".to_string());
+
+    if let Some(mask_value) = object
+        .get::<_, Option<Value<'_>>>("mask")
+        .map_err(|e| js_err(format!("invalid screenshot.mask: {e}")))?
+    {
+        let mask_obj = Object::from_value(mask_value)
+            .map_err(|_| js_err("screenshot.mask must be an array of Locator".to_string()))?;
+        let len = mask_obj
+            .get::<_, i32>("length")
+            .map_err(|e| js_err(format!("invalid screenshot.mask length: {e}")))?;
+        for index in 0..len {
+            let value = mask_obj
+                .get::<_, Value<'_>>(index)
+                .map_err(|e| js_err(format!("invalid screenshot.mask[{index}]: {e}")))?;
+            let class = Class::<Locator>::from_value(&value).map_err(|_| {
+                js_err(format!(
+                    "screenshot.mask[{index}] must be a Locator from this runtime"
+                ))
+            })?;
+            parsed.mask_locators.push(class.borrow().clone());
+        }
+    }
+
+    Ok(parsed)
+}
+
+pub(crate) fn resolve_screenshot_output_path(
+    download_dir: &Path,
+    path: Option<&str>,
+) -> JsResult<Option<PathBuf>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let candidate = PathBuf::from(path);
+    if candidate.is_absolute() {
+        return Err(js_err(
+            "screenshot.path must be relative to the browser download directory".to_string(),
+        ));
+    }
+    if candidate
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(js_err(
+            "screenshot.path must not contain parent directory traversals".to_string(),
+        ));
+    }
+    let resolved = download_dir.join(&candidate);
+    if !resolved.starts_with(download_dir) {
+        return Err(js_err(
+            "screenshot.path must stay within the browser download directory".to_string(),
+        ));
+    }
+    Ok(Some(resolved))
+}
+
+fn rect_to_viewport(
+    clip: &ScreenshotClip,
+    scale: f64,
+) -> JsResult<chromiumoxide::cdp::browser_protocol::page::Viewport> {
+    chromiumoxide::cdp::browser_protocol::page::Viewport::builder()
+        .x(clip.x)
+        .y(clip.y)
+        .width(clip.width)
+        .height(clip.height)
+        .scale(scale)
+        .build()
+        .map_err(|e| js_err(format!("invalid screenshot viewport: {e}")))
+}
+
+fn decode_binary_base64(binary: &chromiumoxide::Binary) -> JsResult<Vec<u8>> {
+    let encoded: String = binary.clone().into();
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded.as_bytes())
+        .map_err(|e| js_err(format!("screenshot decode failed: {e}")))
+}
+
+async fn current_scroll_offsets(page: &chromiumoxide::Page) -> JsResult<(f64, f64)> {
+    use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+    let eval = EvaluateParams::builder()
+        .expression("({ x: window.scrollX || 0, y: window.scrollY || 0 })".to_string())
+        .await_promise(false)
+        .return_by_value(true)
+        .build()
+        .map_err(|e| js_err(format!("screenshot scroll params failed: {e}")))?;
+    let result = page
+        .evaluate_expression(eval)
+        .await
+        .map_err(|e| js_err(format!("screenshot scroll eval failed: {e}")))?;
+    let value = result
+        .value()
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    Ok((
+        value
+            .get("x")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0),
+        value
+            .get("y")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0),
+    ))
+}
+
+pub(crate) async fn screenshot_clip_for_object_id(
+    page: &chromiumoxide::Page,
+    object_id: String,
+) -> JsResult<ScreenshotClip> {
+    use chromiumoxide::cdp::browser_protocol::dom::GetContentQuadsParams;
+    use chromiumoxide::layout::ElementQuad;
+    let quads = page
+        .execute(
+            GetContentQuadsParams::builder()
+                .object_id(object_id)
+                .build(),
+        )
+        .await
+        .map_err(|e| js_err(format!("screenshot clip failed: {e}")))?;
+    quads
+        .quads
+        .iter()
+        .filter(|q| q.inner().len() == 8)
+        .map(ElementQuad::from_quad)
+        .filter(|q| q.quad_area() > 1.)
+        .map(|q| {
+            let min_x = q
+                .top_left
+                .x
+                .min(q.top_right.x)
+                .min(q.bottom_left.x)
+                .min(q.bottom_right.x);
+            let max_x = q
+                .top_left
+                .x
+                .max(q.top_right.x)
+                .max(q.bottom_left.x)
+                .max(q.bottom_right.x);
+            let min_y = q
+                .top_left
+                .y
+                .min(q.top_right.y)
+                .min(q.bottom_left.y)
+                .min(q.bottom_right.y);
+            let max_y = q
+                .top_left
+                .y
+                .max(q.top_right.y)
+                .max(q.bottom_left.y)
+                .max(q.bottom_right.y);
+            ScreenshotClip {
+                x: min_x,
+                y: min_y,
+                width: max_x - min_x,
+                height: max_y - min_y,
+            }
+        })
+        .next()
+        .ok_or_else(|| js_err("screenshot failed: element not visible in viewport".to_string()))
+}
+
+async fn install_screenshot_overrides(
+    page: &chromiumoxide::Page,
+    options: &ParsedScreenshotOptions,
+    mask_clips: &[ScreenshotClip],
+) -> JsResult<()> {
+    use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+    let (scroll_x, scroll_y) = current_scroll_offsets(page).await?;
+    let mask_rects = mask_clips
+        .iter()
+        .map(|clip| {
+            serde_json::json!({
+                "left": clip.x + scroll_x,
+                "top": clip.y + scroll_y,
+                "width": clip.width,
+                "height": clip.height,
+            })
+        })
+        .collect::<Vec<_>>();
+    let style_json = serde_json::to_string(&options.style.clone().unwrap_or_default())
+        .unwrap_or_else(|_| "\"\"".to_string());
+    let mask_color_json =
+        serde_json::to_string(&options.mask_color).unwrap_or_else(|_| "\"#FF00FF\"".to_string());
+    let mask_rects_json = serde_json::to_string(&mask_rects).unwrap_or_else(|_| "[]".to_string());
+    let disable_animations = options.animations == "disabled";
+    let hide_caret = options.caret == "hide";
+    let expression = format!(
+        r#"(function() {{
+            const prev = window[{key:?}];
+            if (prev && prev.cleanup) prev.cleanup();
+            const styleEl = document.createElement('style');
+            styleEl.setAttribute('data-refreshmint-screenshot', 'true');
+            let css = '';
+            if ({disable_animations}) {{
+              css += '*,*::before,*::after{{animation:none!important;transition:none!important;}}';
+            }}
+            if ({hide_caret}) {{
+              css += '*,input,textarea{{caret-color:transparent!important;}}';
+            }}
+            const extraStyle = {style_json};
+            if (extraStyle) css += extraStyle;
+            styleEl.textContent = css;
+            document.documentElement.appendChild(styleEl);
+
+            const overlayRoot = document.createElement('div');
+            overlayRoot.setAttribute('data-refreshmint-screenshot-mask-root', 'true');
+            overlayRoot.style.position = 'absolute';
+            overlayRoot.style.left = '0px';
+            overlayRoot.style.top = '0px';
+            overlayRoot.style.width = Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0) + 'px';
+            overlayRoot.style.height = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0) + 'px';
+            overlayRoot.style.pointerEvents = 'none';
+            overlayRoot.style.zIndex = '2147483647';
+            for (const rect of {mask_rects_json}) {{
+              const mask = document.createElement('div');
+              mask.style.position = 'absolute';
+              mask.style.left = rect.left + 'px';
+              mask.style.top = rect.top + 'px';
+              mask.style.width = rect.width + 'px';
+              mask.style.height = rect.height + 'px';
+              mask.style.background = {mask_color_json};
+              overlayRoot.appendChild(mask);
+            }}
+            if (overlayRoot.childNodes.length) document.body.appendChild(overlayRoot);
+            window[{key:?}] = {{
+              cleanup() {{
+                styleEl.remove();
+                overlayRoot.remove();
+                delete window[{key:?}];
+              }}
+            }};
+            return true;
+        }})()"#,
+        key = SCREENSHOT_PREPARE_STATE_KEY,
+        disable_animations = if disable_animations { "true" } else { "false" },
+        hide_caret = if hide_caret { "true" } else { "false" },
+    );
+    let eval = EvaluateParams::builder()
+        .expression(expression)
+        .await_promise(false)
+        .return_by_value(true)
+        .build()
+        .map_err(|e| js_err(format!("screenshot override params failed: {e}")))?;
+    page.execute(eval)
+        .await
+        .map_err(|e| js_err(format!("screenshot override failed: {e}")))?;
+    Ok(())
+}
+
+async fn clear_screenshot_overrides(page: &chromiumoxide::Page) -> JsResult<()> {
+    use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+    let expression = format!(
+        r#"(function() {{
+            const state = window[{key:?}];
+            if (state && state.cleanup) state.cleanup();
+            return true;
+        }})()"#,
+        key = SCREENSHOT_PREPARE_STATE_KEY,
+    );
+    let eval = EvaluateParams::builder()
+        .expression(expression)
+        .await_promise(false)
+        .return_by_value(true)
+        .build()
+        .map_err(|e| js_err(format!("clear screenshot override params failed: {e}")))?;
+    page.execute(eval)
+        .await
+        .map_err(|e| js_err(format!("clear screenshot override failed: {e}")))?;
+    Ok(())
+}
+
+pub(crate) async fn run_screenshot_capture(
+    page_inner: Arc<Mutex<PageInner>>,
+    options: &ParsedScreenshotOptions,
+    clip_override: Option<ScreenshotClip>,
+    mask_clips: &[ScreenshotClip],
+    output_path: Option<PathBuf>,
+) -> JsResult<Vec<u8>> {
+    use chromiumoxide::cdp::browser_protocol::dom::Rgba;
+    use chromiumoxide::cdp::browser_protocol::emulation::SetDefaultBackgroundColorOverrideParams;
+    use chromiumoxide::cdp::browser_protocol::page::{
+        CaptureScreenshotFormat, CaptureScreenshotParams, GetLayoutMetricsParams,
+    };
+
+    let (page, download_dir) = {
+        let inner = page_inner.lock().await;
+        (inner.page.clone(), inner.download_dir.clone())
+    };
+    if let Some(path) = &output_path {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| js_err(format!("screenshot mkdir failed: {e}")))?;
+        } else {
+            fs::create_dir_all(&download_dir)
+                .map_err(|e| js_err(format!("screenshot mkdir failed: {e}")))?;
+        }
+    }
+
+    install_screenshot_overrides(&page, options, mask_clips).await?;
+    let mut background_overridden = false;
+    if options.omit_background && options.format == ScreenshotImageFormat::Png {
+        let rgba = Rgba::builder()
+            .r(0)
+            .g(0)
+            .b(0)
+            .a(0.0)
+            .build()
+            .map_err(|e| js_err(format!("omitBackground color failed: {e}")))?;
+        page.execute(
+            SetDefaultBackgroundColorOverrideParams::builder()
+                .color(rgba)
+                .build(),
+        )
+        .await
+        .map_err(|e| js_err(format!("omitBackground failed: {e}")))?;
+        background_overridden = true;
+    }
+
+    let capture_result = async {
+        let requested_clip =
+            if let Some(clip) = clip_override.clone().or_else(|| options.clip.clone()) {
+                clip
+            } else if options.full_page {
+                let metrics = page
+                    .execute(GetLayoutMetricsParams {})
+                    .await
+                    .map_err(|e| js_err(format!("fullPage layout metrics failed: {e}")))?;
+                ScreenshotClip {
+                    x: metrics.result.css_content_size.x,
+                    y: metrics.result.css_content_size.y,
+                    width: metrics.result.css_content_size.width,
+                    height: metrics.result.css_content_size.height,
+                }
+            } else {
+                let metrics = page
+                    .execute(GetLayoutMetricsParams {})
+                    .await
+                    .map_err(|e| js_err(format!("layout metrics failed: {e}")))?;
+                ScreenshotClip {
+                    x: metrics.result.css_visual_viewport.page_x,
+                    y: metrics.result.css_visual_viewport.page_y,
+                    width: metrics.result.css_visual_viewport.client_width,
+                    height: metrics.result.css_visual_viewport.client_height,
+                }
+            };
+        let mut builder = CaptureScreenshotParams::builder()
+            .format(match options.format {
+                ScreenshotImageFormat::Png => CaptureScreenshotFormat::Png,
+                ScreenshotImageFormat::Jpeg => CaptureScreenshotFormat::Jpeg,
+            })
+            .from_surface(true)
+            .capture_beyond_viewport(
+                options.full_page || clip_override.is_some() || options.clip.is_some(),
+            );
+        if let Some(quality) = options.quality {
+            builder = builder.quality(quality);
+        }
+        let _scale_mode = &options.scale;
+        builder = builder.clip(rect_to_viewport(&requested_clip, 1.0)?);
+        let screenshot = page
+            .execute(builder.build())
+            .await
+            .map_err(|e| js_err(format!("screenshot failed: {e}")))?;
+        let bytes = decode_binary_base64(&screenshot.result.data)?;
+        if let Some(path) = output_path {
+            fs::write(&path, &bytes)
+                .map_err(|e| js_err(format!("screenshot write failed: {e}")))?;
+        }
+        Ok::<Vec<u8>, rquickjs::Error>(bytes)
+    }
+    .await;
+
+    if background_overridden {
+        let _ = page
+            .execute(SetDefaultBackgroundColorOverrideParams::builder().build())
+            .await;
+    }
+    let _ = clear_screenshot_overrides(&page).await;
+    capture_result
 }
 
 fn headers_to_map(
@@ -7846,5 +8428,32 @@ mod tests {
         assert!(listed.contains(&second));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_screenshot_output_path_rejects_absolute_paths() {
+        let root = PathBuf::from("/tmp/downloads");
+        let err = resolve_screenshot_output_path(&root, Some("/tmp/elsewhere/out.png"))
+            .err()
+            .unwrap_or_else(|| panic!("absolute path should fail"));
+        assert!(err.to_string().contains("relative"));
+    }
+
+    #[test]
+    fn resolve_screenshot_output_path_rejects_parent_traversal() {
+        let root = PathBuf::from("/tmp/downloads");
+        let err = resolve_screenshot_output_path(&root, Some("../escape.png"))
+            .err()
+            .unwrap_or_else(|| panic!("parent traversal should fail"));
+        assert!(err.to_string().contains("parent directory"));
+    }
+
+    #[test]
+    fn resolve_screenshot_output_path_joins_relative_paths_under_download_dir() {
+        let root = PathBuf::from("/tmp/downloads");
+        let path = resolve_screenshot_output_path(&root, Some("nested/out.png"))
+            .unwrap_or_else(|err| panic!("relative path should work: {err}"))
+            .unwrap_or_else(|| panic!("path should be present"));
+        assert_eq!(path, root.join("nested/out.png"));
     }
 }

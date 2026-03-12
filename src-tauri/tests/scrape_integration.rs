@@ -241,6 +241,50 @@ try {
 }
 "##;
 
+const SCREENSHOT_DRIVER_SOURCE: &str = r##"
+try {
+  refreshmint.log("integration screenshot start");
+  const html = encodeURIComponent(`
+    <style>
+      body { margin: 0; background: white; }
+      #target {
+        width: 120px;
+        height: 80px;
+        margin: 24px;
+        background: rgb(255, 0, 0);
+        color: white;
+      }
+    </style>
+    <div id="target">shot</div>
+  `);
+  await page.goto(`data:text/html,${html}`);
+  await page.waitForLoadState("domcontentloaded", 10000);
+
+  const pageShot = await page.screenshot({ path: "shots/page.png" });
+  if (!(pageShot instanceof Uint8Array) || pageShot.length === 0) {
+    throw new Error("page.screenshot did not return Uint8Array bytes");
+  }
+
+  const locatorShot = await page.locator("#target").screenshot({ path: "shots/locator.png" });
+  if (!(locatorShot instanceof Uint8Array) || locatorShot.length === 0) {
+    throw new Error("locator.screenshot did not return Uint8Array bytes");
+  }
+
+  const handle = await page.evaluate("document.getElementById('target')");
+  const handleShot = await handle.screenshot({ type: "jpeg", quality: 80, path: "shots/handle.jpeg" });
+  if (!(handleShot instanceof Uint8Array) || handleShot.length === 0) {
+    throw new Error("elementHandle.screenshot did not return Uint8Array bytes");
+  }
+
+  await refreshmint.saveResource("screenshot-api.bin", [111, 107]);
+  refreshmint.log("integration screenshot done");
+} catch (e) {
+  const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+  refreshmint.log("integration screenshot error: " + msg);
+  throw e;
+}
+"##;
+
 const NETWORK_DRIVER_SOURCE: &str = r##"
 try {
   refreshmint.log("network api test start");
@@ -868,6 +912,21 @@ impl Drop for HttpFixtureServer {
     }
 }
 
+fn find_file_named(root: &Path, target_name: &str) -> Result<Option<PathBuf>, Box<dyn Error>> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file_named(&path, target_name)? {
+                return Ok(Some(found));
+            }
+        } else if path.file_name().and_then(|name| name.to_str()) == Some(target_name) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 #[test]
 #[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
 fn scrape_smoke_driver_writes_output() -> Result<(), Box<dyn Error>> {
@@ -974,6 +1033,63 @@ fn scrape_popup_wait_for_event_switches_tab() -> Result<(), Box<dyn Error>> {
         .join("popup.bin");
     let bytes = fs::read(&output_file)?;
     assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn scrape_screenshot_api_returns_bytes_and_writes_paths() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping screenshot scrape test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let sandbox = TestSandbox::new("scrape-screenshot")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = driver_path.parent().ok_or("driver path has no parent")?;
+    fs::create_dir_all(driver_parent)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
+    fs::write(&driver_path, SCREENSHOT_DRIVER_SOURCE)?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        login_name: LOGIN_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir.clone()),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    scrape::run_scrape(config)?;
+
+    let output_file = ledger_dir
+        .join("cache")
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("screenshot-api.bin");
+    assert_eq!(fs::read(&output_file)?, b"ok");
+
+    let downloads_root = profile_dir.join("downloads");
+    let page_png = find_file_named(&downloads_root, "page.png")?
+        .ok_or("page screenshot path was not written")?;
+    let locator_png = find_file_named(&downloads_root, "locator.png")?
+        .ok_or("locator screenshot path was not written")?;
+    let handle_jpeg = find_file_named(&downloads_root, "handle.jpeg")?
+        .ok_or("elementHandle screenshot path was not written")?;
+
+    assert!(!fs::read(&page_png)?.is_empty());
+    assert!(!fs::read(&locator_png)?.is_empty());
+    assert!(!fs::read(&handle_jpeg)?.is_empty());
 
     Ok(())
 }

@@ -7,8 +7,9 @@ use chromiumoxide::layout::ElementQuad;
 use rquickjs::{class::Trace, function::Opt, JsLifetime, Result as JsResult, Value};
 
 use super::js_api::{
-    js_err, resolve_secret_if_applicable, scrub_known_secrets, stringify_evaluation_result,
-    wait_for_frame_execution_context, PageInner,
+    js_err, parse_screenshot_options, resolve_screenshot_output_path, resolve_secret_if_applicable,
+    run_screenshot_capture, screenshot_clip_for_object_id, scrub_known_secrets,
+    stringify_evaluation_result, wait_for_frame_execution_context, PageInner, ScreenshotClip,
 };
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -526,7 +527,7 @@ fn debug_selector_string(steps: &[LocatorStep]) -> String {
 }
 
 #[rquickjs::class]
-#[derive(Trace)]
+#[derive(Trace, Clone)]
 pub struct Locator {
     #[qjs(skip_trace)]
     pub(crate) inner: Arc<Mutex<PageInner>>,
@@ -553,6 +554,52 @@ impl Locator {
             inner,
             steps: vec![step],
         }
+    }
+
+    pub(crate) async fn resolve_single_element_object_id(&self) -> JsResult<String> {
+        let inner = self.inner.lock().await;
+        let context_id = if let Some(frame_id) = &inner.target_frame_id {
+            Some(
+                wait_for_frame_execution_context(&inner.page, frame_id.clone())
+                    .await
+                    .map_err(|e| js_err(format!("locator resolve element context failed: {e}")))?,
+            )
+        } else {
+            None
+        };
+
+        let steps_json = serde_json::to_string(&self.steps).unwrap_or_default();
+        let expression = format!(
+            r#"(async (steps) => {{
+                const els = await resolveLocator(steps);
+                if (els.length === 0) throw new Error('Element not found');
+                if (els.length > 1) throw new Error('Strict mode violation: ' + els.length + ' elements found');
+                return els[0];
+            }})({steps_json})"#
+        );
+        let full_expression = format!("(() => {{ {RESOLVER_JS} return {expression} }})()");
+
+        let mut builder = EvaluateParams::builder()
+            .expression(full_expression)
+            .await_promise(true)
+            .return_by_value(false);
+        if let Some(context_id) = context_id {
+            builder = builder.context_id(context_id);
+        }
+        let eval = builder
+            .build()
+            .map_err(|e| js_err(format!("locator resolve element params failed: {e}")))?;
+        let result = inner
+            .page
+            .evaluate_expression(eval)
+            .await
+            .map_err(|e| js_err(format!("locator resolve element failed: {e}")))?;
+        result
+            .object()
+            .object_id
+            .clone()
+            .map(|id| id.as_ref().to_string())
+            .ok_or_else(|| js_err("locator resolved to null".to_string()))
     }
 }
 
@@ -898,9 +945,39 @@ impl Locator {
 
         self.ensure_element_state(&state, timeout).await
     }
+
+    pub async fn screenshot<'js>(
+        &self,
+        ctx: rquickjs::Ctx<'js>,
+        options: Opt<Value<'js>>,
+    ) -> JsResult<rquickjs::TypedArray<'js, u8>> {
+        let parsed = parse_screenshot_options(options.0.as_ref(), false)?;
+        let clip = self.screenshot_clip().await?;
+        let mut mask_clips = Vec::with_capacity(parsed.mask_locators.len());
+        for mask in &parsed.mask_locators {
+            mask_clips.push(mask.screenshot_clip().await?);
+        }
+        let path = {
+            let inner = self.inner.lock().await;
+            resolve_screenshot_output_path(&inner.download_dir, parsed.path.as_deref())?
+        };
+        let bytes =
+            run_screenshot_capture(self.inner.clone(), &parsed, Some(clip), &mask_clips, path)
+                .await?;
+        rquickjs::TypedArray::new_copy(ctx, bytes)
+            .map_err(|e| js_err(format!("Locator.screenshot failed: {e}")))
+    }
 }
 
 impl Locator {
+    pub(crate) async fn screenshot_clip(&self) -> JsResult<ScreenshotClip> {
+        self.ensure_element_state("visible", DEFAULT_TIMEOUT_MS)
+            .await?;
+        let object_id = self.resolve_single_element_object_id().await?;
+        let inner = self.inner.lock().await;
+        screenshot_clip_for_object_id(&inner.page, object_id).await
+    }
+
     /// Injects the `resolveLocator` helper function and evaluates the expression.
     async fn evaluate_internal_with_resolver(&self, expression: String) -> JsResult<String> {
         let full_expression = format!("(() => {{ {RESOLVER_JS} return {expression} }})()");

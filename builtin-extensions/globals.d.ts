@@ -21,6 +21,28 @@ interface ByRoleOptions {
     selected?: boolean;
 }
 
+type ScreenshotClip = {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+};
+
+type ScreenshotOptions = {
+    type?: 'png' | 'jpeg';
+    quality?: number;
+    fullPage?: boolean;
+    clip?: ScreenshotClip;
+    omitBackground?: boolean;
+    caret?: 'hide' | 'initial';
+    animations?: 'disabled' | 'allow';
+    scale?: 'css' | 'device';
+    mask?: Locator[];
+    maskColor?: string;
+    style?: string;
+    path?: string;
+};
+
 type RequestUrlMatcher =
     | string
     | RegExp
@@ -88,6 +110,9 @@ interface Locator {
     inputValue(options?: { timeout?: number } | number): Promise<string>;
     isVisible(): Promise<boolean>;
     isEnabled(): Promise<boolean>;
+    screenshot(
+        options?: Omit<ScreenshotOptions, 'fullPage' | 'clip'>,
+    ): Promise<Uint8Array>;
     wait_for(options?: {
         state?: 'attached' | 'detached' | 'visible' | 'hidden';
         timeout?: number;
@@ -107,6 +132,9 @@ interface ElementHandle extends JSHandle {
     innerText(): Promise<string | null>;
     getAttribute(name: string): Promise<string | null>;
     isVisible(): Promise<boolean>;
+    screenshot(
+        options?: Omit<ScreenshotOptions, 'fullPage' | 'clip'>,
+    ): Promise<Uint8Array>;
     $(selector: string): Promise<ElementHandle | null>;
     $$(selector: string): Promise<ElementHandle[]>;
 }
@@ -232,7 +260,7 @@ interface PageApi {
     lastDialog(): Promise<string>;
     setPopupHandler(mode: 'ignore' | 'same_tab'): Promise<void>;
     popupEvents(): Promise<string>;
-    screenshot(): Promise<string>;
+    screenshot(options?: ScreenshotOptions): Promise<Uint8Array>;
     waitForDownload(timeoutMs?: number): Promise<PageDownload>;
 }
 
