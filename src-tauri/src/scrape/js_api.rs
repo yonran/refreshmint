@@ -29,6 +29,8 @@ const REQUEST_CAPTURE_SETTLE_MS: u64 = 25;
 const REQUEST_LINK_SETTLE_ATTEMPTS: usize = 8;
 const TAB_QUERY_TIMEOUT_MS: u64 = 5_000;
 const SCREENSHOT_PREPARE_STATE_KEY: &str = "__refreshmintScreenshotState";
+const SCREENSHOT_CONTEXT_RETRY_ATTEMPTS: usize = 10;
+const SCREENSHOT_CONTEXT_RETRY_MS: u64 = 100;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ScreenshotClip {
@@ -139,6 +141,13 @@ fn is_browser_error_url(url: &str) -> bool {
 fn is_cdp_request_timeout(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("request timed out") || (lower.contains("timeout") && lower.contains("request"))
+}
+
+fn is_missing_execution_context_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("cannot find context with specified id")
+        || lower.contains("context with specified id")
+        || lower.contains("execution context was destroyed")
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -5701,16 +5710,38 @@ fn decode_binary_base64(binary: &chromiumoxide::Binary) -> JsResult<Vec<u8>> {
 
 async fn current_scroll_offsets(page: &chromiumoxide::Page) -> JsResult<(f64, f64)> {
     use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
-    let eval = EvaluateParams::builder()
-        .expression("({ x: window.scrollX || 0, y: window.scrollY || 0 })".to_string())
-        .await_promise(false)
-        .return_by_value(true)
-        .build()
-        .map_err(|e| js_err(format!("screenshot scroll params failed: {e}")))?;
-    let result = page
-        .evaluate_expression(eval)
-        .await
-        .map_err(|e| js_err(format!("screenshot scroll eval failed: {e}")))?;
+    let expression = "({ x: window.scrollX || 0, y: window.scrollY || 0 })".to_string();
+    let mut last_error = None;
+    let result = loop {
+        let eval = EvaluateParams::builder()
+            .expression(expression.clone())
+            .await_promise(false)
+            .return_by_value(true)
+            .build()
+            .map_err(|e| js_err(format!("screenshot scroll params failed: {e}")))?;
+        match page.evaluate_expression(eval).await {
+            Ok(result) => break result,
+            Err(err) => {
+                let err_text = err.to_string();
+                if !is_missing_execution_context_error(&err_text) {
+                    return Err(js_err(format!("screenshot scroll eval failed: {err}")));
+                }
+                let attempts = last_error
+                    .as_ref()
+                    .map(|(attempts, _): &(usize, String)| *attempts)
+                    .unwrap_or(0);
+                if attempts + 1 >= SCREENSHOT_CONTEXT_RETRY_ATTEMPTS {
+                    let message = last_error.map(|(_, message)| message).unwrap_or(err_text);
+                    return Err(js_err(format!("screenshot scroll eval failed: {message}")));
+                }
+                last_error = Some((attempts + 1, err_text));
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    SCREENSHOT_CONTEXT_RETRY_MS,
+                ))
+                .await;
+            }
+        }
+    };
     let value = result
         .value()
         .and_then(serde_json::Value::as_object)
@@ -5860,15 +5891,32 @@ async fn install_screenshot_overrides(
         disable_animations = if disable_animations { "true" } else { "false" },
         hide_caret = if hide_caret { "true" } else { "false" },
     );
-    let eval = EvaluateParams::builder()
-        .expression(expression)
-        .await_promise(false)
-        .return_by_value(true)
-        .build()
-        .map_err(|e| js_err(format!("screenshot override params failed: {e}")))?;
-    page.execute(eval)
-        .await
-        .map_err(|e| js_err(format!("screenshot override failed: {e}")))?;
+    let mut last_error = None;
+    for attempt in 0..SCREENSHOT_CONTEXT_RETRY_ATTEMPTS {
+        let eval = EvaluateParams::builder()
+            .expression(expression.clone())
+            .await_promise(false)
+            .return_by_value(true)
+            .build()
+            .map_err(|e| js_err(format!("screenshot override params failed: {e}")))?;
+        match page.execute(eval).await {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                let err_text = err.to_string();
+                if !is_missing_execution_context_error(&err_text)
+                    || attempt + 1 == SCREENSHOT_CONTEXT_RETRY_ATTEMPTS
+                {
+                    let message = last_error.unwrap_or(err_text);
+                    return Err(js_err(format!("screenshot override failed: {message}")));
+                }
+                last_error = Some(err_text);
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    SCREENSHOT_CONTEXT_RETRY_MS,
+                ))
+                .await;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -5882,15 +5930,29 @@ async fn clear_screenshot_overrides(page: &chromiumoxide::Page) -> JsResult<()> 
         }})()"#,
         key = SCREENSHOT_PREPARE_STATE_KEY,
     );
-    let eval = EvaluateParams::builder()
-        .expression(expression)
-        .await_promise(false)
-        .return_by_value(true)
-        .build()
-        .map_err(|e| js_err(format!("clear screenshot override params failed: {e}")))?;
-    page.execute(eval)
-        .await
-        .map_err(|e| js_err(format!("clear screenshot override failed: {e}")))?;
+    for attempt in 0..SCREENSHOT_CONTEXT_RETRY_ATTEMPTS {
+        let eval = EvaluateParams::builder()
+            .expression(expression.clone())
+            .await_promise(false)
+            .return_by_value(true)
+            .build()
+            .map_err(|e| js_err(format!("clear screenshot override params failed: {e}")))?;
+        match page.execute(eval).await {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                let err_text = err.to_string();
+                if !is_missing_execution_context_error(&err_text)
+                    || attempt + 1 == SCREENSHOT_CONTEXT_RETRY_ATTEMPTS
+                {
+                    return Err(js_err(format!("clear screenshot override failed: {err}")));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    SCREENSHOT_CONTEXT_RETRY_MS,
+                ))
+                .await;
+            }
+        }
+    }
     Ok(())
 }
 
