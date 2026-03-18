@@ -9,7 +9,7 @@ use rquickjs::{class::Trace, function::Opt, JsLifetime, Result as JsResult, Valu
 use super::js_api::{
     js_err, parse_screenshot_options, resolve_screenshot_output_path, resolve_secret_if_applicable,
     run_screenshot_capture, screenshot_clip_for_object_id, scrub_known_secrets,
-    stringify_evaluation_result, wait_for_frame_execution_context, PageInner, ScreenshotClip,
+    stringify_evaluation_result, wait_for_frame_execution_target, PageInner, ScreenshotClip,
 };
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -558,11 +558,11 @@ impl Locator {
 
     pub(crate) async fn resolve_single_element_object_id(&self) -> JsResult<String> {
         let inner = self.inner.lock().await;
-        let context_id = if let Some(frame_id) = &inner.target_frame_id {
+        let execution_target = if let Some(frame_id) = &inner.target_frame_id {
             Some(
-                wait_for_frame_execution_context(&inner.page, frame_id.clone())
+                wait_for_frame_execution_target(&inner.page, frame_id.clone())
                     .await
-                    .map_err(|e| js_err(format!("locator resolve element context failed: {e}")))?,
+                    .map_err(|e| js_err(format!("locator resolve element target failed: {e}")))?,
             )
         } else {
             None
@@ -583,17 +583,25 @@ impl Locator {
             .expression(full_expression)
             .await_promise(true)
             .return_by_value(false);
-        if let Some(context_id) = context_id {
-            builder = builder.context_id(context_id);
+        if let Some((context_id, _)) = execution_target.as_ref() {
+            builder = builder.context_id(*context_id);
         }
         let eval = builder
             .build()
             .map_err(|e| js_err(format!("locator resolve element params failed: {e}")))?;
-        let result = inner
-            .page
-            .evaluate_expression(eval)
-            .await
-            .map_err(|e| js_err(format!("locator resolve element failed: {e}")))?;
+        let result = if let Some((_, session_id)) = execution_target {
+            inner
+                .page
+                .evaluate_expression_with_session(eval, session_id)
+                .await
+                .map_err(|e| js_err(format!("locator resolve element failed: {e}")))?
+        } else {
+            inner
+                .page
+                .evaluate_expression(eval)
+                .await
+                .map_err(|e| js_err(format!("locator resolve element failed: {e}")))?
+        };
         result
             .object()
             .object_id
@@ -674,11 +682,11 @@ impl Locator {
         let inner = self.inner.lock().await;
 
         // A. Determine frame execution context.
-        let context_id = if let Some(frame_id) = &inner.target_frame_id {
+        let execution_target = if let Some(frame_id) = &inner.target_frame_id {
             Some(
-                wait_for_frame_execution_context(&inner.page, frame_id.clone())
+                wait_for_frame_execution_target(&inner.page, frame_id.clone())
                     .await
-                    .map_err(|e| js_err(format!("click: frame context: {e}")))?,
+                    .map_err(|e| js_err(format!("click: frame target: {e}")))?,
             )
         } else {
             None
@@ -701,18 +709,26 @@ impl Locator {
                 .expression(full_expression)
                 .await_promise(true)
                 .return_by_value(false);
-            if let Some(cid) = context_id {
-                builder = builder.context_id(cid);
+            if let Some((context_id, _)) = execution_target.as_ref() {
+                builder = builder.context_id(*context_id);
             }
             let eval = builder
                 .build()
                 .map_err(|e| js_err(format!("click: params: {e}")))?;
 
-            let result = inner
-                .page
-                .evaluate_expression(eval)
-                .await
-                .map_err(|e| js_err(format!("click: resolve element: {e}")))?;
+            let result = if let Some((_, session_id)) = execution_target.as_ref() {
+                inner
+                    .page
+                    .evaluate_expression_with_session(eval, session_id.clone())
+                    .await
+                    .map_err(|e| js_err(format!("click: resolve element: {e}")))?
+            } else {
+                inner
+                    .page
+                    .evaluate_expression(eval)
+                    .await
+                    .map_err(|e| js_err(format!("click: resolve element: {e}")))?
+            };
 
             result
                 .object()
@@ -723,12 +739,9 @@ impl Locator {
 
         // C. Scroll into view and check actionability (detached, visible, not occluded).
         //    Uses shadow-aware elementFromPoint traversal to detect occlusion.
-        let scroll = inner
-            .page
-            .execute(
-                CallFunctionOnParams::builder()
-                    .function_declaration(
-                        r#"function() {
+        let scroll_params = CallFunctionOnParams::builder()
+            .function_declaration(
+                r#"function() {
                         if (!this.isConnected) return 'Node is detached from document';
                         this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
                         const rect = this.getBoundingClientRect();
@@ -766,15 +779,25 @@ impl Locator {
                         }
                         return '';
                     }"#,
-                    )
-                    .object_id(object_id.clone())
-                    .await_promise(false)
-                    .return_by_value(true)
-                    .build()
-                    .map_err(|e| js_err(format!("click: scroll params: {e}")))?,
             )
-            .await
-            .map_err(|e| js_err(format!("click: scroll: {e}")))?;
+            .object_id(object_id.clone())
+            .await_promise(false)
+            .return_by_value(true)
+            .build()
+            .map_err(|e| js_err(format!("click: scroll params: {e}")))?;
+        let scroll = if let Some((_, session_id)) = execution_target.as_ref() {
+            inner
+                .page
+                .execute_with_session(scroll_params, session_id.clone())
+                .await
+                .map_err(|e| js_err(format!("click: scroll: {e}")))?
+        } else {
+            inner
+                .page
+                .execute(scroll_params)
+                .await
+                .map_err(|e| js_err(format!("click: scroll: {e}")))?
+        };
         let msg = scroll
             .result
             .result
@@ -788,15 +811,22 @@ impl Locator {
 
         // D. Get clickable coordinates — DOM.getContentQuads returns top-level viewport coords,
         //    so this works correctly even inside iframes.
-        let quads = inner
-            .page
-            .execute(
-                GetContentQuadsParams::builder()
-                    .object_id(object_id)
-                    .build(),
-            )
-            .await
-            .map_err(|e| js_err(format!("click: getContentQuads: {e}")))?;
+        let quad_params = GetContentQuadsParams::builder()
+            .object_id(object_id)
+            .build();
+        let quads = if let Some((_, session_id)) = execution_target.as_ref() {
+            inner
+                .page
+                .execute_with_session(quad_params, session_id.clone())
+                .await
+                .map_err(|e| js_err(format!("click: getContentQuads: {e}")))?
+        } else {
+            inner
+                .page
+                .execute(quad_params)
+                .await
+                .map_err(|e| js_err(format!("click: getContentQuads: {e}")))?
+        };
         let point = quads
             .quads
             .iter()
@@ -986,35 +1016,42 @@ impl Locator {
 
     async fn evaluate_internal(&self, expression: String) -> JsResult<String> {
         let inner = self.inner.lock().await;
-        let context_id: Option<chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId> =
-            if let Some(frame_id) = &inner.target_frame_id {
-                Some(
-                    wait_for_frame_execution_context(&inner.page, frame_id.clone())
-                        .await
-                        .map_err(|e| js_err(format!("failed to get frame context: {e}")))?,
-                )
-            } else {
-                None
-            };
+        let execution_target = if let Some(frame_id) = &inner.target_frame_id {
+            Some(
+                wait_for_frame_execution_target(&inner.page, frame_id.clone())
+                    .await
+                    .map_err(|e| js_err(format!("failed to get frame target: {e}")))?,
+            )
+        } else {
+            None
+        };
 
         let mut builder = EvaluateParams::builder()
             .expression(expression)
             .await_promise(true)
             .return_by_value(true);
 
-        if let Some(cid) = context_id {
-            builder = builder.context_id(cid);
+        if let Some((context_id, _)) = execution_target.as_ref() {
+            builder = builder.context_id(*context_id);
         }
 
         let eval = builder
             .build()
             .map_err(|e| js_err(format!("evaluate invalid params: {e}")))?;
 
-        let result = inner
-            .page
-            .evaluate_expression(eval)
-            .await
-            .map_err(|e| js_err(format!("evaluate failed: {e}")))?;
+        let result = if let Some((_, session_id)) = execution_target {
+            inner
+                .page
+                .evaluate_expression_with_session(eval, session_id)
+                .await
+                .map_err(|e| js_err(format!("evaluate failed: {e}")))?
+        } else {
+            inner
+                .page
+                .evaluate_expression(eval)
+                .await
+                .map_err(|e| js_err(format!("evaluate failed: {e}")))?
+        };
 
         let mut text =
             stringify_evaluation_result(result.value(), result.object().description.as_deref());

@@ -152,8 +152,10 @@ try {
   if (!iframeFrame) {
     throw new Error("Could not find logonbox frame. Frames: " + framesJson);
   }
+  refreshmint.log("frame test: found iframe frame " + JSON.stringify(iframeFrame));
 
   // 2. isVisible in main frame should NOT see #user (it lives in the iframe).
+  refreshmint.log("frame test: checking main-frame visibility");
   const visibleInMain = await page.isVisible("#user");
   refreshmint.reportValue("visible_in_main", String(visibleInMain));
   if (visibleInMain) {
@@ -161,21 +163,26 @@ try {
   }
 
   // 3. Switch to frame by name and verify element methods see iframe content.
+  refreshmint.log("frame test: switching to iframe");
   await page.switchToFrame("logonbox");
 
+  refreshmint.log("frame test: checking iframe visibility");
   const visibleInFrame = await page.isVisible("#user");
   refreshmint.reportValue("visible_in_frame", String(visibleInFrame));
   if (!visibleInFrame) {
     throw new Error("isVisible('#user') should be true in logonbox frame");
   }
 
+  refreshmint.log("frame test: evaluating inside iframe");
   const evalInFrame = await page.evaluate("document.getElementById('user') ? 'found' : 'missing'");
   refreshmint.reportValue("eval_in_frame", evalInFrame);
   if (evalInFrame !== "found") {
     throw new Error("evaluate in frame returned: " + evalInFrame);
   }
 
+  refreshmint.log("frame test: filling inside iframe");
   await page.fill("#user", "testuser");
+  refreshmint.log("frame test: reading filled value");
   const filledValue = await page.evaluate("document.getElementById('user').value");
   refreshmint.reportValue("filled_value", filledValue);
   if (filledValue !== "testuser") {
@@ -183,6 +190,7 @@ try {
   }
 
   // 4. switchToMainFrame restores the main-frame context.
+  refreshmint.log("frame test: switching back to main frame");
   await page.switchToMainFrame();
 
   const visibleAfter = await page.isVisible("#user");
@@ -819,6 +827,7 @@ impl HttpFixtureServer {
         let addr = listener.local_addr()?;
         let base_url = format!("http://{}", addr);
         let thread_base_url = base_url.clone();
+        let thread_localhost_url = thread_base_url.replacen("127.0.0.1", "localhost", 1);
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let thread = thread::spawn(move || loop {
             if shutdown_rx.try_recv().is_ok() {
@@ -849,6 +858,30 @@ impl HttpFixtureServer {
                         body.len(),
                         body
                     );
+                let _ = stream.write_all(response.as_bytes());
+                continue;
+            }
+            if path == "/frame-main" {
+                let body = format!(
+                    "<!doctype html><html><body><div id=\"main\">Main</div><iframe name=\"logonbox\" src={}></iframe></body></html>",
+                    serde_json::to_string(&format!("{thread_localhost_url}/frame-child"))
+                        .unwrap_or_else(|_| "\"\"".to_string()),
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                continue;
+            }
+            if path == "/frame-child" {
+                let body = "<!doctype html><html><body><input id=\"user\"><input id=\"pass\"><button id=\"submit\">OK</button></body></html>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
                 let _ = stream.write_all(response.as_bytes());
                 continue;
             }
@@ -1290,6 +1323,62 @@ fn scrape_frame_methods_switch_context() -> Result<(), Box<dyn Error>> {
         serde_json::to_string(&frame_child_url)?,
     );
     let frame_url = write_fixture_file(&sandbox, "frame.html", &frame_html)?;
+    fs::write(
+        driver_parent.join("manifest.json"),
+        format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),
+    )?;
+    fs::write(
+        &driver_path,
+        FRAME_DRIVER_SOURCE.replace("__FRAME_URL__", &serde_json::to_string(&frame_url)?),
+    )?;
+
+    let profile_dir = sandbox.path().join("profile");
+    let config = ScrapeConfig {
+        login_name: LOGIN_NAME.to_string(),
+        extension_name: EXTENSION_NAME.to_string(),
+        ledger_dir: ledger_dir.clone(),
+        profile_override: Some(profile_dir),
+        prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        prompt_requires_override: false,
+    };
+
+    scrape::run_scrape(config)?;
+
+    let output_file = ledger_dir
+        .join("cache")
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("output")
+        .join("frame_test.bin");
+    let bytes = fs::read(&output_file)?;
+    assert_eq!(bytes, b"ok");
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a local Chrome/Edge install; run periodically with --ignored"]
+fn scrape_frame_methods_switch_context_cross_origin_oopif() -> Result<(), Box<dyn Error>> {
+    if scrape::browser::find_chrome_binary().is_err() {
+        eprintln!("skipping cross-origin frame scrape test: Chrome/Edge binary not found");
+        return Ok(());
+    }
+
+    let sandbox = TestSandbox::new("scrape-frame-oopif")?;
+    let ledger_dir = sandbox.path().join("ledger.refreshmint");
+    let driver_path = ledger_dir
+        .join("extensions")
+        .join(EXTENSION_NAME)
+        .join("driver.mjs");
+    let driver_parent = match driver_path.parent() {
+        Some(parent) => parent,
+        None => return Err("driver path has no parent".into()),
+    };
+    fs::create_dir_all(driver_parent)?;
+
+    let server = HttpFixtureServer::start()?;
+    let frame_url = format!("{}/frame-main", server.base_url);
+
     fs::write(
         driver_parent.join("manifest.json"),
         format!("{{\"name\":\"{EXTENSION_NAME}\"}}"),

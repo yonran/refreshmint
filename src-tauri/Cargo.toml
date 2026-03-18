@@ -35,9 +35,9 @@ lopdf = "0.35"
 # - spider_chrome 2.37.129 + spider_chromiumoxide_cdp 0.7.7 => compiles
 # Keep dependency key as `chromiumoxide` because the code imports
 # `chromiumoxide::...`. Pin to the tested chromey fork revision that restores
-# CDP network event delivery for Refreshmint's request/response waiters.
-chromiumoxide = { package = "chromey", git = "https://github.com/yonran/chromey", rev = "51623a4dc0db964033ad7dfb05dfddf0083fc9a2" }
-spider_chromiumoxide_cdp = { package = "spider_chromiumoxide_cdp", git = "https://github.com/yonran/chromey", rev = "51623a4dc0db964033ad7dfb05dfddf0083fc9a2" }
+# CDP network event delivery and OOPIF frame/session routing.
+chromiumoxide = { package = "chromey", git = "https://github.com/yonran/chromey", rev = "6c0db7204092fdcb23825399ef1c8733790df9be" }
+spider_chromiumoxide_cdp = { package = "spider_chromiumoxide_cdp", git = "https://github.com/yonran/chromey", rev = "6c0db7204092fdcb23825399ef1c8733790df9be" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 futures = "0.3"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }

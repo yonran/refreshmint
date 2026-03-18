@@ -213,6 +213,19 @@ struct RequestCaptureState {
     task: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapturedFrameInfo {
+    id: String,
+    name: String,
+    url: String,
+    parent_id: Option<String>,
+}
+
+struct FrameCaptureState {
+    task: tokio::task::JoinHandle<()>,
+}
+
 struct RequestWaiter {
     id: u64,
     matcher: UrlWaiterMatcher,
@@ -462,6 +475,10 @@ pub struct PageApi {
     response_capture: Arc<Mutex<Option<ResponseCaptureState>>>,
     #[qjs(skip_trace)]
     request_capture: Arc<Mutex<Option<RequestCaptureState>>>,
+    #[qjs(skip_trace)]
+    frame_entries: Arc<Mutex<BTreeMap<String, CapturedFrameInfo>>>,
+    #[qjs(skip_trace)]
+    frame_capture: Arc<Mutex<Option<FrameCaptureState>>>,
     #[qjs(skip_trace)]
     request_waiters: Arc<Mutex<Vec<RequestWaiter>>>,
     #[qjs(skip_trace)]
@@ -1317,6 +1334,276 @@ impl PageApi {
         }
     }
 
+    async fn live_frame_infos(&self) -> Result<Vec<CapturedFrameInfo>, String> {
+        let page = {
+            let inner = self.inner.lock().await;
+            inner.page.clone()
+        };
+        let frame_ids = page
+            .frames()
+            .await
+            .map_err(|e| format!("failed to list live frames: {e}"))?;
+        let mut frames = Vec::with_capacity(frame_ids.len());
+        for frame_id in frame_ids {
+            let id = frame_id.as_ref().to_string();
+            let name = page
+                .frame_name(frame_id.clone())
+                .await
+                .map_err(|e| format!("failed to query frame name for {id}: {e}"))?
+                .unwrap_or_default();
+            let url = page
+                .frame_url(frame_id.clone())
+                .await
+                .map_err(|e| format!("failed to query frame url for {id}: {e}"))?
+                .unwrap_or_default();
+            let parent_id = page
+                .frame_parent(frame_id)
+                .await
+                .map_err(|e| format!("failed to query frame parent for {id}: {e}"))?
+                .map(|parent| parent.as_ref().to_string());
+            frames.push(CapturedFrameInfo {
+                id,
+                name,
+                url,
+                parent_id,
+            });
+        }
+        Ok(frames)
+    }
+
+    async fn ensure_frame_capture(
+        &self,
+    ) -> JsResult<Arc<Mutex<BTreeMap<String, CapturedFrameInfo>>>> {
+        let mut guard = self.frame_capture.lock().await;
+        if let Some(state) = guard.as_ref() {
+            if !state.task.is_finished() {
+                return Ok(self.frame_entries.clone());
+            }
+        }
+
+        if let Some(previous) = guard.take() {
+            previous.task.abort();
+        }
+
+        let page = {
+            let inner = self.inner.lock().await;
+            inner.page.clone()
+        };
+
+        use chromiumoxide::cdp::browser_protocol::page::{
+            EnableParams, EventFrameAttached, EventFrameDetached, EventFrameNavigated,
+            GetFrameTreeParams,
+        };
+        use chromiumoxide::cdp::browser_protocol::target::{
+            EventAttachedToTarget, EventDetachedFromTarget,
+        };
+        page.execute(EnableParams::default())
+            .await
+            .map_err(|e| js_err(format!("failed to enable Page domain: {e}")))?;
+
+        let tree = page
+            .execute(GetFrameTreeParams::default())
+            .await
+            .map_err(|e| js_err(format!("failed to query frame tree: {e}")))?;
+
+        let attached_events = page
+            .event_listener::<EventFrameAttached>()
+            .await
+            .map_err(|e| js_err(format!("failed to attach frameAttached listener: {e}")))?;
+        let navigated_events = page
+            .event_listener::<EventFrameNavigated>()
+            .await
+            .map_err(|e| js_err(format!("failed to attach frameNavigated listener: {e}")))?;
+        let detached_events = page
+            .event_listener::<EventFrameDetached>()
+            .await
+            .map_err(|e| js_err(format!("failed to attach frameDetached listener: {e}")))?;
+        let attached_target_events = page
+            .event_listener::<EventAttachedToTarget>()
+            .await
+            .map_err(|e| js_err(format!("failed to attach attachedToTarget listener: {e}")))?;
+        let detached_target_events = page
+            .event_listener::<EventDetachedFromTarget>()
+            .await
+            .map_err(|e| js_err(format!("failed to attach detachedFromTarget listener: {e}")))?;
+
+        let entries_for_task = self.frame_entries.clone();
+        {
+            let mut entries = entries_for_task.lock().await;
+            entries.clear();
+            seed_frame_entries_from_tree(&mut entries, tree.result.frame_tree);
+        }
+
+        let task = tokio::spawn(async move {
+            use futures::StreamExt;
+            let mut attached_target_sessions = BTreeMap::<String, String>::new();
+            tokio::pin!(attached_events);
+            tokio::pin!(navigated_events);
+            tokio::pin!(detached_events);
+            tokio::pin!(attached_target_events);
+            tokio::pin!(detached_target_events);
+
+            loop {
+                tokio::select! {
+                    ev = attached_events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        let mut entries = entries_for_task.lock().await;
+                        entries
+                            .entry(ev.frame_id.as_ref().to_string())
+                            .or_insert_with(|| CapturedFrameInfo {
+                                id: ev.frame_id.as_ref().to_string(),
+                                name: String::new(),
+                                url: String::new(),
+                                parent_id: Some(ev.parent_frame_id.as_ref().to_string()),
+                            });
+                    }
+                    ev = navigated_events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        let mut entries = entries_for_task.lock().await;
+                        let frame = &ev.frame;
+                        entries.insert(
+                            frame.id.as_ref().to_string(),
+                            CapturedFrameInfo {
+                                id: frame.id.as_ref().to_string(),
+                                name: frame.name.clone().unwrap_or_default(),
+                                url: frame.url.clone(),
+                                parent_id: frame
+                                    .parent_id
+                                    .clone()
+                                    .map(|parent| parent.as_ref().to_string()),
+                            },
+                        );
+                    }
+                    ev = detached_events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        let mut entries = entries_for_task.lock().await;
+                        remove_frame_entry_and_descendants(
+                            &mut entries,
+                            ev.frame_id.as_ref(),
+                        );
+                    }
+                    ev = attached_target_events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        if ev.target_info.r#type == "iframe" {
+                            let frame_id = ev.target_info.target_id.as_ref().to_string();
+                            attached_target_sessions
+                                .insert(ev.session_id.as_ref().to_string(), frame_id.clone());
+                            let parent_id = ev
+                                .target_info
+                                .parent_frame_id
+                                .as_ref()
+                                .map(|parent| parent.as_ref().to_string());
+                            let mut entries = entries_for_task.lock().await;
+                            entries
+                                .entry(frame_id.clone())
+                                .and_modify(|entry| {
+                                    entry.parent_id = parent_id.clone();
+                                    if entry.url.is_empty() {
+                                        entry.url = ev.target_info.url.clone();
+                                    }
+                                })
+                                .or_insert_with(|| CapturedFrameInfo {
+                                    id: frame_id,
+                                    name: String::new(),
+                                    url: ev.target_info.url.clone(),
+                                    parent_id,
+                                });
+                        }
+                    }
+                    ev = detached_target_events.next() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        if let Some(frame_id) =
+                            attached_target_sessions.remove(ev.session_id.as_ref())
+                        {
+                            let mut entries = entries_for_task.lock().await;
+                            remove_frame_entry_and_descendants(&mut entries, &frame_id);
+                        }
+                    }
+                }
+            }
+        });
+
+        *guard = Some(FrameCaptureState { task });
+        Ok(self.frame_entries.clone())
+    }
+
+    async fn resolve_frame_id_live(
+        &self,
+        frame_ref: &str,
+    ) -> Result<chromiumoxide::cdp::browser_protocol::page::FrameId, String> {
+        let trimmed = frame_ref.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("main") {
+            let inner = self.inner.lock().await;
+            let main = inner
+                .page
+                .mainframe()
+                .await
+                .map_err(|e| format!("failed to resolve main frame: {e}"))?;
+            return main.ok_or_else(|| "main frame not available".to_string());
+        }
+
+        let frames = self
+            .ensure_frame_capture()
+            .await
+            .map_err(|e| e.to_string())?;
+        let entries = frames.lock().await;
+        if let Some(entry) = entries.get(trimmed) {
+            return Ok(entry.id.clone().into());
+        }
+        if let Some(entry) = entries.values().find(|entry| entry.name == trimmed) {
+            return Ok(entry.id.clone().into());
+        }
+        if let Some(entry) = entries
+            .values()
+            .find(|entry| entry.url == trimmed || entry.url.contains(trimmed))
+        {
+            return Ok(entry.id.clone().into());
+        }
+        drop(entries);
+
+        for entry in self.live_frame_infos().await? {
+            if entry.id == trimmed
+                || entry.name == trimmed
+                || entry.url == trimmed
+                || entry.url.contains(trimmed)
+            {
+                return Ok(entry.id.into());
+            }
+        }
+
+        if discovered_frame_ids_from_network(self)
+            .await
+            .contains(trimmed)
+        {
+            return Ok(trimmed.to_string().into());
+        }
+
+        let entries = frames.lock().await;
+        let mut known_frames = entries
+            .values()
+            .map(|entry| format!("id={} name={} url={}", entry.id, entry.name, entry.url))
+            .collect::<Vec<_>>();
+        for frame_id in discovered_frame_ids_from_network(self).await {
+            if !entries.contains_key(&frame_id) {
+                known_frames.push(format!("id={} name= url=", frame_id));
+            }
+        }
+        Err(format!(
+            "frame not found for reference '{trimmed}'. Available frames: {}",
+            known_frames.join(" | ")
+        ))
+    }
+
     pub fn new(inner: Arc<Mutex<PageInner>>) -> Self {
         Self {
             inner,
@@ -1324,6 +1611,8 @@ impl PageApi {
             response_entries: Arc::new(Mutex::new(Vec::new())),
             response_capture: Arc::new(Mutex::new(None)),
             request_capture: Arc::new(Mutex::new(None)),
+            frame_entries: Arc::new(Mutex::new(BTreeMap::new())),
+            frame_capture: Arc::new(Mutex::new(None)),
             request_waiters: Arc::new(Mutex::new(Vec::new())),
             response_waiters: Arc::new(Mutex::new(Vec::new())),
             request_lifecycle_waiters: Arc::new(Mutex::new(Vec::new())),
@@ -2464,37 +2753,33 @@ impl PageApi {
     ///
     /// Each element has `{ id, name, url, parentId }`.
     pub async fn frames(&self) -> JsResult<String> {
-        let inner = self.inner.lock().await;
-        use chromiumoxide::cdp::browser_protocol::page::GetFrameTreeParams;
-        let tree = inner
-            .page
-            .execute(GetFrameTreeParams::default())
+        let entries = self.ensure_frame_capture().await?;
+        let entries = entries.lock().await;
+        let mut out = entries.values().cloned().collect::<Vec<_>>();
+        let mut known_ids = out
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<BTreeSet<_>>();
+        drop(entries);
+        for frame in self
+            .live_frame_infos()
             .await
-            .map_err(|e| js_err(format!("frames failed: {e}")))?;
-
-        #[derive(serde::Serialize)]
-        struct FrameInfo {
-            id: String,
-            name: String,
-            url: String,
-            #[serde(rename = "parentId")]
-            parent_id: Option<String>,
-        }
-
-        let mut out = Vec::new();
-        let mut stack = vec![tree.result.frame_tree];
-        while let Some(node) = stack.pop() {
-            out.push(FrameInfo {
-                id: node.frame.id.as_ref().to_string(),
-                name: node.frame.name.unwrap_or_default(),
-                url: node.frame.url,
-                parent_id: node.frame.parent_id.map(|p| p.as_ref().to_string()),
-            });
-            if let Some(children) = node.child_frames {
-                for child in children {
-                    stack.push(child);
-                }
+            .map_err(|e| js_err(format!("frames failed: {e}")))?
+        {
+            if known_ids.insert(frame.id.clone()) {
+                out.push(frame);
             }
+        }
+        for frame_id in discovered_frame_ids_from_network(self).await {
+            if known_ids.contains(&frame_id) {
+                continue;
+            }
+            out.push(CapturedFrameInfo {
+                id: frame_id,
+                name: String::new(),
+                url: String::new(),
+                parent_id: None,
+            });
         }
         serde_json::to_string(&out).map_err(|e| js_err(format!("frames serialization failed: {e}")))
     }
@@ -2504,10 +2789,11 @@ impl PageApi {
     /// `frame_ref` may be a frame id, frame name, or frame URL substring.
     #[qjs(rename = "switchToFrame")]
     pub async fn js_switch_to_frame(&self, frame_ref: String) -> JsResult<()> {
-        let mut inner = self.inner.lock().await;
-        let frame_id = resolve_frame_id(&inner.page, &frame_ref)
+        let frame_id = self
+            .resolve_frame_id_live(&frame_ref)
             .await
             .map_err(|e| js_err(format!("switchToFrame failed: {e}")))?;
+        let mut inner = self.inner.lock().await;
         inner.target_frame_id = Some(frame_id);
         Ok(())
     }
@@ -3001,9 +3287,10 @@ impl PageApi {
         let inner = self.inner.lock().await;
         if let Some(frame_id) = &inner.target_frame_id {
             // Frame context: evaluate JS click inside the frame's execution context.
-            let context_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
-                .await
-                .map_err(|e| js_err(format!("click failed to get frame context: {e}")))?;
+            let (context_id, session_id) =
+                wait_for_frame_execution_target(&inner.page, frame_id.clone())
+                    .await
+                    .map_err(|e| js_err(format!("click failed to get frame target: {e}")))?;
             let selector_json = serde_json::to_string(&selector).unwrap_or_default();
             let js = format!(
                 r#"(() => {{
@@ -3024,7 +3311,7 @@ impl PageApi {
                 .map_err(|e| js_err(format!("click invalid params: {e}")))?;
             inner
                 .page
-                .evaluate_expression(eval)
+                .evaluate_expression_with_session(eval, session_id)
                 .await
                 .map_err(|e| js_err(format!("click failed: {e}")))?;
         } else {
@@ -3049,9 +3336,10 @@ impl PageApi {
         if let Some(frame_id) = &inner.target_frame_id {
             // Frame context: focus element via JS, then dispatch CDP key events
             // (Input.dispatchKeyEvent is global and targets the focused element).
-            let context_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
-                .await
-                .map_err(|e| js_err(format!("type failed to get frame context: {e}")))?;
+            let (context_id, session_id) =
+                wait_for_frame_execution_target(&inner.page, frame_id.clone())
+                    .await
+                    .map_err(|e| js_err(format!("type failed to get frame target: {e}")))?;
             let selector_json = serde_json::to_string(&selector).unwrap_or_default();
             let js = format!(
                 r#"(() => {{
@@ -3071,7 +3359,7 @@ impl PageApi {
                 .map_err(|e| js_err(format!("type invalid params: {e}")))?;
             inner
                 .page
-                .evaluate_expression(eval)
+                .evaluate_expression_with_session(eval, session_id)
                 .await
                 .map_err(|e| js_err(format!("type failed: {e}")))?;
             inner
@@ -3264,14 +3552,16 @@ impl PageApi {
         expression: String,
     ) -> JsResult<JsEvalResult> {
         use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
-        let inner = self.inner.lock().await;
         let page_inner_arc = self.inner.clone();
-        let frame_id = resolve_frame_id(&inner.page, &frame_ref)
+        let frame_id = self
+            .resolve_frame_id_live(&frame_ref)
             .await
             .map_err(|e| js_err(format!("frameEvaluate failed: {e}")))?;
-        let context_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
-            .await
-            .map_err(|e| js_err(format!("frameEvaluate failed: {e}")))?;
+        let inner = self.inner.lock().await;
+        let (context_id, session_id) =
+            wait_for_frame_execution_target(&inner.page, frame_id.clone())
+                .await
+                .map_err(|e| js_err(format!("frameEvaluate failed: {e}")))?;
         let eval = EvaluateParams::builder()
             .expression(expression)
             .context_id(context_id)
@@ -3281,7 +3571,7 @@ impl PageApi {
             .map_err(|e| js_err(format!("frameEvaluate invalid expression params: {e}")))?;
         let result = inner
             .page
-            .evaluate_expression(eval)
+            .evaluate_expression_with_session(eval, session_id)
             .await
             .map_err(|e| js_err(format!("frameEvaluate failed: {e}")))?;
         let mut eval_result = remote_object_to_eval_result(result.object().clone(), page_inner_arc);
@@ -3301,12 +3591,13 @@ impl PageApi {
         selector: String,
         value: String,
     ) -> JsResult<()> {
-        let inner = self.inner.lock().await;
-        let frame_id = resolve_frame_id(&inner.page, &frame_ref)
+        let frame_id = self
+            .resolve_frame_id_live(&frame_ref)
             .await
             .map_err(|e| js_err(format!("frameFill failed: {e}")))?;
+        let inner = self.inner.lock().await;
         let actual_value = resolve_secret_if_applicable(&inner, &value).await?;
-        let context_id = wait_for_frame_execution_context(&inner.page, frame_id)
+        let (context_id, session_id) = wait_for_frame_execution_target(&inner.page, frame_id)
             .await
             .map_err(|e| js_err(format!("frameFill failed: {e}")))?;
         let selector_json = serde_json::to_string(&selector).unwrap_or_else(|_| "\"\"".to_string());
@@ -3333,7 +3624,7 @@ impl PageApi {
             .map_err(|e| js_err(format!("frameFill invalid expression params: {e}")))?;
         inner
             .page
-            .evaluate_expression(eval)
+            .evaluate_expression_with_session(eval, session_id)
             .await
             .map_err(|e| js_err(format!("frameFill failed: {e}")))?;
         Ok(())
@@ -3580,10 +3871,15 @@ impl PageApi {
         let page_inner_arc = self.inner.clone();
 
         // Obtain the execution context id for the active context.
-        let context_id: ExecutionContextId = if let Some(frame_id) = &inner.target_frame_id {
-            wait_for_frame_execution_context(&inner.page, frame_id.clone())
-                .await
-                .map_err(|e| js_err(format!("callFunction failed to get frame context: {e}")))?
+        let (context_id, session_id_opt): (
+            ExecutionContextId,
+            Option<chromiumoxide::cdp::browser_protocol::target::SessionId>,
+        ) = if let Some(frame_id) = &inner.target_frame_id {
+            let (context_id, session_id) =
+                wait_for_frame_execution_target(&inner.page, frame_id.clone())
+                    .await
+                    .map_err(|e| js_err(format!("callFunction failed to get frame target: {e}")))?;
+            (context_id, Some(session_id))
         } else {
             // Main frame: get the main frame id and then its context.
             let main_frame = inner
@@ -3592,9 +3888,12 @@ impl PageApi {
                 .await
                 .map_err(|e| js_err(format!("callFunction failed to get main frame: {e}")))?
                 .ok_or_else(|| js_err("callFunction: main frame not available".to_string()))?;
-            wait_for_frame_execution_context(&inner.page, main_frame)
-                .await
-                .map_err(|e| js_err(format!("callFunction failed to get main context: {e}")))?
+            (
+                wait_for_frame_execution_context(&inner.page, main_frame)
+                    .await
+                    .map_err(|e| js_err(format!("callFunction failed to get main context: {e}")))?,
+                None,
+            )
         };
 
         let mut builder = CallFunctionOnParams::builder()
@@ -3608,11 +3907,19 @@ impl PageApi {
         let params = builder
             .build()
             .map_err(|e| js_err(format!("callFunction build failed: {e}")))?;
-        let response = inner
-            .page
-            .execute(params)
-            .await
-            .map_err(|e| js_err(format!("callFunction CDP failed: {e}")))?;
+        let response = if let Some(session_id) = session_id_opt {
+            inner
+                .page
+                .execute_with_session(params, session_id)
+                .await
+                .map_err(|e| js_err(format!("callFunction CDP failed: {e}")))?
+        } else {
+            inner
+                .page
+                .execute(params)
+                .await
+                .map_err(|e| js_err(format!("callFunction CDP failed: {e}")))?
+        };
         if let Some(exc) = &response.result.exception_details {
             let msg = exc
                 .exception
@@ -3665,10 +3972,11 @@ impl PageApi {
         let sel_json = serde_json::to_string(&selector).unwrap_or_else(|_| "\"\"".to_string());
         let expr = format!("Array.from(document.querySelectorAll({sel_json}))");
 
-        let (array_obj, context_id_opt) = if let Some(frame_id) = &inner.target_frame_id {
-            let ctx_id = wait_for_frame_execution_context(&inner.page, frame_id.clone())
-                .await
-                .map_err(|e| js_err(format!("$$({selector}) frame context: {e}")))?;
+        let (array_obj, session_id_opt) = if let Some(frame_id) = &inner.target_frame_id {
+            let (ctx_id, session_id) =
+                wait_for_frame_execution_target(&inner.page, frame_id.clone())
+                    .await
+                    .map_err(|e| js_err(format!("$$({selector}) frame target: {e}")))?;
             let eval = EvaluateParams::builder()
                 .expression(expr)
                 .context_id(ctx_id)
@@ -3678,10 +3986,10 @@ impl PageApi {
                 .map_err(|e| js_err(format!("$$({selector}) params: {e}")))?;
             let res = inner
                 .page
-                .evaluate_expression(eval)
+                .evaluate_expression_with_session(eval, session_id.clone())
                 .await
                 .map_err(|e| js_err(format!("$$({selector}) eval: {e}")))?;
-            (res.object().clone(), Some(ctx_id))
+            (res.object().clone(), Some(session_id))
         } else {
             let eval = EvaluateParams::builder()
                 .expression(expr)
@@ -3702,7 +4010,7 @@ impl PageApi {
                 unserializable_value: None,
                 object_id: None,
             },
-            context_id_opt,
+            session_id_opt,
         );
 
         let array_id = match array_obj.object_id {
@@ -3868,9 +4176,9 @@ impl PageApi {
         };
         let page_inner_arc = self.inner.clone();
         if let Some(frame_id) = frame_id {
-            let context_id = wait_for_frame_execution_context(&page, frame_id.clone())
+            let (context_id, session_id) = wait_for_frame_execution_target(&page, frame_id.clone())
                 .await
-                .map_err(|e| js_err(format!("failed to get frame context: {e}")))?;
+                .map_err(|e| js_err(format!("failed to get frame target: {e}")))?;
             let eval = EvaluateParams::builder()
                 .expression(expression.clone())
                 .context_id(context_id)
@@ -3878,7 +4186,10 @@ impl PageApi {
                 .return_by_value(false)
                 .build()
                 .map_err(|e| js_err(format!("evaluate invalid params: {e}")))?;
-            let result = match page.evaluate_expression(eval).await {
+            let result = match page
+                .evaluate_expression_with_session(eval, session_id.clone())
+                .await
+            {
                 Ok(result) => result,
                 Err(err) => {
                     let err_text = err.to_string();
@@ -3891,12 +4202,12 @@ impl PageApi {
                             &refresh_err,
                         ))
                     })?;
-                    let refreshed_context_id =
-                        wait_for_frame_execution_context(&refreshed, frame_id.clone())
+                    let (refreshed_context_id, refreshed_session_id) =
+                        wait_for_frame_execution_target(&refreshed, frame_id.clone())
                             .await
                             .map_err(|e| {
                                 js_err(format!(
-                                    "failed to get frame context after page refresh: {e}"
+                                    "failed to get frame target after page refresh: {e}"
                                 ))
                             })?;
                     let retry_eval = EvaluateParams::builder()
@@ -3907,7 +4218,7 @@ impl PageApi {
                         .build()
                         .map_err(|e| js_err(format!("evaluate invalid params: {e}")))?;
                     refreshed
-                        .evaluate_expression(retry_eval)
+                        .evaluate_expression_with_session(retry_eval, refreshed_session_id)
                         .await
                         .map_err(|retry_err| {
                             js_err(format_browser_error(
@@ -6507,74 +6818,62 @@ async fn get_request_post_data(
     Ok(result.result.post_data)
 }
 
-async fn resolve_frame_id(
-    page: &chromiumoxide::Page,
-    frame_ref: &str,
-) -> Result<chromiumoxide::cdp::browser_protocol::page::FrameId, String> {
-    let trimmed = frame_ref.trim();
-
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("main") {
-        let main = page
-            .mainframe()
-            .await
-            .map_err(|e| format!("failed to resolve main frame: {e}"))?;
-        return main.ok_or_else(|| "main frame not available".to_string());
+fn seed_frame_entries_from_tree(
+    entries: &mut BTreeMap<String, CapturedFrameInfo>,
+    frame_tree: chromiumoxide::cdp::browser_protocol::page::FrameTree,
+) {
+    let frame = frame_tree.frame;
+    entries.insert(
+        frame.id.as_ref().to_string(),
+        CapturedFrameInfo {
+            id: frame.id.as_ref().to_string(),
+            name: frame.name.unwrap_or_default(),
+            url: frame.url,
+            parent_id: frame.parent_id.map(|parent| parent.as_ref().to_string()),
+        },
+    );
+    if let Some(children) = frame_tree.child_frames {
+        for child in children {
+            seed_frame_entries_from_tree(entries, child);
+        }
     }
+}
 
-    let frames = page
-        .frames()
+fn remove_frame_entry_and_descendants(
+    entries: &mut BTreeMap<String, CapturedFrameInfo>,
+    frame_id: &str,
+) {
+    let child_ids = entries
+        .values()
+        .filter(|entry| entry.parent_id.as_deref() == Some(frame_id))
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    for child_id in child_ids {
+        remove_frame_entry_and_descendants(entries, &child_id);
+    }
+    entries.remove(frame_id);
+}
+
+async fn discovered_frame_ids_from_network(page: &PageApi) -> BTreeSet<String> {
+    let _ = page.ensure_request_capture().await;
+    let _ = page.ensure_response_capture().await;
+    let mut frame_ids = page
+        .response_entries
+        .lock()
         .await
-        .map_err(|e| format!("failed to list frames: {e}"))?;
-
-    if let Some(found) = frames.iter().find(|frame_id| frame_id.as_ref() == trimmed) {
-        return Ok(found.clone());
-    }
-
-    for frame_id in &frames {
-        let name = page
-            .frame_name(frame_id.clone())
+        .iter()
+        .filter_map(|entry| entry.frame_id.clone())
+        .filter(|frame_id| !frame_id.is_empty())
+        .collect::<BTreeSet<_>>();
+    frame_ids.extend(
+        page.request_entries
+            .lock()
             .await
-            .map_err(|e| format!("failed to query frame name: {e}"))?;
-        if name.as_deref() == Some(trimmed) {
-            return Ok(frame_id.clone());
-        }
-    }
-
-    for frame_id in &frames {
-        let url = page
-            .frame_url(frame_id.clone())
-            .await
-            .map_err(|e| format!("failed to query frame URL: {e}"))?
-            .unwrap_or_default();
-        if url == trimmed || url.contains(trimmed) {
-            return Ok(frame_id.clone());
-        }
-    }
-
-    let mut known_frames = Vec::new();
-    for frame_id in &frames {
-        let name = page
-            .frame_name(frame_id.clone())
-            .await
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let url = page
-            .frame_url(frame_id.clone())
-            .await
-            .unwrap_or(None)
-            .unwrap_or_default();
-        known_frames.push(format!(
-            "id={} name={} url={}",
-            frame_id.as_ref(),
-            name,
-            url
-        ));
-    }
-
-    Err(format!(
-        "frame not found for reference '{trimmed}'. Available frames: {}",
-        known_frames.join(" | ")
-    ))
+            .iter()
+            .filter_map(|entry| entry.frame_id.clone())
+            .filter(|frame_id| !frame_id.is_empty()),
+    );
+    frame_ids
 }
 
 pub(crate) async fn wait_for_frame_execution_context(
@@ -6601,6 +6900,58 @@ pub(crate) async fn wait_for_frame_execution_context(
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
                 "timeout waiting for frame execution context (frame id {})",
+                frame_id.as_ref()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+    }
+}
+
+pub(crate) async fn wait_for_frame_execution_target(
+    page: &chromiumoxide::Page,
+    frame_id: chromiumoxide::cdp::browser_protocol::page::FrameId,
+) -> Result<
+    (
+        chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId,
+        chromiumoxide::cdp::browser_protocol::target::SessionId,
+    ),
+    String,
+> {
+    use chromiumoxide::cdp::js_protocol::runtime::EnableParams;
+    let mut runtime_enabled_session = None;
+
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    loop {
+        let session = page
+            .frame_session_id(frame_id.clone())
+            .await
+            .map_err(|e| format!("failed to query frame session: {e}"))?;
+        if let Some(session_id) = session.as_ref() {
+            if runtime_enabled_session.as_ref() != Some(session_id) {
+                // Cross-origin iframes may be owned by child target sessions.
+                // Match Playwright's OOPIF model in crPage.ts by enabling
+                // Runtime on the owning session before waiting on its context.
+                page.execute_with_session(EnableParams::default(), session_id.clone())
+                    .await
+                    .map_err(|e| {
+                        format!("failed to enable runtime for frame target lookup: {e}")
+                    })?;
+                runtime_enabled_session = Some(session_id.clone());
+            }
+        }
+        let context = page
+            .frame_execution_context(frame_id.clone())
+            .await
+            .map_err(|e| format!("failed to query frame execution context: {e}"))?;
+
+        if let (Some(context_id), Some(session_id)) = (context, session) {
+            return Ok((context_id, session_id));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "timeout waiting for frame execution target (frame id {})",
                 frame_id.as_ref()
             ));
         }

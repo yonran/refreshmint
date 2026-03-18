@@ -578,7 +578,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 [[package]]
 name = "chromey"
 version = "2.38.4"
-source = "git+https://github.com/yonran/chromey?rev=51623a4dc0db964033ad7dfb05dfddf0083fc9a2#51623a4dc0db964033ad7dfb05dfddf0083fc9a2"
+source = "git+https://github.com/yonran/chromey?rev=6c0db7204092fdcb23825399ef1c8733790df9be#6c0db7204092fdcb23825399ef1c8733790df9be"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
@@ -4408,7 +4408,7 @@ dependencies = [
 [[package]]
 name = "spider_chromiumoxide_cdp"
 version = "0.7.8"
-source = "git+https://github.com/yonran/chromey?rev=51623a4dc0db964033ad7dfb05dfddf0083fc9a2#51623a4dc0db964033ad7dfb05dfddf0083fc9a2"
+source = "git+https://github.com/yonran/chromey?rev=6c0db7204092fdcb23825399ef1c8733790df9be#6c0db7204092fdcb23825399ef1c8733790df9be"
 dependencies = [
  "serde",
  "serde_json",
@@ -4419,7 +4419,7 @@ dependencies = [
 [[package]]
 name = "spider_chromiumoxide_pdl"
 version = "0.7.5"
-source = "git+https://github.com/yonran/chromey?rev=51623a4dc0db964033ad7dfb05dfddf0083fc9a2#51623a4dc0db964033ad7dfb05dfddf0083fc9a2"
+source = "git+https://github.com/yonran/chromey?rev=6c0db7204092fdcb23825399ef1c8733790df9be#6c0db7204092fdcb23825399ef1c8733790df9be"
 dependencies = [
  "either",
  "heck 0.4.1",
@@ -4435,7 +4435,7 @@ dependencies = [
 [[package]]
 name = "spider_chromiumoxide_types"
 version = "0.7.4"
-source = "git+https://github.com/yonran/chromey?rev=51623a4dc0db964033ad7dfb05dfddf0083fc9a2#51623a4dc0db964033ad7dfb05dfddf0083fc9a2"
+source = "git+https://github.com/yonran/chromey?rev=6c0db7204092fdcb23825399ef1c8733790df9be#6c0db7204092fdcb23825399ef1c8733790df9be"
 dependencies = [
  "serde",
  "serde_json",
