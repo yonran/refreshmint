@@ -350,7 +350,7 @@ async function handleLogin() {
         '*secure.bankofamerica.com/auth/*',
         '*secure.bankofamerica.com/myaccounts*',
         '*secure.bankofamerica.com/customer-uci/*',
-        '*secure.bankofamerica.com/mycommunications/statements*',
+        '**secure.bankofamerica.com/mycommunications/statements**',
         '*secure.bankofamerica.com/login/signIn.go*',
     ];
     var matchedPostLoginPattern = '';
@@ -1039,7 +1039,7 @@ async function openStatementsPage(adx) {
         await page.goto(redirectUrl);
     }
     try {
-        await page.waitForURL('*mycommunications/statements*', 30000);
+        await page.waitForURL('**mycommunications/statements**', 30000);
         return;
     } catch (e) {
         refreshmint.log('Initial waitForURL on statements failed: ' + e);
@@ -1049,7 +1049,7 @@ async function openStatementsPage(adx) {
         try {
             await page.goto(urls[i]);
             await humanPace(700, 1500);
-            await page.waitForURL('*mycommunications/statements*', 15000);
+            await page.waitForURL('**mycommunications/statements**', 15000);
             refreshmint.log('Statements URL fallback succeeded: ' + urls[i]);
             return;
         } catch (e2) {
@@ -1470,7 +1470,7 @@ async function downloadStatementsSinceLastScrape(
                 'Refreshing statements context via redirect URL: ' + profileUrl,
             );
             await page.goto(profileUrl);
-            await page.waitForURL('*mycommunications/statements*', 30000);
+            await page.waitForURL('**mycommunications/statements**', 30000);
             await maybeEnterStatementList();
             await waitForStatementsContent();
             statementsUrl = await page.url();
@@ -1492,7 +1492,7 @@ async function downloadStatementsSinceLastScrape(
                     statementsUrl,
             );
             await page.goto(forcedUrl);
-            await page.waitForURL('*mycommunications/statements*', 30000);
+            await page.waitForURL('**mycommunications/statements**', 30000);
             await maybeEnterStatementList();
             await waitForStatementsContent();
         }
