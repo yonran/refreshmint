@@ -2309,6 +2309,18 @@ export function ScrapeTab({
                         {isRunningScrape ? 'Running scrape...' : 'Run scrape'}
                     </button>
                 </div>
+                {scrapeStatus === null ? null : (
+                    <p
+                        className={
+                            scrapeStatus.toLowerCase().includes('failed') ||
+                            scrapeStatus.toLowerCase().includes('error')
+                                ? 'status status-error'
+                                : 'status'
+                        }
+                    >
+                        {scrapeStatus}
+                    </p>
+                )}
                 <details className="dev-tools-disclosure">
                     <summary className="disclosure-summary">
                         Developer tools
@@ -3065,9 +3077,6 @@ export function ScrapeTab({
                         No runnable extensions found in extensions/*/driver.mjs.
                     </p>
                 ) : null}
-                {scrapeStatus === null ? null : (
-                    <p className="status">{scrapeStatus}</p>
-                )}
                 {pipelineStatus === null ? null : (
                     <p className="status">{pipelineStatus}</p>
                 )}
