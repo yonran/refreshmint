@@ -630,6 +630,16 @@ details[open] > .disclosure-summary::before {
     border-color: #bfdbfe;
 }
 
+.evidence-chip-toggle {
+    cursor: pointer;
+    color: #555;
+}
+
+.evidence-chip-toggle:hover {
+    background: #f3f4f6;
+    border-color: #d1d5db;
+}
+
 .attachment-lightbox {
     width: min(90vw, 1200px);
     max-height: 90vh;

@@ -381,6 +381,9 @@ export function TransactionsTable({
     );
     const [lightboxLoading, setLightboxLoading] = useState(false);
     const [lightboxError, setLightboxError] = useState<string | null>(null);
+    const [expandedEvidenceIds, setExpandedEvidenceIds] = useState<
+        ReadonlySet<string>
+    >(new Set());
     const [editingKey, setEditingKey] = useState<string | null>(null); // `${txnId}:${postingIndex}`
     const [categoryDraft, setCategoryDraft] = useState('');
     const [uncontrolledSelectedIds, setUncontrolledSelectedIds] = useState<
@@ -1239,43 +1242,112 @@ export function TransactionsTable({
                                                     -
                                                 </span>
                                             ) : (
-                                                <div className="evidence-list">
-                                                    {txn.evidence.map(
-                                                        (evidenceRef) =>
-                                                            isImageAttachmentRef(
-                                                                evidenceRef,
-                                                            ) ? (
-                                                                <button
-                                                                    key={`${txn.id}-${evidenceRef}`}
-                                                                    className="evidence-chip evidence-chip-image"
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                        void handleAttachmentClick(
-                                                                            attachmentFilename(
+                                                (() => {
+                                                    const imageRefs =
+                                                        txn.evidence.filter(
+                                                            isImageAttachmentRef,
+                                                        );
+                                                    const otherRefs =
+                                                        txn.evidence.filter(
+                                                            (r) =>
+                                                                !isImageAttachmentRef(
+                                                                    r,
+                                                                ),
+                                                        );
+                                                    const evidenceExpanded =
+                                                        expandedEvidenceIds.has(
+                                                            txn.id,
+                                                        );
+                                                    return (
+                                                        <div className="evidence-list">
+                                                            {imageRefs.map(
+                                                                (
+                                                                    evidenceRef,
+                                                                ) => (
+                                                                    <button
+                                                                        key={`${txn.id}-${evidenceRef}`}
+                                                                        className="evidence-chip evidence-chip-image"
+                                                                        type="button"
+                                                                        onClick={() => {
+                                                                            void handleAttachmentClick(
+                                                                                attachmentFilename(
+                                                                                    evidenceRef,
+                                                                                ),
+                                                                            );
+                                                                        }}
+                                                                    >
+                                                                        {attachmentFilename(
+                                                                            evidenceRef,
+                                                                        )}
+                                                                    </button>
+                                                                ),
+                                                            )}
+                                                            {otherRefs.length >
+                                                                0 && (
+                                                                <>
+                                                                    <button
+                                                                        className="evidence-chip evidence-chip-toggle"
+                                                                        type="button"
+                                                                        onClick={() => {
+                                                                            setExpandedEvidenceIds(
+                                                                                (
+                                                                                    prev,
+                                                                                ) => {
+                                                                                    const next =
+                                                                                        new Set(
+                                                                                            prev,
+                                                                                        );
+                                                                                    if (
+                                                                                        evidenceExpanded
+                                                                                    ) {
+                                                                                        next.delete(
+                                                                                            txn.id,
+                                                                                        );
+                                                                                    } else {
+                                                                                        next.add(
+                                                                                            txn.id,
+                                                                                        );
+                                                                                    }
+                                                                                    return next;
+                                                                                },
+                                                                            );
+                                                                        }}
+                                                                    >
+                                                                        {evidenceExpanded
+                                                                            ? '▾'
+                                                                            : '▸'}{' '}
+                                                                        {
+                                                                            otherRefs.length
+                                                                        }{' '}
+                                                                        source
+                                                                        {otherRefs.length !==
+                                                                        1
+                                                                            ? 's'
+                                                                            : ''}
+                                                                    </button>
+                                                                    {evidenceExpanded &&
+                                                                        otherRefs.map(
+                                                                            (
                                                                                 evidenceRef,
+                                                                            ) => (
+                                                                                <span
+                                                                                    key={`${txn.id}-${evidenceRef}`}
+                                                                                    className="evidence-chip"
+                                                                                    title={
+                                                                                        evidenceRef
+                                                                                    }
+                                                                                >
+                                                                                    {
+                                                                                        evidenceRef
+                                                                                    }
+                                                                                </span>
                                                                             ),
-                                                                        );
-                                                                    }}
-                                                                >
-                                                                    {attachmentFilename(
-                                                                        evidenceRef,
-                                                                    )}
-                                                                </button>
-                                                            ) : (
-                                                                <span
-                                                                    key={`${txn.id}-${evidenceRef}`}
-                                                                    className="evidence-chip"
-                                                                    title={
-                                                                        evidenceRef
-                                                                    }
-                                                                >
-                                                                    {
-                                                                        evidenceRef
-                                                                    }
-                                                                </span>
-                                                            ),
-                                                    )}
-                                                </div>
+                                                                        )}
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })()
                                             )}
                                         </td>
                                     </tr>
