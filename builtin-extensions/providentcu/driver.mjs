@@ -84,6 +84,14 @@ function currentMonthIso() {
     return `${y}-${m}`;
 }
 
+function currentDateIsoLocal() {
+    const now = new Date();
+    const y = String(now.getFullYear());
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
 function sanitizeFilenameSegment(value) {
     return String(value || '')
         .toLowerCase()
@@ -105,6 +113,337 @@ function getMetadataString(metadata, key) {
 
 async function waitMs(page, ms) {
     await page.evaluate(`new Promise(r => setTimeout(r, ${ms}))`);
+}
+
+async function savePageScreenshot(page, filename) {
+    const bytes = Array.from(await page.screenshot({ fullPage: true }));
+    await refreshmint.saveResource(filename, bytes, { mimeType: 'image/png' });
+}
+
+async function collectZelleFrameInventory(page, filename) {
+    const frames = JSON.parse(await page.frames());
+    const collected = [];
+    for (const frame of frames) {
+        const ref = frame.name || frame.url;
+        try {
+            await page.switchToFrame(ref);
+            const data = JSON.parse(
+                await page.evaluate(`(() => {
+                    const textOf = (el) => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                    const clickable = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"]'))
+                        .map(el => ({
+                            text: textOf(el),
+                            tag: el.tagName,
+                            id: el.id || '',
+                            href: el.getAttribute('href') || '',
+                            ariaLabel: el.getAttribute('aria-label') || '',
+                            className: typeof el.className === 'string' ? el.className : ''
+                        }))
+                        .filter(item => item.text || item.ariaLabel)
+                        .filter(item =>
+                            /zelle|recent|transaction|activity|history|payment|send|receive/i.test(
+                                (item.text || '') + ' ' + (item.ariaLabel || ''),
+                            ),
+                        )
+                        .slice(0, 200);
+                    return JSON.stringify({
+                        href: location.href,
+                        title: document.title,
+                        clickable,
+                        bodyText: (document.body?.innerText || '').slice(0, 6000)
+                    });
+                })()`),
+            );
+            collected.push({ frame, data });
+        } catch (error) {
+            collected.push({
+                frame,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+    await page.switchToMainFrame();
+    await refreshmint.saveResource(
+        filename,
+        stringToUtf8Bytes(JSON.stringify(collected, null, 2)),
+        { mimeType: 'application/json' },
+    );
+}
+
+async function findFrameByUrlParts(page, urlParts) {
+    const frames = JSON.parse(await page.frames());
+    for (const frame of frames) {
+        const frameUrl = String(frame.url || '');
+        if (urlParts.every((part) => frameUrl.includes(part))) {
+            return frame;
+        }
+    }
+    return null;
+}
+
+async function waitForFrameByUrlParts(page, urlParts, timeoutMs) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+        const frame = await findFrameByUrlParts(page, urlParts);
+        if (frame != null) {
+            return frame;
+        }
+        await waitMs(page, 250);
+    }
+    return null;
+}
+
+async function inspectCurrentFrame(page) {
+    return JSON.parse(
+        await page.evaluate(`(() => {
+            const textOf = (el) => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+            const clickable = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"]'))
+                .map(el => ({
+                    text: textOf(el),
+                    tag: el.tagName,
+                    id: el.id || '',
+                    href: el.getAttribute('href') || '',
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                    className: typeof el.className === 'string' ? el.className : ''
+                }))
+                .filter(item => item.text || item.ariaLabel)
+                .slice(0, 300);
+            const iframes = Array.from(document.querySelectorAll('iframe, frame'))
+                .map(el => ({
+                    tag: el.tagName,
+                    id: el.id || '',
+                    name: el.getAttribute('name') || '',
+                    src: el.getAttribute('src') || '',
+                    title: el.getAttribute('title') || '',
+                    className: typeof el.className === 'string' ? el.className : ''
+                }))
+                .slice(0, 50);
+            const forms = Array.from(document.querySelectorAll('form'))
+                .map(el => ({
+                    id: el.id || '',
+                    name: el.getAttribute('name') || '',
+                    action: el.getAttribute('action') || '',
+                    method: (el.getAttribute('method') || 'get').toLowerCase(),
+                    target: el.getAttribute('target') || '',
+                    className: typeof el.className === 'string' ? el.className : ''
+                }))
+                .slice(0, 50);
+            const scripts = Array.from(document.scripts)
+                .map(el => ({
+                    src: el.getAttribute('src') || '',
+                    type: el.getAttribute('type') || '',
+                    textSnippet: (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 300)
+                }))
+                .slice(0, 100);
+            return JSON.stringify({
+                href: location.href,
+                title: document.title,
+                clickable,
+                iframes,
+                forms,
+                scripts,
+                bodyText: (document.body?.innerText || '').slice(0, 12000)
+            });
+        })()`),
+    );
+}
+
+async function inspectCurrentFrameBasic(page) {
+    return JSON.parse(
+        await page.evaluate(`(() => JSON.stringify({
+            href: location.href,
+            title: document.title,
+            bodyText: (document.body?.innerText || '').slice(0, 12000)
+        }))()`),
+    );
+}
+
+async function saveCurrentFrameInventory(page, filename) {
+    const data = await inspectCurrentFrame(page);
+    await refreshmint.saveResource(
+        filename,
+        stringToUtf8Bytes(JSON.stringify(data, null, 2)),
+        { mimeType: 'application/json' },
+    );
+}
+
+async function saveTextResource(filename, text) {
+    await refreshmint.saveResource(filename, stringToUtf8Bytes(text), {
+        mimeType: 'text/plain',
+    });
+}
+
+async function saveJsonResource(filename, value) {
+    await refreshmint.saveResource(
+        filename,
+        stringToUtf8Bytes(JSON.stringify(value, null, 2)),
+        { mimeType: 'application/json' },
+    );
+}
+
+async function saveDebugPageState(page, prefix) {
+    try {
+        await savePageScreenshot(page, `${prefix}.png`);
+    } catch (error) {
+        refreshmint.log(
+            `Failed to save screenshot for ${prefix}: ${inspect(error)}`,
+        );
+    }
+    try {
+        await saveCurrentFrameInventory(page, `${prefix}.json`);
+    } catch (error) {
+        refreshmint.log(
+            `Failed to save frame inventory for ${prefix}: ${inspect(error)}`,
+        );
+    }
+}
+
+async function clickZelleActivityInCurrentFrame(page) {
+    return assertBoolean(
+        await page.evaluate(`(() => {
+            const target = document.getElementById('lnkActivityFooter');
+            if (target) {
+                target.click();
+                return true;
+            }
+            const textOf = (el) =>
+                (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+            const items = Array.from(
+                document.querySelectorAll('button, a, [role="button"], [role="link"]'),
+            );
+            const fallback = items.find(
+                (el) =>
+                    /activity/i.test(textOf(el)) &&
+                    /pending items/i.test(textOf(el)),
+            );
+            const selectedNav = document.getElementById('navListActivity');
+            const targetEl = fallback || selectedNav;
+            if (!targetEl) return false;
+            targetEl.click();
+            return true;
+        })()`),
+    );
+}
+
+function findZelleUnavailableReason(frameState) {
+    const bodyText = String(frameState?.bodyText || '');
+    if (
+        /Zelle Status/i.test(bodyText) &&
+        /temporarily put a lock for verification of your account/i.test(
+            bodyText,
+        )
+    ) {
+        return 'servicing-lock-verification';
+    }
+    if (
+        /system issue/i.test(bodyText) &&
+        /try accessing Zelle/i.test(bodyText)
+    ) {
+        return 'checkfree-system-issue';
+    }
+    if (
+        /sign up/i.test(String(frameState?.title || '')) &&
+        /system issue/i.test(bodyText)
+    ) {
+        return 'checkfree-sign-up-system-issue';
+    }
+    return null;
+}
+
+async function clickZelleActivity(page, urlParts) {
+    const frames = JSON.parse(await page.frames());
+    for (const frame of frames) {
+        const frameUrl = String(frame.url || '');
+        if (!urlParts.every((part) => frameUrl.includes(part))) {
+            continue;
+        }
+        const ref = frame.name || frame.url;
+        try {
+            await page.switchToFrame(ref);
+            const clicked = await clickZelleActivityInCurrentFrame(page);
+            if (clicked) {
+                await page.switchToMainFrame();
+                return { clicked: true, frame: ref };
+            }
+        } catch (error) {
+            refreshmint.log(
+                `Zelle activity probe failed in frame ${ref}: ${inspect(error)}`,
+            );
+        }
+    }
+    await page.switchToMainFrame();
+    return { clicked: false, frame: null };
+}
+
+async function extractZelleActivitiesInCurrentFrame(page) {
+    return JSON.parse(
+        await page.evaluate(`(() => {
+            const textOf = (el) =>
+                (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+            const parseCard = (el, index) => {
+                const rawInnerText = el.innerText || el.textContent || '';
+                const rawText = rawInnerText.replace(/\\s+/g, ' ').trim();
+                const lines = rawInnerText
+                    .split(/\\n+/)
+                    .map((line) => line.replace(/\\s+/g, ' ').trim())
+                    .filter(Boolean);
+                const status =
+                    textOf(el.querySelector('h3')) ||
+                    lines.find((line) => /^[A-Z][A-Z\\s]+$/.test(line)) ||
+                    null;
+                const dateMatch = rawText.match(
+                    /\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2},\\s+\\d{4}\\b/,
+                );
+                const amountMatch = rawText.match(/\\$[\\d,]+(?:\\.\\d{2})?/);
+                const recipient = lines.find(
+                    (line) =>
+                        line !== status &&
+                        line !== dateMatch?.[0] &&
+                        line !== amountMatch?.[0] &&
+                        !/^\\(?[A-Z]{2}\\)?$/.test(line) &&
+                        !/^Recurring:/i.test(line) &&
+                        !/^Cancel /i.test(line) &&
+                        !/^Edit /i.test(line) &&
+                        !/^Payment (Sent|Scheduled|Canceled)/i.test(line),
+                ) || null;
+                const details = lines.filter(
+                    (line) =>
+                        line !== status &&
+                        line !== dateMatch?.[0] &&
+                        line !== amountMatch?.[0] &&
+                        line !== recipient &&
+                        !/^\\(?[A-Z]{2}\\)?$/.test(line),
+                );
+                return {
+                    id: el.id || ('payment-' + index),
+                    bucket: /^payment_x/.test(el.id) ? 'pending' : 'past',
+                    status,
+                    date: dateMatch ? dateMatch[0] : null,
+                    amount: amountMatch ? amountMatch[0] : null,
+                    recipient,
+                    lines,
+                    details,
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                    rawText,
+                };
+            };
+
+            return JSON.stringify({
+                href: location.href,
+                title: document.title,
+                selectedTab:
+                    document.querySelector('#pendingTab.is-selected') ? 'pending' :
+                    document.querySelector('#pastTab.is-selected') ? 'past' :
+                    null,
+                pendingSelected: !!document.querySelector('#pendingTab.is-selected'),
+                pastSelected: !!document.querySelector('#pastTab.is-selected'),
+                activities: Array.from(document.querySelectorAll('[id^="payment"]'))
+                    .map(parseCard)
+                    .filter((item) => item.rawText),
+                bodyText: (document.body?.innerText || '').slice(0, 20000),
+            });
+        })()`),
+    );
 }
 
 /**
@@ -138,11 +477,20 @@ async function humanPace(page, minMs, maxMs) {
 }
 
 async function navigateToSignIn(page) {
-    await page.goto(SIGN_IN_URL, {
-        waitUntil: 'domcontentloaded',
-        timeout: 90000,
-    });
-    await page.waitForSelector('input[id$="txtLoginName"]', 90000);
+    refreshmint.log(`Navigating to sign-in URL: ${SIGN_IN_URL}`);
+    try {
+        await page.goto(SIGN_IN_URL, {
+            waitUntil: 'domcontentloaded',
+            timeout: 90000,
+        });
+        await page.waitForSelector('input[id$="txtLoginName"]', 90000);
+    } catch (error) {
+        refreshmint.log(
+            `navigateToSignIn failed at ${await page.url()}: ${inspect(error)}`,
+        );
+        await saveDebugPageState(page, 'login-navigate-failure');
+        throw error;
+    }
 }
 
 /**
@@ -152,6 +500,7 @@ async function navigateToSignIn(page) {
 async function handleLogin(context) {
     const page = context.mainPage;
     refreshmint.log('State: Login Page');
+    await saveDebugPageState(page, 'login-entry');
 
     // Dismiss browser compatibility warning if present.
     const hasContinue = await page.evaluate(`(function() {
@@ -169,27 +518,62 @@ async function handleLogin(context) {
             if (continueBtn) continueBtn.click();
         })()`);
         await waitMs(page, 2000);
+        await saveDebugPageState(page, 'login-after-browser-warning');
     }
 
     refreshmint.log('Filling credentials...');
-    await page.type(
-        '#M_layout_content_PCDZ_MMCA7G7_ctl00_webInputForm_txtLoginName',
-        'providentcu_username',
-    );
+    try {
+        await page.fill(
+            '#M_layout_content_PCDZ_MMCA7G7_ctl00_webInputForm_txtLoginName',
+            'providentcu_username',
+        );
+    } catch (error) {
+        refreshmint.log(`Username fill failed: ${inspect(error)}`);
+        await saveDebugPageState(page, 'login-fill-username-failure');
+        throw error;
+    }
     await humanPace(page, 200, 500);
-    await page.type(
-        '#M_layout_content_PCDZ_MMCA7G7_ctl00_webInputForm_txtPassword',
-        'providentcu_password',
+    try {
+        await page.fill(
+            '#M_layout_content_PCDZ_MMCA7G7_ctl00_webInputForm_txtPassword',
+            'providentcu_password',
+        );
+    } catch (error) {
+        refreshmint.log(`Password fill failed: ${inspect(error)}`);
+        await saveDebugPageState(page, 'login-fill-password-failure');
+        throw error;
+    }
+
+    const fillStateJson = /** @type {string} */ (
+        await page.evaluate(`JSON.stringify({
+            usernameLength: (document.querySelector('#M_layout_content_PCDZ_MMCA7G7_ctl00_webInputForm_txtLoginName')?.value || '').length,
+            passwordLength: (document.querySelector('#M_layout_content_PCDZ_MMCA7G7_ctl00_webInputForm_txtPassword')?.value || '').length
+        })`)
     );
+    refreshmint.log(`Login field lengths after fill: ${fillStateJson}`);
+    await saveDebugPageState(page, 'login-after-fill');
 
     await humanPace(page, 1000, 2000);
 
     refreshmint.log('Clicking Sign On');
-    await page.click(
-        '#M_layout_content_PCDZ_MMCA7G7_ctl00_webInputForm_cmdContinue',
-    );
-
-    await waitMs(page, 3000);
+    try {
+        await page.evaluate(`(() => {
+            const button = document.querySelector('#M_layout_content_PCDZ_MMCA7G7_ctl00_webInputForm_cmdContinue');
+            if (!button) throw new Error('Sign On button not found');
+            // Let evaluate return before navigation destroys the current JS context.
+            setTimeout(() => button.click(), 0);
+            return true;
+        })()`);
+        await page.waitForLoadState('domcontentloaded', 30000);
+        refreshmint.log(`URL after Sign On: ${await page.url()}`);
+    } catch (error) {
+        refreshmint.log(
+            `Sign On transition failed at ${await page.url()}: ${inspect(error)}`,
+        );
+        await saveDebugPageState(page, 'login-submit-failure');
+        throw error;
+    }
+    await saveDebugPageState(page, 'login-after-submit');
 
     return { progressName: 'login submitted' };
 }
@@ -1912,9 +2296,11 @@ async function handleStatements(context) {
 async function handleZelle(context) {
     const page = context.mainPage;
     refreshmint.log('State: Zelle Activity');
+    const zelleFrameUrlParts = ['checkfreeweb.com', '/ftkz/'];
+    const zelleActivityUrlParts = [...zelleFrameUrlParts, '#/activity/main'];
 
     // Dedup check: if today's file already exists, skip
-    const today = new Date().toISOString().slice(0, 10);
+    const today = currentDateIsoLocal();
     const label = context.checkingLabel;
     const filename = `zelle-activity-${today}.json`;
     const existingDocsJson = await refreshmint.listAccountDocuments({ label });
@@ -1927,34 +2313,177 @@ async function handleZelle(context) {
         return { progressName: 'zelle already downloaded' };
     }
 
-    let response = null;
     try {
-        [response] = await Promise.all([
-            page.waitForResponse('/v2/activity', { timeout: 15000 }),
-            page.goto(ZELLE_URL),
-        ]);
+        refreshmint.log('Zelle stage: register handoff waiters');
+        const checkfreeRequestPromise = page.waitForRequest(
+            /checkfreeweb\.com\/ftkz\//,
+            { timeout: 20000 },
+        );
+        const loginServletRequestPromise = page.waitForRequest(
+            /transfers\.fta\.cashedge\.com\/popnet\/faces\/loginServlet/,
+            { timeout: 20000 },
+        );
+
+        refreshmint.log('Zelle stage: navigate to Zelle shell');
+        await page.goto(ZELLE_URL);
+
+        refreshmint.log('Zelle stage: await handoff requests');
+        const loginServletRequest = await loginServletRequestPromise.catch(
+            () => null,
+        );
+        const checkfreeRequest = await checkfreeRequestPromise.catch(
+            () => null,
+        );
+
+        if (loginServletRequest != null) {
+            await saveTextResource(
+                `zelle-login-servlet-${today}.txt`,
+                await loginServletRequest.url(),
+            );
+        }
+        if (checkfreeRequest != null) {
+            const checkfreeUrl = await checkfreeRequest.url();
+            refreshmint.log(
+                `Captured CheckFree handoff request: ${checkfreeUrl}`,
+            );
+            await saveTextResource(
+                `zelle-checkfree-url-${today}.txt`,
+                checkfreeUrl,
+            );
+        }
+        const checkfreeFrame = await waitForFrameByUrlParts(
+            page,
+            zelleFrameUrlParts,
+            15000,
+        );
+        if (checkfreeFrame == null) {
+            throw new Error('CheckFree handoff request did not appear');
+        }
+
+        refreshmint.log(
+            `Detected CheckFree Zelle frame: ${checkfreeFrame.url}`,
+        );
+        const frameRef = checkfreeFrame.name || checkfreeFrame.url;
+        refreshmint.log('Zelle stage: inspect CheckFree home frame');
+        await page.switchToFrame(frameRef);
+        await waitMs(page, 2000);
+        const entryState = await inspectCurrentFrameBasic(page);
+        await page.switchToMainFrame();
+
+        const unavailableReason = findZelleUnavailableReason(entryState);
+        if (unavailableReason != null) {
+            await saveJsonResource(`zelle-unavailable-${today}.json`, {
+                stage: 'checkfree-entry',
+                reason: unavailableReason,
+                title: entryState.title,
+                bodyText: entryState.bodyText,
+                url: entryState.href,
+            });
+            throw new Error(
+                `CheckFree unavailable state: ${unavailableReason}`,
+            );
+        }
+
+        refreshmint.log('Zelle stage: click activity footer');
+        const activityClicked = await clickZelleActivity(
+            page,
+            zelleFrameUrlParts,
+        );
+        refreshmint.log(
+            `Zelle activity click result: ${inspect(activityClicked)}`,
+        );
+        if (!activityClicked.clicked) {
+            throw new Error('Zelle activity footer was not available');
+        }
+
+        refreshmint.log('Zelle stage: wait for activity route');
+        const activityFrame = await waitForFrameByUrlParts(
+            page,
+            zelleActivityUrlParts,
+            15000,
+        );
+        if (activityFrame == null) {
+            throw new Error(
+                'Zelle activity page did not load in CheckFree frame',
+            );
+        }
+
+        refreshmint.log('Zelle stage: extract rendered activity cards');
+        await page.switchToFrame(activityFrame.name || activityFrame.url);
+        await waitMs(page, 3000);
+        const activityState = await extractZelleActivitiesInCurrentFrame(page);
+        await page.switchToMainFrame();
+
+        const unavailableActivityReason =
+            findZelleUnavailableReason(activityState);
+        if (unavailableActivityReason != null) {
+            await saveJsonResource(`zelle-unavailable-${today}.json`, {
+                stage: 'checkfree-activity',
+                reason: unavailableActivityReason,
+                title: activityState.title,
+                bodyText: activityState.bodyText,
+                url: activityState.href,
+            });
+            throw new Error(
+                `CheckFree activity opened unavailable state: ${unavailableActivityReason}`,
+            );
+        }
+
+        if (
+            !Array.isArray(activityState.activities) ||
+            activityState.activities.length === 0
+        ) {
+            throw new Error('No Zelle activity cards were found');
+        }
+
+        const payload = {
+            source: 'checkfree-rendered-activity',
+            scrapedAt: new Date().toISOString(),
+            coverageEndDate: today,
+            url: activityState.href,
+            title: activityState.title,
+            selectedTab: activityState.selectedTab,
+            pendingSelected: activityState.pendingSelected,
+            pastSelected: activityState.pastSelected,
+            count: activityState.activities.length,
+            activities: activityState.activities,
+        };
+        await refreshmint.saveResource(
+            filename,
+            stringToUtf8Bytes(JSON.stringify(payload, null, 2)),
+            {
+                mimeType: 'application/json',
+                label,
+                coverageEndDate: today,
+            },
+        );
+        await refreshmint.saveResource(
+            `zelle-activity-debug-${today}.json`,
+            stringToUtf8Bytes(JSON.stringify(activityState, null, 2)),
+            { mimeType: 'application/json' },
+        );
+        refreshmint.log(
+            `Saved Zelle activity to ${filename} (${activityState.activities.length} items)`,
+        );
     } catch (e) {
         refreshmint.log(
-            `Zelle activity not captured: ${e instanceof Error ? e.message : String(e)}`,
+            `Zelle activity scrape failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        await waitMs(page, 5000);
+        await savePageScreenshot(page, `zelle-timeout-${today}.png`);
+        await collectZelleFrameInventory(
+            page,
+            `zelle-timeout-frames-${today}.json`,
+        );
+        await refreshmint.saveResource(
+            `zelle-timeout-network-${today}.json`,
+            stringToUtf8Bytes(await page.networkRequests()),
+            { mimeType: 'application/json' },
         );
         context.zelleDone = true;
         await page.goto(SUMMARY_URL);
-        return { progressName: 'zelle activity timeout' };
+        return { progressName: 'zelle activity failed' };
     }
-
-    const activityText = await response.text();
-    refreshmint.log(`Zelle activity captured (${activityText.length} bytes)`);
-
-    const json = JSON.parse(activityText);
-    refreshmint.log(`Zelle activity: ${json?.activities?.length ?? 0} items`);
-
-    const payload = stringToUtf8Bytes(JSON.stringify(json, null, 2));
-    await refreshmint.saveResource(filename, payload, {
-        mimeType: 'application/json',
-        label,
-        coverageEndDate: today,
-    });
-    refreshmint.log(`Saved Zelle activity to ${filename}`);
 
     context.zelleDone = true;
     await page.goto(SUMMARY_URL);
