@@ -760,17 +760,17 @@ export function TransactionsTable({
                                                             ),
                                                     },
                                                     {
-                                                        label: `Filter: date:>=${txn.date}`,
+                                                        label: `Filter: date:${txn.date}..`,
                                                         action: () =>
                                                             onAddSearchTerm?.(
-                                                                `date:>=${txn.date}`,
+                                                                `date:${txn.date}..`,
                                                             ),
                                                     },
                                                     {
-                                                        label: `Filter: date:<=${txn.date}`,
+                                                        label: `Filter: date:..${txn.date}`,
                                                         action: () =>
                                                             onAddSearchTerm?.(
-                                                                `date:<=${txn.date}`,
+                                                                `date:..${txn.date}`,
                                                             ),
                                                     },
                                                 ]);
