@@ -1342,12 +1342,21 @@ async function collectStatementPdfCandidateUrls(
 
     try {
         var popupEvents = JSON.parse((await page.popupEvents()) || '[]');
+        var newPopups = popupEvents.slice(popupEventsBeforeCount);
+        if (newPopups.length > 0) {
+            refreshmint.log(
+                'Statement popup events after click: ' +
+                    newPopups
+                        .map(function (e) {
+                            return e.url || '(no-url)';
+                        })
+                        .join(', '),
+            );
+        }
         for (var i = popupEventsBeforeCount; i < popupEvents.length; i++) {
             var ev = popupEvents[i] || {};
             var evUrl = String(ev.url || '');
-            if (isLikelyPdfUrl(evUrl)) {
-                add(evUrl);
-            }
+            add(evUrl);
         }
     } catch (_popupErr) {
         // Best-effort popup event probe.
@@ -1355,17 +1364,38 @@ async function collectStatementPdfCandidateUrls(
 
     try {
         var responses = JSON.parse((await page.networkRequests()) || '[]');
+        refreshmint.log(
+            'Statement candidate network requests (' +
+                responses.length +
+                ' total):',
+        );
         for (var ri = responses.length - 1; ri >= 0; ri--) {
             var resp = responses[ri] || {};
             var status = Number(resp.status || 0);
             var respUrl = String(resp.url || '');
-            if (status >= 200 && status < 400 && isLikelyPdfUrl(respUrl)) {
+            var respHeaders = resp.headers || {};
+            var ct = String(
+                respHeaders['content-type'] ||
+                    respHeaders['Content-Type'] ||
+                    '',
+            ).toLowerCase();
+            refreshmint.log(
+                '  [' + status + '] ' + ct + ' ' + respUrl.slice(0, 120),
+            );
+            if (
+                status >= 200 &&
+                status < 400 &&
+                (isLikelyPdfUrl(respUrl) ||
+                    ct.indexOf('application/pdf') !== -1)
+            ) {
                 add(respUrl);
             }
             if (candidates.length >= 8) break;
         }
     } catch (_respErr) {
-        // Best-effort network request probe.
+        refreshmint.log(
+            'Statement candidate network requests error: ' + _respErr,
+        );
     }
 
     return candidates;
@@ -1892,6 +1922,32 @@ async function downloadStatementsSinceLastScrape(
                     'Statement pre-download snapshot diff error: ' +
                         snapshotDiffErr,
                 );
+            }
+            // After activating a row, BoA reveals actual download/view links in
+            // a dialog (#downloadPDFLink, #viewPDFLink). Click them if present.
+            // Note: skip isVisible check — these IDs are specific enough and the
+            // element may be in a dialog with zero BCR despite being rendered.
+            var secondClickResult = /** @type {string} */ (
+                await page.evaluate(`(function() {
+                    var ids = ['downloadPDFLink', 'downloadPDFAccLink', 'viewPDFLink', 'viewPDFAccLink'];
+                    for (var k = 0; k < ids.length; k++) {
+                        var el = document.getElementById(ids[k]);
+                        if (!el) continue;
+                        var st = window.getComputedStyle(el);
+                        var r = el.getBoundingClientRect();
+                        var info = ids[k] + ':display=' + st.display + ',vis=' + st.visibility + ',w=' + r.width + ',h=' + r.height;
+                        el.click();
+                        return info;
+                    }
+                    return '';
+                })()`)
+            );
+            if (secondClickResult) {
+                refreshmint.log(
+                    'Statement second-click on revealed link: ' +
+                        secondClickResult,
+                );
+                await humanPace(300, 600);
             }
             download = await page.waitForDownload(5000);
         } catch (e) {
