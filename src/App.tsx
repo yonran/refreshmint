@@ -23,12 +23,14 @@ import {
     type LoginConfig,
     listLogins,
     openLedger,
+    runScrapeForLogin,
     type AccountRow,
     type AmountStyleHint,
     type AmountTotal,
     type LedgerView,
     setLoginAccount,
 } from './tauri-commands.ts';
+import { appendScrapeLog } from './scrapeLog.ts';
 import { PipelineTab } from './tabs/PipelineTab.tsx';
 import { ReportsTab } from './tabs/ReportsTab.tsx';
 import { ScrapeTab } from './tabs/ScrapeTab.tsx';
@@ -57,6 +59,17 @@ function App() {
     const [hideObviousAmounts, setHideObviousAmounts] = useState(
         () => localStorage.getItem('pref:hideObviousAmounts') !== 'false',
     );
+    const [autoScrapeEnabled, setAutoScrapeEnabled] = useState(
+        () => localStorage.getItem('pref:autoScrapeEnabled') !== 'false',
+    );
+    const [autoScrapeIntervalHours, setAutoScrapeIntervalHours] = useState(() =>
+        Number(localStorage.getItem('pref:autoScrapeIntervalHours') ?? '24'),
+    );
+    const [autoScrapeQueue, setAutoScrapeQueue] = useState<string[]>([]);
+    const [autoScrapeActive, setAutoScrapeActive] = useState<string | null>(
+        null,
+    );
+    const [scrapeLogVersion, setScrapeLogVersion] = useState(0);
     const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
     const [loginAccounts, setLoginAccounts] = useState<LoginAccountRef[]>([]);
 
@@ -237,6 +250,61 @@ function App() {
             setActiveTab('transactions');
         }
     }, [activeRecategorizeTabId, recategorizeTabs]);
+
+    // Effect 1: build auto-scrape queue of stale logins
+    useEffect(() => {
+        if (!autoScrapeEnabled || !ledger || loginNames.length === 0) return;
+        const intervalMs = autoScrapeIntervalHours * 60 * 60 * 1000;
+        const now = Date.now();
+        const stale = loginNames.filter((loginName) => {
+            const last = localStorage.getItem(`lastScrape:${loginName}`);
+            if (last === null) return true;
+            return now - new Date(last).getTime() > intervalMs;
+        });
+        if (stale.length === 0) return;
+        setAutoScrapeQueue((current) => {
+            const toAdd = stale.filter((n) => !current.includes(n));
+            return toAdd.length === 0 ? current : [...current, ...toAdd];
+        });
+    }, [ledger, loginNames, autoScrapeEnabled, autoScrapeIntervalHours]);
+
+    // Effect 2: drain queue one login at a time
+    useEffect(() => {
+        if (
+            autoScrapeActive !== null ||
+            autoScrapeQueue.length === 0 ||
+            !ledger
+        )
+            return;
+        const [loginName, ...rest] = autoScrapeQueue;
+        if (loginName === undefined) return;
+        setAutoScrapeActive(loginName);
+        setAutoScrapeQueue(rest);
+        const timestamp = new Date().toISOString();
+        void runScrapeForLogin(ledger.path, loginName)
+            .then(() => {
+                localStorage.setItem(`lastScrape:${loginName}`, timestamp);
+                appendScrapeLog({
+                    loginName,
+                    timestamp,
+                    success: true,
+                    source: 'auto',
+                });
+            })
+            .catch((error: unknown) => {
+                appendScrapeLog({
+                    loginName,
+                    timestamp,
+                    success: false,
+                    error: String(error),
+                    source: 'auto',
+                });
+            })
+            .finally(() => {
+                setAutoScrapeActive(null);
+                setScrapeLogVersion((v) => v + 1);
+            });
+    }, [ledger, autoScrapeQueue, autoScrapeActive]);
 
     useEffect(() => {
         if (ledgerPath === null) {
@@ -896,6 +964,27 @@ function App() {
                         </button>
                     </div>
 
+                    {autoScrapeActive !== null && (
+                        <div className="auto-scrape-banner">
+                            <span>
+                                Auto-scraping {autoScrapeActive}
+                                {autoScrapeQueue.length > 0
+                                    ? ` (${autoScrapeQueue.length} remaining)`
+                                    : ''}
+                                …
+                            </span>
+                            <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => {
+                                    setAutoScrapeQueue([]);
+                                }}
+                            >
+                                Skip
+                            </button>
+                        </div>
+                    )}
+
                     {activeTab === 'accounts' ? (
                         <div className="table-wrap">
                             <AccountsTable
@@ -980,6 +1069,40 @@ function App() {
                                     they are derivable from the Amount column.
                                 </p>
                             </section>
+                            <section className="preferences-section">
+                                <h3>Auto-scrape</h3>
+                                <label className="checkbox-field">
+                                    <input
+                                        type="checkbox"
+                                        checked={autoScrapeEnabled}
+                                        onChange={(e) => {
+                                            const v = e.target.checked;
+                                            setAutoScrapeEnabled(v);
+                                            localStorage.setItem(
+                                                'pref:autoScrapeEnabled',
+                                                String(v),
+                                            );
+                                        }}
+                                    />
+                                    <span>Auto-scrape accounts when stale</span>
+                                </label>
+                                <label className="checkbox-field">
+                                    <span>Scrape interval (hours):</span>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        value={autoScrapeIntervalHours}
+                                        onChange={(e) => {
+                                            const v = Number(e.target.value);
+                                            setAutoScrapeIntervalHours(v);
+                                            localStorage.setItem(
+                                                'pref:autoScrapeIntervalHours',
+                                                String(v),
+                                            );
+                                        }}
+                                    />
+                                </label>
+                            </section>
                         </div>
                     ) : (
                         <ScrapeTab
@@ -1007,6 +1130,7 @@ function App() {
                             onIgnoreLoginAccountMapping={
                                 handleIgnoreLoginAccountMapping
                             }
+                            scrapeLogVersion={scrapeLogVersion}
                         />
                     )}
                 </section>

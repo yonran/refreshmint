@@ -48,6 +48,11 @@ import {
     type TransferDraft,
     normalizeLoginConfig,
 } from '../types.ts';
+import {
+    appendScrapeLog,
+    readScrapeLog,
+    type ScrapeLogEntry,
+} from '../scrapeLog.ts';
 
 interface ScrapeTabProps {
     ledger: LedgerView | null;
@@ -80,6 +85,7 @@ interface ScrapeTabProps {
         label: string,
         glAccount: string,
     ) => Promise<void>;
+    scrapeLogVersion: number;
 }
 
 function secretDomainKey(domain: string): string {
@@ -109,11 +115,15 @@ export function ScrapeTab({
     onLedgerRefresh,
     onSecretPrompt,
     onIgnoreLoginAccountMapping,
+    scrapeLogVersion,
 }: ScrapeTabProps) {
     const [scrapeAccount, setScrapeAccount] = useState('');
     const [scrapeExtension, setScrapeExtension] = useState('');
     const [scrapeExtensions, setScrapeExtensions] = useState<string[]>([]);
     const [scrapeStatus, setScrapeStatus] = useState<string | null>(null);
+    const [scrapeLogEntries, setScrapeLogEntries] = useState<ScrapeLogEntry[]>(
+        [],
+    );
     const [scrapeDebugSocket, setScrapeDebugSocket] = useState<string | null>(
         null,
     );
@@ -303,7 +313,17 @@ export function ScrapeTab({
             entryId2: '',
         });
         setIsPostingTransfer(false);
+        setScrapeLogEntries([]);
     }, [ledgerPath]);
+
+    // Reload scrape log when selected login or scrapeLogVersion changes.
+    useEffect(() => {
+        if (activeScrapeLoginName === null) {
+            setScrapeLogEntries([]);
+            return;
+        }
+        setScrapeLogEntries(readScrapeLog(activeScrapeLoginName));
+    }, [activeScrapeLoginName, scrapeLogVersion]);
 
     // List scrape extensions when ledger changes.
     useEffect(() => {
@@ -1687,8 +1707,16 @@ export function ScrapeTab({
 
         setIsRunningScrape(true);
         setScrapeStatus(`Running scrape for ${loginName}...`);
+        const timestamp = new Date().toISOString();
         try {
             await runScrapeForLogin(ledger.path, loginName);
+            localStorage.setItem(`lastScrape:${loginName}`, timestamp);
+            appendScrapeLog({
+                loginName,
+                timestamp,
+                success: true,
+                source: 'manual',
+            });
             setScrapeStatus(`Scrape completed for ${loginName}.`);
             try {
                 if (selectedLoginMapping !== null && account.length > 0) {
@@ -1698,9 +1726,17 @@ export function ScrapeTab({
                 // Surface scrape success first; pipeline reload errors are non-fatal here.
             }
         } catch (error) {
+            appendScrapeLog({
+                loginName,
+                timestamp,
+                success: false,
+                error: String(error),
+                source: 'manual',
+            });
             setScrapeStatus(`Scrape failed: ${String(error)}`);
         } finally {
             setIsRunningScrape(false);
+            setScrapeLogEntries(readScrapeLog(loginName));
         }
     }
 
@@ -2320,6 +2356,44 @@ export function ScrapeTab({
                     >
                         {scrapeStatus}
                     </p>
+                )}
+                {scrapeLogEntries.length > 0 && (
+                    <details className="scrape-log-disclosure">
+                        <summary className="disclosure-summary">
+                            Scrape log ({scrapeLogEntries.length})
+                        </summary>
+                        <table className="scrape-log-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Source</th>
+                                    <th>Status</th>
+                                    <th>Error</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {scrapeLogEntries.map((entry, i) => (
+                                    <tr
+                                        key={i}
+                                        className={
+                                            entry.success ? '' : 'status-error'
+                                        }
+                                    >
+                                        <td>
+                                            {new Date(
+                                                entry.timestamp,
+                                            ).toLocaleString()}
+                                        </td>
+                                        <td>{entry.source}</td>
+                                        <td>
+                                            {entry.success ? 'OK' : 'Failed'}
+                                        </td>
+                                        <td>{entry.error ?? ''}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </details>
                 )}
                 <details className="dev-tools-disclosure">
                     <summary className="disclosure-summary">
