@@ -5976,7 +5976,7 @@ pub(crate) fn resolve_screenshot_output_path(
         return Ok(None);
     };
     let candidate = PathBuf::from(path);
-    if candidate.is_absolute() {
+    if candidate.has_root() {
         return Err(js_err(
             "screenshot.path must be relative to the browser download directory".to_string(),
         ));
