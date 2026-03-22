@@ -8869,4 +8869,16 @@ mod tests {
             .unwrap_or_else(|| panic!("path should be present"));
         assert_eq!(path, root.join("nested/out.png"));
     }
+
+    #[test]
+    fn url_matches_pattern_bare_star_does_not_match_http_url() {
+        // Single "*" only matches strings with no slashes — real HTTP URLs always
+        // contain slashes and are never matched by bare "*".  This documents why
+        // waitForEvent("request") must NOT be routed through
+        // wait_for_request_pattern("*"): it would silently drop all events.
+        assert!(!url_matches_pattern("http://127.0.0.1:8080/api/echo", "*"));
+        assert!(!url_matches_pattern("https://example.com/path", "*"));
+        // A string with no slashes does match "*".
+        assert!(url_matches_pattern("noslash", "*"));
+    }
 }
