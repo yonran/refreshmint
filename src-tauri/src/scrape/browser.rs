@@ -152,12 +152,7 @@ pub async fn launch_browser(
             builder = builder
                 .no_sandbox()
                 .arg("--disable-dev-shm-usage")
-                .arg("--disable-gpu")
-                // On Ubuntu 24.04, `localhost` resolves to ::1 (IPv6) by preference.
-                // Our test fixture server binds only 127.0.0.1, so OOPIF iframe
-                // requests to localhost would hang waiting for a connection.
-                // Force Chrome to resolve localhost → 127.0.0.1 to avoid the issue.
-                .arg("--host-resolver-rules=MAP localhost 127.0.0.1");
+                .arg("--disable-gpu");
         }
     } else {
         eprintln!("[browser] Launch mode: headed");

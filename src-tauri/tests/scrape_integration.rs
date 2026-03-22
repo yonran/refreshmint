@@ -827,34 +827,30 @@ impl HttpFixtureServer {
         let port = listener.local_addr()?.port();
         let base_url = format!("http://127.0.0.1:{port}");
         let thread_base_url = base_url.clone();
-        let thread_localhost_url = format!("http://localhost:{port}");
-        // On systems where `localhost` resolves to ::1 (e.g. Ubuntu 24.04),
-        // also bind the IPv6 loopback so cross-origin iframe requests succeed.
-        let listener_v6 = TcpListener::bind(format!("[::1]:{port}")).ok();
-        if let Some(ref v6) = listener_v6 {
-            let _ = v6.set_nonblocking(true);
-        }
+        // Bind a second listener on a different port so the OOPIF test can use
+        // a cross-origin iframe URL (http://127.0.0.1:port2) without relying on
+        // `localhost` DNS resolution, which varies by OS (e.g. Ubuntu 24.04
+        // prefers ::1).
+        let listener2 = TcpListener::bind("127.0.0.1:0")?;
+        listener2.set_nonblocking(true)?;
+        let port2 = listener2.local_addr()?.port();
+        let thread_cross_origin_url = format!("http://127.0.0.1:{port2}");
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let thread = thread::spawn(move || loop {
             if shutdown_rx.try_recv().is_ok() {
                 break;
             }
+            // Poll the primary listener, then the cross-origin listener.
             let stream = match listener.accept() {
                 Ok((stream, _addr)) => stream,
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Also try the IPv6 listener when the IPv4 one has nothing.
-                    if let Some(ref v6) = listener_v6 {
-                        match v6.accept() {
-                            Ok((stream, _addr)) => stream,
-                            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                                thread::sleep(Duration::from_millis(10));
-                                continue;
-                            }
-                            Err(_) => break,
+                    match listener2.accept() {
+                        Ok((stream, _addr)) => stream,
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                            continue;
                         }
-                    } else {
-                        thread::sleep(Duration::from_millis(10));
-                        continue;
+                        Err(_) => break,
                     }
                 }
                 Err(_) => break,
@@ -882,7 +878,7 @@ impl HttpFixtureServer {
             if path == "/frame-main" {
                 let body = format!(
                     "<!doctype html><html><body><div id=\"main\">Main</div><iframe name=\"logonbox\" src={}></iframe></body></html>",
-                    serde_json::to_string(&format!("{thread_localhost_url}/frame-child"))
+                    serde_json::to_string(&format!("{thread_cross_origin_url}/frame-child"))
                         .unwrap_or_else(|_| "\"\"".to_string()),
                 );
                 let response = format!(
