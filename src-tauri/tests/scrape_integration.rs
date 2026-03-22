@@ -824,10 +824,16 @@ impl HttpFixtureServer {
     fn start() -> Result<Self, Box<dyn Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
-        let addr = listener.local_addr()?;
-        let base_url = format!("http://{}", addr);
+        let port = listener.local_addr()?.port();
+        let base_url = format!("http://127.0.0.1:{port}");
         let thread_base_url = base_url.clone();
-        let thread_localhost_url = thread_base_url.replacen("127.0.0.1", "localhost", 1);
+        let thread_localhost_url = format!("http://localhost:{port}");
+        // On systems where `localhost` resolves to ::1 (e.g. Ubuntu 24.04),
+        // also bind the IPv6 loopback so cross-origin iframe requests succeed.
+        let listener_v6 = TcpListener::bind(format!("[::1]:{port}")).ok();
+        if let Some(ref v6) = listener_v6 {
+            let _ = v6.set_nonblocking(true);
+        }
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let thread = thread::spawn(move || loop {
             if shutdown_rx.try_recv().is_ok() {
@@ -836,8 +842,20 @@ impl HttpFixtureServer {
             let stream = match listener.accept() {
                 Ok((stream, _addr)) => stream,
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
-                    continue;
+                    // Also try the IPv6 listener when the IPv4 one has nothing.
+                    if let Some(ref v6) = listener_v6 {
+                        match v6.accept() {
+                            Ok((stream, _addr)) => stream,
+                            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(10));
+                                continue;
+                            }
+                            Err(_) => break,
+                        }
+                    } else {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
                 }
                 Err(_) => break,
             };

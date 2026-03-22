@@ -1215,12 +1215,6 @@ impl PageApi {
         ctx: &Ctx<'js>,
         options: &EventWaitOptions,
     ) -> JsResult<RequestApi> {
-        if options.predicate.is_none() {
-            return self
-                .wait_for_request_pattern("*".to_string(), options.timeout_ms)
-                .await;
-        }
-
         let entries = self.ensure_request_capture().await?;
         let mut cursor = entries.lock().await.len();
         let started_at = tokio::time::Instant::now();
@@ -1251,12 +1245,6 @@ impl PageApi {
         ctx: &Ctx<'js>,
         options: &EventWaitOptions,
     ) -> JsResult<ResponseApi> {
-        if options.predicate.is_none() {
-            return self
-                .wait_for_response_pattern("*".to_string(), options.timeout_ms)
-                .await;
-        }
-
         let entries = self.ensure_response_capture().await?;
         let mut cursor = entries.lock().await.len();
         let started_at = tokio::time::Instant::now();
@@ -4638,9 +4626,15 @@ impl PageApi {
             EnableParams, EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent,
             EventRequestWillBeSentExtraInfo,
         };
-        page.execute(EnableParams::default())
-            .await
-            .map_err(|e| js_err(format!("failed to enable Network domain: {e}")))?;
+        if let Err(e) = page.execute(EnableParams::default()).await {
+            // CDP -32001 ("Session with given id not found") means the target
+            // was closed between when we obtained the page handle and now.
+            // Surface TargetClosedError so callers see the right error type;
+            // if the page is actually still alive, propagate the original error.
+            self.ensure_page_waiter_alive("network domain setup")
+                .await?;
+            return Err(js_err(format!("failed to enable Network domain: {e}")));
+        }
 
         let events = page
             .event_listener::<EventRequestWillBeSent>()
@@ -4947,9 +4941,15 @@ impl PageApi {
             EnableParams, EventLoadingFailed, EventLoadingFinished, EventResponseReceived,
             EventResponseReceivedExtraInfo,
         };
-        page.execute(EnableParams::default())
-            .await
-            .map_err(|e| js_err(format!("failed to enable Network domain: {e}")))?;
+        if let Err(e) = page.execute(EnableParams::default()).await {
+            // CDP -32001 ("Session with given id not found") means the target
+            // was closed between when we obtained the page handle and now.
+            // Surface TargetClosedError so callers see the right error type;
+            // if the page is actually still alive, propagate the original error.
+            self.ensure_page_waiter_alive("network domain setup")
+                .await?;
+            return Err(js_err(format!("failed to enable Network domain: {e}")));
+        }
 
         let events = page
             .event_listener::<EventResponseReceived>()
