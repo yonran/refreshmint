@@ -148,11 +148,13 @@ pub async fn launch_browser(
         eprintln!("[browser] Launch mode: headless=old");
         builder = builder.headless_mode(HeadlessMode::True);
         if cfg!(target_os = "linux") {
-            eprintln!("[browser] Launch flags: --no-sandbox --disable-dev-shm-usage --disable-gpu");
-            builder = builder
-                .no_sandbox()
-                .arg("--disable-dev-shm-usage")
-                .arg("--disable-gpu");
+            // --disable-gpu is intentionally omitted: it prevents Chrome from
+            // starting the GPU compositor process, which is required for
+            // Out-of-Process iFrames (OOPIF) to render cross-origin frames.
+            // Chrome falls back to SwiftShader (software GL) when no real GPU
+            // is present, so omitting this flag is safe on headless CI runners.
+            eprintln!("[browser] Launch flags: --no-sandbox --disable-dev-shm-usage");
+            builder = builder.no_sandbox().arg("--disable-dev-shm-usage");
         }
     } else {
         eprintln!("[browser] Launch mode: headed");
