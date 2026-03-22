@@ -827,31 +827,16 @@ impl HttpFixtureServer {
         let port = listener.local_addr()?.port();
         let base_url = format!("http://127.0.0.1:{port}");
         let thread_base_url = base_url.clone();
-        // Bind a second listener on a different port so the OOPIF test can use
-        // a cross-origin iframe URL (http://127.0.0.1:port2) without relying on
-        // `localhost` DNS resolution, which varies by OS (e.g. Ubuntu 24.04
-        // prefers ::1).
-        let listener2 = TcpListener::bind("127.0.0.1:0")?;
-        listener2.set_nonblocking(true)?;
-        let port2 = listener2.local_addr()?.port();
-        let thread_cross_origin_url = format!("http://127.0.0.1:{port2}");
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let thread = thread::spawn(move || loop {
             if shutdown_rx.try_recv().is_ok() {
                 break;
             }
-            // Poll the primary listener, then the cross-origin listener.
             let stream = match listener.accept() {
                 Ok((stream, _addr)) => stream,
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    match listener2.accept() {
-                        Ok((stream, _addr)) => stream,
-                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(10));
-                            continue;
-                        }
-                        Err(_) => break,
-                    }
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
                 }
                 Err(_) => break,
             };
@@ -876,9 +861,16 @@ impl HttpFixtureServer {
                 continue;
             }
             if path == "/frame-main" {
+                // Use an inline srcdoc with sandbox so the iframe gets a null
+                // (opaque) origin, making it genuinely cross-origin without
+                // requiring a second network connection.  Chrome headless on CI
+                // does not reliably load HTTP iframes from a different port, so
+                // avoid the network round-trip here entirely.
+                let child_html =
+                    "<!doctype html><html><body><input id='user'><input id='pass'><button id='submit'>OK</button></body></html>";
                 let body = format!(
-                    "<!doctype html><html><body><div id=\"main\">Main</div><iframe name=\"logonbox\" src={}></iframe></body></html>",
-                    serde_json::to_string(&format!("{thread_cross_origin_url}/frame-child"))
+                    "<!doctype html><html><body><div id=\"main\">Main</div><iframe name=\"logonbox\" sandbox=\"allow-scripts\" srcdoc={child_html_json}></iframe></body></html>",
+                    child_html_json = serde_json::to_string(child_html)
                         .unwrap_or_else(|_| "\"\"".to_string()),
                 );
                 let response = format!(

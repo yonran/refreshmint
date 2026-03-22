@@ -148,21 +148,8 @@ pub async fn launch_browser(
         eprintln!("[browser] Launch mode: headless=old");
         builder = builder.headless_mode(HeadlessMode::True);
         if cfg!(target_os = "linux") {
-            // --disable-features=SitePerProcess: Chrome's OOPIF (site isolation)
-            // requires the GPU compositor process to composite cross-origin
-            // iframe frames. In headless mode on Linux CI the GPU compositor
-            // doesn't initialise, so the OOPIF renderer never makes its network
-            // request and the parent page's load event never fires. Disabling
-            // SitePerProcess forces cross-origin iframes to run in-process,
-            // where Chrome loads them normally. Cross-origin JS restrictions
-            // still apply, so the frame API is still exercised.
-            eprintln!(
-                "[browser] Launch flags: --no-sandbox --disable-dev-shm-usage --disable-features=SitePerProcess"
-            );
-            builder = builder
-                .no_sandbox()
-                .arg("--disable-dev-shm-usage")
-                .arg("--disable-features=SitePerProcess");
+            eprintln!("[browser] Launch flags: --no-sandbox --disable-dev-shm-usage");
+            builder = builder.no_sandbox().arg("--disable-dev-shm-usage");
         }
     } else {
         eprintln!("[browser] Launch mode: headed");
