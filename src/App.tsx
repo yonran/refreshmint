@@ -22,6 +22,13 @@ import {
     getLoginConfig,
     type LoginConfig,
     listLogins,
+    listLoginAccountDocuments,
+    runLoginAccountExtraction,
+    getLoginAccountUnposted,
+    suggestCategories,
+    postLoginAccountEntry,
+    postLoginAccountTransfer,
+    type CategoryResult,
     openLedger,
     runScrapeForLogin,
     type AccountRow,
@@ -69,6 +76,8 @@ function App() {
     const [autoScrapeActive, setAutoScrapeActive] = useState<string | null>(
         null,
     );
+    const [autoEtlStatus, setAutoEtlStatus] = useState<string | null>(null);
+    const [autoEtlErrors, setAutoEtlErrors] = useState<string | null>(null);
     const [scrapeLogVersion, setScrapeLogVersion] = useState(0);
     const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
     const [loginAccounts, setLoginAccounts] = useState<LoginAccountRef[]>([]);
@@ -142,6 +151,10 @@ function App() {
     });
     const startupCancelledRef = useRef(false);
     const recategorizeTabIdRef = useRef(1);
+    const autoEtlForLoginRef = useRef<
+        ((loginName: string) => Promise<void>) | null
+    >(null);
+    const handleLedgerRefreshRef = useRef<(() => void) | null>(null);
     const secretPromptResolverRef = useRef<
         ((confirmed: boolean) => void) | null
     >(null);
@@ -268,6 +281,126 @@ function App() {
         });
     }, [ledger, loginNames, autoScrapeEnabled, autoScrapeIntervalHours]);
 
+    // Keep autoEtlForLoginRef current so Effect 2's async chain always sees
+    // the latest loginAccounts and loginConfigsByName without adding them to
+    // Effect 2's dependency array.
+    useEffect(() => {
+        autoEtlForLoginRef.current = async (loginName: string) => {
+            if (!ledger) return;
+            const ledgerPath = ledger.path;
+            const accounts = loginAccounts.filter(
+                (a) => a.loginName === loginName,
+            );
+            const cfg = normalizeLoginConfig(
+                loginConfigsByName[loginName] ?? null,
+            );
+
+            setAutoEtlErrors(null);
+
+            // Phase 1: Extract documents → account journal entries
+            const extractErrors: string[] = [];
+            for (const { label } of accounts) {
+                if ((cfg.extension?.trim() ?? '') === '') continue;
+                setAutoEtlStatus(`ETL extract: ${loginName}/${label}…`);
+                try {
+                    const docs = await listLoginAccountDocuments(
+                        ledgerPath,
+                        loginName,
+                        label,
+                    );
+                    if (docs.length > 0) {
+                        await runLoginAccountExtraction(
+                            ledgerPath,
+                            loginName,
+                            label,
+                            docs.map((d) => d.filename),
+                        );
+                    }
+                } catch (err) {
+                    console.error(
+                        `Auto-ETL extract failed ${loginName}/${label}:`,
+                        err,
+                    );
+                    extractErrors.push(`${loginName}/${label}: ${String(err)}`);
+                }
+            }
+
+            // Phase 2: Post unposted entries → GL
+            let posted = false;
+            const postErrors: string[] = [];
+            for (const { label } of accounts) {
+                const glAccount = cfg.accounts[label]?.glAccount?.trim() ?? '';
+                if (!glAccount) continue;
+                setAutoEtlStatus(`ETL post: ${loginName}/${label}…`);
+                try {
+                    const [unposted, suggestions] = await Promise.all([
+                        getLoginAccountUnposted(ledgerPath, loginName, label),
+                        suggestCategories(ledgerPath, loginName, label),
+                    ]);
+                    for (const entry of unposted) {
+                        try {
+                            const suggestion: CategoryResult | undefined =
+                                suggestions[entry.id];
+                            if (suggestion?.transferMatch) {
+                                const parts =
+                                    suggestion.transferMatch.accountLocator.split(
+                                        '/',
+                                    );
+                                const otherLogin = parts[1] ?? '';
+                                const otherLabel = parts[3] ?? '';
+                                if (otherLogin && otherLabel) {
+                                    await postLoginAccountTransfer(
+                                        ledgerPath,
+                                        loginName,
+                                        label,
+                                        entry.id,
+                                        otherLogin,
+                                        otherLabel,
+                                        suggestion.transferMatch.entryId,
+                                    );
+                                    posted = true;
+                                }
+                            } else {
+                                await postLoginAccountEntry(
+                                    ledgerPath,
+                                    loginName,
+                                    label,
+                                    entry.id,
+                                    'Expenses:Unknown',
+                                    null,
+                                );
+                                posted = true;
+                            }
+                        } catch (err) {
+                            console.error(
+                                `Auto-ETL post failed ${loginName}/${label}/${entry.id}:`,
+                                err,
+                            );
+                            postErrors.push(
+                                `${loginName}/${label}/${entry.id}: ${String(err)}`,
+                            );
+                        }
+                    }
+                } catch (err) {
+                    console.error(
+                        `Auto-ETL post phase failed ${loginName}/${label}:`,
+                        err,
+                    );
+                    postErrors.push(`${loginName}/${label}: ${String(err)}`);
+                }
+            }
+
+            if (posted) {
+                handleLedgerRefreshRef.current?.();
+            }
+
+            const allErrors = [...extractErrors, ...postErrors];
+            if (allErrors.length > 0) {
+                setAutoEtlErrors(`Auto-ETL errors: ${allErrors.join('; ')}`);
+            }
+        };
+    }, [ledger, loginAccounts, loginConfigsByName]);
+
     // Effect 2: drain queue one login at a time
     useEffect(() => {
         if (
@@ -282,7 +415,7 @@ function App() {
         setAutoScrapeQueue(rest);
         const timestamp = new Date().toISOString();
         void runScrapeForLogin(ledger.path, loginName)
-            .then(() => {
+            .then(async () => {
                 localStorage.setItem(`lastScrape:${loginName}`, timestamp);
                 appendScrapeLog({
                     loginName,
@@ -290,6 +423,7 @@ function App() {
                     success: true,
                     source: 'auto',
                 });
+                await autoEtlForLoginRef.current?.(loginName);
             })
             .catch((error: unknown) => {
                 appendScrapeLog({
@@ -302,6 +436,7 @@ function App() {
             })
             .finally(() => {
                 setAutoScrapeActive(null);
+                setAutoEtlStatus(null);
                 setScrapeLogVersion((v) => v + 1);
             });
     }, [ledger, autoScrapeQueue, autoScrapeActive]);
@@ -569,6 +704,7 @@ function App() {
                 console.error('ledger reload failed:', err);
             });
     }
+    handleLedgerRefreshRef.current = handleLedgerRefresh;
 
     function handleLoadConflictMapping(
         loginName: string,
@@ -967,11 +1103,15 @@ function App() {
                     {autoScrapeActive !== null && (
                         <div className="auto-scrape-banner">
                             <span>
-                                Auto-scraping {autoScrapeActive}
-                                {autoScrapeQueue.length > 0
-                                    ? ` (${autoScrapeQueue.length} remaining)`
-                                    : ''}
-                                …
+                                {autoEtlStatus ?? (
+                                    <>
+                                        Auto-scraping {autoScrapeActive}
+                                        {autoScrapeQueue.length > 0
+                                            ? ` (${autoScrapeQueue.length} remaining)`
+                                            : ''}
+                                        …
+                                    </>
+                                )}
                             </span>
                             <button
                                 type="button"
@@ -981,6 +1121,20 @@ function App() {
                                 }}
                             >
                                 Skip
+                            </button>
+                        </div>
+                    )}
+                    {autoEtlErrors !== null && (
+                        <div className="auto-scrape-banner auto-scrape-banner--error">
+                            <span>{autoEtlErrors}</span>
+                            <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => {
+                                    setAutoEtlErrors(null);
+                                }}
+                            >
+                                Dismiss
                             </button>
                         </div>
                     )}

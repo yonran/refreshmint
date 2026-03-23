@@ -61,6 +61,26 @@
     color: #c0392b;
 }
 
+.auto-scrape-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.4rem 0.75rem;
+    background: #f0f4ff;
+    border: 1px solid #b3c4f5;
+    border-radius: 6px;
+    font-size: 0.875rem;
+}
+
+.auto-scrape-banner span {
+    flex: 1;
+}
+
+.auto-scrape-banner--error {
+    background: #fff0f0;
+    border-color: #f5b3b3;
+}
+
 .empty-state {
     padding: 2rem;
     border: 1px dashed #d4d4d4;
