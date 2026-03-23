@@ -1283,6 +1283,9 @@ function App() {
                                 handleIgnoreLoginAccountMapping
                             }
                             scrapeLogVersion={scrapeLogVersion}
+                            onScrapeComplete={async (loginName) => {
+                                await autoEtlForLoginRef.current?.(loginName);
+                            }}
                         />
                     )}
                 </section>

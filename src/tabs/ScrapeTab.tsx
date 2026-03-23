@@ -86,6 +86,7 @@ interface ScrapeTabProps {
         glAccount: string,
     ) => Promise<void>;
     scrapeLogVersion: number;
+    onScrapeComplete: (loginName: string) => Promise<void>;
 }
 
 function secretDomainKey(domain: string): string {
@@ -116,6 +117,7 @@ export function ScrapeTab({
     onSecretPrompt,
     onIgnoreLoginAccountMapping,
     scrapeLogVersion,
+    onScrapeComplete,
 }: ScrapeTabProps) {
     const [scrapeAccount, setScrapeAccount] = useState('');
     const [scrapeExtension, setScrapeExtension] = useState('');
@@ -1718,6 +1720,7 @@ export function ScrapeTab({
                 source: 'manual',
             });
             setScrapeStatus(`Scrape completed for ${loginName}.`);
+            await onScrapeComplete(loginName);
             try {
                 if (selectedLoginMapping !== null && account.length > 0) {
                     await refreshAccountPipelineData(account);
