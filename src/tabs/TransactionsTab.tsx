@@ -94,14 +94,10 @@ function buildRecategorizeSeedQuery(
 
 function buildCurrentFilterQuery(
     transactionsSearch: string,
-    selectedAccount: string | null,
     unpostedOnly: boolean,
 ): string {
     return joinQueryClauses(
         transactionsSearch,
-        selectedAccount !== null
-            ? `acct:${quoteHledgerValue(selectedAccount)}`
-            : '',
         unpostedOnly ? 'acct:^Equity:Unreconciled' : '',
     );
 }
@@ -152,8 +148,6 @@ function getSelectableRecategorizePostings(
 interface TransactionsTabProps {
     ledger: LedgerView;
     isActive: boolean;
-    selectedAccount: string | null;
-    onSelectedAccountChange: (account: string | null) => void;
     hideObviousAmounts: boolean;
     onLedgerRefresh: () => void;
     // Recategorize tab integration (lifted to App.tsx for tab bar)
@@ -275,8 +269,6 @@ function selectMostRecentTransaction(
 export function TransactionsTab({
     ledger,
     isActive,
-    selectedAccount,
-    onSelectedAccountChange,
     hideObviousAmounts,
     onLedgerRefresh,
     onRecategorizeTabsChange,
@@ -635,12 +627,6 @@ export function TransactionsTab({
     const filteredTransactions = (() => {
         const base = queryResults ?? ledger.transactions;
         return base.filter((txn) => {
-            if (
-                selectedAccount !== null &&
-                !txn.postings.some((p) => p.account === selectedAccount)
-            ) {
-                return false;
-            }
             if (unpostedOnly) {
                 if (
                     !txn.postings.some((p) =>
@@ -656,11 +642,6 @@ export function TransactionsTab({
 
     const isNewTxnExpanded =
         isNewTxnExpandedOverride ?? ledger.transactions.length === 0;
-
-    const selectedAccountRow =
-        selectedAccount !== null
-            ? ledger.accounts.find((a) => a.name === selectedAccount)
-            : null;
 
     async function handleAddTransaction() {
         setAddStatus(null);
@@ -875,7 +856,6 @@ export function TransactionsTab({
         const id = recategorizeTabIdRef.current++;
         const currentFilterQuery = buildCurrentFilterQuery(
             transactionsSearch,
-            selectedAccount,
             unpostedOnly,
         );
         const seedQuery = buildRecategorizeSeedQuery(
@@ -1583,15 +1563,12 @@ export function TransactionsTab({
                     />
                     <span>Unposted only</span>
                 </label>
-                {(transactionsSearch.trim() ||
-                    unpostedOnly ||
-                    selectedAccount !== null) && (
+                {(transactionsSearch.trim() || unpostedOnly) && (
                     <button
                         className="ghost-button"
                         onClick={() => {
                             setTransactionsSearch('');
                             setUnpostedOnly(false);
-                            onSelectedAccountChange(null);
                             setQueryResults(null);
                             setQueryError(null);
                         }}
@@ -1603,34 +1580,6 @@ export function TransactionsTab({
             {queryError !== null && (
                 <div className="query-error">{queryError}</div>
             )}
-            {selectedAccount !== null ? (
-                <div className="filter-header">
-                    <div className="filter-info">
-                        <span className="filter-label">
-                            Filtered by account:
-                        </span>
-                        <span className="filter-value mono">
-                            {selectedAccount}
-                        </span>
-                        {selectedAccountRow &&
-                        selectedAccountRow.unpostedCount > 0 ? (
-                            <span className="secret-chip warning">
-                                {selectedAccountRow.unpostedCount} unposted
-                            </span>
-                        ) : null}
-                    </div>
-                    <div className="filter-actions">
-                        <button
-                            className="ghost-button"
-                            onClick={() => {
-                                onSelectedAccountChange(null);
-                            }}
-                        >
-                            Clear account filter
-                        </button>
-                    </div>
-                </div>
-            ) : null}
             <section className="txn-form">
                 <button
                     className="txn-form-toggle"

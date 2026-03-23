@@ -79,13 +79,10 @@ function App() {
     const [autoEtlStatus, setAutoEtlStatus] = useState<string | null>(null);
     const [autoEtlErrors, setAutoEtlErrors] = useState<string | null>(null);
     const [scrapeLogVersion, setScrapeLogVersion] = useState(0);
-    const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
     const [loginAccounts, setLoginAccounts] = useState<LoginAccountRef[]>([]);
 
     function handleSelectAccount(accountName: string) {
-        setSelectedAccount((current) =>
-            current === accountName ? null : accountName,
-        );
+        setPendingTransactionSearch(`acct:${accountName}`);
         setActiveTab('transactions');
     }
     const [recentLedgers, setRecentLedgersState] = useState<string[]>([]);
@@ -1151,8 +1148,6 @@ function App() {
                         <TransactionsTab
                             ledger={ledger}
                             isActive={true}
-                            selectedAccount={selectedAccount}
-                            onSelectedAccountChange={setSelectedAccount}
                             hideObviousAmounts={hideObviousAmounts}
                             onLedgerRefresh={handleLedgerRefresh}
                             onRecategorizeTabsChange={(updater) => {
