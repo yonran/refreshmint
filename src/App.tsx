@@ -82,7 +82,10 @@ function App() {
     const [loginAccounts, setLoginAccounts] = useState<LoginAccountRef[]>([]);
 
     function handleSelectAccount(accountName: string) {
-        setPendingTransactionSearch(`acct:${accountName}`);
+        setTransactionsTabSession((current) => ({
+            ...current,
+            transactionsSearch: `acct:${accountName}`,
+        }));
         setActiveTab('transactions');
     }
     const [recentLedgers, setRecentLedgersState] = useState<string[]>([]);
