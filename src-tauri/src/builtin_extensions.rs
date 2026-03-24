@@ -90,6 +90,19 @@ const EXTENSIONS: &[BuiltinExtension] = &[
             ),
         ],
     },
+    BuiltinExtension {
+        name: "target-circle-card",
+        files: &[
+            (
+                "manifest.json",
+                include_str!("../../builtin-extensions/target-circle-card/manifest.json"),
+            ),
+            (
+                "driver.mjs",
+                include_str!("../../builtin-extensions/target-circle-card/driver.mjs"),
+            ),
+        ],
+    },
 ];
 
 static EXTRACTED: OnceLock<HashMap<&'static str, PathBuf>> = OnceLock::new();
