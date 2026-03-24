@@ -103,6 +103,9 @@
 .tabs {
     display: inline-flex;
     gap: 0.5rem;
+}
+
+.tabs:not(.pipeline-subtabs) {
     border-bottom: 1px solid #e6e6e6;
     padding-bottom: 0.5rem;
 }
