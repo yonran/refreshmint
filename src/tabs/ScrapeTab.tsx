@@ -68,10 +68,10 @@ interface ScrapeTabProps {
     onSelectedLoginNameChange: (name: string) => void;
     loginManagementTab: 'select' | 'create';
     onLoginManagementTabChange: (tab: 'select' | 'create') => void;
-    loginLabelDraft: string;
-    onLoginLabelDraftChange: (label: string) => void;
-    loginGlAccountDraft: string;
-    onLoginGlAccountDraftChange: (account: string) => void;
+    editingMappingLabel: string | null;
+    onEditingMappingLabelChange: (label: string | null) => void;
+    editingMappingGlAccountDraft: string;
+    onEditingMappingGlAccountDraftChange: (account: string) => void;
     loginConfigStatus: string | null;
     onLoginConfigStatusChange: (status: string | null) => void;
     isSavingLoginConfig: boolean;
@@ -97,17 +97,16 @@ export function ScrapeTab({
     ledger,
     loginNames,
     loginConfigsByName,
-    loginAccountMappings,
     isLoadingLoginConfigs,
     conflictingGlAccountSet,
     selectedLoginName,
     onSelectedLoginNameChange,
     loginManagementTab,
     onLoginManagementTabChange,
-    loginLabelDraft,
-    onLoginLabelDraftChange,
-    loginGlAccountDraft,
-    onLoginGlAccountDraftChange,
+    editingMappingLabel,
+    onEditingMappingLabelChange,
+    editingMappingGlAccountDraft,
+    onEditingMappingGlAccountDraftChange,
     loginConfigStatus,
     onLoginConfigStatusChange,
     isSavingLoginConfig,
@@ -119,7 +118,9 @@ export function ScrapeTab({
     scrapeLogVersion,
     onScrapeComplete,
 }: ScrapeTabProps) {
-    const [scrapeAccount, setScrapeAccount] = useState('');
+    const [selectedPipelineLabel, setSelectedPipelineLabel] = useState<
+        string | null
+    >(null);
     const [scrapeExtension, setScrapeExtension] = useState('');
     const [scrapeExtensions, setScrapeExtensions] = useState<string[]>([]);
     const [scrapeStatus, setScrapeStatus] = useState<string | null>(null);
@@ -203,34 +204,10 @@ export function ScrapeTab({
                       name.length > 0 && names.indexOf(name) === index,
               )
         : [];
-    const selectedScrapeAccount = scrapeAccount.trim();
-    const selectedAccountMappings =
-        selectedScrapeAccount.length === 0
-            ? []
-            : (loginAccountMappings[selectedScrapeAccount] ?? []);
-    const selectedLoginMapping: LoginAccountMapping | null =
-        selectedAccountMappings.length === 1
-            ? (selectedAccountMappings[0] ?? null)
-            : null;
-    const selectedLoginMappingError =
-        selectedScrapeAccount.length === 0
-            ? null
-            : selectedAccountMappings.length === 0
-              ? `No login mapping found for account '${selectedScrapeAccount}'. Run migration and set a login account mapping.`
-              : `Account '${selectedScrapeAccount}' has multiple login mappings. Resolve GL mapping conflicts first.`;
-    const hasResolvedLoginMapping = selectedLoginMapping !== null;
-    const selectedLoginMappingSummary =
-        selectedLoginMapping === null
-            ? null
-            : `${selectedLoginMapping.loginName}/${selectedLoginMapping.label}`;
-    const activeScrapeLoginName =
-        selectedLoginMapping?.loginName ?? (selectedLoginName.trim() || null);
+    const activeScrapeLoginName = selectedLoginName.trim() || null;
     const hasActiveScrapeLogin = activeScrapeLoginName !== null;
     const activeSecretsLoginName = activeScrapeLoginName;
     const hasActiveSecretsLogin = activeSecretsLoginName !== null;
-    const selectedScrapeAccountHasConflict =
-        selectedScrapeAccount.length > 0 &&
-        conflictingGlAccountSet.has(selectedScrapeAccount);
 
     const selectedLoginConfig: LoginConfig | null =
         selectedLoginName.length === 0
@@ -242,6 +219,22 @@ export function ScrapeTab({
             : Object.entries(
                   normalizeLoginConfig(selectedLoginConfig).accounts,
               ).sort(([a], [b]) => a.localeCompare(b));
+    // Labels for the selected login that have a GL account mapping.
+    const selectedLoginMappedLabels = selectedLoginAccounts
+        .filter(([, cfg]) => (cfg.glAccount?.trim() ?? '').length > 0)
+        .map(([label]) => label);
+    const hasResolvedLoginMapping =
+        selectedPipelineLabel !== null &&
+        selectedLoginMappedLabels.includes(selectedPipelineLabel);
+    // The GL account for the pipeline-selected label (used by transfer form and
+    // post-scrape refresh).
+    const selectedPipelineGlAccount =
+        selectedPipelineLabel !== null
+            ? (selectedLoginAccounts
+                  .find(([l]) => l === selectedPipelineLabel)?.[1]
+                  ?.glAccount?.trim() ?? '')
+            : '';
+
     const selectedLoginConflictCount = selectedLoginAccounts.reduce(
         (count, [, config]) => {
             const glAccount = config.glAccount?.trim() ?? '';
@@ -280,7 +273,7 @@ export function ScrapeTab({
     useEffect(() => {
         setScrapeStatus(null);
         setScrapeDebugSocket(null);
-        setScrapeAccount('');
+        setSelectedPipelineLabel(null);
         setSelectedLoginExtensionDraft('');
         setNewLoginName('');
         setNewLoginExtension('');
@@ -431,6 +424,21 @@ export function ScrapeTab({
         const extension = selectedLoginConfig?.extension?.trim() ?? '';
         setSelectedLoginExtensionDraft(extension);
     }, [selectedLoginConfig]);
+
+    // Auto-select the pipeline label when it can be unambiguously determined.
+    useEffect(() => {
+        if (selectedLoginMappedLabels.length === 1) {
+            setSelectedPipelineLabel(selectedLoginMappedLabels[0] ?? null);
+        } else {
+            // Clear if the previously selected label is no longer valid.
+            setSelectedPipelineLabel((current) =>
+                current !== null && selectedLoginMappedLabels.includes(current)
+                    ? current
+                    : null,
+            );
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedLoginName, selectedLoginMappedLabels.join(',')]);
 
     // Load account secrets when login or secrets panel state changes.
     useEffect(() => {
@@ -645,7 +653,9 @@ export function ScrapeTab({
             return;
         }
 
-        if (selectedLoginMapping === null) {
+        const loginName = selectedLoginName.trim();
+        const label = selectedPipelineLabel;
+        if (loginName.length === 0 || label === null) {
             setDocuments([]);
             setSelectedDocumentNames([]);
             setUnpostedEntries([]);
@@ -656,28 +666,19 @@ export function ScrapeTab({
             return;
         }
 
-        const mapping = selectedLoginMapping;
+        const glAccount =
+            selectedLoginAccounts
+                .find(([l]) => l === label)?.[1]
+                ?.glAccount?.trim() ?? '';
         let cancelled = false;
         const timer = window.setTimeout(() => {
             setIsLoadingDocuments(true);
             setIsLoadingAccountJournal(true);
             setIsLoadingUnposted(true);
             void Promise.all([
-                listLoginAccountDocuments(
-                    ledgerPath,
-                    mapping.loginName,
-                    mapping.label,
-                ),
-                getLoginAccountJournal(
-                    ledgerPath,
-                    mapping.loginName,
-                    mapping.label,
-                ),
-                getLoginAccountUnposted(
-                    ledgerPath,
-                    mapping.loginName,
-                    mapping.label,
-                ),
+                listLoginAccountDocuments(ledgerPath, loginName, label),
+                getLoginAccountJournal(ledgerPath, loginName, label),
+                getLoginAccountUnposted(ledgerPath, loginName, label),
             ])
                 .then(
                     ([fetchedDocuments, _fetchedJournal, fetchedUnposted]) => {
@@ -706,7 +707,7 @@ export function ScrapeTab({
                             account1:
                                 current.account1.trim().length > 0
                                     ? current.account1
-                                    : selectedScrapeAccount,
+                                    : glAccount,
                         }));
                     },
                 )
@@ -734,7 +735,12 @@ export function ScrapeTab({
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [ledgerPath, selectedLoginMapping, selectedScrapeAccount]);
+    }, [
+        ledgerPath,
+        selectedLoginName,
+        selectedPipelineLabel,
+        selectedLoginAccounts,
+    ]);
 
     // ─── Handlers ───────────────────────────────────────────────────────────────
 
@@ -864,9 +870,8 @@ export function ScrapeTab({
 
         const loginName = activeScrapeLoginName;
         if (loginName === null) {
-            const msg = selectedLoginMappingError ?? 'Select a login first.';
-            setScrapeStatus(msg);
-            setExtensionLoadStatus(msg);
+            setScrapeStatus('Select a login first.');
+            setExtensionLoadStatus('Select a login first.');
             return;
         }
 
@@ -889,7 +894,7 @@ export function ScrapeTab({
         if (!ledger) return;
         const loginName = activeScrapeLoginName;
         if (loginName === null) {
-            setScrapeStatus(selectedLoginMappingError ?? 'Login is required.');
+            setScrapeStatus('Select a login first.');
             return;
         }
         setIsStartingScrapeDebug(true);
@@ -983,10 +988,7 @@ export function ScrapeTab({
 
     async function handleRefreshAccountSecrets() {
         if (activeSecretsLoginName === null) {
-            setSecretsStatus(
-                selectedLoginMappingError ??
-                    'Select a login mapping or login first.',
-            );
+            setSecretsStatus('Select a login first.');
             return;
         }
         try {
@@ -1002,10 +1004,7 @@ export function ScrapeTab({
     async function handleSaveDomainCredentials(): Promise<boolean> {
         const loginName = activeSecretsLoginName;
         if (loginName === null) {
-            setSecretsStatus(
-                selectedLoginMappingError ??
-                    'Select a login mapping or login first.',
-            );
+            setSecretsStatus('Select a login first.');
             return false;
         }
         const domain = secretDomain.trim();
@@ -1055,10 +1054,7 @@ export function ScrapeTab({
     async function handleRemoveDomainSecret(domain: string) {
         const loginName = activeSecretsLoginName;
         if (loginName === null) {
-            setSecretsStatus(
-                selectedLoginMappingError ??
-                    'Select a login mapping or login first.',
-            );
+            setSecretsStatus('Select a login first.');
             return;
         }
         setBusySecretKey(domain);
@@ -1100,10 +1096,7 @@ export function ScrapeTab({
     async function handleMigrateLoginSecrets() {
         const loginName = activeSecretsLoginName;
         if (loginName === null) {
-            setSecretsStatus(
-                selectedLoginMappingError ??
-                    'Select a login mapping or login first.',
-            );
+            setSecretsStatus('Select a login first.');
             return;
         }
         setIsSavingAccountSecret(true);
@@ -1122,29 +1115,6 @@ export function ScrapeTab({
         } finally {
             setIsSavingAccountSecret(false);
         }
-    }
-
-    async function handleScrapeAccountInputChange(nextAccount: string) {
-        if (nextAccount === scrapeAccount) return;
-        const canContinue = await confirmSaveOrDiscardSecretValue(
-            'before changing account',
-        );
-        if (!canContinue) return;
-        setScrapeAccount(nextAccount);
-        setScrapeStatus(null);
-        setSecretsStatus(null);
-        setPipelineStatus(null);
-    }
-
-    async function handleScrapeExtensionChange(nextExtension: string) {
-        if (nextExtension === scrapeExtension) return;
-        const canContinue = await confirmSaveOrDiscardSecretValue(
-            'before changing extension',
-        );
-        if (!canContinue) return;
-        setScrapeExtension(nextExtension);
-        setScrapeStatus(null);
-        setPipelineStatus(null);
     }
 
     async function handleCreateLoginConfig() {
@@ -1242,12 +1212,12 @@ export function ScrapeTab({
             onLoginConfigStatusChange('Select a login first.');
             return;
         }
-        const label = loginLabelDraft.trim();
+        const label = (editingMappingLabel ?? '').trim();
         if (label.length === 0) {
             onLoginConfigStatusChange('Label is required.');
             return;
         }
-        const glAccount = loginGlAccountDraft.trim();
+        const glAccount = editingMappingGlAccountDraft.trim();
 
         onIsSavingLoginConfigChange(true);
         try {
@@ -1262,6 +1232,7 @@ export function ScrapeTab({
                     ? `Set '${loginName}/${label}' as ignored (no GL account).`
                     : `Mapped '${loginName}/${label}' to '${glAccount}'.`,
             );
+            onEditingMappingLabelChange(null);
             onLoginConfigChanged();
         } catch (error) {
             onLoginConfigStatusChange(
@@ -1358,28 +1329,12 @@ export function ScrapeTab({
         return { value: parsed, error: null };
     }
 
-    async function refreshAccountPipelineData(accountInput: string) {
+    async function refreshAccountPipelineData(
+        loginName: string,
+        label: string,
+        glAccount = '',
+    ) {
         if (!ledger) return;
-        const account = accountInput.trim();
-        if (account.length === 0) {
-            setDocuments([]);
-            setSelectedDocumentNames([]);
-            setUnpostedEntries([]);
-            setPostDrafts({});
-            return;
-        }
-        const mappings = loginAccountMappings[account] ?? [];
-        if (mappings.length !== 1) {
-            throw new Error(
-                mappings.length === 0
-                    ? `No login mapping found for account '${account}'.`
-                    : `Multiple login mappings found for account '${account}'.`,
-            );
-        }
-        const mapping = mappings[0];
-        if (mapping === undefined) {
-            throw new Error(`No login mapping found for account '${account}'.`);
-        }
 
         setIsLoadingDocuments(true);
         setIsLoadingAccountJournal(true);
@@ -1387,21 +1342,9 @@ export function ScrapeTab({
         try {
             const [fetchedDocuments, _fetchedJournal, fetchedUnposted] =
                 await Promise.all([
-                    listLoginAccountDocuments(
-                        ledger.path,
-                        mapping.loginName,
-                        mapping.label,
-                    ),
-                    getLoginAccountJournal(
-                        ledger.path,
-                        mapping.loginName,
-                        mapping.label,
-                    ),
-                    getLoginAccountUnposted(
-                        ledger.path,
-                        mapping.loginName,
-                        mapping.label,
-                    ),
+                    listLoginAccountDocuments(ledger.path, loginName, label),
+                    getLoginAccountJournal(ledger.path, loginName, label),
+                    getLoginAccountUnposted(ledger.path, loginName, label),
                 ]);
             setDocuments(fetchedDocuments);
             setSelectedDocumentNames((current) =>
@@ -1425,7 +1368,7 @@ export function ScrapeTab({
                 account1:
                     current.account1.trim().length > 0
                         ? current.account1
-                        : account,
+                        : glAccount,
             }));
         } finally {
             setIsLoadingDocuments(false);
@@ -1435,14 +1378,21 @@ export function ScrapeTab({
     }
 
     async function handleRefreshAccountPipelineData() {
-        const account = scrapeAccount.trim();
-        if (account.length === 0) {
-            setPipelineStatus('Account is required.');
+        const loginName = selectedLoginName.trim();
+        const label = selectedPipelineLabel;
+        if (loginName.length === 0 || label === null) {
+            setPipelineStatus('Select a login and label first.');
             return;
         }
         try {
-            await refreshAccountPipelineData(account);
-            setPipelineStatus(`Loaded documents and journals for ${account}.`);
+            await refreshAccountPipelineData(
+                loginName,
+                label,
+                selectedPipelineGlAccount,
+            );
+            setPipelineStatus(
+                `Loaded documents and journals for ${loginName}/${label}.`,
+            );
         } catch (error) {
             setPipelineStatus(
                 `Failed to refresh account pipeline data: ${String(error)}`,
@@ -1463,25 +1413,10 @@ export function ScrapeTab({
 
     async function handleRunExtraction() {
         if (!ledger) return;
-        const account = scrapeAccount.trim();
-        if (account.length === 0) {
-            setPipelineStatus('Account is required.');
-            return;
-        }
-        const mappings = loginAccountMappings[account] ?? [];
-        if (mappings.length !== 1) {
-            setPipelineStatus(
-                mappings.length === 0
-                    ? `No login mapping found for account '${account}'.`
-                    : `Multiple login mappings found for account '${account}'.`,
-            );
-            return;
-        }
-        const mapping = mappings[0];
-        if (mapping === undefined) {
-            setPipelineStatus(
-                `No login mapping found for account '${account}'.`,
-            );
+        const loginName = selectedLoginName.trim();
+        const label = selectedPipelineLabel;
+        if (loginName.length === 0 || label === null) {
+            setPipelineStatus('Select a login and label first.');
             return;
         }
         const documentNames =
@@ -1500,11 +1435,15 @@ export function ScrapeTab({
         try {
             const newCount = await runLoginAccountExtraction(
                 ledger.path,
-                mapping.loginName,
-                mapping.label,
+                loginName,
+                label,
                 documentNames,
             );
-            await refreshAccountPipelineData(account);
+            await refreshAccountPipelineData(
+                loginName,
+                label,
+                selectedPipelineGlAccount,
+            );
             setPipelineStatus(
                 `Extraction complete. Added ${newCount} new transaction(s).`,
             );
@@ -1530,25 +1469,10 @@ export function ScrapeTab({
 
     async function handlePostAccountEntry(entryId: string) {
         if (!ledger) return;
-        const account = scrapeAccount.trim();
-        if (account.length === 0) {
-            setPipelineStatus('Account is required.');
-            return;
-        }
-        const mappings = loginAccountMappings[account] ?? [];
-        if (mappings.length !== 1) {
-            setPipelineStatus(
-                mappings.length === 0
-                    ? `No login mapping found for account '${account}'.`
-                    : `Multiple login mappings found for account '${account}'.`,
-            );
-            return;
-        }
-        const mapping = mappings[0];
-        if (mapping === undefined) {
-            setPipelineStatus(
-                `No login mapping found for account '${account}'.`,
-            );
+        const loginName = selectedLoginName.trim();
+        const label = selectedPipelineLabel;
+        if (loginName.length === 0 || label === null) {
+            setPipelineStatus('Select a login and label first.');
             return;
         }
         const draft = postDrafts[entryId] ?? {
@@ -1571,13 +1495,17 @@ export function ScrapeTab({
         try {
             const glId = await postLoginAccountEntry(
                 ledger.path,
-                mapping.loginName,
-                mapping.label,
+                loginName,
+                label,
                 entryId,
                 counterpartAccount,
                 postingIndex.value,
             );
-            await refreshAccountPipelineData(account);
+            await refreshAccountPipelineData(
+                loginName,
+                label,
+                selectedPipelineGlAccount,
+            );
             setUnpostEntryId(entryId);
             setPipelineStatus(`Posted ${entryId} to ${glId}.`);
             onLedgerRefresh();
@@ -1590,25 +1518,10 @@ export function ScrapeTab({
 
     async function handleUnpostAccountEntry() {
         if (!ledger) return;
-        const account = scrapeAccount.trim();
-        if (account.length === 0) {
-            setPipelineStatus('Account is required.');
-            return;
-        }
-        const mappings = loginAccountMappings[account] ?? [];
-        if (mappings.length !== 1) {
-            setPipelineStatus(
-                mappings.length === 0
-                    ? `No login mapping found for account '${account}'.`
-                    : `Multiple login mappings found for account '${account}'.`,
-            );
-            return;
-        }
-        const mapping = mappings[0];
-        if (mapping === undefined) {
-            setPipelineStatus(
-                `No login mapping found for account '${account}'.`,
-            );
+        const loginName = selectedLoginName.trim();
+        const label = selectedPipelineLabel;
+        if (loginName.length === 0 || label === null) {
+            setPipelineStatus('Select a login and label first.');
             return;
         }
         const entryId = unpostEntryId.trim();
@@ -1627,12 +1540,16 @@ export function ScrapeTab({
         try {
             await unpostLoginAccountEntry(
                 ledger.path,
-                mapping.loginName,
-                mapping.label,
+                loginName,
+                label,
                 entryId,
                 postingIndex.value,
             );
-            await refreshAccountPipelineData(account);
+            await refreshAccountPipelineData(
+                loginName,
+                label,
+                selectedPipelineGlAccount,
+            );
             setPipelineStatus(`Unposted ${entryId}.`);
             onLedgerRefresh();
         } catch (error) {
@@ -1666,8 +1583,15 @@ export function ScrapeTab({
                 account2,
                 entryId2,
             );
-            if (scrapeAccount.trim().length > 0) {
-                await refreshAccountPipelineData(scrapeAccount);
+            if (
+                selectedLoginName.trim().length > 0 &&
+                selectedPipelineLabel !== null
+            ) {
+                await refreshAccountPipelineData(
+                    selectedLoginName.trim(),
+                    selectedPipelineLabel,
+                    selectedPipelineGlAccount,
+                );
             }
             setPipelineStatus(
                 `Transfer posting complete: ${entryId1} ↔ ${entryId2} (${glId}).`,
@@ -1702,10 +1626,9 @@ export function ScrapeTab({
         if (!ledger) return;
         const loginName = activeScrapeLoginName;
         if (loginName === null) {
-            setScrapeStatus(selectedLoginMappingError ?? 'Login is required.');
+            setScrapeStatus('Login is required.');
             return;
         }
-        const account = scrapeAccount.trim();
 
         setIsRunningScrape(true);
         setScrapeStatus(`Running scrape for ${loginName}...`);
@@ -1722,8 +1645,13 @@ export function ScrapeTab({
             setScrapeStatus(`Scrape completed for ${loginName}.`);
             await onScrapeComplete(loginName);
             try {
-                if (selectedLoginMapping !== null && account.length > 0) {
-                    await refreshAccountPipelineData(account);
+                // Refresh pipeline for all mapped labels of this login.
+                if (selectedPipelineLabel !== null) {
+                    await refreshAccountPipelineData(
+                        loginName,
+                        selectedPipelineLabel,
+                        selectedPipelineGlAccount,
+                    );
                 }
             } catch {
                 // Surface scrape success first; pipeline reload errors are non-fatal here.
@@ -1752,8 +1680,8 @@ export function ScrapeTab({
                     <div>
                         <h2>Run scrape</h2>
                         <p>
-                            Choose a GL account mapped to a login and extension,
-                            then run the same scraper pipeline as the CLI
+                            Select a login in the Login Management section
+                            below, then run the same scraper pipeline as the CLI
                             command.
                         </p>
                     </div>
@@ -1998,10 +1926,8 @@ export function ScrapeTab({
                                     </label>
                                     <label className="field">
                                         <span>Login extension</span>
-                                        <input
-                                            type="text"
+                                        <select
                                             value={selectedLoginExtensionDraft}
-                                            placeholder="optional"
                                             onChange={(event) => {
                                                 setSelectedLoginExtensionDraft(
                                                     event.target.value,
@@ -2010,9 +1936,42 @@ export function ScrapeTab({
                                             }}
                                             disabled={
                                                 selectedLoginName.length ===
-                                                    0 || isSavingLoginConfig
+                                                    0 ||
+                                                isSavingLoginConfig ||
+                                                isLoadingScrapeExtensions
                                             }
-                                        />
+                                        >
+                                            <option value="">
+                                                {isLoadingScrapeExtensions
+                                                    ? 'Loading extensions...'
+                                                    : 'Select extension'}
+                                            </option>
+                                            {scrapeExtensions.map((name) => (
+                                                <option key={name} value={name}>
+                                                    {name}
+                                                </option>
+                                            ))}
+                                            {selectedLoginExtensionDraft.length >
+                                                0 &&
+                                            !scrapeExtensions.includes(
+                                                selectedLoginExtensionDraft,
+                                            ) ? (
+                                                <option
+                                                    value={
+                                                        selectedLoginExtensionDraft
+                                                    }
+                                                >
+                                                    {selectedLoginExtensionDraft.includes(
+                                                        '/',
+                                                    ) ||
+                                                    selectedLoginExtensionDraft.includes(
+                                                        '\\',
+                                                    )
+                                                        ? `(unpacked) ${selectedLoginExtensionDraft.split('/').pop() ?? selectedLoginExtensionDraft}`
+                                                        : selectedLoginExtensionDraft}
+                                                </option>
+                                            ) : null}
+                                        </select>
                                     </label>
                                 </div>
                                 <div className="pipeline-actions">
@@ -2069,7 +2028,10 @@ export function ScrapeTab({
                                     </p>
                                 ) : selectedLoginAccounts.length === 0 ? (
                                     <p className="hint">
-                                        No labels configured for this login.
+                                        No labels configured yet. Labels are
+                                        discovered automatically on the first
+                                        scrape run. Use + to add a mapping
+                                        manually.
                                     </p>
                                 ) : (
                                     <div className="table-wrap">
@@ -2114,15 +2076,15 @@ export function ScrapeTab({
                                                                         type="button"
                                                                         className="ghost-button"
                                                                         onClick={() => {
-                                                                            onLoginLabelDraftChange(
+                                                                            onEditingMappingLabelChange(
                                                                                 label,
                                                                             );
-                                                                            onLoginGlAccountDraftChange(
+                                                                            onEditingMappingGlAccountDraftChange(
                                                                                 config.glAccount ??
                                                                                     '',
                                                                             );
                                                                             onLoginConfigStatusChange(
-                                                                                `Loaded '${selectedLoginName}/${label}' for editing.`,
+                                                                                null,
                                                                             );
                                                                         }}
                                                                         disabled={
@@ -2184,16 +2146,16 @@ export function ScrapeTab({
                                         ignoring a conflicting mapping.
                                     </p>
                                 ) : null}
-                                <div className="txn-grid">
-                                    <label className="field">
-                                        <span>Label</span>
-                                        <input
-                                            type="text"
-                                            value={loginLabelDraft}
-                                            placeholder="checking"
-                                            onChange={(event) => {
-                                                onLoginLabelDraftChange(
-                                                    event.target.value,
+                                {selectedLoginConfig !== null &&
+                                editingMappingLabel === null ? (
+                                    <div className="pipeline-actions">
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                onEditingMappingLabelChange('');
+                                                onEditingMappingGlAccountDraftChange(
+                                                    '',
                                                 );
                                                 onLoginConfigStatusChange(null);
                                             }}
@@ -2201,62 +2163,104 @@ export function ScrapeTab({
                                                 selectedLoginName.length ===
                                                     0 || isSavingLoginConfig
                                             }
-                                        />
-                                    </label>
-                                    <label className="field">
-                                        <span>GL account</span>
-                                        <input
-                                            type="text"
-                                            value={loginGlAccountDraft}
-                                            placeholder="Assets:Bank:Checking (blank = ignored)"
-                                            list="scrape-account-options"
-                                            onChange={(event) => {
-                                                onLoginGlAccountDraftChange(
-                                                    event.target.value,
-                                                );
-                                                onLoginConfigStatusChange(null);
-                                            }}
-                                            disabled={
-                                                selectedLoginName.length ===
-                                                    0 || isSavingLoginConfig
-                                            }
-                                        />
-                                    </label>
-                                </div>
-                                <div className="pipeline-actions">
-                                    <button
-                                        type="button"
-                                        className="ghost-button"
-                                        onClick={() => {
-                                            void handleSetLoginAccountMapping();
-                                        }}
-                                        disabled={
-                                            selectedLoginName.length === 0 ||
-                                            isSavingLoginConfig
-                                        }
-                                    >
-                                        {isSavingLoginConfig
-                                            ? 'Saving...'
-                                            : 'Set mapping'}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="ghost-button"
-                                        onClick={() => {
-                                            onLoginLabelDraftChange('');
-                                            onLoginGlAccountDraftChange(
-                                                selectedScrapeAccount,
-                                            );
-                                            onLoginConfigStatusChange(null);
-                                        }}
-                                        disabled={
-                                            selectedLoginName.length === 0 ||
-                                            isSavingLoginConfig
-                                        }
-                                    >
-                                        Use selected account
-                                    </button>
-                                </div>
+                                        >
+                                            + Add mapping
+                                        </button>
+                                    </div>
+                                ) : null}
+                                {editingMappingLabel !== null ? (
+                                    <>
+                                        <div className="txn-grid">
+                                            <label className="field">
+                                                <span>Label</span>
+                                                <input
+                                                    type="text"
+                                                    value={editingMappingLabel}
+                                                    placeholder="checking"
+                                                    readOnly={
+                                                        editingMappingLabel.length >
+                                                        0
+                                                    }
+                                                    onChange={(event) => {
+                                                        onEditingMappingLabelChange(
+                                                            event.target.value,
+                                                        );
+                                                        onLoginConfigStatusChange(
+                                                            null,
+                                                        );
+                                                    }}
+                                                    disabled={
+                                                        isSavingLoginConfig
+                                                    }
+                                                />
+                                            </label>
+                                            <label className="field">
+                                                <span>GL account</span>
+                                                <input
+                                                    type="text"
+                                                    value={
+                                                        editingMappingGlAccountDraft
+                                                    }
+                                                    placeholder="Assets:Bank:Checking (blank = ignored)"
+                                                    list="scrape-account-options"
+                                                    onChange={(event) => {
+                                                        onEditingMappingGlAccountDraftChange(
+                                                            event.target.value,
+                                                        );
+                                                        onLoginConfigStatusChange(
+                                                            null,
+                                                        );
+                                                    }}
+                                                    disabled={
+                                                        isSavingLoginConfig
+                                                    }
+                                                />
+                                            </label>
+                                        </div>
+                                        <datalist id="scrape-account-options">
+                                            {scrapeAccountOptions.map(
+                                                (name) => (
+                                                    <option
+                                                        key={name}
+                                                        value={name}
+                                                    />
+                                                ),
+                                            )}
+                                        </datalist>
+                                        <div className="pipeline-actions">
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                onClick={() => {
+                                                    void handleSetLoginAccountMapping();
+                                                }}
+                                                disabled={
+                                                    selectedLoginName.length ===
+                                                        0 || isSavingLoginConfig
+                                                }
+                                            >
+                                                {isSavingLoginConfig
+                                                    ? 'Saving...'
+                                                    : 'Save mapping'}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                onClick={() => {
+                                                    onEditingMappingLabelChange(
+                                                        null,
+                                                    );
+                                                    onLoginConfigStatusChange(
+                                                        null,
+                                                    );
+                                                }}
+                                                disabled={isSavingLoginConfig}
+                                            >
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </>
+                                ) : null}
                             </>
                         )}
                         {loginConfigStatus === null ? null : (
@@ -2264,77 +2268,13 @@ export function ScrapeTab({
                         )}
                     </fieldset>
                 </section>
-                <div className="txn-grid">
-                    <label className="field">
-                        <span>Account</span>
-                        <input
-                            type="text"
-                            value={scrapeAccount}
-                            placeholder="Account name"
-                            list="scrape-account-options"
-                            onChange={(event) => {
-                                void handleScrapeAccountInputChange(
-                                    event.target.value,
-                                );
-                            }}
-                        />
-                    </label>
-                    <label className="field">
-                        <span>Extension</span>
-                        <select
-                            value={scrapeExtension}
-                            onChange={(event) => {
-                                void handleScrapeExtensionChange(
-                                    event.target.value,
-                                );
-                            }}
-                            disabled={isLoadingScrapeExtensions}
-                        >
-                            <option value="">
-                                {isLoadingScrapeExtensions
-                                    ? 'Loading extensions...'
-                                    : 'Select extension'}
-                            </option>
-                            {scrapeExtensions.map((name) => (
-                                <option key={name} value={name}>
-                                    {name}
-                                </option>
-                            ))}
-                            {scrapeExtension.length > 0 &&
-                            !scrapeExtensions.includes(scrapeExtension) ? (
-                                <option value={scrapeExtension}>
-                                    {scrapeExtension.includes('/') ||
-                                    scrapeExtension.includes('\\')
-                                        ? `(unpacked) ${scrapeExtension.split('/').pop() ?? scrapeExtension}`
-                                        : scrapeExtension}
-                                </option>
-                            ) : null}
-                        </select>
-                    </label>
-                </div>
-                <datalist id="scrape-account-options">
-                    {scrapeAccountOptions.map((name) => (
-                        <option key={name} value={name} />
-                    ))}
-                </datalist>
-                {selectedLoginMappingSummary !== null ? (
-                    <p className="hint mono">
-                        Login mapping: {selectedLoginMappingSummary}
-                    </p>
-                ) : selectedScrapeAccountHasConflict ? (
-                    <p className="status">
-                        {`Account '${selectedScrapeAccount}' has GL mapping conflicts. Use the conflict panel to load and edit a mapping.`}
-                    </p>
-                ) : hasActiveScrapeLogin ? (
-                    <p className="hint mono">
-                        Using login selection: {activeScrapeLoginName}
-                    </p>
-                ) : selectedScrapeAccount.length === 0 ? (
-                    <p className="hint">
-                        Choose a GL account or login to run scrape/debug.
-                    </p>
+                {hasActiveScrapeLogin ? (
+                    <p className="hint mono">Login: {activeScrapeLoginName}</p>
                 ) : (
-                    <p className="status">{selectedLoginMappingError}</p>
+                    <p className="hint">
+                        Select a login in the Login Management section above to
+                        run scrape or start a debug session.
+                    </p>
                 )}
                 <div className="txn-actions">
                     <button
@@ -2623,10 +2563,7 @@ export function ScrapeTab({
                                 <p className="hint">
                                     {hasActiveSecretsLogin
                                         ? 'No credentials stored for this login.'
-                                        : selectedScrapeAccount.length > 0 &&
-                                            selectedLoginMappingError !== null
-                                          ? 'Resolve login mapping first, or select a login in Login mappings.'
-                                          : 'Select a login mapping or login to manage secrets.'}
+                                        : 'Select a login to manage secrets.'}
                                 </p>
                             ) : (
                                 <div className="table-wrap">
@@ -2742,6 +2679,33 @@ export function ScrapeTab({
                             </p>
                         </div>
                         <div className="header-actions">
+                            {selectedLoginMappedLabels.length > 1 ? (
+                                <label className="field">
+                                    <span>Label</span>
+                                    <select
+                                        value={selectedPipelineLabel ?? ''}
+                                        onChange={(event) => {
+                                            setSelectedPipelineLabel(
+                                                event.target.value.length > 0
+                                                    ? event.target.value
+                                                    : null,
+                                            );
+                                        }}
+                                    >
+                                        <option value="">Select label</option>
+                                        {selectedLoginMappedLabels.map(
+                                            (label) => (
+                                                <option
+                                                    key={label}
+                                                    value={label}
+                                                >
+                                                    {label}
+                                                </option>
+                                            ),
+                                        )}
+                                    </select>
+                                </label>
+                            ) : null}
                             <button
                                 className="ghost-button"
                                 type="button"
@@ -2818,10 +2782,10 @@ export function ScrapeTab({
                         <p className="status">Loading documents...</p>
                     ) : documents.length === 0 ? (
                         <p className="hint">
-                            {selectedScrapeAccount.length === 0
-                                ? 'Choose a GL account to view documents.'
+                            {!hasActiveScrapeLogin
+                                ? 'Select a login to view documents.'
                                 : !hasResolvedLoginMapping
-                                  ? 'Resolve login mapping first to view documents.'
+                                  ? 'Configure a GL account mapping for this login to view documents.'
                                   : 'No documents found for this login account mapping.'}
                         </p>
                     ) : (
@@ -2885,10 +2849,10 @@ export function ScrapeTab({
                         <p className="status">Loading unposted entries...</p>
                     ) : unpostedEntries.length === 0 ? (
                         <p className="hint">
-                            {selectedScrapeAccount.length === 0
-                                ? 'Choose a GL account to view unposted entries.'
+                            {!hasActiveScrapeLogin
+                                ? 'Select a login to view unposted entries.'
                                 : !hasResolvedLoginMapping
-                                  ? 'Resolve login mapping first to view unposted entries.'
+                                  ? 'Configure a GL account mapping for this login to view unposted entries.'
                                   : 'No unposted entries for this login mapping.'}
                         </p>
                     ) : (
@@ -2991,7 +2955,7 @@ export function ScrapeTab({
                                                                     ) => ({
                                                                         ...current,
                                                                         account1:
-                                                                            scrapeAccount,
+                                                                            selectedPipelineGlAccount,
                                                                         entryId1:
                                                                             entry.id,
                                                                     }),
@@ -3013,7 +2977,7 @@ export function ScrapeTab({
                                                                     ) => ({
                                                                         ...current,
                                                                         account2:
-                                                                            scrapeAccount,
+                                                                            selectedPipelineGlAccount,
                                                                         entryId2:
                                                                             entry.id,
                                                                     }),

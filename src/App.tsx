@@ -97,8 +97,11 @@ function App() {
         'select' | 'create'
     >('select');
     const [selectedLoginName, setSelectedLoginName] = useState('');
-    const [loginLabelDraft, setLoginLabelDraft] = useState('');
-    const [loginGlAccountDraft, setLoginGlAccountDraft] = useState('');
+    const [editingMappingLabel, setEditingMappingLabel] = useState<
+        string | null
+    >(null);
+    const [editingMappingGlAccountDraft, setEditingMappingGlAccountDraft] =
+        useState('');
     const [loginConfigStatus, setLoginConfigStatus] = useState<string | null>(
         null,
     );
@@ -221,8 +224,8 @@ function App() {
             setLoginConfigsByName({});
             setLoginManagementTab('select');
             setSelectedLoginName('');
-            setLoginLabelDraft('');
-            setLoginGlAccountDraft('');
+            setEditingMappingLabel(null);
+            setEditingMappingGlAccountDraft('');
             setLoginConfigStatus(null);
             setIsLoadingLoginConfigs(false);
             setIsSavingLoginConfig(false);
@@ -713,8 +716,8 @@ function App() {
     ) {
         setActiveTab('scrape');
         setSelectedLoginName(loginName);
-        setLoginLabelDraft(label);
-        setLoginGlAccountDraft(glAccount);
+        setEditingMappingLabel(label);
+        setEditingMappingGlAccountDraft(glAccount);
         setLoginConfigStatus(
             `Loaded '${loginName}/${label}' from conflicts. Update GL account or clear it to resolve.`,
         );
@@ -746,8 +749,8 @@ function App() {
             await setLoginAccount(ledger.path, loginName, label, null);
             setActiveTab('scrape');
             setSelectedLoginName(loginName);
-            setLoginLabelDraft(label);
-            setLoginGlAccountDraft('');
+            setEditingMappingLabel(label);
+            setEditingMappingGlAccountDraft('');
             setLoginConfigStatus(
                 `Set '${loginName}/${label}' to ignored (removed GL account '${glAccount}').`,
             );
@@ -1268,10 +1271,14 @@ function App() {
                             onSelectedLoginNameChange={setSelectedLoginName}
                             loginManagementTab={loginManagementTab}
                             onLoginManagementTabChange={setLoginManagementTab}
-                            loginLabelDraft={loginLabelDraft}
-                            onLoginLabelDraftChange={setLoginLabelDraft}
-                            loginGlAccountDraft={loginGlAccountDraft}
-                            onLoginGlAccountDraftChange={setLoginGlAccountDraft}
+                            editingMappingLabel={editingMappingLabel}
+                            onEditingMappingLabelChange={setEditingMappingLabel}
+                            editingMappingGlAccountDraft={
+                                editingMappingGlAccountDraft
+                            }
+                            onEditingMappingGlAccountDraftChange={
+                                setEditingMappingGlAccountDraft
+                            }
                             loginConfigStatus={loginConfigStatus}
                             onLoginConfigStatusChange={setLoginConfigStatus}
                             isSavingLoginConfig={isSavingLoginConfig}
