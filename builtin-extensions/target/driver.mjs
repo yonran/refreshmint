@@ -814,33 +814,14 @@ async function handleLogin(context) {
     const emailInputVisible = await page.locator('input#username').isVisible();
     if (emailInputVisible) {
         refreshmint.log('Target login branch: email step');
-        // Re-fill the email with the stored credential. locator.fill() fires
-        // React-compatible input events that trigger React's onChange so the
-        // Continue button becomes active. autofill alone does not trigger them.
-        await page.locator('input#username').fill('target_username');
+        // Use page.type() which sends CDP key events character-by-character.
+        // These fire real keydown/keypress/keyup/input events that React's
+        // synthetic event system processes, updating the controlled input state.
+        // locator.fill() sets el.value directly which React's tracker ignores.
+        await page.type('input#username', 'target_username');
         await humanPace(page, 300, 700);
 
-        // Click Continue. On the first login cycle the React state may not
-        // have caught up; fall back to requestSubmit() if the page doesn't
-        // advance within 1 second.
         await page.locator('button#login').click();
-        await waitMs(page, 1000);
-        const stillOnEmailStep = await page
-            .locator('input#username')
-            .isVisible();
-        if (stillOnEmailStep) {
-            refreshmint.log(
-                'Target login branch: Continue click did not advance page; trying requestSubmit()',
-            );
-            await page.evaluate(
-                '(function() {' +
-                    '  var form = document.querySelector("form");' +
-                    '  var btn = document.querySelector("button#login");' +
-                    '  if (form && btn) { form.requestSubmit(btn); }' +
-                    '  else if (form) { form.requestSubmit(); }' +
-                    '})()',
-            );
-        }
         await waitMs(page, 3000);
         return { progressName: 'submitted target email' };
     }
@@ -871,7 +852,14 @@ async function handleLogin(context) {
         // There may be multiple "Sign in" buttons (e.g. nav + form); use
         // .first() to pick the form submit button.
         await page.getByRole('button', { name: 'Sign in' }).first().click();
-        await waitMs(page, 4000);
+        // The page navigates on successful login, which kills any in-flight
+        // evaluate (including waitMs). Catch the navigation error and let the
+        // main loop detect the new URL on the next step.
+        try {
+            await waitMs(page, 4000);
+        } catch (_e) {
+            // page navigated away — login succeeded
+        }
         return { progressName: 'submitted target password' };
     }
 
