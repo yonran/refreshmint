@@ -5,7 +5,8 @@
 import { inspect } from 'refreshmint:util';
 
 const TARGET_ORIGIN = 'https://www.target.com/';
-const TARGET_LOGIN_URL = 'https://www.target.com/login';
+const TARGET_LOGIN_URL =
+    'https://www.target.com/login?client_id=ecom-web-1.0.0&ui_namespace=ui-default&back_button_action=browser&keep_me_signed_in=true&kmsi_default=false&actions=create_session_request_username&signin_amr=true';
 const TARGET_ORDERS_URL = 'https://www.target.com/orders';
 
 const SOURCE_KIND_ORDER_JSON = 'order-json';
@@ -766,7 +767,22 @@ async function scrapeInStoreOrders(page, existingState) {
  */
 async function navigateToLogin(context) {
     const page = context.mainPage;
-    refreshmint.log(`Navigating to ${TARGET_LOGIN_URL}`);
+    // Navigate to the orders page first. If the session is still active the
+    // browser lands there directly and we skip login. If the session is expired
+    // Target redirects to the login page which the main loop then handles.
+    refreshmint.log(
+        `Navigating to ${TARGET_ORDERS_URL} (session check before login)`,
+    );
+    await page.goto(TARGET_ORDERS_URL, { waitUntil: 'load', timeout: 30000 });
+    const landedUrl = await page.url();
+    refreshmint.log(`Landed at ${landedUrl}`);
+    if (landedUrl.startsWith(TARGET_ORDERS_URL)) {
+        return {
+            progressName: 'navigate to target orders (already logged in)',
+        };
+    }
+    // Not on the orders page — session is expired. Navigate to the full login URL.
+    refreshmint.log(`Session expired; navigating to ${TARGET_LOGIN_URL}`);
     await page.goto(TARGET_LOGIN_URL);
     return { progressName: `navigate to ${TARGET_LOGIN_URL}` };
 }
@@ -786,26 +802,75 @@ async function handleLogin(context) {
         throw new Error(`expected Target origin during login, got ${url}`);
     }
 
+    // Wait for the login form to hydrate (Next.js may show a loading spinner
+    // briefly before rendering the actual login fields).
+    await page.waitForSelector('#username, #password', 15000);
+
     await logStateSnapshot(page, 'target login snapshot');
 
-    if (await hasSelector(page, '#username')) {
+    // After submitting the email step, Target keeps #username in the DOM as a
+    // read-only edit-email link, so test for the *visible input* rather than
+    // just the element's presence.
+    const emailInputVisible = await page.locator('input#username').isVisible();
+    if (emailInputVisible) {
         refreshmint.log('Target login branch: email step');
-        await page.locator('#username').fill('target_username');
+        // Re-fill the email with the stored credential. locator.fill() fires
+        // React-compatible input events that trigger React's onChange so the
+        // Continue button becomes active. autofill alone does not trigger them.
+        await page.locator('input#username').fill('target_username');
         await humanPace(page, 300, 700);
 
-        // Click Continue to advance from the email step to the password step.
-        await page.getByRole('button', { name: 'Continue' }).click();
-        await waitMs(page, 2000);
+        // Click Continue. On the first login cycle the React state may not
+        // have caught up; fall back to requestSubmit() if the page doesn't
+        // advance within 1 second.
+        await page.locator('button#login').click();
+        await waitMs(page, 1000);
+        const stillOnEmailStep = await page
+            .locator('input#username')
+            .isVisible();
+        if (stillOnEmailStep) {
+            refreshmint.log(
+                'Target login branch: Continue click did not advance page; trying requestSubmit()',
+            );
+            await page.evaluate(
+                '(function() {' +
+                    '  var form = document.querySelector("form");' +
+                    '  var btn = document.querySelector("button#login");' +
+                    '  if (form && btn) { form.requestSubmit(btn); }' +
+                    '  else if (form) { form.requestSubmit(); }' +
+                    '})()',
+            );
+        }
+        await waitMs(page, 3000);
         return { progressName: 'submitted target email' };
     }
 
     if (await hasSelector(page, '#password')) {
         refreshmint.log('Target login branch: password step');
-        await page.locator('#password').fill('target_password');
+        // Target may render #password as a button that expands the input on
+        // click.  Check visibility via evaluate to avoid strict-mode issues
+        // when the DOM has multiple #password elements.
+        const firstPwVisible = await page.evaluate(
+            '(function() {' +
+                '  var el = document.querySelector("input#password");' +
+                '  if (!el) return false;' +
+                '  var s = window.getComputedStyle(el);' +
+                '  var r = el.getBoundingClientRect();' +
+                '  return s.display !== "none" && s.visibility !== "hidden" && r.width > 0;' +
+                '})()',
+        );
+        if (!firstPwVisible) {
+            await page.locator('#password').first().click();
+            await waitMs(page, 500);
+        }
+
+        // page.fill() uses document.querySelector() — no strict-mode issue.
+        await page.fill('#password', 'target_password');
         await humanPace(page, 500, 1000);
 
-        // Submit credentials and let Target redirect to the signed-in area.
-        await page.getByRole('button', { name: 'Sign in' }).click();
+        // There may be multiple "Sign in" buttons (e.g. nav + form); use
+        // .first() to pick the form submit button.
+        await page.getByRole('button', { name: 'Sign in' }).first().click();
         await waitMs(page, 4000);
         return { progressName: 'submitted target password' };
     }
@@ -871,10 +936,7 @@ async function main() {
 
         if (url === 'about:blank') {
             stepReturn = await navigateToLogin(context);
-        } else if (
-            url.startsWith(TARGET_LOGIN_URL) ||
-            url.startsWith(`${TARGET_ORIGIN}login?`)
-        ) {
+        } else if (url.startsWith(`${TARGET_ORIGIN}login?`)) {
             stepReturn = await handleLogin(context);
         } else if (url.startsWith(TARGET_ORDERS_URL)) {
             stepReturn = await handleOrdersHome(context);
