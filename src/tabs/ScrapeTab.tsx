@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SyntheticEvent } from 'react';
 import {
     confirm as confirmDialog,
@@ -213,12 +213,15 @@ export function ScrapeTab({
         selectedLoginName.length === 0
             ? null
             : (loginConfigsByName[selectedLoginName] ?? null);
-    const selectedLoginAccounts =
-        selectedLoginConfig === null
-            ? []
-            : Object.entries(
-                  normalizeLoginConfig(selectedLoginConfig).accounts,
-              ).sort(([a], [b]) => a.localeCompare(b));
+    const selectedLoginAccounts = useMemo(
+        () =>
+            selectedLoginConfig === null
+                ? []
+                : Object.entries(
+                      normalizeLoginConfig(selectedLoginConfig).accounts,
+                  ).sort(([a], [b]) => a.localeCompare(b)),
+        [selectedLoginConfig],
+    );
     // Labels for the selected login that have a GL account mapping.
     const selectedLoginMappedLabels = selectedLoginAccounts
         .filter(([, cfg]) => (cfg.glAccount?.trim() ?? '').length > 0)

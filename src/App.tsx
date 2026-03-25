@@ -158,6 +158,7 @@ function App() {
         ((loginName: string) => Promise<void>) | null
     >(null);
     const handleLedgerRefreshRef = useRef<(() => void) | null>(null);
+    const loginNamesRef = useRef<string[]>([]);
     const secretPromptResolverRef = useRef<
         ((confirmed: boolean) => void) | null
     >(null);
@@ -267,22 +268,44 @@ function App() {
         }
     }, [activeRecategorizeTabId, recategorizeTabs]);
 
-    // Effect 1: build auto-scrape queue of stale logins
+    // Keep loginNamesRef current so Effect 1 can read logins without depending on loginNames.
     useEffect(() => {
-        if (!autoScrapeEnabled || !ledger || loginNames.length === 0) return;
-        const intervalMs = autoScrapeIntervalHours * 60 * 60 * 1000;
-        const now = Date.now();
-        const stale = loginNames.filter((loginName) => {
-            const last = localStorage.getItem(`lastScrape:${loginName}`);
-            if (last === null) return true;
-            return now - new Date(last).getTime() > intervalMs;
-        });
-        if (stale.length === 0) return;
-        setAutoScrapeQueue((current) => {
-            const toAdd = stale.filter((n) => !current.includes(n));
-            return toAdd.length === 0 ? current : [...current, ...toAdd];
-        });
-    }, [ledger, loginNames, autoScrapeEnabled, autoScrapeIntervalHours]);
+        loginNamesRef.current = loginNames;
+    }, [loginNames]);
+
+    // Effect 1: build auto-scrape queue of stale logins on a timer.
+    // Uses a timer rather than reacting to loginNames so that config edits
+    // (which reload login configs but don't add/remove logins) do not
+    // spuriously trigger scrapes.
+    useEffect(() => {
+        if (!autoScrapeEnabled || !ledger) return;
+
+        function check() {
+            const names = loginNamesRef.current;
+            if (names.length === 0) return;
+            const intervalMs = autoScrapeIntervalHours * 60 * 60 * 1000;
+            const now = Date.now();
+            const stale = names.filter((loginName) => {
+                const last = localStorage.getItem(`lastScrape:${loginName}`);
+                if (last === null) return true;
+                return now - new Date(last).getTime() > intervalMs;
+            });
+            if (stale.length === 0) return;
+            setAutoScrapeQueue((current) => {
+                const toAdd = stale.filter((n) => !current.includes(n));
+                return toAdd.length === 0 ? current : [...current, ...toAdd];
+            });
+        }
+
+        // Immediate check when ledger opens or autoscrape settings change.
+        check();
+        // Periodic re-check every 5 minutes to catch logins that become stale
+        // while the app is open.
+        const id = window.setInterval(check, 5 * 60 * 1000);
+        return () => {
+            window.clearInterval(id);
+        };
+    }, [ledger, autoScrapeEnabled, autoScrapeIntervalHours]);
 
     // Keep autoEtlForLoginRef current so Effect 2's async chain always sees
     // the latest loginAccounts and loginConfigsByName without adding them to
