@@ -13,6 +13,7 @@ import {
     type GlCategoryResult,
     type PostingRow,
     type TransactionRow,
+    UNCATEGORIZED_GL_ACCOUNT,
     readAttachmentDataUrl,
 } from '../tauri-commands.ts';
 import {
@@ -130,7 +131,7 @@ function similarityGroupKey(txn: TransactionRow): string | null {
 /** Key for grouping "similar" uncategorized transactions: same description + same balancing account. */
 function similarKey(txn: TransactionRow): string | null {
     const posting = singleNonBalancingPosting(txn);
-    if (!posting || posting.account !== 'Expenses:Unknown') return null;
+    if (!posting || posting.account !== UNCATEGORIZED_GL_ACCOUNT) return null;
     return similarityGroupKey(txn);
 }
 
@@ -694,7 +695,8 @@ export function TransactionsTable({
                         ) : (
                             transactions.map((txn) => {
                                 const isUncategorized = txn.postings.some(
-                                    (p) => p.account === 'Expenses:Unknown',
+                                    (p) =>
+                                        p.account === UNCATEGORIZED_GL_ACCOUNT,
                                 );
                                 const glSuggestion =
                                     glCategorySuggestions[txn.id];
@@ -839,7 +841,7 @@ export function TransactionsTable({
                                                                 key;
                                                             const isUnknown =
                                                                 p.account ===
-                                                                'Expenses:Unknown';
+                                                                UNCATEGORIZED_GL_ACCOUNT;
                                                             const isNonBalanceSheet =
                                                                 !p.account.startsWith(
                                                                     'Assets:',
@@ -890,8 +892,7 @@ export function TransactionsTable({
                                                                           [])
                                                                         : [];
                                                                 if (
-                                                                    p.account !==
-                                                                        'Expenses:Unknown' &&
+                                                                    !isUnknown &&
                                                                     onOpenSimilarRecategorize !==
                                                                         undefined &&
                                                                     similarIdsForMenu.length >
@@ -911,9 +912,7 @@ export function TransactionsTable({
                                                                 }
                                                             }
                                                             if (
-                                                                isUncategorized &&
-                                                                transferMatch !==
-                                                                    null &&
+                                                                isNonBalanceSheet &&
                                                                 onOpenLinkTransfer !==
                                                                     undefined
                                                             ) {
@@ -1103,7 +1102,7 @@ export function TransactionsTable({
                                                                             }
                                                                         </span>
                                                                     )}
-                                                                    {isUnknown &&
+                                                                    {isNonBalanceSheet &&
                                                                         !isEditing &&
                                                                         transferMatch !==
                                                                             null &&

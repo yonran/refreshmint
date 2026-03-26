@@ -54,6 +54,9 @@ export interface PostingRow {
     totals: AmountTotal[] | null;
 }
 
+/** The placeholder counterpart account used for uncategorized GL transactions. */
+export const UNCATEGORIZED_GL_ACCOUNT = 'Expenses:Unknown';
+
 /** Per-domain credential status returned by list/sync commands. */
 export interface DomainSecretEntry {
     domain: string;
