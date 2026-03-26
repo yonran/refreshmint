@@ -36,6 +36,18 @@ per-field `#[serde(rename = "...")]` attrs that are now covered by `rename_all`.
 Exceptions (on-disk formats such as `operations.rs`) must have an explicit comment
 explaining why `rename_all = "camelCase"` is omitted.
 
+## Frontend Testing
+
+- Tests use **vitest** (`npm test`). Test files live alongside source as `src/*.test.ts`.
+- Pure logic that needs testing must be extracted into a standalone function before writing the test — React component rendering is not unit-testable in this setup.
+- `src/gl-transfer-utils.ts` is the established home for pure GL filtering helpers.
+
+## Frontend Conventions
+
+- **`UNCATEGORIZED_GL_ACCOUNT`** (`src/tauri-commands.ts`) is the single source of truth for the `'Expenses:Unknown'` string. Import it; do not hardcode the string elsewhere.
+- For **posting-level UI guards** (context menu items, inline chips) that should apply to any non-balance-sheet posting — not just uncategorized ones — use `isNonBalanceSheet` rather than `isUnknown`.
+- To identify a GL transaction that was posted by refreshmint (and is therefore eligible for `merge_gl_transfer`), check `t.comment.includes('generated-by: refreshmint-post')`.
+
 ## Scraping
 
 Read [scraper.md](./docs/scraper.md) before you edit any extension driver which scrapes an account.
