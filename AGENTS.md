@@ -6,6 +6,9 @@ Also read [AGENTS.local.md](./AGENTS.local.md) if it exists for machine-local de
 
 ## Commits
 
+- Commit logically distinct changes in separate commits.
+- Commits that modify behavior should generally have at least one test. Once you are done with the test and code change, then run the test to make sure it succeeds. Then `git add` the test only, `git stash push --keep-index --include-untracked --message <plan>-without-test`, then re-run the test and verify that it failed for the right reason. Then `git stash pop` the business changes, re-run the test if you had to modify it while everything else was stashed, and stage the business change and commit.
+  If you can, write the test first, run it to make sure that it fails, then write the business change, then ensure that the test succeeds without modification. If you had to modify the test to make the test succeed after changing other things, then
 - Use subject + body format (blank line between).
 - If the change is non-obvious, the body must explain why.
 - Add a separate co-author paragraph after the body.
