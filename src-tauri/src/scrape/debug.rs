@@ -323,10 +323,10 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
             .map_err(|err| err.to_string())?;
             std::fs::create_dir_all(&download_dir).map_err(|err| err.to_string())?;
 
-            let extension_dir = config
-                .ledger_dir
-                .join("extensions")
-                .join(&config.extension_name);
+            let extension_dir = crate::account_config::resolve_extension_dir(
+                &config.ledger_dir,
+                &config.extension_name,
+            );
             let declared_secrets = super::load_manifest_secret_declarations(&extension_dir)
                 .map_err(|err| err.to_string())?;
             let ext_cache_key = std::path::Path::new(&config.extension_name)
