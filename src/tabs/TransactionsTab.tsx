@@ -20,6 +20,7 @@ import {
     getSearchSuggestions,
     quoteHledgerValue,
 } from '../search-utils.ts';
+import { filterGlTransferCandidates } from '../gl-transfer-utils.ts';
 import {
     type RecategorizeTab,
     type SimilarRecategorizeSeed,
@@ -2023,21 +2024,11 @@ export function TransactionsTab({
             />
             {glTransferModalTxnId !== null &&
                 ((modalTxnId) => {
-                    const q = glTransferModalSearch.toLowerCase();
-                    const candidates = ledger.transactions
-                        .filter(
-                            (t) =>
-                                t.id !== glTransferModalTxnId &&
-                                t.postings.some(
-                                    (p) => p.account === 'Expenses:Unknown',
-                                ),
-                        )
-                        .filter(
-                            (t) =>
-                                !q ||
-                                t.description.toLowerCase().includes(q) ||
-                                t.date.includes(q),
-                        );
+                    const candidates = filterGlTransferCandidates(
+                        ledger.transactions,
+                        modalTxnId,
+                        glTransferModalSearch,
+                    );
                     return (
                         <div
                             className="modal-overlay"
