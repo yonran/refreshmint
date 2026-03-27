@@ -504,6 +504,7 @@ async fn run_extract_script_async(
     let module_specifier =
         crate::js_module_loader::entry_module_specifier(extension_dir, script_path)
             .map_err(|error| format!("failed to resolve extract module entrypoint: {error}"))?;
+    let allow_package_resolution = extension_dir.join("package.json").is_file();
 
     let runtime = AsyncRuntime::new()?;
     runtime
@@ -515,6 +516,7 @@ async fn run_extract_script_async(
                 crate::js_module_loader::RootedScriptModuleResolver::new(
                     extension_dir,
                     &["mjs", "js", "mts", "ts"],
+                    allow_package_resolution,
                 ),
             ),
             (
@@ -1567,6 +1569,73 @@ export async function extract(context) {
     tdate: row[0],
     tstatus: "Cleared",
     tdescription: buildDescription(row),
+    tcomment: "",
+    ttags: [["evidence", `${context.document.name}:2:1`]]
+  }];
+}
+"#,
+        )
+        .expect("write extract script");
+
+        let doc_name = "statement.csv";
+        let doc_path = documents_dir.join(doc_name);
+        fs::write(
+            &doc_path,
+            "date,description,bank_id\n2024-01-05,Coffee Shop,fit-123\n",
+        )
+        .expect("write csv document");
+
+        let txns = run_extract_script(
+            &root,
+            &script_path,
+            &doc_path,
+            doc_name,
+            &documents_dir,
+            &root,
+            "Assets:Checking",
+            None,
+            "example-extension",
+        )
+        .expect("extract script should succeed");
+
+        assert_eq!(txns.len(), 1);
+        assert_eq!(txns[0].tdescription, "2024-01-05:Coffee Shop");
+    }
+
+    #[test]
+    fn run_extract_script_supports_package_imports_from_source_tree() {
+        let root = temp_dir("extract-script-package-import");
+        let documents_dir = root.join("documents");
+        let package_dir = root.join("node_modules").join("demo-pkg").join("dist");
+        fs::create_dir_all(&documents_dir).expect("create docs dir");
+        fs::create_dir_all(&package_dir).expect("create package dir");
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"extract-script-package-import","private":true}"#,
+        )
+        .expect("write extension package manifest");
+        fs::write(
+            package_dir.parent().unwrap().join("package.json"),
+            r#"{"name":"demo-pkg","module":"./dist/index.js"}"#,
+        )
+        .expect("write dependency package manifest");
+        fs::write(
+            package_dir.join("index.js"),
+            "export function buildDescription(row) { return `${row[0]}:${row[1]}`; }\n",
+        )
+        .expect("write dependency package entry");
+
+        let script_path = root.join("extract.mts");
+        fs::write(
+            &script_path,
+            r#"
+import { buildDescription } from 'demo-pkg';
+
+export async function extract(context) {
+  return [{
+    tdate: context.csv[1][0],
+    tstatus: "Cleared",
+    tdescription: buildDescription(context.csv[1]),
     tcomment: "",
     ttags: [["evidence", `${context.document.name}:2:1`]]
   }];

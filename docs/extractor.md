@@ -96,6 +96,11 @@ Extractor modules may be `.js`, `.mjs`, `.ts`, or `.mts` and may import sibling
 modules with relative ESM specifiers. Runtime TypeScript support is limited to
 erasable syntax only.
 
+During source-tree development, an extractor with a `package.json` may also
+import ESM dependencies from `node_modules`. Built/package artifacts must be
+runtime-ready and relative-only; use `node scripts/build-extensions.mjs` to
+rewrite package imports into built runtime files under `dist/`.
+
 ### `context` shape
 
 `context` always includes:

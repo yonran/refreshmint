@@ -1,5 +1,7 @@
 {
     "name": "target-circle-card",
+    "extract": "extract.mts",
+    "idField": "bankId",
     "secrets": {
         "mytargetcirclecard.target.com": {
             "username": "target_circle_card_username",

@@ -95,3 +95,90 @@ fn extension_load_smoke_from_directory() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+#[test]
+fn extension_build_script_produces_runtime_ready_artifact() -> Result<(), Box<dyn Error>> {
+    let sandbox = TestSandbox::new("extension-build")?;
+    let source_dir = sandbox.path().join("extension-src");
+    let built_dir = sandbox.path().join("extension-built");
+    fs::create_dir_all(
+        source_dir
+            .join("node_modules")
+            .join("demo-pkg")
+            .join("dist"),
+    )?;
+    fs::write(
+        source_dir.join("manifest.json"),
+        r#"{"name":"build-ext","driver":"driver.mts","extract":"extract.mts"}"#,
+    )?;
+    fs::write(
+        source_dir.join("package.json"),
+        r#"{"name":"build-ext-src","private":true}"#,
+    )?;
+    fs::write(
+        source_dir
+            .join("node_modules")
+            .join("demo-pkg")
+            .join("package.json"),
+        r#"{"name":"demo-pkg","module":"./dist/index.js"}"#,
+    )?;
+    fs::write(
+        source_dir
+            .join("node_modules")
+            .join("demo-pkg")
+            .join("dist")
+            .join("index.js"),
+        "export const value = 'ok';\n",
+    )?;
+    fs::write(
+        source_dir.join("driver.mts"),
+        "import { value } from 'demo-pkg';\nif (value !== 'ok') { throw new Error('bad value'); }\n",
+    )?;
+    fs::write(
+        source_dir.join("extract.mts"),
+        "import { value } from 'demo-pkg';\nexport async function extract(context) { return [{ tdate: '2024-01-01', tstatus: 'Cleared', tdescription: value, tcomment: '', ttags: [[ 'evidence', `${context.document.name}:1:1` ]] }]; }\n",
+    )?;
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or("src-tauri should have repo parent")?
+        .to_path_buf();
+    let builder = repo_root.join("scripts").join("build-extensions.mjs");
+    let output = Command::new("node")
+        .arg(&builder)
+        .arg("--extension-dir")
+        .arg(&source_dir)
+        .arg("--out-dir")
+        .arg(&built_dir)
+        .current_dir(&repo_root)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "builder failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let built_manifest = fs::read_to_string(built_dir.join("manifest.json"))?;
+    assert!(
+        built_manifest.contains(r#""driver": "dist/driver.mjs""#),
+        "unexpected built manifest:\n{built_manifest}"
+    );
+    assert!(
+        built_manifest.contains(r#""extract": "dist/extract.mjs""#),
+        "unexpected built manifest:\n{built_manifest}"
+    );
+    assert!(built_dir.join("dist").join("driver.mjs").is_file());
+    assert!(built_dir.join("dist").join("extract.mjs").is_file());
+    assert!(
+        !built_dir.join("package.json").exists(),
+        "built artifact should not include package.json"
+    );
+    let built_extract = fs::read_to_string(built_dir.join("dist").join("extract.mjs"))?;
+    assert!(
+        !built_extract.contains("from 'demo-pkg'"),
+        "built extractor still has bare package import:\n{built_extract}"
+    );
+
+    Ok(())
+}

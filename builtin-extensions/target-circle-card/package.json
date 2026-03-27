@@ -1,0 +1,8 @@
+{
+    "name": "@refreshmint-ext/target-circle-card",
+    "private": true,
+    "type": "module",
+    "dependencies": {
+        "ofx-data-extractor": "^1.5.0"
+    }
+}

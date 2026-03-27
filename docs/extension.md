@@ -13,6 +13,16 @@ my-extension/
   # or another manifest-declared driver path such as src/driver.ts
 ```
 
+Source-tree extensions that use npm dependencies may also include:
+
+```text
+my-extension/
+  manifest.json
+  package.json
+  driver.mts
+  extract.mts
+```
+
 For the full scrape + extract pipeline, add at least one extraction method:
 
 ```text
@@ -21,6 +31,17 @@ my-extension/
   driver.mjs
   account.rules     # CSV rules-based extraction
   # or extract.mjs  # JS extraction script
+```
+
+Built/package artifacts should contain runtime-ready files only:
+
+```text
+my-extension/
+  manifest.json
+  dist/
+    driver.mjs
+    extract.mjs
+    ...
 ```
 
 ## `manifest.json`
@@ -96,6 +117,10 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 
 Use `--replace` to overwrite an existing extension with the same manifest `name`.
 
+`extension load` expects a runtime-ready directory or zip. If an extension uses
+package imports in source, build it first so the loaded artifact only contains
+relative runtime files.
+
 ## Built-in extensions
 
 The following extensions are bundled with the app and available automatically
@@ -108,10 +133,11 @@ without a prior `extension load` step:
 - `providentcu`
 - `target`
 
-In **release builds** the extension files are embedded in the binary. In **debug
-builds** the app reads directly from the `builtin-extensions/` source tree (via
-the compile-time `CARGO_MANIFEST_DIR` constant), so edits to those files are
-reflected immediately without recompiling.
+In **release builds** builtin extensions are built to runtime-ready artifacts
+and then embedded in the binary. In **debug builds** the app reads directly from
+the `builtin-extensions/` source tree (via the compile-time
+`CARGO_MANIFEST_DIR` constant), so edits to those files are reflected
+immediately without recompiling.
 
 ## Extension resolution order
 
@@ -145,6 +171,18 @@ Scraper and extractor entrypoints can import sibling modules with relative ESM
 imports, and TypeScript files are loaded with runtime type stripping for
 erasable syntax only.
 
+Source-tree extensions that include `package.json` may also import ESM packages
+from ancestor `node_modules` directories during development. Package resolution
+is intentionally disabled for built/package artifacts; built runtime files must
+use only relative imports.
+
+Development package resolution is browser-oriented and ESM-only:
+
+- prefer `exports.browser`, then `exports.import`, then `exports.default`
+- otherwise fall back to `module`
+- otherwise fall back to `main` only when it resolves to ESM
+- CommonJS / `require` entrypoints are rejected
+
 Shared extension compiler defaults live in `builtin-extensions/tsconfig.json`.
 Individual extensions can add their own `tsconfig.json` that extends that base
 when they need local `include` settings or additional editor configuration.
@@ -167,8 +205,30 @@ import { login } from './shared.ts';
 Run:
 
 ```bash
+npm run build:extensions
 npm run typecheck
 npm run lint
 ```
 
 Both commands include builtin extensions and `.agents/skills` source.
+
+## Build runtime-ready artifacts
+
+Build one extension source tree into a loadable/packageable artifact:
+
+```bash
+node scripts/build-extensions.mjs \
+  --extension-dir /path/to/my-extension \
+  --out-dir /tmp/my-extension-built
+```
+
+Build all builtin extensions into a release-style output tree:
+
+```bash
+node scripts/build-extensions.mjs \
+  --builtin-out-dir /tmp/refreshmint-builtins
+```
+
+The builder resolves package imports at build time and rewrites the emitted
+runtime graph to relative imports under `dist/`. The exact emitted layout under
+`dist/` is a build-tool detail and should not be hard-coded by runtime code.

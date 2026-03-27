@@ -133,6 +133,7 @@ async fn run_module_path_internal(
     let module_specifier =
         crate::js_module_loader::entry_module_specifier(extension_dir, entry_path)
             .map_err(|error| format!("failed to resolve module entrypoint: {error}"))?;
+    let allow_package_resolution = extension_dir.join("package.json").is_file();
 
     maybe_diag(options, "[sandbox] Creating QuickJS runtime...");
     let runtime = AsyncRuntime::new()?;
@@ -146,6 +147,7 @@ async fn run_module_path_internal(
                 crate::js_module_loader::RootedScriptModuleResolver::new(
                     extension_dir,
                     &["mjs", "js", "mts", "ts"],
+                    allow_package_resolution,
                 ),
             ),
             (
@@ -933,6 +935,51 @@ if (util.TextDecoder !== TextDecoder) {
         assert!(
             result.is_ok(),
             "expected TypeScript driver to pass: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_driver_supports_package_imports_from_source_tree() {
+        let extension_dir = temp_dir("sandbox-package-imports");
+        let package_dir = extension_dir
+            .join("node_modules")
+            .join("demo-pkg")
+            .join("dist");
+        fs::create_dir_all(&package_dir)
+            .unwrap_or_else(|err| panic!("failed to create package dir: {err}"));
+        fs::write(
+            extension_dir.join("package.json"),
+            r#"{"name":"sandbox-package-imports","private":true}"#,
+        )
+        .unwrap_or_else(|err| panic!("failed to write extension package.json: {err}"));
+        fs::write(
+            package_dir.parent().unwrap().join("package.json"),
+            r#"{"name":"demo-pkg","module":"./dist/index.js"}"#,
+        )
+        .unwrap_or_else(|err| panic!("failed to write package manifest: {err}"));
+        fs::write(package_dir.join("index.js"), "export const value = 42;\n")
+            .unwrap_or_else(|err| panic!("failed to write package entry: {err}"));
+        let driver_path = extension_dir.join("driver.mjs");
+        fs::write(
+            &driver_path,
+            "import { value } from 'demo-pkg';\nif (value !== 42) { throw new Error(`unexpected value: ${value}`); }\n",
+        )
+        .unwrap_or_else(|err| panic!("failed to write driver module: {err}"));
+
+        let result = run_module_path_internal(
+            &extension_dir,
+            &driver_path,
+            None,
+            SandboxRunOptions {
+                emit_diagnostics: false,
+            },
+        )
+        .await;
+
+        let _ = fs::remove_dir_all(&extension_dir);
+        assert!(
+            result.is_ok(),
+            "expected package-import driver to pass: {result:?}"
         );
     }
 }
