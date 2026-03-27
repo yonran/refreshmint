@@ -55,6 +55,11 @@ fn source_uses_static_module_syntax(source: &str) -> bool {
 fn init_quickjs_web_platform(ctx: &rquickjs::Ctx<'_>) -> Result<(), String> {
     // Keep these globals/modules aligned with extract.rs so driver and extractor
     // runtimes expose the same platform surface.
+    llrt_buffer::init(ctx)
+        .map_err(|error| format!("failed to init llrt buffer globals: {error}"))?;
+    ctx.globals()
+        .remove("Buffer")
+        .map_err(|error| format!("failed to remove Buffer global: {error}"))?;
     llrt_util::init(ctx).map_err(|error| format!("failed to init llrt util globals: {error}"))?;
     Ok(())
 }
@@ -680,6 +685,12 @@ if (!out.includes('[Circular]')) {
 import util from 'util';
 import streamWeb from 'stream/web';
 
+if (typeof Blob !== 'function') {
+  throw new Error('global Blob missing');
+}
+if (typeof File !== 'function') {
+  throw new Error('global File missing');
+}
 if (typeof TextDecoder !== 'function') {
   throw new Error('global TextDecoder missing');
 }
@@ -690,6 +701,10 @@ if (typeof streamWeb.ReadableStream !== 'function') {
 const decoded = new TextDecoder('utf-8').decode(new Uint8Array([0x6f, 0x6b]));
 if (decoded !== 'ok') {
   throw new Error('TextDecoder decode mismatch: ' + decoded);
+}
+const file = new File(['ok'], 'probe.txt', { type: 'text/plain' });
+if (file.name !== 'probe.txt') {
+  throw new Error('File name mismatch: ' + file.name);
 }
 if (util.TextDecoder !== TextDecoder) {
   throw new Error('util.TextDecoder does not match global TextDecoder');

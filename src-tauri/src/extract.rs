@@ -1,6 +1,9 @@
 use lopdf::Document as PdfDocument;
 use rquickjs::loader::{BuiltinLoader, BuiltinResolver, ModuleLoader};
-use rquickjs::{CatchResultExt, Context, Module, Runtime, Value};
+use rquickjs::{
+    async_with, function::Constructor, Array, AsyncContext, AsyncRuntime, CatchResultExt, Module,
+    Object, TypedArray, Value,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io;
@@ -14,6 +17,11 @@ const LLRT_STREAM_WEB_MODULE_NAME: &str = "stream/web";
 fn init_quickjs_web_platform(ctx: &rquickjs::Ctx<'_>) -> Result<(), String> {
     // Keep these globals/modules aligned with scrape/sandbox.rs so driver and
     // extractor runtimes expose the same platform surface.
+    llrt_buffer::init(ctx)
+        .map_err(|error| format!("failed to init llrt buffer globals: {error}"))?;
+    ctx.globals()
+        .remove("Buffer")
+        .map_err(|error| format!("failed to remove Buffer global: {error}"))?;
     llrt_util::init(ctx).map_err(|error| format!("failed to init llrt util globals: {error}"))?;
     Ok(())
 }
@@ -448,6 +456,29 @@ fn run_extract_script(
     label: Option<&str>,
     extension_name: &str,
 ) -> Result<Vec<ExtractedTransaction>, Box<dyn std::error::Error + Send + Sync>> {
+    block_on_extract_script(run_extract_script_async(
+        script_path,
+        doc_path,
+        doc_name,
+        documents_dir,
+        ledger_dir,
+        account_name,
+        label,
+        extension_name,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_extract_script_async(
+    script_path: &Path,
+    doc_path: &Path,
+    doc_name: &str,
+    documents_dir: &Path,
+    ledger_dir: &Path,
+    account_name: &str,
+    label: Option<&str>,
+    extension_name: &str,
+) -> Result<Vec<ExtractedTransaction>, Box<dyn std::error::Error + Send + Sync>> {
     let script_source = std::fs::read_to_string(script_path)?;
     let context = build_extract_script_context(
         doc_path,
@@ -458,93 +489,138 @@ fn run_extract_script(
         label,
         extension_name,
     )?;
+    let document_bytes = std::fs::read(doc_path)?;
+    let document_mime_type = context
+        .document_info
+        .as_ref()
+        .map(|info| info.mime_type.clone())
+        .unwrap_or_else(|| {
+            guess_document_mime_type(doc_name, &context.document.format).to_string()
+        });
     let context_json = serde_json::to_string(&context)?;
 
-    let runtime = Runtime::new()?;
-    runtime.set_loader(
-        BuiltinResolver::default()
-            .with_module(LLRT_UTIL_MODULE_NAME)
-            .with_module(LLRT_STREAM_WEB_MODULE_NAME),
-        (
-            BuiltinLoader::default(),
-            ModuleLoader::default()
-                .with_module(LLRT_UTIL_MODULE_NAME, llrt_util::UtilModule)
-                .with_module(
-                    LLRT_STREAM_WEB_MODULE_NAME,
-                    llrt_stream_web::StreamWebModule,
-                ),
-        ),
-    );
-    let context = Context::full(&runtime)?;
+    let runtime = AsyncRuntime::new()?;
+    runtime
+        .set_loader(
+            BuiltinResolver::default()
+                .with_module(LLRT_UTIL_MODULE_NAME)
+                .with_module(LLRT_STREAM_WEB_MODULE_NAME),
+            (
+                BuiltinLoader::default(),
+                ModuleLoader::default()
+                    .with_module(LLRT_UTIL_MODULE_NAME, llrt_util::UtilModule)
+                    .with_module(
+                        LLRT_STREAM_WEB_MODULE_NAME,
+                        llrt_stream_web::StreamWebModule,
+                    ),
+            ),
+        )
+        .await;
+    let context = AsyncContext::full(&runtime).await?;
 
-    let result_json = context
-        .with(|ctx| {
-            init_quickjs_web_platform(&ctx)?;
-            let module_name = script_path
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .unwrap_or("extract.mjs");
+    let result_json: Result<String, String> = async_with!(context => |ctx| {
+        init_quickjs_web_platform(&ctx)?;
+        let module_name = script_path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("extract.mjs");
 
-            let module = Module::declare(ctx.clone(), module_name, script_source.as_str())
+        let module = Module::declare(ctx.clone(), module_name, script_source.as_str())
+            .catch(&ctx)
+            .map_err(|error| format!("failed to compile {}: {error}", script_path.display()))?;
+        let (module, module_promise) = module.eval().catch(&ctx).map_err(|error| {
+            format!("failed to evaluate {}: {error}", script_path.display())
+        })?;
+
+        module_promise
+            .into_future::<()>()
+            .await
+            .catch(&ctx)
+            .map_err(|error| {
+            format!(
+                "module initialization failed in {}: {error}",
+                script_path.display()
+            )
+        })?;
+
+        let extract_export: Value = module.get("extract").catch(&ctx).map_err(|_| {
+            format!(
+                "{} must export function `extract(context)`",
+                script_path.display()
+            )
+        })?;
+        let extract_fn = extract_export.into_function().ok_or_else(|| {
+            format!(
+                "{} must export function `extract(context)`",
+                script_path.display()
+            )
+        })?;
+
+        let js_context = ctx
+            .json_parse(context_json.as_str())
+            .catch(&ctx)
+            .map_err(|error| format!("failed to serialize extract context: {error}"))?;
+        let js_context_object = js_context.as_object().ok_or_else(|| {
+            "internal error: extract context did not parse to object".to_string()
+        })?;
+            let file_constructor: Constructor = ctx
+                .globals()
+                .get("File")
                 .catch(&ctx)
-                .map_err(|error| format!("failed to compile {}: {error}", script_path.display()))?;
-            let (module, module_promise) = module.eval().catch(&ctx).map_err(|error| {
-                format!("failed to evaluate {}: {error}", script_path.display())
-            })?;
-
-            module_promise.finish::<()>().catch(&ctx).map_err(|error| {
-                format!(
-                    "module initialization failed in {}: {error}",
-                    script_path.display()
-                )
-            })?;
-
-            let extract_export: Value = module.get("extract").catch(&ctx).map_err(|_| {
-                format!(
-                    "{} must export function `extract(context)`",
-                    script_path.display()
-                )
-            })?;
-            let extract_fn = extract_export.into_function().ok_or_else(|| {
-                format!(
-                    "{} must export function `extract(context)`",
-                    script_path.display()
-                )
-            })?;
-
-            let js_context = ctx
-                .json_parse(context_json.as_str())
+                .map_err(|error| format!("failed to resolve global File constructor: {error}"))?;
+            let file_bytes = TypedArray::new_copy(ctx.clone(), document_bytes)
+                .map_err(|error| format!("failed to build extract file bytes: {error}"))?;
+            let file_parts = Array::new(ctx.clone())
+                .map_err(|error| format!("failed to build extract file parts: {error}"))?;
+            file_parts
+                .set(0, file_bytes)
                 .catch(&ctx)
-                .map_err(|error| format!("failed to serialize extract context: {error}"))?;
-
-            let returned: Value = extract_fn
-                .call((js_context,))
+                .map_err(|error| format!("failed to attach extract file bytes: {error}"))?;
+            let file_options = Object::new(ctx.clone())
+                .map_err(|error| format!("failed to build extract file options: {error}"))?;
+            file_options
+                .set("type", document_mime_type)
                 .catch(&ctx)
-                .map_err(|error| format!("extract(context) threw: {error}"))?;
-
-            let resolved = if returned.is_promise() {
-                returned
-                    .into_promise()
-                    .ok_or_else(|| "internal error: promise conversion failed".to_string())?
-                    .finish::<Value>()
-                    .catch(&ctx)
-                    .map_err(|error| format!("extract(context) rejected: {error}"))?
-            } else {
-                returned
-            };
-
-            if !resolved.is_array() {
-                return Err("extract(context) must return an array of transactions".to_string());
-            }
-
-            ctx.json_stringify(resolved)
+                .map_err(|error| format!("failed to set extract file type: {error}"))?;
+            let document_file: Value = file_constructor
+                .construct((file_parts, doc_name.to_string(), file_options))
                 .catch(&ctx)
-                .map_err(|error| format!("failed to serialize extractor result: {error}"))?
-                .ok_or_else(|| "extract(context) returned a non-serializable value".to_string())?
-                .to_string()
-                .map_err(|error| format!("failed to decode extractor result: {error}"))
-        })
-        .map_err(io_error)?;
+                .map_err(|error| format!("failed to construct extract context file: {error}"))?;
+            js_context_object
+                .set("file", document_file)
+                .catch(&ctx)
+            .map_err(|error| format!("failed to attach extract context file: {error}"))?;
+
+        let returned: Value = extract_fn
+            .call((js_context,))
+            .catch(&ctx)
+            .map_err(|error| format!("extract(context) threw: {error}"))?;
+
+        let resolved = if returned.is_promise() {
+            returned
+                .into_promise()
+                .ok_or_else(|| "internal error: promise conversion failed".to_string())?
+                .into_future::<Value>()
+                .await
+                .catch(&ctx)
+                .map_err(|error| format!("extract(context) rejected: {error}"))?
+        } else {
+            returned
+        };
+
+        if !resolved.is_array() {
+            return Err("extract(context) must return an array of transactions".to_string());
+        }
+
+        ctx.json_stringify(resolved)
+            .catch(&ctx)
+            .map_err(|error| format!("failed to serialize extractor result: {error}"))?
+            .ok_or_else(|| "extract(context) returned a non-serializable value".to_string())?
+            .to_string()
+            .map_err(|error| format!("failed to decode extractor result: {error}"))
+    })
+    .await;
+    let result_json = result_json.map_err(io_error)?;
 
     let extracted: Vec<ExtractedTransaction> =
         serde_json::from_str(&result_json).map_err(|error| {
@@ -558,6 +634,25 @@ fn run_extract_script(
     }
 
     Ok(extracted)
+}
+
+fn block_on_extract_script<T>(future: impl std::future::Future<Output = T>) -> T {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return tokio::task::block_in_place(|| handle.block_on(future));
+        }
+    }
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            panic!("failed to create temporary tokio runtime for extract script: {error}")
+        }
+    };
+    runtime.block_on(future)
 }
 
 fn build_extract_script_context(
@@ -653,6 +748,22 @@ fn detect_document_format(
     }
 
     DocumentFormat::Other
+}
+
+fn guess_document_mime_type(doc_name: &str, format: &str) -> &'static str {
+    if doc_name.to_ascii_lowercase().ends_with(".qfx")
+        || doc_name.to_ascii_lowercase().ends_with(".ofx")
+        || doc_name.to_ascii_lowercase().ends_with(".qbo")
+    {
+        return "application/x-ofx";
+    }
+
+    match format {
+        "csv" => "text/csv",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        _ => "application/octet-stream",
+    }
 }
 
 fn read_csv_rows(
@@ -1288,6 +1399,67 @@ export async function extract(context) {
         assert_eq!(txns[0].tdate, "2024-01-05");
         assert_eq!(txns[0].tdescription, "Coffee Shop");
         assert_eq!(txns[0].bank_id(), Some("fit-123"));
+    }
+
+    #[test]
+    fn run_extract_script_exposes_document_as_file() {
+        let root = temp_dir("extract-script-file");
+        let documents_dir = root.join("documents");
+        fs::create_dir_all(&documents_dir).expect("create docs dir");
+
+        let script_path = root.join("extract.mjs");
+        fs::write(
+            &script_path,
+            r#"
+export async function extract(context) {
+  if (!(context.file instanceof File)) {
+    throw new Error('context.file is not a File');
+  }
+  const bytes = new Uint8Array(await context.file.arrayBuffer());
+  const text = new TextDecoder('utf-8').decode(bytes);
+  return [{
+    tdate: "2024-01-05",
+    tstatus: "Cleared",
+    tdescription: `${context.file.name}:${context.file.type}:${bytes.length}`,
+    tcomment: text.trim(),
+    ttags: [["evidence", `${context.document.name}:1:1`]]
+  }];
+}
+"#,
+        )
+        .expect("write extract script");
+
+        let doc_name = "statement.csv";
+        let doc_path = documents_dir.join(doc_name);
+        fs::write(
+            &doc_path,
+            "date,description,bank_id\n2024-01-05,Coffee Shop,fit-123\n",
+        )
+        .expect("write csv document");
+        fs::write(
+            documents_dir.join("statement.csv-info.json"),
+            r#"{"mimeType":"text/csv","scrapedAt":"2026-03-26T00:00:00Z","extensionName":"example-extension","loginName":"example-login","label":"_default","scrapeSessionId":"session-1","coverageEndDate":"2026-03-26"}"#,
+        )
+        .expect("write sidecar");
+
+        let txns = run_extract_script(
+            &script_path,
+            &doc_path,
+            doc_name,
+            &documents_dir,
+            &root,
+            "Assets:Checking",
+            None,
+            "example-extension",
+        )
+        .expect("extract script should succeed");
+
+        assert_eq!(txns.len(), 1);
+        assert!(txns[0].tdescription.starts_with("statement.csv:text/csv:"));
+        assert_eq!(
+            txns[0].tcomment,
+            "date,description,bank_id\n2024-01-05,Coffee Shop,fit-123"
+        );
     }
 
     #[test]
