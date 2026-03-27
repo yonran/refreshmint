@@ -108,7 +108,7 @@ pub async fn run_script_source_with_options(
 
 type SandboxGlobals = (Arc<Mutex<PageInner>>, Arc<Mutex<RefreshmintInner>>);
 
-async fn run_module_path_with_options(
+pub(crate) async fn run_module_path_with_options(
     extension_dir: &Path,
     entry_path: &Path,
     page_inner: Arc<Mutex<PageInner>>,
@@ -145,7 +145,7 @@ async fn run_module_path_internal(
                     .with_module(LLRT_STREAM_WEB_MODULE_NAME),
                 crate::js_module_loader::RootedScriptModuleResolver::new(
                     extension_dir,
-                    &["mjs", "js"],
+                    &["mjs", "js", "mts", "ts"],
                 ),
             ),
             (
@@ -897,6 +897,42 @@ if (util.TextDecoder !== TextDecoder) {
         assert!(
             result.is_ok(),
             "expected relative-import driver to pass: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_driver_supports_typescript_modules() {
+        let extension_dir = temp_dir("sandbox-typescript-modules");
+        let shared_dir = extension_dir.join("shared");
+        fs::create_dir_all(&shared_dir).unwrap_or_else(|err| {
+            panic!("failed to create shared dir: {err}");
+        });
+        let driver_path = extension_dir.join("driver.ts");
+        fs::write(
+            shared_dir.join("value.ts"),
+            "export function parseAmount(input: string): number {\n  return Number(input as string)!;\n}\n",
+        )
+        .unwrap_or_else(|err| panic!("failed to write shared module: {err}"));
+        fs::write(
+            &driver_path,
+            "import { parseAmount } from './shared/value.ts';\nconst amount: number = parseAmount('42');\nif (amount !== 42) { throw new Error(`unexpected amount: ${amount}`); }\n",
+        )
+        .unwrap_or_else(|err| panic!("failed to write driver module: {err}"));
+
+        let result = run_module_path_internal(
+            &extension_dir,
+            &driver_path,
+            None,
+            SandboxRunOptions {
+                emit_diagnostics: false,
+            },
+        )
+        .await;
+
+        let _ = fs::remove_dir_all(&extension_dir);
+        assert!(
+            result.is_ok(),
+            "expected TypeScript driver to pass: {result:?}"
         );
     }
 }

@@ -738,7 +738,7 @@ fn run_debug_start(
 fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
     let prompt_overrides = parse_prompt_overrides(&args.prompt)?;
     let script_options = parse_script_options(&args.option)?;
-    let (script_source, declared_secrets) = if let Some(extension_dir) = args.extension_dir {
+    if let Some(extension_dir) = args.extension_dir {
         if !extension_dir.is_dir() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -754,8 +754,15 @@ fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()).into()
             })?;
         let script_path = crate::scrape::resolve_driver_script_path(&extension_dir, &manifest);
-        let script_source = read_text_input(&script_path)?;
-        (script_source, Some(manifest.secrets))
+        crate::scrape::debug::exec_debug_entry_module_with_options(
+            &args.socket,
+            &extension_dir,
+            &script_path,
+            Some(manifest.secrets),
+            Some(prompt_overrides),
+            Some(true),
+            Some(script_options),
+        )?;
     } else {
         let script_path = args.script.ok_or_else(|| {
             std::io::Error::new(
@@ -763,22 +770,21 @@ fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
                 "either --script or --extension-dir is required",
             )
         })?;
-        (read_text_input(&script_path)?, None)
-    };
-
-    if script_source.trim().is_empty() {
-        return Err(
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "script is empty").into(),
-        );
+        let script_source = read_text_input(&script_path)?;
+        if script_source.trim().is_empty() {
+            return Err(
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "script is empty").into(),
+            );
+        }
+        crate::scrape::debug::exec_debug_script_with_options(
+            &args.socket,
+            &script_source,
+            None,
+            Some(prompt_overrides),
+            Some(true),
+            Some(script_options),
+        )?;
     }
-    crate::scrape::debug::exec_debug_script_with_options(
-        &args.socket,
-        &script_source,
-        declared_secrets,
-        Some(prompt_overrides),
-        Some(true),
-        Some(script_options),
-    )?;
     Ok(())
 }
 

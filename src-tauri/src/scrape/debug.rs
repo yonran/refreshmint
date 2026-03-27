@@ -98,6 +98,43 @@ pub fn exec_debug_script_with_options(
     }
 }
 
+pub fn exec_debug_entry_module_with_options(
+    socket_path: &Path,
+    extension_root: &Path,
+    entry_path: &Path,
+    declared_secrets: Option<super::js_api::SecretDeclarations>,
+    prompt_overrides: Option<super::js_api::PromptOverrides>,
+    prompt_requires_override: Option<bool>,
+    script_options: Option<super::js_api::ScriptOptions>,
+) -> Result<(), Box<dyn Error>> {
+    #[cfg(unix)]
+    {
+        exec_debug_entry_module_with_options_unix(
+            socket_path,
+            extension_root,
+            entry_path,
+            declared_secrets,
+            prompt_overrides,
+            prompt_requires_override,
+            script_options,
+        )
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            socket_path,
+            extension_root,
+            entry_path,
+            declared_secrets,
+            prompt_overrides,
+            prompt_requires_override,
+            script_options,
+        );
+        Err("debug sockets are currently supported only on unix platforms".into())
+    }
+}
+
 pub fn stop_debug_session(socket_path: &Path) -> Result<(), Box<dyn Error>> {
     let response = send_request(socket_path, Request::Stop)?;
     if response.ok {
@@ -118,16 +155,46 @@ fn exec_debug_script_with_options_unix(
     prompt_requires_override: Option<bool>,
     script_options: Option<super::js_api::ScriptOptions>,
 ) -> Result<(), Box<dyn Error>> {
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
-
     let request = Request::Exec {
-        script: script_source.to_string(),
+        script: Some(script_source.to_string()),
+        entry_root: None,
+        entry_path: None,
         declared_secrets,
         prompt_overrides,
         prompt_requires_override,
         script_options,
     };
+
+    exec_debug_request_unix(socket_path, request)
+}
+
+#[cfg(unix)]
+fn exec_debug_entry_module_with_options_unix(
+    socket_path: &Path,
+    extension_root: &Path,
+    entry_path: &Path,
+    declared_secrets: Option<super::js_api::SecretDeclarations>,
+    prompt_overrides: Option<super::js_api::PromptOverrides>,
+    prompt_requires_override: Option<bool>,
+    script_options: Option<super::js_api::ScriptOptions>,
+) -> Result<(), Box<dyn Error>> {
+    let request = Request::Exec {
+        script: None,
+        entry_root: Some(extension_root.to_path_buf()),
+        entry_path: Some(entry_path.to_path_buf()),
+        declared_secrets,
+        prompt_overrides,
+        prompt_requires_override,
+        script_options,
+    };
+
+    exec_debug_request_unix(socket_path, request)
+}
+
+#[cfg(unix)]
+fn exec_debug_request_unix(socket_path: &Path, request: Request) -> Result<(), Box<dyn Error>> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
 
     let connect_path = resolve_socket_bind_path(socket_path);
     let mut stream = UnixStream::connect(&connect_path)?;
@@ -187,7 +254,12 @@ fn exec_debug_script_with_options_unix(
 #[serde(tag = "command", rename_all = "snake_case")]
 enum Request {
     Exec {
-        script: String,
+        #[serde(default)]
+        script: Option<String>,
+        #[serde(default)]
+        entry_root: Option<PathBuf>,
+        #[serde(default)]
+        entry_path: Option<PathBuf>,
         #[serde(default)]
         declared_secrets: Option<super::js_api::SecretDeclarations>,
         #[serde(default)]
@@ -418,6 +490,8 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                         Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
                             Ok(Request::Exec {
                                 script,
+                                entry_root,
+                                entry_path,
                                 declared_secrets,
                                 prompt_overrides,
                                 prompt_requires_override,
@@ -428,6 +502,8 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                                     page_inner.clone(),
                                     refreshmint_inner.clone(),
                                     script,
+                                    entry_root,
+                                    entry_path,
                                     declared_secrets,
                                     prompt_overrides,
                                     prompt_requires_override,
@@ -496,7 +572,9 @@ async fn handle_exec_request_async(
     stream: &mut tokio::net::UnixStream,
     page_inner: std::sync::Arc<tokio::sync::Mutex<super::js_api::PageInner>>,
     refreshmint_inner: std::sync::Arc<tokio::sync::Mutex<super::js_api::RefreshmintInner>>,
-    script: String,
+    script: Option<String>,
+    entry_root: Option<PathBuf>,
+    entry_path: Option<PathBuf>,
     declared_secrets: Option<super::js_api::SecretDeclarations>,
     prompt_overrides: Option<super::js_api::PromptOverrides>,
     prompt_requires_override: Option<bool>,
@@ -523,15 +601,35 @@ async fn handle_exec_request_async(
 
     let refreshmint_inner_for_task = refreshmint_inner.clone();
     let mut exec_task = tokio::spawn(async move {
-        let run_result = super::sandbox::run_script_source_with_options(
-            &script,
-            page_inner,
-            refreshmint_inner_for_task.clone(),
-            super::sandbox::SandboxRunOptions {
-                emit_diagnostics: false,
-            },
-        )
-        .await;
+        let run_result = match (script, entry_root, entry_path) {
+            (Some(script), None, None) => {
+                super::sandbox::run_script_source_with_options(
+                    &script,
+                    page_inner,
+                    refreshmint_inner_for_task.clone(),
+                    super::sandbox::SandboxRunOptions {
+                        emit_diagnostics: false,
+                    },
+                )
+                .await
+            }
+            (None, Some(extension_root), Some(entry_path)) => {
+                super::sandbox::run_module_path_with_options(
+                    &extension_root,
+                    &entry_path,
+                    page_inner,
+                    refreshmint_inner_for_task.clone(),
+                    super::sandbox::SandboxRunOptions {
+                        emit_diagnostics: false,
+                    },
+                )
+                .await
+            }
+            _ => Err(
+                "invalid debug exec request: expected either script source or module entrypoint"
+                    .into(),
+            ),
+        };
 
         let finalize_result = {
             let mut refreshmint = refreshmint_inner_for_task.lock().await;

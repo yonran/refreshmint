@@ -42,6 +42,11 @@ impl Loader for RootedScriptModuleLoader {
     fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str) -> Result<Module<'js>> {
         let source_path = self.root.join(specifier_to_path(name));
         let source = std::fs::read(&source_path)?;
+        let source = match source_path.extension().and_then(std::ffi::OsStr::to_str) {
+            Some("ts" | "mts") => crate::ts_strip::strip_typescript_module(name, &source)
+                .map_err(|error| Error::new_loading_message(name, error))?,
+            _ => source,
+        };
         Module::declare(ctx.clone(), name, source)
     }
 }

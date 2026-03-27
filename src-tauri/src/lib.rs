@@ -22,6 +22,7 @@ mod js_module_loader;
 mod ledger;
 mod ledger_add;
 mod ledger_open;
+mod ts_strip;
 mod version;
 
 use tauri::{Emitter, Manager};
