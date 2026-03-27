@@ -51,7 +51,7 @@ For vendor accounts (e.g. safeway, target, etc.), it should download all the sta
 
 ## Runtime model
 
-- `driver.mjs` runs in a QuickJS sandbox
+- the manifest-declared driver module (default `driver.mjs`) runs in a QuickJS sandbox
 - top-level `await` is supported
 - globals available:
     - `page` for browser automation
@@ -62,6 +62,10 @@ For vendor accounts (e.g. safeway, target, etc.), it should download all the sta
         - for `Error` values it includes `name`, `stack`, and `cause` details
 
 Errors thrown from your script fail the scrape run.
+
+Driver modules may be `.js`, `.mjs`, `.ts`, or `.mts` and may import sibling
+modules with relative ESM specifiers. TypeScript support is limited to erasable
+syntax that can be stripped without code generation.
 
 ## Best practices
 

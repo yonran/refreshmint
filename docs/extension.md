@@ -9,7 +9,8 @@ A runnable extension directory must include:
 ```text
 my-extension/
   manifest.json
-  driver.mjs
+  driver.mjs         # legacy default
+  # or another manifest-declared driver path such as src/driver.ts
 ```
 
 For the full scrape + extract pipeline, add at least one extraction method:
@@ -29,6 +30,7 @@ Example:
 ```json
 {
     "name": "my-extension",
+    "driver": "src/driver.ts",
     "extract": "extract.mjs",
     "idField": "bankId",
     "autoExtract": true,
@@ -44,6 +46,7 @@ Example:
 Fields:
 
 - `name` (required for extension load): extension folder name under `<ledger>.refreshmint/extensions/<name>/`
+- `driver` (optional): scraper entry module path. Defaults to `driver.mjs`.
 - `secrets` (optional): map of domain to declared secret roles
     - preferred format:
         - `"domain": { "username": "secret_name", "password": "secret_name" }`
@@ -51,7 +54,7 @@ Fields:
         - `"domain": ["secret_name_a", "secret_name_b"]`
 - `rules` or `extract` (required, exactly one): choose one extraction method
 - `rules`: hledger CSV rules path used by extraction
-- `extract`: JS extraction script path (`extract.mjs`) exporting `extract(context)`
+- `extract`: JS extraction script path exporting `extract(context)`
 - `idField` (optional): source ID field used by extraction mapping
 - `autoExtract` (optional): extraction preference flag (defaults to `true`)
 
@@ -137,8 +140,29 @@ built-in resolution entirely.
 
 ## Type checking and linting
 
-Builtin extension scripts are plain `driver.mjs` files, but they can still be
-checked with TypeScript and ESLint using project-provided globals declarations.
+Builtin extensions may be authored as `.js`, `.mjs`, `.ts`, or `.mts` modules.
+Scraper and extractor entrypoints can import sibling modules with relative ESM
+imports, and TypeScript files are loaded with runtime type stripping for
+erasable syntax only.
+
+Shared extension compiler defaults live in `builtin-extensions/tsconfig.json`.
+Individual extensions can add their own `tsconfig.json` that extends that base
+when they need local `include` settings or additional editor configuration.
+
+Non-erasable TypeScript syntax is intentionally unsupported at runtime. Avoid
+constructs such as:
+
+- `enum`
+- `namespace`
+- decorators
+- parameter properties
+
+Keep relative import specifiers explicit so runtime resolution matches checked
+source, for example:
+
+```ts
+import { login } from './shared.ts';
+```
 
 Run:
 

@@ -4,18 +4,23 @@
         "allowJs": true,
         "checkJs": true,
         "noEmit": true,
-        "target": "ES2022",
-        "module": "ESNext",
-        "moduleResolution": "bundler",
+        "target": "ESNext",
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "rewriteRelativeImportExtensions": true,
+        "erasableSyntaxOnly": true,
+        "verbatimModuleSyntax": true,
+        "allowImportingTsExtensions": true,
+        "moduleDetection": "force",
         "noImplicitAny": false,
         "strictNullChecks": false,
         "noUncheckedIndexedAccess": false,
         "exactOptionalPropertyTypes": false,
         "skipLibCheck": true,
         "types": [],
-        // don't use noUnused*; use @typescript-eslint/no-unused-vars instead
+        // The runtime strips only erasable TypeScript syntax at load time.
+        // Keep unused checks in ESLint so JS and TS files share one rule set.
         "noUnusedLocals": false,
         "noUnusedParameters": false
-    },
-    "include": ["./**/*.mjs", "./**/*.d.ts"]
+    }
 }

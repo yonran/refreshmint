@@ -108,12 +108,15 @@ export default defineConfig(
         },
     },
     {
-        files: ['**/*.mjs'],
+        files: ['**/*.js', '**/*.mjs'],
         // eslint-disable-next-line import-x/no-named-as-default-member
         ...tseslint.configs.disableTypeChecked,
     },
     {
-        files: ['builtin-extensions/**/*.mjs', '.agents/skills/**/*.mjs'],
+        files: [
+            'builtin-extensions/**/*.{js,mjs,ts,mts}',
+            '.agents/skills/**/*.{js,mjs,ts,mts}',
+        ],
         languageOptions: {
             globals: {
                 browser: 'readonly',

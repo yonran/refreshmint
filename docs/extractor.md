@@ -39,7 +39,7 @@ Document selection behavior:
 Extraction config comes from extension `manifest.json`:
 
 - `rules`: hledger CSV rules file path
-- `extract`: JS extractor script path (`extract.mjs`)
+- `extract`: JS extractor script path exporting `extract(context)`
 - `idField`: optional source ID field
 
 Manifest contract:
@@ -64,13 +64,13 @@ my-extension/
 ```json
 {
     "name": "my-extension",
-    "extract": "extract.mjs"
+    "extract": "src/extract.ts"
 }
 ```
 
-`extract.mjs`:
+`src/extract.ts`:
 
-```js
+```ts
 export async function extract(context) {
     if (!Array.isArray(context.csv) || context.csv.length < 2) {
         return [];
@@ -91,6 +91,10 @@ export async function extract(context) {
 ```
 
 `extract(context)` must return an array of transactions compatible with the `ExtractedTransaction` schema (`tdate`, `tstatus`, `tdescription`, `tcomment`, `ttags`, optional `tpostings`).
+
+Extractor modules may be `.js`, `.mjs`, `.ts`, or `.mts` and may import sibling
+modules with relative ESM specifiers. Runtime TypeScript support is limited to
+erasable syntax only.
 
 ### `context` shape
 
