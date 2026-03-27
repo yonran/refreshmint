@@ -27,7 +27,20 @@ tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"
 clap = { version = "4.5.58", features = ["derive"] }
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
-rquickjs = { version = "0.9", features = ["array-buffer", "classes", "futures", "loader", "macro", "parallel"] }
+rquickjs = { version = "0.11", features = ["array-buffer", "classes", "futures", "loader", "macro", "parallel"] }
+# Pin to the last known-good commit from awslabs/llrt#1382.
+# Later branch commits have not been validated here yet. This snapshot already
+# includes the llrt_stream_web readable/reader fix for our reproduced case:
+# under AsyncRuntime, this JS completed its reads and then aborted at teardown
+# with `Assertion failed: (list_empty(&rt->gc_obj_list)), function JS_FreeRuntime`:
+# `const stream = new ReadableStream({ start(c) { c.enqueue("a"); c.close(); } });
+# const reader = stream.getReader();
+# await reader.read();
+# await reader.read();`
+# The same repro passed cleanly with the `feat/fetch-body-streams` snapshot at
+# 7d3953f7ccea72bc72b7bf01ca480e22106c6ecb, so pin LLRT there for now.
+llrt_util = { git = "https://github.com/awslabs/llrt", package = "llrt_util", rev = "7d3953f7ccea72bc72b7bf01ca480e22106c6ecb" }
+llrt_stream_web = { git = "https://github.com/awslabs/llrt", package = "llrt_stream_web", rev = "7d3953f7ccea72bc72b7bf01ca480e22106c6ecb" }
 csv = "1.3"
 lopdf = "0.35"
 # Compatibility notes (verified with minimal repro crates in /tmp):

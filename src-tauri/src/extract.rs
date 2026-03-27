@@ -1,4 +1,5 @@
 use lopdf::Document as PdfDocument;
+use rquickjs::loader::{BuiltinLoader, BuiltinResolver, ModuleLoader};
 use rquickjs::{CatchResultExt, Context, Module, Runtime, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -6,6 +7,16 @@ use std::io;
 use std::path::Path;
 
 use crate::account_journal::{self, AccountEntry, EntryPosting, EntryStatus, SimpleAmount};
+
+const LLRT_UTIL_MODULE_NAME: &str = "util";
+const LLRT_STREAM_WEB_MODULE_NAME: &str = "stream/web";
+
+fn init_quickjs_web_platform(ctx: &rquickjs::Ctx<'_>) -> Result<(), String> {
+    // Keep these globals/modules aligned with scrape/sandbox.rs so driver and
+    // extractor runtimes expose the same platform surface.
+    llrt_util::init(ctx).map_err(|error| format!("failed to init llrt util globals: {error}"))?;
+    Ok(())
+}
 
 /// A proposed transaction from extraction (matches the JS API schema).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,10 +461,25 @@ fn run_extract_script(
     let context_json = serde_json::to_string(&context)?;
 
     let runtime = Runtime::new()?;
+    runtime.set_loader(
+        BuiltinResolver::default()
+            .with_module(LLRT_UTIL_MODULE_NAME)
+            .with_module(LLRT_STREAM_WEB_MODULE_NAME),
+        (
+            BuiltinLoader::default(),
+            ModuleLoader::default()
+                .with_module(LLRT_UTIL_MODULE_NAME, llrt_util::UtilModule)
+                .with_module(
+                    LLRT_STREAM_WEB_MODULE_NAME,
+                    llrt_stream_web::StreamWebModule,
+                ),
+        ),
+    );
     let context = Context::full(&runtime)?;
 
     let result_json = context
         .with(|ctx| {
+            init_quickjs_web_platform(&ctx)?;
             let module_name = script_path
                 .file_name()
                 .and_then(std::ffi::OsStr::to_str)

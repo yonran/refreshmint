@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use rquickjs::loader::{BuiltinLoader, BuiltinResolver};
+use rquickjs::loader::{BuiltinLoader, BuiltinResolver, ModuleLoader};
 use rquickjs::{
     AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Exception, Module, Promise,
 };
@@ -12,6 +12,8 @@ use super::js_api::{self, PageInner, RefreshmintInner};
 const REFRESHMINT_UTIL_MODULE_NAME: &str = "refreshmint:util";
 const REFRESHMINT_UTIL_MODULE_SOURCE: &str =
     include_str!("../../../builtin-extensions/_shared/refreshmint-util.mjs");
+const LLRT_UTIL_MODULE_NAME: &str = "util";
+const LLRT_STREAM_WEB_MODULE_NAME: &str = "stream/web";
 
 #[derive(Clone, Copy)]
 pub struct SandboxRunOptions {
@@ -48,6 +50,13 @@ fn source_uses_static_module_syntax(source: &str) -> bool {
         let trimmed = line.trim_start();
         trimmed.starts_with("import ") || trimmed.starts_with("export ")
     })
+}
+
+fn init_quickjs_web_platform(ctx: &rquickjs::Ctx<'_>) -> Result<(), String> {
+    // Keep these globals/modules aligned with extract.rs so driver and extractor
+    // runtimes expose the same platform surface.
+    llrt_util::init(ctx).map_err(|error| format!("failed to init llrt util globals: {error}"))?;
+    Ok(())
 }
 
 /// Run a driver script inside a QuickJS sandbox with the given page and config.
@@ -102,9 +111,20 @@ async fn run_script_source_internal(
     let runtime = AsyncRuntime::new()?;
     runtime
         .set_loader(
-            BuiltinResolver::default().with_module(REFRESHMINT_UTIL_MODULE_NAME),
-            BuiltinLoader::default()
-                .with_module(REFRESHMINT_UTIL_MODULE_NAME, REFRESHMINT_UTIL_MODULE_SOURCE),
+            BuiltinResolver::default()
+                .with_module(REFRESHMINT_UTIL_MODULE_NAME)
+                .with_module(LLRT_UTIL_MODULE_NAME)
+                .with_module(LLRT_STREAM_WEB_MODULE_NAME),
+            (
+                BuiltinLoader::default()
+                    .with_module(REFRESHMINT_UTIL_MODULE_NAME, REFRESHMINT_UTIL_MODULE_SOURCE),
+                ModuleLoader::default()
+                    .with_module(LLRT_UTIL_MODULE_NAME, llrt_util::UtilModule)
+                    .with_module(
+                        LLRT_STREAM_WEB_MODULE_NAME,
+                        llrt_stream_web::StreamWebModule,
+                    ),
+            ),
         )
         .await;
     let context = AsyncContext::full(&runtime).await?;
@@ -117,6 +137,7 @@ async fn run_script_source_internal(
     );
     let setup_result: Result<(), String> = context
         .with(|ctx| {
+            init_quickjs_web_platform(&ctx)?;
             if let Some((page_inner, refreshmint_inner)) = globals {
                 js_api::register_globals(&ctx, page_inner, refreshmint_inner)
                     .map_err(|e| format!("failed to register globals: {e}"))?;
@@ -650,6 +671,37 @@ if (!out.includes('[Circular]')) {
         assert!(
             result.is_ok(),
             "expected module import script to pass: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn llrt_util_and_stream_web_are_available() {
+        let source = r#"
+import util from 'util';
+import streamWeb from 'stream/web';
+
+if (typeof TextDecoder !== 'function') {
+  throw new Error('global TextDecoder missing');
+}
+if (typeof streamWeb.ReadableStream !== 'function') {
+  throw new Error('stream/web ReadableStream export missing');
+}
+
+const decoded = new TextDecoder('utf-8').decode(new Uint8Array([0x6f, 0x6b]));
+if (decoded !== 'ok') {
+  throw new Error('TextDecoder decode mismatch: ' + decoded);
+}
+if (util.TextDecoder !== TextDecoder) {
+  throw new Error('util.TextDecoder does not match global TextDecoder');
+}
+"#;
+        let options = SandboxRunOptions {
+            emit_diagnostics: false,
+        };
+        let result = run_script_source_internal(source, None, options).await;
+        assert!(
+            result.is_ok(),
+            "expected LLRT util/stream script to pass: {result:?}"
         );
     }
 }
