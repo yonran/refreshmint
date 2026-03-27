@@ -230,11 +230,13 @@ mod tests {
             "expected builtin dir, got ledger-local path: {}",
             dir.display()
         );
-        // The returned directory should contain driver.mjs
+        let manifest = crate::scrape::load_manifest(&dir)
+            .unwrap_or_else(|err| panic!("builtin manifest should load: {err}"));
+        let driver_path = crate::scrape::resolve_driver_script_path(&dir, &manifest);
         assert!(
-            dir.join("driver.mjs").exists(),
-            "builtin paypal dir missing driver.mjs: {}",
-            dir.display()
+            driver_path.exists(),
+            "builtin paypal dir missing declared driver: {}",
+            driver_path.display()
         );
     }
 

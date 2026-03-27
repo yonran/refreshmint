@@ -193,7 +193,7 @@ struct DebugExecArgs {
     #[arg(
         long,
         value_name = "DIR",
-        help = "Extension directory (loads driver.mjs and manifest secrets).",
+        help = "Extension directory (loads the manifest-declared driver and manifest secrets).",
         required_unless_present = "script",
         conflicts_with = "script"
     )]
@@ -749,14 +749,13 @@ fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
             )
             .into());
         }
-        let script_path = extension_dir.join("driver.mjs");
-        let script_source = read_text_input(&script_path)?;
-        let declared = crate::scrape::load_manifest_secret_declarations(&extension_dir).map_err(
-            |err| -> Box<dyn Error> {
+        let manifest =
+            crate::scrape::load_manifest(&extension_dir).map_err(|err| -> Box<dyn Error> {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()).into()
-            },
-        )?;
-        (script_source, Some(declared))
+            })?;
+        let script_path = crate::scrape::resolve_driver_script_path(&extension_dir, &manifest);
+        let script_source = read_text_input(&script_path)?;
+        (script_source, Some(manifest.secrets))
     } else {
         let script_path = args.script.ok_or_else(|| {
             std::io::Error::new(

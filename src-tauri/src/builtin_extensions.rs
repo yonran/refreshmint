@@ -124,6 +124,14 @@ fn ensure_extracted() -> &'static HashMap<&'static str, PathBuf> {
     })
 }
 
+fn has_runnable_driver(candidate: &std::path::Path) -> bool {
+    let manifest = match crate::scrape::load_manifest(candidate) {
+        Ok(manifest) => manifest,
+        Err(_) => return false,
+    };
+    crate::scrape::resolve_driver_script_path(candidate, &manifest).is_file()
+}
+
 /// Return the directory for a built-in extension by name, or `None` if unknown.
 ///
 /// In debug builds, prefers the live source tree via `CARGO_MANIFEST_DIR` so
@@ -139,7 +147,7 @@ pub fn resolve_dir(name: &str) -> Option<PathBuf> {
             "/../builtin-extensions"
         ));
         let candidate = source_root.join(name);
-        if candidate.join("driver.mjs").is_file() {
+        if has_runnable_driver(&candidate) {
             eprintln!(
                 "[builtin] using source tree for '{name}': {}",
                 candidate.display()

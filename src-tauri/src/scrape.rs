@@ -44,6 +44,8 @@ struct ExtensionManifest {
     #[serde(default)]
     secrets: std::collections::BTreeMap<String, ManifestSecretEntry>,
     #[serde(default)]
+    driver: Option<String>,
+    #[serde(default)]
     extract: Option<String>,
     #[serde(default)]
     rules: Option<String>,
@@ -56,6 +58,7 @@ struct ExtensionManifest {
 /// Parsed extension manifest with all fields.
 pub struct ParsedManifest {
     pub secrets: js_api::SecretDeclarations,
+    pub driver: Option<String>,
     pub extract: Option<String>,
     pub rules: Option<String>,
     pub id_field: Option<String>,
@@ -140,11 +143,20 @@ pub fn load_manifest(
 
     Ok(ParsedManifest {
         secrets: declared,
+        driver: manifest.driver,
         extract: manifest.extract,
         rules: manifest.rules,
         id_field: manifest.id_field,
         auto_extract: manifest.auto_extract.unwrap_or(true),
     })
+}
+
+/// Resolve the scrape driver path declared by `manifest.json`.
+///
+/// Keep this fallback aligned with the user-facing extension docs until all
+/// builtins and ledger-local extensions move to explicit `manifest.driver`.
+pub fn resolve_driver_script_path(extension_dir: &Path, manifest: &ParsedManifest) -> PathBuf {
+    extension_dir.join(manifest.driver.as_deref().unwrap_or("driver.mjs"))
 }
 
 /// Generate a scrape session ID from the current timestamp.
@@ -362,7 +374,7 @@ fn normalize_manifest_domain(input: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// List extension names that have a runnable `driver.mjs` script.
+/// List extension names that have a runnable driver script.
 ///
 /// Built-in extensions are always included. Ledger-local extensions under
 /// `extensions/` are merged in; duplicates (same name as a built-in) are
@@ -377,7 +389,7 @@ pub fn list_runnable_extensions(
         names.insert(name.to_string());
     }
 
-    // Ledger-local extensions that have a driver.mjs
+    // Ledger-local extensions that declare or default to a driver script.
     let extensions_dir = ledger_dir.join("extensions");
     if extensions_dir.exists() {
         for entry in std::fs::read_dir(&extensions_dir)? {
@@ -386,7 +398,11 @@ pub fn list_runnable_extensions(
             if !entry_path.is_dir() {
                 continue;
             }
-            if !entry_path.join("driver.mjs").is_file() {
+            let manifest = match load_manifest(&entry_path) {
+                Ok(manifest) => manifest,
+                Err(_) => continue,
+            };
+            if !resolve_driver_script_path(&entry_path, &manifest).is_file() {
                 continue;
             }
             let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
@@ -416,14 +432,12 @@ pub async fn run_scrape_async(
 
     let extension_dir =
         crate::account_config::resolve_extension_dir(&config.ledger_dir, &config.extension_name);
-    // 1. Locate the driver script
-    let driver_path = extension_dir.join("driver.mjs");
+    // 1. Load full manifest and locate the declared driver script.
+    let manifest = load_manifest(&extension_dir)?;
+    let driver_path = resolve_driver_script_path(&extension_dir, &manifest);
     if !driver_path.exists() {
         return Err(format!("driver script not found: {}", driver_path.display()).into());
     }
-
-    // Load full manifest
-    let manifest = load_manifest(&extension_dir)?;
     let declared_secrets = manifest.secrets;
 
     // Generate scrape session ID
@@ -576,8 +590,8 @@ pub fn run_scrape(config: ScrapeConfig) -> Result<(), Box<dyn std::error::Error>
 #[cfg(test)]
 mod tests {
     use super::{
-        finalize_staged_resources, list_runnable_extensions, load_manifest_secret_declarations,
-        normalize_manifest_domain,
+        finalize_staged_resources, list_runnable_extensions, load_manifest,
+        load_manifest_secret_declarations, normalize_manifest_domain, resolve_driver_script_path,
     };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
@@ -618,9 +632,29 @@ mod tests {
         fs::create_dir_all(extensions.join("empty")).unwrap_or_else(|err| {
             panic!("failed to create empty extension: {err}");
         });
-        fs::write(extensions.join("alpha").join("driver.mjs"), "// alpha").unwrap_or_else(|err| {
+        fs::write(
+            extensions.join("alpha").join("manifest.json"),
+            r#"{"name":"alpha","driver":"src/alpha-driver.mjs"}"#,
+        )
+        .unwrap_or_else(|err| panic!("failed to write alpha manifest: {err}"));
+        fs::create_dir_all(extensions.join("alpha").join("src")).unwrap_or_else(|err| {
+            panic!("failed to create alpha src dir: {err}");
+        });
+        fs::write(
+            extensions
+                .join("alpha")
+                .join("src")
+                .join("alpha-driver.mjs"),
+            "// alpha",
+        )
+        .unwrap_or_else(|err| {
             panic!("failed to write alpha driver: {err}");
         });
+        fs::write(
+            extensions.join("beta").join("manifest.json"),
+            r#"{"name":"beta"}"#,
+        )
+        .unwrap_or_else(|err| panic!("failed to write beta manifest: {err}"));
         fs::write(extensions.join("beta").join("driver.mjs"), "// beta").unwrap_or_else(|err| {
             panic!("failed to write beta driver: {err}");
         });
@@ -629,7 +663,7 @@ mod tests {
             panic!("unexpected list_runnable_extensions error: {err}");
         });
 
-        // Ledger-local extensions with driver.mjs must be present
+        // Ledger-local extensions with declared or fallback drivers must be present
         assert!(
             found.contains(&"alpha".to_string()),
             "missing alpha: {found:?}"
@@ -638,7 +672,7 @@ mod tests {
             found.contains(&"beta".to_string()),
             "missing beta: {found:?}"
         );
-        // Ledger-local extension without driver.mjs must be absent
+        // Ledger-local extension without a runnable driver must be absent
         assert!(
             !found.contains(&"empty".to_string()),
             "empty should be excluded: {found:?}"
@@ -654,6 +688,39 @@ mod tests {
         let mut sorted = found.clone();
         sorted.sort();
         assert_eq!(found, sorted, "result is not sorted");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_driver_script_path_uses_manifest_driver_with_legacy_fallback() {
+        let root = create_temp_dir("scrape-driver-path");
+        let explicit_dir = root.join("explicit");
+        fs::create_dir_all(&explicit_dir)
+            .unwrap_or_else(|err| panic!("failed to create explicit dir: {err}"));
+        fs::write(
+            explicit_dir.join("manifest.json"),
+            r#"{"name":"demo","driver":"src/driver.mjs"}"#,
+        )
+        .unwrap_or_else(|err| panic!("failed to write explicit manifest: {err}"));
+        let explicit_manifest =
+            load_manifest(&explicit_dir).unwrap_or_else(|err| panic!("load failed: {err}"));
+        assert_eq!(
+            resolve_driver_script_path(&explicit_dir, &explicit_manifest),
+            explicit_dir.join("src/driver.mjs")
+        );
+
+        let fallback_dir = root.join("fallback");
+        fs::create_dir_all(&fallback_dir)
+            .unwrap_or_else(|err| panic!("failed to create fallback dir: {err}"));
+        fs::write(fallback_dir.join("manifest.json"), r#"{"name":"demo"}"#)
+            .unwrap_or_else(|err| panic!("failed to write fallback manifest: {err}"));
+        let fallback_manifest =
+            load_manifest(&fallback_dir).unwrap_or_else(|err| panic!("load failed: {err}"));
+        assert_eq!(
+            resolve_driver_script_path(&fallback_dir, &fallback_manifest),
+            fallback_dir.join("driver.mjs")
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
