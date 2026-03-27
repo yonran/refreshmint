@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use rquickjs::loader::{BuiltinLoader, BuiltinResolver, ModuleLoader};
 use rquickjs::{
-    AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Exception, Module, Promise,
+    AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Exception, Module, Promise, Value,
 };
 use tokio::sync::Mutex;
 
@@ -66,17 +66,20 @@ fn init_quickjs_web_platform(ctx: &rquickjs::Ctx<'_>) -> Result<(), String> {
 
 /// Run a driver script inside a QuickJS sandbox with the given page and config.
 pub async fn run_driver(
+    extension_dir: &Path,
     driver_path: &Path,
     page_inner: Arc<Mutex<PageInner>>,
     refreshmint_inner: Arc<Mutex<RefreshmintInner>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let options = SandboxRunOptions::default();
-    maybe_diag(options, "[sandbox] Reading driver source...");
-    let driver_source = tokio::fs::read_to_string(driver_path).await?;
-    if options.emit_diagnostics {
-        eprintln!("[sandbox] Driver source: {} bytes", driver_source.len());
-    }
-    run_script_source_with_options(&driver_source, page_inner, refreshmint_inner, options).await
+    run_module_path_with_options(
+        extension_dir,
+        driver_path,
+        page_inner,
+        refreshmint_inner,
+        options,
+    )
+    .await
 }
 
 /// Run arbitrary JS source inside the same QuickJS sandbox used by drivers.
@@ -105,30 +108,58 @@ pub async fn run_script_source_with_options(
 
 type SandboxGlobals = (Arc<Mutex<PageInner>>, Arc<Mutex<RefreshmintInner>>);
 
-async fn run_script_source_internal(
-    source: &str,
+async fn run_module_path_with_options(
+    extension_dir: &Path,
+    entry_path: &Path,
+    page_inner: Arc<Mutex<PageInner>>,
+    refreshmint_inner: Arc<Mutex<RefreshmintInner>>,
+    options: SandboxRunOptions,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_module_path_internal(
+        extension_dir,
+        entry_path,
+        Some((page_inner, refreshmint_inner)),
+        options,
+    )
+    .await
+}
+
+async fn run_module_path_internal(
+    extension_dir: &Path,
+    entry_path: &Path,
     globals: Option<SandboxGlobals>,
     options: SandboxRunOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let driver_source = source.to_string();
+    let module_specifier =
+        crate::js_module_loader::entry_module_specifier(extension_dir, entry_path)
+            .map_err(|error| format!("failed to resolve module entrypoint: {error}"))?;
 
     maybe_diag(options, "[sandbox] Creating QuickJS runtime...");
     let runtime = AsyncRuntime::new()?;
     runtime
         .set_loader(
-            BuiltinResolver::default()
-                .with_module(REFRESHMINT_UTIL_MODULE_NAME)
-                .with_module(LLRT_UTIL_MODULE_NAME)
-                .with_module(LLRT_STREAM_WEB_MODULE_NAME),
+            (
+                BuiltinResolver::default()
+                    .with_module(REFRESHMINT_UTIL_MODULE_NAME)
+                    .with_module(LLRT_UTIL_MODULE_NAME)
+                    .with_module(LLRT_STREAM_WEB_MODULE_NAME),
+                crate::js_module_loader::RootedScriptModuleResolver::new(
+                    extension_dir,
+                    &["mjs", "js"],
+                ),
+            ),
             (
                 BuiltinLoader::default()
                     .with_module(REFRESHMINT_UTIL_MODULE_NAME, REFRESHMINT_UTIL_MODULE_SOURCE),
-                ModuleLoader::default()
-                    .with_module(LLRT_UTIL_MODULE_NAME, llrt_util::UtilModule)
-                    .with_module(
-                        LLRT_STREAM_WEB_MODULE_NAME,
-                        llrt_stream_web::StreamWebModule,
-                    ),
+                (
+                    ModuleLoader::default()
+                        .with_module(LLRT_UTIL_MODULE_NAME, llrt_util::UtilModule)
+                        .with_module(
+                            LLRT_STREAM_WEB_MODULE_NAME,
+                            llrt_stream_web::StreamWebModule,
+                        ),
+                    crate::js_module_loader::RootedScriptModuleLoader::new(extension_dir),
+                ),
             ),
         )
         .await;
@@ -148,34 +179,11 @@ async fn run_script_source_internal(
                     .map_err(|e| format!("failed to register globals: {e}"))?;
             }
             maybe_diag(options, "[sandbox] Globals registered.");
-
-            let promise = if source_uses_static_module_syntax(&driver_source) {
-                maybe_diag(options, "[sandbox] Evaluating script as module...");
-                let module = Module::declare(ctx.clone(), "__driver__.mjs", driver_source.as_str())
-                    .catch(&ctx)
-                    .map_err(|e| format!("failed to compile driver module: {e}"))?;
-                let (_module, module_promise) = module
-                    .eval()
-                    .catch(&ctx)
-                    .map_err(|e| format!("failed to eval driver module: {e}"))?;
-                maybe_diag(options, "[sandbox] Module evaluated, got promise.");
-                module_promise
-            } else {
-                // Wrap script source in an async IIFE so top-level await works
-                let wrapped = format!(
-                    "(async () => {{\n{source}\n}})();\n",
-                    source = driver_source
-                );
-                maybe_diag(options, "[sandbox] Evaluating wrapped script...");
-                let result = ctx.eval::<Promise, _>(wrapped).catch(&ctx);
-                match result {
-                    Ok(p) => {
-                        maybe_diag(options, "[sandbox] Script evaluated, got promise.");
-                        p
-                    }
-                    Err(e) => return Err(format!("failed to eval driver: {e}")),
-                }
-            };
+            maybe_diag(options, "[sandbox] Importing driver module...");
+            let promise = Module::import(&ctx, module_specifier.as_str())
+                .catch(&ctx)
+                .map_err(|e| format!("failed to import driver module: {e}"))?;
+            maybe_diag(options, "[sandbox] Driver import returned promise.");
 
             ctx.globals()
                 .set("__driver_promise__", promise)
@@ -208,6 +216,131 @@ async fn run_script_source_internal(
                 Err(e) => return Err(format!("failed to get promise: {e}")),
             };
             match promise.result::<rquickjs::Value>() {
+                None => {
+                    maybe_diag(options, "[sandbox] Promise still pending after idle.");
+                    Ok(())
+                }
+                Some(Ok(_)) => {
+                    maybe_diag(options, "[sandbox] Promise resolved successfully.");
+                    Ok(())
+                }
+                Some(Err(err)) => {
+                    let msg = match Err::<(), _>(err).catch(&ctx) {
+                        Err(caught) => format_caught_js_error(caught),
+                        Ok(()) => "unknown JavaScript exception".to_string(),
+                    };
+                    if options.emit_diagnostics {
+                        eprintln!("[sandbox] Promise rejected: {msg}");
+                    }
+                    Err(msg)
+                }
+            }
+        })
+        .await;
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(msg) => Err(format!("driver script failed: {msg}").into()),
+    }
+}
+
+async fn run_script_source_internal(
+    source: &str,
+    globals: Option<SandboxGlobals>,
+    options: SandboxRunOptions,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let driver_source = source.to_string();
+
+    maybe_diag(options, "[sandbox] Creating QuickJS runtime...");
+    let runtime = AsyncRuntime::new()?;
+    runtime
+        .set_loader(
+            BuiltinResolver::default()
+                .with_module(REFRESHMINT_UTIL_MODULE_NAME)
+                .with_module(LLRT_UTIL_MODULE_NAME)
+                .with_module(LLRT_STREAM_WEB_MODULE_NAME),
+            (
+                BuiltinLoader::default()
+                    .with_module(REFRESHMINT_UTIL_MODULE_NAME, REFRESHMINT_UTIL_MODULE_SOURCE),
+                ModuleLoader::default()
+                    .with_module(LLRT_UTIL_MODULE_NAME, llrt_util::UtilModule)
+                    .with_module(
+                        LLRT_STREAM_WEB_MODULE_NAME,
+                        llrt_stream_web::StreamWebModule,
+                    ),
+            ),
+        )
+        .await;
+    let context = AsyncContext::full(&runtime).await?;
+    maybe_diag(options, "[sandbox] Runtime created.");
+
+    maybe_diag(
+        options,
+        "[sandbox] Registering globals and evaluating driver...",
+    );
+    let setup_result: Result<(), String> = context
+        .with(|ctx| {
+            init_quickjs_web_platform(&ctx)?;
+            if let Some((page_inner, refreshmint_inner)) = globals {
+                js_api::register_globals(&ctx, page_inner, refreshmint_inner)
+                    .map_err(|e| format!("failed to register globals: {e}"))?;
+            }
+            maybe_diag(options, "[sandbox] Globals registered.");
+
+            let promise = if source_uses_static_module_syntax(&driver_source) {
+                maybe_diag(options, "[sandbox] Evaluating script as module...");
+                let module = Module::declare(ctx.clone(), "__driver__.mjs", driver_source.as_str())
+                    .catch(&ctx)
+                    .map_err(|e| format!("failed to compile driver module: {e}"))?;
+                let (_module, module_promise) = module
+                    .eval()
+                    .catch(&ctx)
+                    .map_err(|e| format!("failed to eval driver module: {e}"))?;
+                maybe_diag(options, "[sandbox] Module evaluated, got promise.");
+                module_promise
+            } else {
+                let wrapped = format!(
+                    "(async () => {{\n{source}\n}})();\n",
+                    source = driver_source
+                );
+                maybe_diag(options, "[sandbox] Evaluating wrapped script...");
+                let result = ctx.eval::<Promise, _>(wrapped).catch(&ctx);
+                match result {
+                    Ok(p) => {
+                        maybe_diag(options, "[sandbox] Script evaluated, got promise.");
+                        p
+                    }
+                    Err(e) => return Err(format!("failed to eval driver: {e}")),
+                }
+            };
+
+            ctx.globals()
+                .set("__driver_promise__", promise)
+                .map_err(|e| format!("failed to store promise: {e}"))?;
+
+            Ok(())
+        })
+        .await;
+
+    if let Err(msg) = setup_result {
+        return Err(msg.into());
+    }
+
+    maybe_diag(
+        options,
+        "[sandbox] Driving event loop (runtime.execute_pending_job)...",
+    );
+    drive_runtime(&runtime, &options).await;
+    maybe_diag(options, "[sandbox] Event loop done.");
+
+    let result: Result<(), String> = context
+        .with(|ctx| {
+            let promise_result: Result<Promise, _> = ctx.globals().get("__driver_promise__");
+            let promise = match promise_result {
+                Ok(p) => p,
+                Err(e) => return Err(format!("failed to get promise: {e}")),
+            };
+            match promise.result::<Value>() {
                 None => {
                     maybe_diag(options, "[sandbox] Promise still pending after idle.");
                     Ok(())
@@ -275,10 +408,13 @@ mod tests {
     use rquickjs::function::Async;
     use rquickjs::prelude::Func;
     use rquickjs::{CaughtError, Ctx, Function, Promise, Value};
+    use std::fs;
     use std::future::Future;
+    use std::path::PathBuf;
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use std::time::Duration;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn format_caught_js_error_for_test(caught: CaughtError<'_>) -> String {
         match caught {
@@ -293,6 +429,17 @@ mod tests {
 
     async fn drive_runtime_idle(runtime: &AsyncRuntime) {
         runtime.idle().await;
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("refreshmint-{prefix}-{}-{now}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("failed to create temp dir: {err}"));
+        dir
     }
 
     async fn drive_runtime_with_fix(runtime: &AsyncRuntime) {
@@ -717,6 +864,39 @@ if (util.TextDecoder !== TextDecoder) {
         assert!(
             result.is_ok(),
             "expected LLRT util/stream script to pass: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_driver_supports_relative_module_imports() {
+        let extension_dir = temp_dir("sandbox-relative-imports");
+        let shared_dir = extension_dir.join("shared");
+        fs::create_dir_all(&shared_dir).unwrap_or_else(|err| {
+            panic!("failed to create shared dir: {err}");
+        });
+        let driver_path = extension_dir.join("driver.mjs");
+        fs::write(shared_dir.join("value.mjs"), "export const value = 42;\n")
+            .unwrap_or_else(|err| panic!("failed to write shared module: {err}"));
+        fs::write(
+            &driver_path,
+            "import { value } from './shared/value.mjs';\nif (value !== 42) { throw new Error(`unexpected value: ${value}`); }\n",
+        )
+        .unwrap_or_else(|err| panic!("failed to write driver module: {err}"));
+
+        let result = run_module_path_internal(
+            &extension_dir,
+            &driver_path,
+            None,
+            SandboxRunOptions {
+                emit_diagnostics: false,
+            },
+        )
+        .await;
+
+        let _ = fs::remove_dir_all(&extension_dir);
+        assert!(
+            result.is_ok(),
+            "expected relative-import driver to pass: {result:?}"
         );
     }
 }

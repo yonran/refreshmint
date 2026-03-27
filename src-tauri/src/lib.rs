@@ -18,6 +18,7 @@ pub mod transfer_detector;
 mod binpath;
 mod builtin_extensions;
 mod extension;
+mod js_module_loader;
 mod ledger;
 mod ledger_add;
 mod ledger_open;

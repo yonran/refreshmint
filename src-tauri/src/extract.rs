@@ -397,6 +397,7 @@ fn run_extraction_with_documents_dir(
                     return Err(format!("document not found: {}", doc_path.display()).into());
                 }
                 let proposed = run_extract_script(
+                    &extension_dir,
                     &script_path,
                     &doc_path,
                     doc_name,
@@ -447,6 +448,7 @@ fn run_extraction_with_documents_dir(
 /// Run extract.mjs on a document using QuickJS sandbox.
 #[allow(clippy::too_many_arguments)]
 fn run_extract_script(
+    extension_dir: &Path,
     script_path: &Path,
     doc_path: &Path,
     doc_name: &str,
@@ -457,6 +459,7 @@ fn run_extract_script(
     extension_name: &str,
 ) -> Result<Vec<ExtractedTransaction>, Box<dyn std::error::Error + Send + Sync>> {
     block_on_extract_script(run_extract_script_async(
+        extension_dir,
         script_path,
         doc_path,
         doc_name,
@@ -470,6 +473,7 @@ fn run_extract_script(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_extract_script_async(
+    extension_dir: &Path,
     script_path: &Path,
     doc_path: &Path,
     doc_name: &str,
@@ -479,7 +483,6 @@ async fn run_extract_script_async(
     label: Option<&str>,
     extension_name: &str,
 ) -> Result<Vec<ExtractedTransaction>, Box<dyn std::error::Error + Send + Sync>> {
-    let script_source = std::fs::read_to_string(script_path)?;
     let context = build_extract_script_context(
         doc_path,
         doc_name,
@@ -498,21 +501,33 @@ async fn run_extract_script_async(
             guess_document_mime_type(doc_name, &context.document.format).to_string()
         });
     let context_json = serde_json::to_string(&context)?;
+    let module_specifier =
+        crate::js_module_loader::entry_module_specifier(extension_dir, script_path)
+            .map_err(|error| format!("failed to resolve extract module entrypoint: {error}"))?;
 
     let runtime = AsyncRuntime::new()?;
     runtime
         .set_loader(
-            BuiltinResolver::default()
-                .with_module(LLRT_UTIL_MODULE_NAME)
-                .with_module(LLRT_STREAM_WEB_MODULE_NAME),
+            (
+                BuiltinResolver::default()
+                    .with_module(LLRT_UTIL_MODULE_NAME)
+                    .with_module(LLRT_STREAM_WEB_MODULE_NAME),
+                crate::js_module_loader::RootedScriptModuleResolver::new(
+                    extension_dir,
+                    &["mjs", "js"],
+                ),
+            ),
             (
                 BuiltinLoader::default(),
-                ModuleLoader::default()
-                    .with_module(LLRT_UTIL_MODULE_NAME, llrt_util::UtilModule)
-                    .with_module(
-                        LLRT_STREAM_WEB_MODULE_NAME,
-                        llrt_stream_web::StreamWebModule,
-                    ),
+                (
+                    ModuleLoader::default()
+                        .with_module(LLRT_UTIL_MODULE_NAME, llrt_util::UtilModule)
+                        .with_module(
+                            LLRT_STREAM_WEB_MODULE_NAME,
+                            llrt_stream_web::StreamWebModule,
+                        ),
+                    crate::js_module_loader::RootedScriptModuleLoader::new(extension_dir),
+                ),
             ),
         )
         .await;
@@ -520,25 +535,21 @@ async fn run_extract_script_async(
 
     let result_json: Result<String, String> = async_with!(context => |ctx| {
         init_quickjs_web_platform(&ctx)?;
-        let module_name = script_path
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("extract.mjs");
-
-        let module = Module::declare(ctx.clone(), module_name, script_source.as_str())
+        let module_namespace = Module::import(&ctx, module_specifier.as_str())
             .catch(&ctx)
-            .map_err(|error| format!("failed to compile {}: {error}", script_path.display()))?;
-        let (module, module_promise) = module.eval().catch(&ctx).map_err(|error| {
-            format!("failed to evaluate {}: {error}", script_path.display())
-        })?;
-
-        module_promise
-            .into_future::<()>()
+            .map_err(|error| format!("failed to import {}: {error}", script_path.display()))?
+            .into_future::<Value>()
             .await
             .catch(&ctx)
             .map_err(|error| {
             format!(
                 "module initialization failed in {}: {error}",
+                script_path.display()
+            )
+        })?;
+        let module = module_namespace.as_object().ok_or_else(|| {
+            format!(
+                "module initialization failed in {}: missing module namespace object",
                 script_path.display()
             )
         })?;
@@ -1384,6 +1395,7 @@ export async function extract(context) {
         .expect("write csv document");
 
         let txns = run_extract_script(
+            &root,
             &script_path,
             &doc_path,
             doc_name,
@@ -1443,6 +1455,7 @@ export async function extract(context) {
         .expect("write sidecar");
 
         let txns = run_extract_script(
+            &root,
             &script_path,
             &doc_path,
             doc_name,
@@ -1463,6 +1476,67 @@ export async function extract(context) {
     }
 
     #[test]
+    fn run_extract_script_supports_relative_module_imports() {
+        let root = temp_dir("extract-script-relative-import");
+        let documents_dir = root.join("documents");
+        let shared_dir = root.join("shared");
+        fs::create_dir_all(&documents_dir).expect("create docs dir");
+        fs::create_dir_all(&shared_dir).expect("create shared dir");
+
+        let script_path = root.join("extract.mjs");
+        fs::write(
+            shared_dir.join("helpers.mjs"),
+            r#"
+export function buildDescription(row) {
+  return `${row[0]}:${row[1]}`;
+}
+"#,
+        )
+        .expect("write helper module");
+        fs::write(
+            &script_path,
+            r#"
+import { buildDescription } from './shared/helpers.mjs';
+
+export async function extract(context) {
+  return [{
+    tdate: context.csv[1][0],
+    tstatus: "Cleared",
+    tdescription: buildDescription(context.csv[1]),
+    tcomment: "",
+    ttags: [["evidence", `${context.document.name}:2:1`]]
+  }];
+}
+"#,
+        )
+        .expect("write extract script");
+
+        let doc_name = "statement.csv";
+        let doc_path = documents_dir.join(doc_name);
+        fs::write(
+            &doc_path,
+            "date,description,bank_id\n2024-01-05,Coffee Shop,fit-123\n",
+        )
+        .expect("write csv document");
+
+        let txns = run_extract_script(
+            &root,
+            &script_path,
+            &doc_path,
+            doc_name,
+            &documents_dir,
+            &root,
+            "Assets:Checking",
+            None,
+            "example-extension",
+        )
+        .expect("extract script should succeed");
+
+        assert_eq!(txns.len(), 1);
+        assert_eq!(txns[0].tdescription, "2024-01-05:Coffee Shop");
+    }
+
+    #[test]
     fn run_extract_script_requires_extract_export() {
         let root = temp_dir("extract-script-missing-export");
         let documents_dir = root.join("documents");
@@ -1477,6 +1551,7 @@ export async function extract(context) {
             .expect("write csv document");
 
         let err = run_extract_script(
+            &root,
             &script_path,
             &doc_path,
             doc_name,
@@ -1516,6 +1591,7 @@ export function extract(_context) {
             .expect("write csv document");
 
         let err = run_extract_script(
+            &root,
             &script_path,
             &doc_path,
             doc_name,
