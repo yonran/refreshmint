@@ -167,8 +167,8 @@ import { login } from './shared.ts';
 Run:
 
 ```bash
-npm run typecheck:extensions
-npm run lint:extensions
+npm run typecheck
+npm run lint
 ```
 
-`npm run typecheck` also includes extension type checks.
+Both commands include builtin extensions and `.agents/skills` source.
