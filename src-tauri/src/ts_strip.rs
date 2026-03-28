@@ -1,9 +1,9 @@
 use swc_common::input::StringInput;
 use swc_common::{sync::Lrc, FileName, SourceMap, Span, Spanned};
 use swc_ecma_ast::{
-    Class, ClassMethod, ClassProp, Constructor, ExportAll, ExportNamedSpecifier, Function,
-    ImportDecl, Module, ParamOrTsParamProp, PrivateMethod, PrivateProp, TsAsExpr, TsEnumDecl,
-    TsExprWithTypeArgs, TsInterfaceDecl, TsModuleDecl, TsNonNullExpr, TsSatisfiesExpr,
+    BindingIdent, Class, ClassMethod, ClassProp, Constructor, ExportAll, ExportNamedSpecifier,
+    Function, ImportDecl, Module, ParamOrTsParamProp, PrivateMethod, PrivateProp, TsAsExpr,
+    TsEnumDecl, TsExprWithTypeArgs, TsInterfaceDecl, TsModuleDecl, TsNonNullExpr, TsSatisfiesExpr,
     TsTypeAliasDecl, TsTypeAnn, TsTypeAssertion, TsTypeParamDecl, TsTypeParamInstantiation,
 };
 use swc_ecma_parser::{lexer::Lexer, Parser, Syntax, TsSyntax};
@@ -166,6 +166,18 @@ impl Visit for StripCollector {
         function.visit_children_with(self);
     }
 
+    fn visit_binding_ident(&mut self, ident: &BindingIdent) {
+        if ident.optional {
+            let start = ident.id.span.hi.0;
+            let end = ident
+                .type_ann
+                .as_ref()
+                .map_or(start.saturating_add(1), |type_ann| type_ann.span.lo.0);
+            self.remove_range(start, end);
+        }
+        ident.visit_children_with(self);
+    }
+
     fn visit_class(&mut self, class: &Class) {
         self.visit_class_like(class);
         class.visit_children_with(self);
@@ -321,6 +333,10 @@ type Balance = { amount: number };
 export function parseAmount<T>(value: string): number {
   return Number(value as string satisfies string)!;
 }
+
+export async function parseStatement(documentName?: string): Promise<string> {
+  return documentName ?? "statement";
+}
 "#;
         let stripped = match strip_typescript_module("driver.ts", source) {
             Ok(stripped) => stripped,
@@ -331,8 +347,38 @@ export function parseAmount<T>(value: string): number {
             Err(error) => panic!("stripped text should be utf-8: {error}"),
         };
         assert!(stripped_text.contains("return Number(value"));
+        assert!(stripped_text.contains("parseStatement(documentName"));
+        assert!(!stripped_text.contains("documentName?:"));
         assert!(!stripped_text.contains("type Balance"));
         assert!(!stripped_text.contains("import type"));
+    }
+
+    #[test]
+    fn strip_typescript_module_preserves_spacing_for_optional_parameters() {
+        let source = b"export async function parseStatement(documentName?: string): Promise<string> {\n  return documentName ?? 'statement';\n}\n";
+        let stripped = match strip_typescript_module("driver.ts", source) {
+            Ok(stripped) => stripped,
+            Err(error) => panic!("erasable TS should strip: {error}"),
+        };
+        let stripped_text = match String::from_utf8(stripped) {
+            Ok(text) => text,
+            Err(error) => panic!("stripped text should be utf-8: {error}"),
+        };
+        let source_text = match std::str::from_utf8(source) {
+            Ok(text) => text,
+            Err(error) => panic!("source text should be utf-8: {error}"),
+        };
+
+        assert_eq!(stripped_text.len(), source_text.len());
+        assert_eq!(
+            stripped_text.lines().next().map(str::len),
+            source_text.lines().next().map(str::len)
+        );
+        assert_eq!(
+            stripped_text.lines().next(),
+            Some("export async function parseStatement(documentName         )                  {")
+        );
+        assert_eq!(stripped_text.lines().nth(1), source_text.lines().nth(1));
     }
 
     #[test]
