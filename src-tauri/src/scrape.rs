@@ -494,6 +494,16 @@ pub async fn run_scrape_async(
         .join(ext_cache_key)
         .join("output");
     std::fs::create_dir_all(&output_dir)?;
+    // Clear orphaned staged files left by any previously-interrupted run.
+    // `listAccountDocuments` in the driver reads only the finalized documents
+    // directory, so it cannot detect these orphans; re-downloading is correct.
+    if let Ok(entries) = std::fs::read_dir(&output_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_file() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 
     let page_inner = Arc::new(Mutex::new(js_api::PageInner {
         target_id: page.target_id().as_ref().to_string(),
