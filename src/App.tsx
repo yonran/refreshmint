@@ -463,13 +463,15 @@ function App() {
                 await autoEtlForLoginRef.current?.(loginName);
             })
             .catch((error: unknown) => {
+                const msg = String(error);
                 appendScrapeLog({
                     loginName,
                     timestamp,
                     success: false,
-                    error: String(error),
+                    error: msg,
                     source: 'auto',
                 });
+                setAutoEtlErrors(`Scrape error (${loginName}): ${msg}`);
             })
             .finally(() => {
                 setAutoScrapeActive(null);
