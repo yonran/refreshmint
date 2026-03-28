@@ -159,6 +159,7 @@ function App() {
     >(null);
     const handleLedgerRefreshRef = useRef<(() => void) | null>(null);
     const loginNamesRef = useRef<string[]>([]);
+    const autoScrapeActiveRef = useRef<string | null>(autoScrapeActive);
     const secretPromptResolverRef = useRef<
         ((confirmed: boolean) => void) | null
     >(null);
@@ -292,7 +293,11 @@ function App() {
             });
             if (stale.length === 0) return;
             setAutoScrapeQueue((current) => {
-                const toAdd = stale.filter((n) => !current.includes(n));
+                const toAdd = stale.filter(
+                    (n) =>
+                        !current.includes(n) &&
+                        n !== autoScrapeActiveRef.current,
+                );
                 return toAdd.length === 0 ? current : [...current, ...toAdd];
             });
         }
@@ -306,6 +311,12 @@ function App() {
             window.clearInterval(id);
         };
     }, [ledger, autoScrapeEnabled, autoScrapeIntervalHours]);
+
+    // Keep autoScrapeActiveRef current so the interval in Effect 1 (which
+    // closes over a stale value) can see the currently active login.
+    useEffect(() => {
+        autoScrapeActiveRef.current = autoScrapeActive;
+    }, [autoScrapeActive]);
 
     // Keep autoEtlForLoginRef current so Effect 2's async chain always sees
     // the latest loginAccounts and loginConfigsByName without adding them to
