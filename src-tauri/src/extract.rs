@@ -1670,6 +1670,127 @@ export async function extract(context) {
     }
 
     #[test]
+    fn target_circle_card_extractor_parses_qfx_via_package_dependency() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap_or_else(|| panic!("src-tauri should have repo parent"))
+            .to_path_buf();
+        let extension_root = repo_root
+            .join("builtin-extensions")
+            .join("target-circle-card");
+        let script_path = extension_root.join("extract.mts");
+
+        let root = temp_dir("target-circle-card-qfx");
+        let documents_dir = root.join("documents");
+        fs::create_dir_all(&documents_dir).expect("create docs dir");
+
+        let doc_name = "2026-03-03-transactions-2026-03-03.qfx";
+        let doc_path = documents_dir.join(doc_name);
+        fs::write(
+            &doc_path,
+            r#"OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+SECURITY:NONE
+ENCODING:USASCII
+CHARSET:1252
+COMPRESSION:NONE
+OLDFILEUID:NONE
+NEWFILEUID:NONE
+
+<OFX>
+<SIGNONMSGSRSV1>
+<SONRS>
+<STATUS>
+<CODE>0
+<SEVERITY>INFO
+</STATUS>
+<DTSERVER>20260326
+<LANGUAGE>ENG
+</SONRS>
+</SIGNONMSGSRSV1>
+<CREDITCARDMSGSRSV1>
+<CCSTMTTRNRS>
+<TRNUID>0
+<STATUS>
+<CODE>0
+<SEVERITY>INFO
+</STATUS>
+<CCSTMTRS>
+<CURDEF>USD
+<CCACCTFROM>
+<ACCTID>3363
+</CCACCTFROM>
+<BANKTRANLIST>
+<DTSTART>2026-02-04
+<DTEND>2026-03-03
+<STMTTRN>
+<TRNTYPE>DEBIT
+<DTPOSTED>2026-03-01
+<DTUSER>2026-02-28
+<TRNAMT>-12.34
+<FITID>fit-123
+<SIC>5812
+<NAME>COFFEE SHOP
+<MEMO>SEATTLE WA
+</STMTTRN>
+</BANKTRANLIST>
+<LEDGERBAL>
+<BALAMT>-188.06
+<DTASOF>20260326
+</LEDGERBAL>
+</CCSTMTRS>
+</CCSTMTTRNRS>
+</CREDITCARDMSGSRSV1>
+</OFX>
+"#,
+        )
+        .expect("write qfx document");
+        fs::write(
+            documents_dir.join(format!("{doc_name}-info.json")),
+            r#"{"mimeType":"application/x-ofx","scrapedAt":"2026-03-26T00:00:00Z","extensionName":"target-circle-card","loginName":"target-circlecard","label":"_default","scrapeSessionId":"session-1","coverageEndDate":"2026-03-26"}"#,
+        )
+        .expect("write qfx sidecar");
+
+        let txns = run_extract_script(
+            &extension_root,
+            &script_path,
+            &doc_path,
+            doc_name,
+            &documents_dir,
+            &root,
+            "Liabilities:Cards:Target Circle Card",
+            None,
+            "target-circle-card",
+        )
+        .expect("target circle card extract script should succeed");
+
+        assert_eq!(txns.len(), 1);
+        assert_eq!(txns[0].tdate, "2026-03-01");
+        assert_eq!(txns[0].tdescription, "COFFEE SHOP SEATTLE WA");
+        assert!(txns[0].tcomment.contains("type=DEBIT"));
+        assert!(txns[0].tcomment.contains("sic=5812"));
+        assert!(txns[0].tcomment.contains("transactionDate=2026-02-28"));
+        let tag_value = |key: &str| {
+            txns[0]
+                .ttags
+                .iter()
+                .find(|(tag_key, _)| tag_key == key)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(tag_value("bankId"), Some("fit-123"));
+        assert_eq!(tag_value("fitId"), Some("fit-123"));
+        assert_eq!(tag_value("accountId"), Some("3363"));
+        assert_eq!(tag_value("currency"), Some("USD"));
+        assert_eq!(tag_value("dateRangeStart"), Some("2026-02-04"));
+        assert_eq!(tag_value("dateRangeEnd"), Some("2026-03-03"));
+        assert_eq!(tag_value("ledgerBalance"), Some("-188.06 USD"));
+        assert_eq!(tag_value("amount"), Some("12.34 USD"));
+        assert_eq!(tag_value("sourceFormat"), Some("qfx"));
+        assert_eq!(tag_value("coverageEndDate"), Some("2026-03-26"));
+    }
+
+    #[test]
     fn run_extract_script_requires_extract_export() {
         let root = temp_dir("extract-script-missing-export");
         let documents_dir = root.join("documents");
