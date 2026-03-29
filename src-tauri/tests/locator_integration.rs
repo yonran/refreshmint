@@ -287,6 +287,7 @@ fn locator_api_works() -> Result<(), Box<dyn Error>> {
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
         prompt_requires_override: false,
+        app_handle: None,
     };
 
     scrape::run_scrape(config)?;
@@ -341,6 +342,7 @@ fn get_by_role_api_works() -> Result<(), Box<dyn Error>> {
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
         prompt_requires_override: false,
+        app_handle: None,
     };
 
     scrape::run_scrape(config)?;
@@ -394,6 +396,7 @@ fn shadow_dom_api_works() -> Result<(), Box<dyn Error>> {
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
         prompt_requires_override: false,
+        app_handle: None,
     };
 
     scrape::run_scrape(config)?;

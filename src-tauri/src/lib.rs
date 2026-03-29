@@ -80,6 +80,13 @@ struct LoginExtractionSupport {
     reason: Option<&'static str>,
 }
 
+/// Tauri state holding the mpsc sender for an in-progress refreshmint.prompt()
+/// call. The scrape thread creates a channel, stores the Sender here, and
+/// blocks waiting for the Receiver. The frontend calls submit_prompt_answer
+/// to send the user's response.
+#[derive(Default)]
+pub struct PromptAnswerState(pub std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>>);
+
 static UI_DEBUG_SESSION: std::sync::OnceLock<std::sync::Mutex<Option<UiDebugSession>>> =
     std::sync::OnceLock::new();
 static LOCK_METADATA_WATCHER: std::sync::OnceLock<std::sync::Mutex<Option<LockMetadataWatcher>>> =
@@ -105,6 +112,7 @@ pub fn run_with_context(
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .manage(PromptAnswerState::default())
         .invoke_handler(tauri::generate_handler![
             new_ledger,
             open_ledger,
@@ -170,6 +178,7 @@ pub fn run_with_context(
             migrate_ledger,
             query_transactions,
             run_hledger_report,
+            submit_prompt_answer,
         ])
         .setup(|app| {
             binpath::init_from_app(app.handle());
@@ -557,7 +566,11 @@ fn get_lock_status_snapshot(
 }
 
 #[tauri::command]
-async fn run_scrape_for_login(ledger: String, login_name: String) -> Result<(), String> {
+async fn run_scrape_for_login(
+    app_handle: tauri::AppHandle,
+    ledger: String,
+    login_name: String,
+) -> Result<(), String> {
     let login_name = require_login_name_input(login_name)?;
 
     let target_dir = std::path::PathBuf::from(ledger);
@@ -574,6 +587,7 @@ async fn run_scrape_for_login(ledger: String, login_name: String) -> Result<(), 
         profile_override: None,
         prompt_overrides: scrape::js_api::PromptOverrides::new(),
         prompt_requires_override: false,
+        app_handle: Some(app_handle),
     };
 
     tokio::task::spawn_blocking(move || scrape::run_scrape(config).map_err(|err| err.to_string()))
@@ -583,9 +597,13 @@ async fn run_scrape_for_login(ledger: String, login_name: String) -> Result<(), 
 }
 
 #[tauri::command]
-async fn run_scrape(ledger: String, account: String) -> Result<(), String> {
+async fn run_scrape(
+    app_handle: tauri::AppHandle,
+    ledger: String,
+    account: String,
+) -> Result<(), String> {
     let login_name = require_non_empty_input("account", account)?;
-    run_scrape_for_login(ledger, login_name).await
+    run_scrape_for_login(app_handle, ledger, login_name).await
 }
 
 #[tauri::command]
@@ -1672,6 +1690,22 @@ fn map_account_journal_entries(
             }
         })
         .collect()
+}
+
+/// Called by the frontend to deliver the user's answer to a pending
+/// `refreshmint.prompt()` call that is blocking the scrape thread.
+/// Sending an empty string is treated as a cancellation.
+#[tauri::command]
+fn submit_prompt_answer(
+    answer: String,
+    state: tauri::State<PromptAnswerState>,
+) -> Result<(), String> {
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(sender) = guard.take() {
+        // Ignore send errors: the scrape thread may have already timed out.
+        let _ = sender.send(answer);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

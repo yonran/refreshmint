@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 import { Menu, MenuItem, Submenu } from '@tauri-apps/api/menu';
 import { documentDir, join } from '@tauri-apps/api/path';
@@ -78,6 +79,9 @@ function App() {
     );
     const [autoEtlStatus, setAutoEtlStatus] = useState<string | null>(null);
     const [autoEtlErrors, setAutoEtlErrors] = useState<string | null>(null);
+    const [promptRequest, setPromptRequest] = useState<{
+        message: string;
+    } | null>(null);
     const [scrapeLogVersion, setScrapeLogVersion] = useState(0);
     const [loginAccounts, setLoginAccounts] = useState<LoginAccountRef[]>([]);
 
@@ -160,6 +164,7 @@ function App() {
     const handleLedgerRefreshRef = useRef<(() => void) | null>(null);
     const loginNamesRef = useRef<string[]>([]);
     const autoScrapeActiveRef = useRef<string | null>(autoScrapeActive);
+    const promptInputRef = useRef<HTMLInputElement | null>(null);
     const secretPromptResolverRef = useRef<
         ((confirmed: boolean) => void) | null
     >(null);
@@ -317,6 +322,24 @@ function App() {
     useEffect(() => {
         autoScrapeActiveRef.current = autoScrapeActive;
     }, [autoScrapeActive]);
+
+    // Listen for prompt requests from the Rust scrape driver and surface them
+    // as a blocking modal so the user can supply MFA codes etc.
+    useEffect(() => {
+        const unlisten = listen<{ message: string }>(
+            'refreshmint://prompt-requested',
+            (event) => {
+                setPromptRequest({ message: event.payload.message });
+            },
+        );
+        return () => {
+            unlisten
+                .then((fn) => {
+                    fn();
+                })
+                .catch(() => {});
+        };
+    }, []);
 
     // Keep autoEtlForLoginRef current so Effect 2's async chain always sees
     // the latest loginAccounts and loginConfigsByName without adding them to
@@ -1332,6 +1355,61 @@ function App() {
                         />
                     )}
                 </section>
+            )}
+            {promptRequest === null ? null : (
+                <div className="secret-prompt-overlay">
+                    <div
+                        className="secret-prompt"
+                        role="dialog"
+                        aria-modal="true"
+                    >
+                        <h3>Scraper prompt</h3>
+                        <p>{promptRequest.message}</p>
+                        <input
+                            ref={promptInputRef}
+                            type="text"
+                            autoFocus
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                    const val =
+                                        promptInputRef.current?.value ?? '';
+                                    setPromptRequest(null);
+                                    void invoke('submit_prompt_answer', {
+                                        answer: val,
+                                    });
+                                }
+                            }}
+                        />
+                        <div className="txn-actions">
+                            <button
+                                type="button"
+                                className="primary-button"
+                                onClick={() => {
+                                    const val =
+                                        promptInputRef.current?.value ?? '';
+                                    setPromptRequest(null);
+                                    void invoke('submit_prompt_answer', {
+                                        answer: val,
+                                    });
+                                }}
+                            >
+                                Submit
+                            </button>
+                            <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => {
+                                    setPromptRequest(null);
+                                    void invoke('submit_prompt_answer', {
+                                        answer: '',
+                                    });
+                                }}
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
             {secretPrompt === null ? null : (
                 <div className="secret-prompt-overlay">

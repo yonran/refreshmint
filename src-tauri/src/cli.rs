@@ -1013,6 +1013,7 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
         profile_override: args.profile,
         prompt_overrides,
         prompt_requires_override: true,
+        app_handle: None,
     };
 
     crate::scrape::run_scrape(config)

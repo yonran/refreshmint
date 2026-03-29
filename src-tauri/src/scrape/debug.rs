@@ -452,6 +452,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                 account_name: config.login_name.clone(),
                 login_name: config.login_name.clone(),
                 ledger_dir: config.ledger_dir.clone(),
+                app_handle: None,
             }));
             Ok::<_, Box<dyn Error>>((browser, handler, page_inner, refreshmint_inner))
         })?;
@@ -978,6 +979,7 @@ mod tests {
             account_name: login_name.clone(),
             login_name: login_name.clone(),
             ledger_dir: ledger_dir.clone(),
+            app_handle: None,
         };
 
         let finalized =

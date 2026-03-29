@@ -13,6 +13,9 @@ use rquickjs::{
 };
 use tokio::sync::{oneshot, Mutex};
 
+use tauri::Emitter as _;
+use tauri::Manager as _;
+
 use super::locator::{build_role_selector, Locator};
 use crate::secret::SecretStore;
 
@@ -7217,6 +7220,10 @@ pub struct RefreshmintInner {
     pub account_name: String,
     pub login_name: String,
     pub ledger_dir: PathBuf,
+    /// When set, `prompt()` emits a UI event and blocks waiting for
+    /// `submit_prompt_answer` instead of reading from stdin.
+    /// See `PromptAnswerState` in lib.rs for the other half of this protocol.
+    pub app_handle: Option<tauri::AppHandle>,
 }
 
 /// JS-visible `refreshmint` namespace object.
@@ -7777,8 +7784,13 @@ impl RefreshmintApi {
     }
 
     /// Prompt the user: use CLI-provided override when available.
+    ///
+    /// In the Tauri UI context (`app_handle` is set), emits the event
+    /// `refreshmint://prompt-requested` with `{ message }` and blocks until
+    /// the frontend calls `submit_prompt_answer`.  In CLI context, reads from
+    /// stdin as before.
     pub fn prompt(&self, message: String) -> JsResult<String> {
-        let (override_value, require_override) = {
+        let (override_value, require_override, app_handle) = {
             let inner = self
                 .inner
                 .try_lock()
@@ -7793,6 +7805,7 @@ impl RefreshmintApi {
                     }
                 }),
                 inner.prompt_requires_override,
+                inner.app_handle.clone(),
             )
         };
 
@@ -7804,6 +7817,36 @@ impl RefreshmintApi {
             return Err(js_err(missing_prompt_override_error(&message)));
         }
 
+        // UI context: emit an event and block until the frontend responds.
+        // `prompt()` runs on a spawn_blocking thread so blocking here is safe.
+        if let Some(handle) = app_handle {
+            let (tx, rx) = std::sync::mpsc::channel::<String>();
+            {
+                let state = handle.state::<crate::PromptAnswerState>();
+                let mut guard = state
+                    .0
+                    .lock()
+                    .map_err(|e| js_err(format!("prompt state lock failed: {e}")))?;
+                *guard = Some(tx);
+            }
+            #[derive(serde::Serialize, Clone)]
+            struct PromptRequestedPayload {
+                message: String,
+            }
+            handle
+                .emit(
+                    "refreshmint://prompt-requested",
+                    PromptRequestedPayload {
+                        message: message.clone(),
+                    },
+                )
+                .map_err(|e| js_err(format!("prompt emit failed: {e}")))?;
+            return rx
+                .recv()
+                .map_err(|_| js_err("prompt cancelled".to_string()));
+        }
+
+        // CLI context: read from stdin.
         eprint!("{message} ");
         let mut line = String::new();
         std::io::stdin()
@@ -8724,6 +8767,7 @@ mod tests {
             account_name: String::new(),
             login_name: String::new(),
             ledger_dir: PathBuf::new(),
+            app_handle: None,
         }
     }
 

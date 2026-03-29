@@ -21,6 +21,9 @@ pub struct ScrapeConfig {
     pub profile_override: Option<PathBuf>,
     pub prompt_overrides: js_api::PromptOverrides,
     pub prompt_requires_override: bool,
+    /// When set, `refreshmint.prompt()` emits a UI event and waits for
+    /// `submit_prompt_answer` rather than reading from stdin.
+    pub app_handle: Option<tauri::AppHandle>,
 }
 
 /// The value type for a domain entry in `manifest.json` `secrets` field.
@@ -528,6 +531,7 @@ pub async fn run_scrape_async(
         account_name: login_name.clone(),
         login_name: login_name.clone(),
         ledger_dir: config.ledger_dir.clone(),
+        app_handle: config.app_handle.clone(),
     }));
 
     // 8. Run the driver script in the sandbox
@@ -839,6 +843,7 @@ mod tests {
             account_name: login_name.clone(),
             login_name: login_name.clone(),
             ledger_dir: ledger_dir.clone(),
+            app_handle: None,
         };
 
         let finalized = finalize_staged_resources(&inner).unwrap_or_else(|err| {
@@ -897,6 +902,7 @@ mod tests {
             account_name: "chase-personal".to_string(),
             login_name: "chase-personal".to_string(),
             ledger_dir: ledger_dir.clone(),
+            app_handle: None,
         };
 
         let err = finalize_staged_resources(&inner)
@@ -970,6 +976,7 @@ mod tests {
                 account_name: "smoke-account".to_string(),
                 login_name: "smoke-account".to_string(),
                 ledger_dir: root.join("ledger.refreshmint"),
+                app_handle: None,
             }));
 
             let browser_for_close = browser.clone();
