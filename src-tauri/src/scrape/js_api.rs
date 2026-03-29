@@ -7226,6 +7226,15 @@ pub struct RefreshmintInner {
     pub app_handle: Option<tauri::AppHandle>,
 }
 
+fn resolve_prompt_response(
+    response: Result<Option<String>, std::sync::mpsc::RecvError>,
+) -> JsResult<String> {
+    match response {
+        Ok(Some(answer)) => Ok(answer),
+        Ok(None) | Err(_) => Err(js_err("prompt cancelled".to_string())),
+    }
+}
+
 /// JS-visible `refreshmint` namespace object.
 #[rquickjs::class(rename = "Refreshmint")]
 #[derive(Trace)]
@@ -7820,7 +7829,7 @@ impl RefreshmintApi {
         // UI context: emit an event and block until the frontend responds.
         // `prompt()` runs on a spawn_blocking thread so blocking here is safe.
         if let Some(handle) = app_handle {
-            let (tx, rx) = std::sync::mpsc::channel::<String>();
+            let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
             {
                 let state = handle.state::<crate::PromptAnswerState>();
                 let mut guard = state
@@ -7841,9 +7850,7 @@ impl RefreshmintApi {
                     },
                 )
                 .map_err(|e| js_err(format!("prompt emit failed: {e}")))?;
-            return rx
-                .recv()
-                .map_err(|_| js_err("prompt cancelled".to_string()));
+            return resolve_prompt_response(rx.recv());
         }
 
         // CLI context: read from stdin.
@@ -8845,6 +8852,21 @@ mod tests {
             .prompt("Enter the texted MFA code: ".to_string())
             .unwrap_or_else(|err| panic!("prompt unexpectedly failed: {err}"));
         assert_eq!(value, "245221");
+    }
+
+    #[test]
+    fn resolve_prompt_response_returns_submitted_empty_string() {
+        let value = resolve_prompt_response(Ok(Some(String::new())))
+            .unwrap_or_else(|err| panic!("expected prompt response value: {err}"));
+        assert_eq!(value, "");
+    }
+
+    #[test]
+    fn resolve_prompt_response_rejects_cancel() {
+        let err = resolve_prompt_response(Ok(None))
+            .err()
+            .unwrap_or_else(|| panic!("expected prompt cancellation"));
+        assert!(err.to_string().contains("prompt cancelled"));
     }
 
     #[test]

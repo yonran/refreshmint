@@ -83,9 +83,10 @@ struct LoginExtractionSupport {
 /// Tauri state holding the mpsc sender for an in-progress refreshmint.prompt()
 /// call. The scrape thread creates a channel, stores the Sender here, and
 /// blocks waiting for the Receiver. The frontend calls submit_prompt_answer
-/// to send the user's response.
+/// to send `Some(answer)` for Submit or `None` for Cancel. Keep this aligned
+/// with the receiving half in `scrape/js_api.rs`.
 #[derive(Default)]
-pub struct PromptAnswerState(pub std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>>);
+pub struct PromptAnswerState(pub std::sync::Mutex<Option<std::sync::mpsc::Sender<Option<String>>>>);
 
 static UI_DEBUG_SESSION: std::sync::OnceLock<std::sync::Mutex<Option<UiDebugSession>>> =
     std::sync::OnceLock::new();
@@ -1694,12 +1695,8 @@ fn map_account_journal_entries(
 
 /// Called by the frontend to deliver the user's answer to a pending
 /// `refreshmint.prompt()` call that is blocking the scrape thread.
-/// Sending an empty string is treated as a cancellation.
-#[tauri::command]
-fn submit_prompt_answer(
-    answer: String,
-    state: tauri::State<PromptAnswerState>,
-) -> Result<(), String> {
+/// Sends `Some(answer)` for Submit or `None` for Cancel.
+fn send_prompt_answer(answer: Option<String>, state: &PromptAnswerState) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(sender) = guard.take() {
         // Ignore send errors: the scrape thread may have already timed out.
@@ -1708,13 +1705,23 @@ fn submit_prompt_answer(
     Ok(())
 }
 
+/// Called by the frontend to deliver the user's answer to a pending
+/// `refreshmint.prompt()` call that is blocking the scrape thread.
+#[tauri::command]
+fn submit_prompt_answer(
+    answer: Option<String>,
+    state: tauri::State<PromptAnswerState>,
+) -> Result<(), String> {
+    send_prompt_answer(answer, &state)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
         delete_login_account, evidence_ref_matches_document, inspect_login_extraction_support,
         require_existing_login, require_label_input, require_login_name_input,
-        require_non_empty_input,
+        require_non_empty_input, send_prompt_answer, PromptAnswerState,
     };
     use std::collections::BTreeMap;
     use std::fs;
@@ -1732,6 +1739,36 @@ mod tests {
             panic!("failed to create temp dir: {err}");
         }
         dir
+    }
+
+    #[test]
+    fn send_prompt_answer_delivers_cancel_as_none() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let state = PromptAnswerState(std::sync::Mutex::new(Some(tx)));
+
+        send_prompt_answer(None, &state)
+            .unwrap_or_else(|err| panic!("send_prompt_answer failed: {err}"));
+
+        assert_eq!(
+            rx.recv()
+                .unwrap_or_else(|err| panic!("failed to receive prompt answer: {err}")),
+            None
+        );
+    }
+
+    #[test]
+    fn send_prompt_answer_preserves_empty_string_submission() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let state = PromptAnswerState(std::sync::Mutex::new(Some(tx)));
+
+        send_prompt_answer(Some(String::new()), &state)
+            .unwrap_or_else(|err| panic!("send_prompt_answer failed: {err}"));
+
+        assert_eq!(
+            rx.recv()
+                .unwrap_or_else(|err| panic!("failed to receive prompt answer: {err}")),
+            Some(String::new())
+        );
     }
 
     #[test]

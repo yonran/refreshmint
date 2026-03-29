@@ -1401,7 +1401,7 @@ function App() {
                                 onClick={() => {
                                     setPromptRequest(null);
                                     void invoke('submit_prompt_answer', {
-                                        answer: '',
+                                        answer: null,
                                     });
                                 }}
                             >
