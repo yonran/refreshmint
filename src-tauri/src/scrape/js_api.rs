@@ -13,9 +13,6 @@ use rquickjs::{
 };
 use tokio::sync::{oneshot, Mutex};
 
-use tauri::Emitter as _;
-use tauri::Manager as _;
-
 use super::locator::{build_role_selector, Locator};
 use crate::secret::SecretStore;
 
@@ -7207,6 +7204,9 @@ pub struct StagedResource {
 }
 
 /// Shared state backing the `refreshmint` JS namespace.
+pub type PromptUiHandler =
+    Arc<dyn Fn(String) -> Result<Option<String>, String> + Send + Sync + 'static>;
+
 pub struct RefreshmintInner {
     pub output_dir: PathBuf,
     pub prompt_overrides: PromptOverrides,
@@ -7220,18 +7220,15 @@ pub struct RefreshmintInner {
     pub account_name: String,
     pub login_name: String,
     pub ledger_dir: PathBuf,
-    /// When set, `prompt()` emits a UI event and blocks waiting for
-    /// `submit_prompt_answer` instead of reading from stdin.
-    /// See `PromptAnswerState` in lib.rs for the other half of this protocol.
-    pub app_handle: Option<tauri::AppHandle>,
+    /// When set, `prompt()` asks the host app for a response instead of
+    /// reading from stdin.
+    pub prompt_ui_handler: Option<PromptUiHandler>,
 }
 
-fn resolve_prompt_response(
-    response: Result<Option<String>, std::sync::mpsc::RecvError>,
-) -> JsResult<String> {
+fn resolve_prompt_response(response: Option<String>) -> JsResult<String> {
     match response {
-        Ok(Some(answer)) => Ok(answer),
-        Ok(None) | Err(_) => Err(js_err("prompt cancelled".to_string())),
+        Some(answer) => Ok(answer),
+        None => Err(js_err("prompt cancelled".to_string())),
     }
 }
 
@@ -7794,12 +7791,11 @@ impl RefreshmintApi {
 
     /// Prompt the user: use CLI-provided override when available.
     ///
-    /// In the Tauri UI context (`app_handle` is set), emits the event
-    /// `refreshmint://prompt-requested` with `{ message }` and blocks until
-    /// the frontend calls `submit_prompt_answer`.  In CLI context, reads from
-    /// stdin as before.
+    /// In the Tauri UI context (`prompt_ui_handler` is set), asks the host app
+    /// for a response and blocks until it returns one. In CLI context, reads
+    /// from stdin as before.
     pub fn prompt(&self, message: String) -> JsResult<String> {
-        let (override_value, require_override, app_handle) = {
+        let (override_value, require_override, prompt_ui_handler) = {
             let inner = self
                 .inner
                 .try_lock()
@@ -7814,7 +7810,7 @@ impl RefreshmintApi {
                     }
                 }),
                 inner.prompt_requires_override,
-                inner.app_handle.clone(),
+                inner.prompt_ui_handler.clone(),
             )
         };
 
@@ -7826,31 +7822,11 @@ impl RefreshmintApi {
             return Err(js_err(missing_prompt_override_error(&message)));
         }
 
-        // UI context: emit an event and block until the frontend responds.
-        // `prompt()` runs on a spawn_blocking thread so blocking here is safe.
-        if let Some(handle) = app_handle {
-            let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
-            {
-                let state = handle.state::<crate::PromptAnswerState>();
-                let mut guard = state
-                    .0
-                    .lock()
-                    .map_err(|e| js_err(format!("prompt state lock failed: {e}")))?;
-                *guard = Some(tx);
-            }
-            #[derive(serde::Serialize, Clone)]
-            struct PromptRequestedPayload {
-                message: String,
-            }
-            handle
-                .emit(
-                    "refreshmint://prompt-requested",
-                    PromptRequestedPayload {
-                        message: message.clone(),
-                    },
-                )
-                .map_err(|e| js_err(format!("prompt emit failed: {e}")))?;
-            return resolve_prompt_response(rx.recv());
+        // UI context: ask the host app to collect a response. `prompt()`
+        // runs on a spawn_blocking thread so a blocking callback is safe.
+        if let Some(prompt_ui_handler) = prompt_ui_handler {
+            let response = prompt_ui_handler(message).map_err(js_err)?;
+            return resolve_prompt_response(response);
         }
 
         // CLI context: read from stdin.
@@ -8774,7 +8750,7 @@ mod tests {
             account_name: String::new(),
             login_name: String::new(),
             ledger_dir: PathBuf::new(),
-            app_handle: None,
+            prompt_ui_handler: None,
         }
     }
 
@@ -8856,14 +8832,14 @@ mod tests {
 
     #[test]
     fn resolve_prompt_response_returns_submitted_empty_string() {
-        let value = resolve_prompt_response(Ok(Some(String::new())))
+        let value = resolve_prompt_response(Some(String::new()))
             .unwrap_or_else(|err| panic!("expected prompt response value: {err}"));
         assert_eq!(value, "");
     }
 
     #[test]
     fn resolve_prompt_response_rejects_cancel() {
-        let err = resolve_prompt_response(Ok(None))
+        let err = resolve_prompt_response(None)
             .err()
             .unwrap_or_else(|| panic!("expected prompt cancellation"));
         assert!(err.to_string().contains("prompt cancelled"));

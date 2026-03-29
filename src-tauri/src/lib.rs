@@ -580,6 +580,10 @@ async fn run_scrape_for_login(
 
     let extension = login_config::resolve_login_extension(&target_dir, &login_name)
         .map_err(|err| err.to_string())?;
+    let prompt_ui_handler = {
+        let app_handle = app_handle.clone();
+        std::sync::Arc::new(move |message: String| request_prompt_answer(&app_handle, message))
+    };
 
     let config = scrape::ScrapeConfig {
         login_name,
@@ -588,7 +592,7 @@ async fn run_scrape_for_login(
         profile_override: None,
         prompt_overrides: scrape::js_api::PromptOverrides::new(),
         prompt_requires_override: false,
-        app_handle: Some(app_handle),
+        prompt_ui_handler: Some(prompt_ui_handler),
     };
 
     tokio::task::spawn_blocking(move || scrape::run_scrape(config).map_err(|err| err.to_string()))
@@ -1703,6 +1707,32 @@ fn send_prompt_answer(answer: Option<String>, state: &PromptAnswerState) -> Resu
         let _ = sender.send(answer);
     }
     Ok(())
+}
+
+fn request_prompt_answer(
+    app_handle: &tauri::AppHandle,
+    message: String,
+) -> Result<Option<String>, String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+    {
+        let state = app_handle.state::<PromptAnswerState>();
+        let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+        *guard = Some(tx);
+    }
+
+    #[derive(serde::Serialize, Clone)]
+    struct PromptRequestedPayload {
+        message: String,
+    }
+
+    app_handle
+        .emit(
+            "refreshmint://prompt-requested",
+            PromptRequestedPayload { message },
+        )
+        .map_err(|e| format!("prompt emit failed: {e}"))?;
+
+    rx.recv().map_err(|_| "prompt cancelled".to_string())
 }
 
 /// Called by the frontend to deliver the user's answer to a pending
