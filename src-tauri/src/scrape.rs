@@ -356,6 +356,25 @@ pub(crate) fn load_manifest_secret_declarations(
     Ok(manifest.secrets)
 }
 
+fn clear_staged_output_dir(
+    output_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match std::fs::symlink_metadata(output_dir) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                std::fs::remove_dir_all(output_dir)?;
+            } else {
+                std::fs::remove_file(output_dir)?;
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    std::fs::create_dir_all(output_dir)?;
+    Ok(())
+}
+
 fn normalize_manifest_domain(input: &str) -> String {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -496,17 +515,10 @@ pub async fn run_scrape_async(
         .join("extensions")
         .join(ext_cache_key)
         .join("output");
-    std::fs::create_dir_all(&output_dir)?;
     // Clear orphaned staged files left by any previously-interrupted run.
     // `listAccountDocuments` in the driver reads only the finalized documents
     // directory, so it cannot detect these orphans; re-downloading is correct.
-    if let Ok(entries) = std::fs::read_dir(&output_dir) {
-        for entry in entries.flatten() {
-            if entry.path().is_file() {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
-    }
+    clear_staged_output_dir(&output_dir)?;
 
     let page_inner = Arc::new(Mutex::new(js_api::PageInner {
         target_id: page.target_id().as_ref().to_string(),
@@ -610,8 +622,9 @@ pub fn run_scrape(config: ScrapeConfig) -> Result<(), Box<dyn std::error::Error>
 #[cfg(test)]
 mod tests {
     use super::{
-        finalize_staged_resources, list_runnable_extensions, load_manifest,
-        load_manifest_secret_declarations, normalize_manifest_domain, resolve_driver_script_path,
+        clear_staged_output_dir, finalize_staged_resources, list_runnable_extensions,
+        load_manifest, load_manifest_secret_declarations, normalize_manifest_domain,
+        resolve_driver_script_path,
     };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
@@ -865,6 +878,42 @@ mod tests {
             .unwrap_or_else(|err| panic!("failed to read sidecar file: {err}"));
         assert!(sidecar.contains("\"loginName\": \"chase-personal\""));
         assert!(sidecar.contains("\"label\": \"checking\""));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clear_staged_output_dir_removes_nested_stale_files() {
+        let root = create_temp_dir("scrape-output-cleanup");
+        let output_dir = root
+            .join("cache")
+            .join("extensions")
+            .join("demo")
+            .join("output");
+        let nested_dir = output_dir.join("statements").join("2026");
+        fs::create_dir_all(&nested_dir).unwrap_or_else(|err| {
+            panic!("failed to create nested output dir: {err}");
+        });
+        fs::write(output_dir.join("top-level.pdf"), b"top").unwrap_or_else(|err| {
+            panic!("failed to write top-level staged file: {err}");
+        });
+        fs::write(nested_dir.join("jan.pdf"), b"nested").unwrap_or_else(|err| {
+            panic!("failed to write nested staged file: {err}");
+        });
+
+        clear_staged_output_dir(&output_dir).unwrap_or_else(|err| {
+            panic!("clear_staged_output_dir failed: {err}");
+        });
+
+        assert!(output_dir.exists(), "expected output dir to be recreated");
+        assert!(
+            !output_dir.join("top-level.pdf").exists(),
+            "expected top-level staged file to be removed"
+        );
+        assert!(
+            !output_dir.join("statements").exists(),
+            "expected nested staged directory to be removed"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
