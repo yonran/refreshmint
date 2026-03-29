@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { ScrapeLogEntry } from './scrapeLog.ts';
 
 export interface LedgerView {
     path: string;
@@ -754,8 +755,16 @@ export async function clearLoginProfile(
 export async function runScrapeForLogin(
     ledger: string,
     loginName: string,
+    source: 'manual' | 'auto' = 'manual',
 ): Promise<void> {
-    await invoke('run_scrape_for_login', { ledger, loginName });
+    await invoke('run_scrape_for_login', { ledger, loginName, source });
+}
+
+export async function getScrapeLog(
+    ledger: string,
+    loginName: string,
+): Promise<ScrapeLogEntry[]> {
+    return invoke('get_scrape_log', { ledger, loginName });
 }
 
 export async function migrateLedger(

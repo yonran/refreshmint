@@ -133,6 +133,7 @@ pub fn run_with_context(
             get_login_extraction_support,
             run_scrape_for_login,
             run_scrape,
+            get_scrape_log,
             list_documents,
             list_login_account_documents,
             read_login_account_document_rows,
@@ -571,34 +572,57 @@ async fn run_scrape_for_login(
     app_handle: tauri::AppHandle,
     ledger: String,
     login_name: String,
+    source: String,
 ) -> Result<(), String> {
     let login_name = require_login_name_input(login_name)?;
 
-    let target_dir = std::path::PathBuf::from(ledger);
+    let target_dir = std::path::PathBuf::from(&ledger);
+    // Validate ledger and login BEFORE any logging: append_jsonl creates
+    // directories, so we must not call it if the ledger or login dir may not exist.
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
     require_existing_login(&target_dir, &login_name)?;
 
-    let extension = login_config::resolve_login_extension(&target_dir, &login_name)
-        .map_err(|err| err.to_string())?;
-    let prompt_ui_handler = {
-        let app_handle = app_handle.clone();
-        std::sync::Arc::new(move |message: String| request_prompt_answer(&app_handle, message))
-    };
+    // From here ledger and login are confirmed to exist; logging is safe.
+    let timestamp = operations::now_timestamp();
 
-    let config = scrape::ScrapeConfig {
-        login_name,
-        extension_name: extension,
-        ledger_dir: target_dir,
-        profile_override: None,
-        prompt_overrides: scrape::js_api::PromptOverrides::new(),
-        prompt_requires_override: false,
-        prompt_ui_handler: Some(prompt_ui_handler),
-    };
+    let result: Result<(), String> = async {
+        let extension = login_config::resolve_login_extension(&target_dir, &login_name)
+            .map_err(|err| err.to_string())?;
+        let prompt_ui_handler = {
+            let app_handle = app_handle.clone();
+            std::sync::Arc::new(move |message: String| request_prompt_answer(&app_handle, message))
+        };
 
-    tokio::task::spawn_blocking(move || scrape::run_scrape(config).map_err(|err| err.to_string()))
+        let config = scrape::ScrapeConfig {
+            login_name: login_name.clone(),
+            extension_name: extension,
+            ledger_dir: target_dir.clone(),
+            profile_override: None,
+            prompt_overrides: scrape::js_api::PromptOverrides::new(),
+            prompt_requires_override: false,
+            prompt_ui_handler: Some(prompt_ui_handler),
+        };
+
+        tokio::task::spawn_blocking(move || {
+            scrape::run_scrape(config).map_err(|err| err.to_string())
+        })
         .await
         .map_err(|err| err.to_string())?
-        .map_err(|err| err.to_string())
+    }
+    .await;
+
+    let entry = operations::ScrapeLogEntry {
+        login_name: login_name.clone(),
+        timestamp,
+        success: result.is_ok(),
+        error: result.as_ref().err().cloned(),
+        source,
+    };
+    if let Err(e) = operations::append_scrape_log_entry(&target_dir, &entry) {
+        eprintln!("warning: failed to write scrape log: {e}");
+    }
+
+    result
 }
 
 #[tauri::command]
@@ -608,7 +632,22 @@ async fn run_scrape(
     account: String,
 ) -> Result<(), String> {
     let login_name = require_non_empty_input("account", account)?;
-    run_scrape_for_login(app_handle, ledger, login_name).await
+    run_scrape_for_login(app_handle, ledger, login_name, "manual".to_string()).await
+}
+
+#[tauri::command]
+fn get_scrape_log(
+    ledger: String,
+    login_name: String,
+) -> Result<Vec<operations::ScrapeLogEntry>, String> {
+    let ledger_dir = std::path::PathBuf::from(&ledger);
+    crate::ledger::require_refreshmint_extension(&ledger_dir).map_err(|err| err.to_string())?;
+    let login_name = require_login_name_input(login_name)?;
+    require_existing_login(&ledger_dir, &login_name)?;
+    let mut entries =
+        operations::read_scrape_log(&ledger_dir, &login_name).map_err(|err| err.to_string())?;
+    entries.reverse(); // newest-first to match prior localStorage behaviour
+    Ok(entries)
 }
 
 #[tauri::command]

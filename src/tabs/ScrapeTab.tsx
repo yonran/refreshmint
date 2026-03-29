@@ -30,6 +30,7 @@ import {
     removeLoginDomain,
     repairLoginAccountLabels,
     runLoginAccountExtraction,
+    getScrapeLog,
     runScrapeForLogin,
     setLoginAccount,
     setLoginCredentials,
@@ -48,11 +49,7 @@ import {
     type TransferDraft,
     normalizeLoginConfig,
 } from '../types.ts';
-import {
-    appendScrapeLog,
-    readScrapeLog,
-    type ScrapeLogEntry,
-} from '../scrapeLog.ts';
+import { type ScrapeLogEntry } from '../scrapeLog.ts';
 
 interface ScrapeTabProps {
     ledger: LedgerView | null;
@@ -320,12 +317,23 @@ export function ScrapeTab({
 
     // Reload scrape log when selected login or scrapeLogVersion changes.
     useEffect(() => {
-        if (activeScrapeLoginName === null) {
+        if (activeScrapeLoginName === null || !ledger) {
             setScrapeLogEntries([]);
             return;
         }
-        setScrapeLogEntries(readScrapeLog(activeScrapeLoginName));
-    }, [activeScrapeLoginName, scrapeLogVersion]);
+        let cancelled = false;
+        const loginName = activeScrapeLoginName;
+        getScrapeLog(ledger.path, loginName)
+            .then((entries) => {
+                if (!cancelled) setScrapeLogEntries(entries);
+            })
+            .catch(() => {
+                if (!cancelled) setScrapeLogEntries([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [activeScrapeLoginName, scrapeLogVersion, ledger]);
 
     // List scrape extensions when ledger changes.
     useEffect(() => {
@@ -1643,12 +1651,6 @@ export function ScrapeTab({
         try {
             await runScrapeForLogin(ledger.path, loginName);
             localStorage.setItem(`lastScrape:${loginName}`, timestamp);
-            appendScrapeLog({
-                loginName,
-                timestamp,
-                success: true,
-                source: 'manual',
-            });
             setScrapeStatus(`Scrape completed for ${loginName}.`);
             await onScrapeComplete(loginName);
             try {
@@ -1664,17 +1666,14 @@ export function ScrapeTab({
                 // Surface scrape success first; pipeline reload errors are non-fatal here.
             }
         } catch (error) {
-            appendScrapeLog({
-                loginName,
-                timestamp,
-                success: false,
-                error: String(error),
-                source: 'manual',
-            });
             setScrapeStatus(`Scrape failed: ${String(error)}`);
         } finally {
             setIsRunningScrape(false);
-            setScrapeLogEntries(readScrapeLog(loginName));
+            getScrapeLog(ledger.path, loginName)
+                .then((entries) => {
+                    setScrapeLogEntries(entries);
+                })
+                .catch(() => {});
         }
     }
 

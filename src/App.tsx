@@ -38,7 +38,6 @@ import {
     type LedgerView,
     setLoginAccount,
 } from './tauri-commands.ts';
-import { appendScrapeLog } from './scrapeLog.ts';
 import { PipelineTab } from './tabs/PipelineTab.tsx';
 import { ReportsTab } from './tabs/ReportsTab.tsx';
 import { ScrapeTab } from './tabs/ScrapeTab.tsx';
@@ -474,26 +473,13 @@ function App() {
         setAutoScrapeActive(loginName);
         setAutoScrapeQueue(rest);
         const timestamp = new Date().toISOString();
-        void runScrapeForLogin(ledger.path, loginName)
+        void runScrapeForLogin(ledger.path, loginName, 'auto')
             .then(async () => {
                 localStorage.setItem(`lastScrape:${loginName}`, timestamp);
-                appendScrapeLog({
-                    loginName,
-                    timestamp,
-                    success: true,
-                    source: 'auto',
-                });
                 await autoEtlForLoginRef.current?.(loginName);
             })
             .catch((error: unknown) => {
                 const msg = String(error);
-                appendScrapeLog({
-                    loginName,
-                    timestamp,
-                    success: false,
-                    error: msg,
-                    source: 'auto',
-                });
                 setAutoEtlErrors(`Scrape error (${loginName}): ${msg}`);
             })
             .finally(() => {

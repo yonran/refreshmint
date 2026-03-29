@@ -29,6 +29,51 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 
 CLI runs fail with an explicit error when a required prompt override is missing.
 
+## Scrape log
+
+Every scrape run — whether triggered from the GUI (Scrape tab), auto-scrape, or CLI — appends one entry to:
+
+```
+logins/<login>/scrape-log.jsonl
+```
+
+Each entry is a JSON object:
+
+```json
+{
+    "loginName": "bankofamerica",
+    "timestamp": "2026-03-29T18:39:45.123Z",
+    "success": false,
+    "error": "no progress in last 3 steps",
+    "source": "auto"
+}
+```
+
+Fields:
+
+| Field       | Type                   | Description                                            |
+| ----------- | ---------------------- | ------------------------------------------------------ |
+| `loginName` | string                 | Login identifier                                       |
+| `timestamp` | string                 | ISO 8601 UTC timestamp of when the run started         |
+| `success`   | boolean                | `true` if the scrape completed without error           |
+| `error`     | string?                | Error message if `success` is `false`                  |
+| `source`    | `"manual"` \| `"auto"` | Whether triggered by the user or the auto-scrape timer |
+
+Read recent errors from the CLI:
+
+```bash
+tail -20 ~/Documents/Accounting.refreshmint/logins/bankofamerica/scrape-log.jsonl
+```
+
+Or pretty-print with `jq`:
+
+```bash
+jq -r '[.timestamp, .source, if .success then "ok" else "FAIL: \(.error)" end] | join("  ")' \
+  ~/Documents/Accounting.refreshmint/logins/bankofamerica/scrape-log.jsonl | tail -20
+```
+
+The log is append-only and unbounded. The Scrape tab shows the same entries newest-first.
+
 ## Objective
 
 The scraper should attempt to find all account information from a login (and support incremental downloads) that would be relevant for accounting and expense tracking.

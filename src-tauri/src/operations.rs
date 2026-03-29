@@ -216,6 +216,37 @@ pub fn read_gl_operations(ledger_dir: &Path) -> io::Result<Vec<GlOperation>> {
     read_jsonl(&path)
 }
 
+/// A scrape run log entry persisted per-login to `logins/<login>/scrape-log.jsonl`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrapeLogEntry {
+    pub login_name: String,
+    pub timestamp: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// `"manual"` for user-triggered runs, `"auto"` for auto-scrape runs.
+    pub source: String,
+}
+
+/// Returns the path to the per-login scrape log.
+pub fn login_scrape_log_path(ledger_dir: &Path, login_name: &str) -> PathBuf {
+    ledger_dir
+        .join("logins")
+        .join(login_name)
+        .join("scrape-log.jsonl")
+}
+
+/// Append a scrape log entry to the per-login scrape log.
+pub fn append_scrape_log_entry(ledger_dir: &Path, entry: &ScrapeLogEntry) -> io::Result<()> {
+    append_jsonl(&login_scrape_log_path(ledger_dir, &entry.login_name), entry)
+}
+
+/// Read all scrape log entries for a login (oldest-first).
+pub fn read_scrape_log(ledger_dir: &Path, login_name: &str) -> io::Result<Vec<ScrapeLogEntry>> {
+    read_jsonl(&login_scrape_log_path(ledger_dir, login_name))
+}
+
 /// Generate an ISO 8601 timestamp for the current time.
 pub fn now_timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -359,6 +390,47 @@ mod tests {
         let root = temp_dir("empty-ops");
         let ops = read_account_operations(&root, "nonexistent").unwrap();
         assert!(ops.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn round_trip_scrape_log() {
+        let root = temp_dir("scrape-log");
+        // Nonexistent login returns empty vec.
+        let entries = read_scrape_log(&root, "bankofamerica").unwrap();
+        assert!(entries.is_empty());
+
+        let e1 = ScrapeLogEntry {
+            login_name: "bankofamerica".to_string(),
+            timestamp: "2026-03-29T18:39:45.123Z".to_string(),
+            success: false,
+            error: Some("no progress in last 3 steps".to_string()),
+            source: "auto".to_string(),
+        };
+        let e2 = ScrapeLogEntry {
+            login_name: "bankofamerica".to_string(),
+            timestamp: "2026-03-29T19:00:00.000Z".to_string(),
+            success: true,
+            error: None,
+            source: "manual".to_string(),
+        };
+        // Create the login dir so append_scrape_log_entry can write.
+        fs::create_dir_all(root.join("logins").join("bankofamerica")).unwrap();
+        append_scrape_log_entry(&root, &e1).unwrap();
+        append_scrape_log_entry(&root, &e2).unwrap();
+
+        let entries = read_scrape_log(&root, "bankofamerica").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(!entries[0].success);
+        assert_eq!(
+            entries[0].error.as_deref(),
+            Some("no progress in last 3 steps")
+        );
+        assert_eq!(entries[0].source, "auto");
+        assert!(entries[1].success);
+        assert!(entries[1].error.is_none());
+        assert_eq!(entries[1].source, "manual");
 
         let _ = fs::remove_dir_all(&root);
     }

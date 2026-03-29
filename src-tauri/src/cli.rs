@@ -1006,6 +1006,9 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
 
     let prompt_overrides = parse_prompt_overrides(&args.prompt)?;
 
+    let login_name_str = login_name.clone();
+    let ledger_dir_clone = ledger_dir.clone();
+
     let config = crate::scrape::ScrapeConfig {
         login_name,
         extension_name,
@@ -1016,7 +1019,19 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
         prompt_ui_handler: None,
     };
 
-    crate::scrape::run_scrape(config)
+    let timestamp = crate::operations::now_timestamp();
+    let result = crate::scrape::run_scrape(config);
+    let entry = crate::operations::ScrapeLogEntry {
+        login_name: login_name_str,
+        timestamp,
+        success: result.is_ok(),
+        error: result.as_ref().err().map(|e| e.to_string()),
+        source: "manual".to_string(),
+    };
+    if let Err(e) = crate::operations::append_scrape_log_entry(&ledger_dir_clone, &entry) {
+        eprintln!("warning: failed to write scrape log: {e}");
+    }
+    result
 }
 
 #[derive(serde::Serialize)]
