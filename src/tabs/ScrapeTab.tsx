@@ -87,6 +87,8 @@ interface ScrapeTabProps {
     ) => Promise<void>;
     scrapeLogVersion: number;
     onScrapeComplete: (loginName: string) => Promise<void>;
+    onScrapeAll: () => void;
+    autoScrapeActive: string | null;
 }
 
 function secretDomainKey(domain: string): string {
@@ -117,6 +119,8 @@ export function ScrapeTab({
     onIgnoreLoginAccountMapping,
     scrapeLogVersion,
     onScrapeComplete,
+    onScrapeAll,
+    autoScrapeActive,
 }: ScrapeTabProps) {
     const [selectedPipelineLabel, setSelectedPipelineLabel] = useState<
         string | null
@@ -2297,6 +2301,18 @@ export function ScrapeTab({
                         }
                     >
                         {isRunningScrape ? 'Running scrape...' : 'Run scrape'}
+                    </button>
+                    <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={onScrapeAll}
+                        disabled={
+                            autoScrapeActive !== null ||
+                            isRunningScrape ||
+                            loginNames.length === 0
+                        }
+                    >
+                        Scrape and Extract All
                     </button>
                 </div>
                 {scrapeStatus === null ? null : (

@@ -821,6 +821,14 @@ function App() {
         }
     }
 
+    function handleScrapeAll() {
+        setAutoScrapeQueue(
+            loginNamesRef.current.filter(
+                (n) => n !== autoScrapeActiveRef.current,
+            ),
+        );
+    }
+
     async function promptNewLedgerLocation(): Promise<boolean> {
         setCreateStatus('Choose a location for the new ledger...');
         try {
@@ -1352,6 +1360,8 @@ function App() {
                             onScrapeComplete={async (loginName) => {
                                 await autoEtlForLoginRef.current?.(loginName);
                             }}
+                            onScrapeAll={handleScrapeAll}
+                            autoScrapeActive={autoScrapeActive}
                         />
                     )}
                 </section>
