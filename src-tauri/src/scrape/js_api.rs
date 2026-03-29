@@ -245,6 +245,12 @@ struct RequestLifecycleWaiter {
 }
 
 #[derive(Debug, Clone)]
+enum PendingRequestLifecycleState {
+    Finished,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
 enum UrlWaiterMatcher {
     Any,
     Pattern(String),
@@ -485,6 +491,9 @@ pub struct PageApi {
     response_waiters: Arc<Mutex<Vec<ResponseWaiter>>>,
     #[qjs(skip_trace)]
     request_lifecycle_waiters: Arc<Mutex<Vec<RequestLifecycleWaiter>>>,
+    #[qjs(skip_trace)]
+    pending_request_lifecycle:
+        Arc<std::sync::Mutex<BTreeMap<String, PendingRequestLifecycleState>>>,
     #[qjs(skip_trace)]
     next_waiter_id: Arc<AtomicU64>,
     #[qjs(skip_trace)]
@@ -1604,6 +1613,7 @@ impl PageApi {
             request_waiters: Arc::new(Mutex::new(Vec::new())),
             response_waiters: Arc::new(Mutex::new(Vec::new())),
             request_lifecycle_waiters: Arc::new(Mutex::new(Vec::new())),
+            pending_request_lifecycle: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             next_waiter_id: Arc::new(AtomicU64::new(1)),
             snapshot_tracks: Arc::new(Mutex::new(BTreeMap::new())),
             request_timings: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
@@ -4664,6 +4674,9 @@ impl PageApi {
             if let Ok(mut ids) = self.raw_request_current_ids.lock() {
                 ids.clear();
             }
+            if let Ok(mut pending) = self.pending_request_lifecycle.lock() {
+                pending.clear();
+            }
             self.next_request_id.store(1, Ordering::Relaxed);
         }
 
@@ -4675,6 +4688,7 @@ impl PageApi {
         let request_waiters = self.request_waiters.clone();
         let response_waiters = self.response_waiters.clone();
         let request_lifecycle_waiters = self.request_lifecycle_waiters.clone();
+        let pending_request_lifecycle = self.pending_request_lifecycle.clone();
         let task = tokio::spawn(async move {
             use futures::StreamExt;
             tokio::pin!(events);
@@ -4700,7 +4714,7 @@ impl PageApi {
                                 &next_request_id,
                             )
                         };
-                        let item = RequestCaptureItem {
+                        let mut item = RequestCaptureItem {
                             request_id: request_id.clone(),
                             raw_request_id: raw_request_id.clone(),
                             url: ev.request.url.clone(),
@@ -4722,6 +4736,13 @@ impl PageApi {
                             finished: false,
                             timing: RequestTiming::default_playwright(),
                         };
+                        let pending_lifecycle = {
+                            let mut pending = pending_request_lifecycle
+                                .lock()
+                                .unwrap_or_else(|err| err.into_inner());
+                            pending.remove(&raw_request_id)
+                        };
+                        apply_pending_request_lifecycle(&mut item, pending_lifecycle.as_ref());
 
                         if let (Some(previous_request_id), Some(redirect_response)) =
                             (previous_request_id, ev.redirect_response.as_ref())
@@ -4789,15 +4810,37 @@ impl PageApi {
                             matched
                         };
 
-                            for waiter in matched_waiters {
-                                let entries_for_waiter = entries_for_task.clone();
-                                let fallback = item.clone();
-                                tokio::spawn(async move {
+                        let matched_lifecycle_waiters = if let Some(state) = pending_lifecycle {
+                            let event = pending_request_lifecycle_event(&state);
+                            let mut waiters = request_lifecycle_waiters.lock().await;
+                            let mut matched = Vec::new();
+                            let mut remaining = Vec::with_capacity(waiters.len());
+                            for waiter in waiters.drain(..) {
+                                if waiter.event == event {
+                                    matched.push(waiter);
+                                } else {
+                                    remaining.push(waiter);
+                                }
+                            }
+                            *waiters = remaining;
+                            matched
+                        } else {
+                            Vec::new()
+                        };
+
+                        for waiter in matched_waiters {
+                            let entries_for_waiter = entries_for_task.clone();
+                            let fallback = item.clone();
+                            tokio::spawn(async move {
                                 let latest =
                                     PageApi::settle_request_entry(&entries_for_waiter, fallback)
                                         .await;
                                 let _ = waiter.sender.send(latest);
                             });
+                        }
+
+                        for waiter in matched_lifecycle_waiters {
+                            let _ = waiter.sender.send(item.clone());
                         }
                     }
                     ev = extra_events.next() => {
@@ -4863,6 +4906,11 @@ impl PageApi {
                             for waiter in matched_waiters {
                                 let _ = waiter.sender.send(latest.clone());
                             }
+                        } else {
+                            let mut pending = pending_request_lifecycle
+                                .lock()
+                                .unwrap_or_else(|err| err.into_inner());
+                            pending.insert(raw_request_id, PendingRequestLifecycleState::Finished);
                         }
                     }
                     ev = loading_failed_events.next() => {
@@ -4883,7 +4931,7 @@ impl PageApi {
                             .find(|entry| entry.request_id == request_id)
                         {
                             entry.finished = true;
-                            entry.error = Some(error_text);
+                            entry.error = Some(error_text.clone());
                             Some(entry.clone())
                         } else {
                             None
@@ -4909,6 +4957,14 @@ impl PageApi {
                             for waiter in matched_waiters {
                                 let _ = waiter.sender.send(latest.clone());
                             }
+                        } else {
+                            let mut pending = pending_request_lifecycle
+                                .lock()
+                                .unwrap_or_else(|err| err.into_inner());
+                            pending.insert(
+                                raw_request_id,
+                                PendingRequestLifecycleState::Failed(error_text),
+                            );
                         }
                     }
                 }
@@ -5639,6 +5695,30 @@ fn parse_request_lifecycle_event_name(event: &str) -> Option<RequestLifecycleEve
         "requestfinished" => Some(RequestLifecycleEvent::Finished),
         "requestfailed" => Some(RequestLifecycleEvent::Failed),
         _ => None,
+    }
+}
+
+fn pending_request_lifecycle_event(state: &PendingRequestLifecycleState) -> RequestLifecycleEvent {
+    match state {
+        PendingRequestLifecycleState::Finished => RequestLifecycleEvent::Finished,
+        PendingRequestLifecycleState::Failed(_) => RequestLifecycleEvent::Failed,
+    }
+}
+
+fn apply_pending_request_lifecycle(
+    entry: &mut RequestCaptureItem,
+    state: Option<&PendingRequestLifecycleState>,
+) {
+    match state {
+        Some(PendingRequestLifecycleState::Finished) => {
+            entry.finished = true;
+            entry.error = None;
+        }
+        Some(PendingRequestLifecycleState::Failed(error_text)) => {
+            entry.finished = true;
+            entry.error = Some(error_text.clone());
+        }
+        None => {}
     }
 }
 
@@ -8245,7 +8325,7 @@ mod tests {
             raw_request_id: "raw-1".to_string(),
             url: "https://example.com/final".to_string(),
             method: "GET".to_string(),
-            headers: BTreeMap::new(),
+            headers: std::collections::BTreeMap::new(),
             resource_type: "document".to_string(),
             post_data: None,
             frame_id: Some("frame-1".to_string()),
@@ -8350,7 +8430,7 @@ mod tests {
             ok: false,
             method: "GET".to_string(),
             status_text: "Found".to_string(),
-            headers: BTreeMap::new(),
+            headers: std::collections::BTreeMap::new(),
             frame_id: Some("frame-1".to_string()),
             from_service_worker: false,
             ts: 0,
@@ -8843,6 +8923,59 @@ mod tests {
             .err()
             .unwrap_or_else(|| panic!("expected prompt cancellation"));
         assert!(err.to_string().contains("prompt cancelled"));
+    }
+
+    #[test]
+    fn apply_pending_request_lifecycle_marks_finished_requests() {
+        let mut entry = RequestCaptureItem {
+            request_id: "req-1".to_string(),
+            raw_request_id: "raw-1".to_string(),
+            url: "https://example.com".to_string(),
+            method: "POST".to_string(),
+            headers: BTreeMap::new(),
+            resource_type: "fetch".to_string(),
+            post_data: None,
+            frame_id: None,
+            is_navigation_request: false,
+            redirected_from: None,
+            error: Some("old".to_string()),
+            finished: false,
+            timing: RequestTiming::default_playwright(),
+        };
+
+        apply_pending_request_lifecycle(&mut entry, Some(&PendingRequestLifecycleState::Finished));
+
+        assert!(entry.finished);
+        assert_eq!(entry.error, None);
+    }
+
+    #[test]
+    fn apply_pending_request_lifecycle_marks_failed_requests() {
+        let mut entry = RequestCaptureItem {
+            request_id: "req-2".to_string(),
+            raw_request_id: "raw-2".to_string(),
+            url: "https://example.com".to_string(),
+            method: "POST".to_string(),
+            headers: BTreeMap::new(),
+            resource_type: "fetch".to_string(),
+            post_data: None,
+            frame_id: None,
+            is_navigation_request: false,
+            redirected_from: None,
+            error: None,
+            finished: false,
+            timing: RequestTiming::default_playwright(),
+        };
+
+        apply_pending_request_lifecycle(
+            &mut entry,
+            Some(&PendingRequestLifecycleState::Failed(
+                "net::ERR_ABORTED".to_string(),
+            )),
+        );
+
+        assert!(entry.finished);
+        assert_eq!(entry.error.as_deref(), Some("net::ERR_ABORTED"));
     }
 
     #[test]
