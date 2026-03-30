@@ -21,7 +21,9 @@ import {
     type DocumentWithInfo,
     type LedgerView,
     postLoginAccountEntry,
+    readAttachmentDataUrl,
     readLoginAccountDocumentRows,
+    readLoginAccountDocumentText,
     postLoginAccountEntrySplit,
     postLoginAccountTransfer,
     runLoginAccountExtraction,
@@ -97,6 +99,16 @@ export function PipelineTab({
     const [documentRows, setDocumentRows] = useState<string[][]>([]);
     const [isLoadingDocumentRows, setIsLoadingDocumentRows] = useState(false);
     const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
+    const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+    const [lightboxFilename, setLightboxFilename] = useState<string | null>(
+        null,
+    );
+    const [lightboxLoading, setLightboxLoading] = useState(false);
+    const [lightboxError, setLightboxError] = useState<string | null>(null);
+    const [textViewContent, setTextViewContent] = useState<string | null>(null);
+    const [textViewFilename, setTextViewFilename] = useState<string | null>(
+        null,
+    );
     const [isRunningExtraction, setIsRunningExtraction] = useState(false);
     const [isLoadingAccountJournal, setIsLoadingAccountJournal] =
         useState(false);
@@ -578,6 +590,65 @@ export function PipelineTab({
     }, [ledgerPath, selectedLoginAccount]);
 
     // --- Handlers ---
+
+    // Same fixed set as TransactionsTable.tsx — must stay in sync with
+    // read_attachment_data_url in src-tauri/src/extract.rs:image_mime_type().
+    const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
+    function isImageDocument(filename: string): boolean {
+        return IMAGE_EXTENSIONS.some((ext) =>
+            filename.toLowerCase().endsWith(ext),
+        );
+    }
+    function isCsvDocument(filename: string): boolean {
+        return filename.toLowerCase().endsWith('.csv');
+    }
+    function isPdfDocument(filename: string): boolean {
+        return filename.toLowerCase().endsWith('.pdf');
+    }
+    function closeLightbox() {
+        setLightboxSrc(null);
+        setLightboxFilename(null);
+        setLightboxLoading(false);
+        setLightboxError(null);
+    }
+    async function handleDocumentView(doc: DocumentWithInfo) {
+        if (isImageDocument(doc.filename)) {
+            setLightboxFilename(doc.filename);
+            setLightboxSrc(null);
+            setLightboxError(null);
+            setLightboxLoading(true);
+            try {
+                const src = await readAttachmentDataUrl(
+                    ledgerPath,
+                    doc.filename,
+                );
+                setLightboxSrc(src);
+            } catch (e) {
+                setLightboxError(String(e));
+            } finally {
+                setLightboxLoading(false);
+            }
+        } else if (isCsvDocument(doc.filename)) {
+            await handleLoadDocumentRows(doc.filename);
+            setPipelineSubTab('evidence-rows');
+        } else {
+            // OFX, HTML, JSON, TXT, XML, etc. — show as raw text
+            if (selectedLoginAccount === null) return;
+            try {
+                const text = await readLoginAccountDocumentText(
+                    ledgerPath,
+                    selectedLoginAccount.loginName,
+                    selectedLoginAccount.label,
+                    doc.filename,
+                );
+                setTextViewFilename(doc.filename);
+                setTextViewContent(text);
+            } catch (e) {
+                setTextViewFilename(doc.filename);
+                setTextViewContent(`Error reading file: ${String(e)}`);
+            }
+        }
+    }
 
     async function handleLoadDocumentRows(documentName: string) {
         setEvidenceRowsDocument(documentName);
@@ -1397,6 +1468,7 @@ export function PipelineTab({
                                         <th>Coverage End</th>
                                         <th>Scraped At</th>
                                         <th>Scrape Session</th>
+                                        <th></th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -1418,6 +1490,22 @@ export function PipelineTab({
                                             <td className="mono">
                                                 {doc.info?.scrapeSessionId ??
                                                     '-'}
+                                            </td>
+                                            <td>
+                                                {!isPdfDocument(
+                                                    doc.filename,
+                                                ) && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            void handleDocumentView(
+                                                                doc,
+                                                            );
+                                                        }}
+                                                    >
+                                                        View
+                                                    </button>
+                                                )}
                                             </td>
                                         </tr>
                                     ))}
@@ -2222,6 +2310,87 @@ export function PipelineTab({
                     <p className="status">{pipelineStatus}</p>
                 )}
             </section>
+            {(lightboxLoading ||
+                lightboxSrc !== null ||
+                lightboxError !== null) && (
+                <div
+                    className="modal-overlay"
+                    onClick={closeLightbox}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label={lightboxFilename ?? 'Attachment'}
+                >
+                    <div
+                        className="modal-dialog attachment-lightbox"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                        }}
+                    >
+                        <div className="modal-header">
+                            <h3>{lightboxFilename}</h3>
+                            <button
+                                type="button"
+                                onClick={closeLightbox}
+                                className="ghost-button"
+                            >
+                                Close
+                            </button>
+                        </div>
+                        {lightboxLoading ? (
+                            <p className="status">Loading…</p>
+                        ) : lightboxError !== null ? (
+                            <p className="status">{lightboxError}</p>
+                        ) : lightboxSrc !== null ? (
+                            <img
+                                src={lightboxSrc}
+                                alt={lightboxFilename ?? 'attachment'}
+                                className="attachment-image"
+                            />
+                        ) : null}
+                    </div>
+                </div>
+            )}
+            {textViewContent !== null && (
+                <div
+                    className="modal-overlay"
+                    onClick={() => {
+                        setTextViewContent(null);
+                    }}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label={textViewFilename ?? 'Document'}
+                >
+                    <div
+                        className="modal-dialog attachment-lightbox"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                        }}
+                    >
+                        <div className="modal-header">
+                            <h3>{textViewFilename}</h3>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setTextViewContent(null);
+                                }}
+                                className="ghost-button"
+                            >
+                                Close
+                            </button>
+                        </div>
+                        <pre
+                            style={{
+                                overflow: 'auto',
+                                maxHeight: 'calc(90vh - 4rem)',
+                                margin: 0,
+                                padding: '0.5rem',
+                            }}
+                        >
+                            {textViewContent}
+                        </pre>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

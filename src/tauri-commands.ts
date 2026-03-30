@@ -302,6 +302,20 @@ export async function readLoginAccountDocumentRows(
     });
 }
 
+export async function readLoginAccountDocumentText(
+    ledger: string,
+    loginName: string,
+    label: string,
+    documentName: string,
+): Promise<string> {
+    return invoke('read_login_account_document_text', {
+        ledger,
+        loginName,
+        label,
+        documentName,
+    });
+}
+
 export async function runExtraction(
     ledger: string,
     accountName: string,

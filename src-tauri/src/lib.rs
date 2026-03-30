@@ -137,6 +137,7 @@ pub fn run_with_context(
             list_documents,
             list_login_account_documents,
             read_login_account_document_rows,
+            read_login_account_document_text,
             read_attachment_data_url,
             run_extraction,
             run_login_account_extraction,
@@ -684,6 +685,20 @@ fn read_login_account_document_rows(
     let login_name = require_login_name_input(login_name)?;
     let label = require_label_input(label)?;
     extract::read_login_account_document_csv_rows(&target_dir, &login_name, &label, &document_name)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn read_login_account_document_text(
+    ledger: String,
+    login_name: String,
+    label: String,
+    document_name: String,
+) -> Result<String, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_login_name_input(login_name)?;
+    let label = require_label_input(label)?;
+    extract::read_login_account_document_text(&target_dir, &login_name, &label, &document_name)
         .map_err(|err| err.to_string())
 }
 

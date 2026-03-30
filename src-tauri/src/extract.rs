@@ -1055,6 +1055,20 @@ pub fn read_login_account_document_csv_rows(
     read_csv_rows(&doc_path)
 }
 
+/// Read the raw bytes of a document in a login account's documents directory as a UTF-8 string.
+/// Non-UTF-8 bytes are replaced with the Unicode replacement character.
+pub fn read_login_account_document_text(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    document_name: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let documents_dir = account_journal::login_account_documents_dir(ledger_dir, login_name, label);
+    let doc_path = documents_dir.join(document_name);
+    let bytes = std::fs::read(&doc_path)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 fn list_documents_in_dir(documents_dir: &Path) -> io::Result<Vec<DocumentWithInfo>> {
     if !documents_dir.exists() {
         return Ok(Vec::new());
