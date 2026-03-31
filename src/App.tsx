@@ -389,7 +389,10 @@ function App() {
             const postErrors: string[] = [];
             for (const { label } of accounts) {
                 const glAccount = cfg.accounts[label]?.glAccount?.trim() ?? '';
-                if (!glAccount) continue;
+                // No early-continue for missing glAccount: accounts without a
+                // glAccount (e.g. target-yon) can still auto-post via transfer
+                // matching. Default posting to Expenses:Unknown is skipped when
+                // glAccount is absent (see else-if below).
                 setAutoEtlStatus(`ETL post: ${loginName}/${label}…`);
                 try {
                     const [unposted, suggestions] = await Promise.all([
@@ -419,7 +422,7 @@ function App() {
                                     );
                                     posted = true;
                                 }
-                            } else {
+                            } else if (glAccount) {
                                 await postLoginAccountEntry(
                                     ledgerPath,
                                     loginName,
@@ -430,6 +433,7 @@ function App() {
                                 );
                                 posted = true;
                             }
+                            // else: no glAccount and no transfer match → leave unposted
                         } catch (err) {
                             console.error(
                                 `Auto-ETL post failed ${loginName}/${label}/${entry.id}:`,

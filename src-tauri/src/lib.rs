@@ -794,7 +794,21 @@ fn run_login_account_extraction(
 
     let extension_name = login_config::resolve_login_extension(&target_dir, &login_name)
         .map_err(|err| err.to_string())?;
-    let gl_account = resolve_login_account_gl_account(&target_dir, &login_name, &label)?;
+    // gl_account is optional for extraction: extensions that supply explicit
+    // tpostings (e.g. the target extractor) do not need a pre-configured GL
+    // account. The gl_account is still required by post_login_account_entry /
+    // post_login_account_transfer at posting time.
+    let gl_account: String = {
+        let config = login_config::read_login_config(&target_dir, &login_name);
+        config
+            .accounts
+            .get(&*label)
+            .and_then(|a| a.gl_account.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_default()
+    };
 
     let result = extract::run_extraction_for_login_account(
         &target_dir,
@@ -837,11 +851,26 @@ fn run_login_account_extraction(
             .filter(|a| matches!(a.result, dedup::DedupResult::New))
             .count();
 
+        // When gl_account is empty (no glAccount configured), default_account
+        // falls back to "" on the very first extraction run (empty journal).
+        // This is safe only if every proposed transaction supplies explicit
+        // tpostings — if any transaction has tpostings: None, we fail loudly
+        // rather than silently writing blank-account journal entries.
         let default_account = all_updated
             .first()
             .and_then(|e| e.postings.first())
             .map(|p| p.account.clone())
             .unwrap_or_else(|| gl_account.clone());
+        if default_account.is_empty() {
+            let has_implicit = doc_txns.iter().any(|t| t.tpostings.is_none());
+            if has_implicit {
+                return Err(format!(
+                    "login '{login_name}' label '{label}': extractor produced a \
+                     transaction without explicit tpostings but no glAccount is \
+                     configured; set a GL account or fix the extractor"
+                ));
+            }
+        }
         let unreconciled_equity = format!("Equity:Unreconciled:{login_name}:{label}");
 
         all_updated = dedup::apply_dedup_actions_for_login_account(
