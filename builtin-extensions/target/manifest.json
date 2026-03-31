@@ -1,5 +1,6 @@
 {
     "name": "target",
+    "extract": "extract.mjs",
     "secrets": {
         "www.target.com": {
             "username": "target_username",
