@@ -909,8 +909,7 @@ export function PipelineTab({
     async function handlePipelineExtractAllLedger() {
         setIsPipelineExtractingAllLedger(true);
         try {
-            const stats =
-                pipelineBulkStats ?? (await refreshPipelineBulkStats());
+            const stats = await refreshPipelineBulkStats();
             const candidates = stats.accounts.filter(
                 (account) =>
                     account.extract.eligible && !account.extract.locked,
@@ -986,8 +985,7 @@ export function PipelineTab({
     async function handlePipelinePostAllLedger() {
         setIsPipelinePostingAllLedger(true);
         try {
-            const stats =
-                pipelineBulkStats ?? (await refreshPipelineBulkStats());
+            const stats = await refreshPipelineBulkStats();
             if (stats.gl.locked) {
                 setPipelineStatus('General journal is currently locked.');
                 return;
