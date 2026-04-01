@@ -1147,6 +1147,17 @@ fn run_account_extract(
             .and_then(|e| e.postings.first())
             .map(|p| p.account.clone())
             .unwrap_or_else(|| gl_account.clone());
+        if default_account.is_empty() {
+            let has_implicit = doc_txns.iter().any(|t| t.tpostings.is_none());
+            if has_implicit {
+                return Err(std::io::Error::other(format!(
+                    "login '{login_name}' label '{label}': extractor produced a \
+                     transaction without explicit tpostings but no glAccount is \
+                     configured; set a GL account or fix the extractor"
+                ))
+                .into());
+            }
+        }
         let unreconciled_equity = format!("Equity:Unreconciled:{login_name}:{label}");
 
         all_updated = crate::dedup::apply_dedup_actions_for_login_account(
@@ -1362,24 +1373,19 @@ fn resolve_login_account_gl_account_cli(
     label: &str,
 ) -> Result<String, Box<dyn Error>> {
     let config = crate::login_config::read_login_config(ledger_dir, login_name);
-    let account_cfg = config.accounts.get(label).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("label '{label}' not found in login '{login_name}'"),
-        )
-    })?;
-
-    let gl_account = account_cfg
-        .gl_account
-        .as_deref()
+    // _default account entries don't require a label key; treat missing as empty gl_account.
+    let gl_account = config
+        .accounts
+        .get(label)
+        .and_then(|a| a.gl_account.as_deref())
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            std::io::Error::other(format!(
-                "login '{login_name}' label '{label}' is ignored (gl_account is null); set a GL account first"
-            ))
-        })?
-        .to_string();
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_default();
+
+    if gl_account.is_empty() {
+        return Ok(gl_account);
+    }
 
     if let Some(conflict) = crate::login_config::find_gl_account_conflicts(ledger_dir)
         .into_iter()
