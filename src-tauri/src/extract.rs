@@ -1,13 +1,14 @@
 use lopdf::Document as PdfDocument;
 use rquickjs::loader::{BuiltinLoader, BuiltinResolver, ModuleLoader};
 use rquickjs::{
-    async_with, function::Constructor, Array, AsyncContext, AsyncRuntime, CatchResultExt, Module,
-    Object, TypedArray, Value,
+    async_with, function::Constructor, function::Rest, Array, AsyncContext, AsyncRuntime,
+    CatchResultExt, Ctx, Module, Object, TypedArray, Value,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use crate::account_journal::{self, AccountEntry, EntryPosting, EntryStatus, SimpleAmount};
 
@@ -17,6 +18,9 @@ const LLRT_STREAM_WEB_MODULE_NAME: &str = "stream/web";
 fn init_quickjs_web_platform(ctx: &rquickjs::Ctx<'_>) -> Result<(), String> {
     // Keep these globals/modules aligned with scrape/sandbox.rs so driver and
     // extractor runtimes expose the same platform surface.
+    // Note: console is NOT installed here; run_extract_script_async installs a
+    // custom collecting console that also writes to stderr. In sandbox.rs, the
+    // llrt_console::init path is used instead (no collection needed there).
     llrt_buffer::init(ctx)
         .map_err(|error| format!("failed to init llrt buffer globals: {error}"))?;
     ctx.globals()
@@ -24,6 +28,51 @@ fn init_quickjs_web_platform(ctx: &rquickjs::Ctx<'_>) -> Result<(), String> {
         .map_err(|error| format!("failed to remove Buffer global: {error}"))?;
     llrt_util::init(ctx).map_err(|error| format!("failed to init llrt util globals: {error}"))?;
     Ok(())
+}
+
+/// A console log line emitted by an extractor script during a single document extraction.
+// Keep the field set aligned with ExtractConsoleLogLine in operations.rs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleLogLine {
+    /// One of: "log", "info", "warn", "error", "debug"
+    pub level: String,
+    pub message: String,
+    /// The document that was being extracted when this line was emitted.
+    pub document_name: String,
+}
+
+/// Convert a single JS value to a string for console output.
+///
+/// Intentionally non-throwing: uses only type checks and `.as_string()`,
+/// never JS-level stringify (which can throw on circular objects or symbols).
+fn format_console_value(v: &Value<'_>) -> String {
+    if v.is_undefined() {
+        "undefined".to_string()
+    } else if v.is_null() {
+        "null".to_string()
+    } else if let Some(b) = v.as_bool() {
+        b.to_string()
+    } else if let Some(n) = v.as_number() {
+        n.to_string()
+    } else if let Some(s) = v.as_string() {
+        s.to_string().unwrap_or_else(|_| "<string>".to_string())
+    } else if v.is_array() {
+        "<array>".to_string()
+    } else if v.is_function() {
+        "<function>".to_string()
+    } else if v.is_object() {
+        "<object>".to_string()
+    } else {
+        "<unknown>".to_string()
+    }
+}
+
+fn format_console_args(args: &Rest<Value<'_>>) -> String {
+    args.iter()
+        .map(format_console_value)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A proposed transaction from extraction (matches the JS API schema).
@@ -308,6 +357,8 @@ pub fn validate_extracted_transaction(
 pub struct ExtractionResult {
     pub proposed_transactions: Vec<ExtractedTransaction>,
     pub document_names: Vec<String>,
+    /// Console log lines emitted by the extractor script across all documents.
+    pub console_logs: Vec<ConsoleLogLine>,
 }
 
 fn resolve_extraction_mode<'a>(
@@ -383,6 +434,7 @@ fn run_extraction_with_documents_dir(
         )?;
 
     let mut all_proposed = Vec::new();
+    let mut all_logs: Vec<ConsoleLogLine> = Vec::new();
 
     match extraction_mode {
         ExtractionMode::Script(script_rel_path) => {
@@ -396,7 +448,7 @@ fn run_extraction_with_documents_dir(
                 if !doc_path.exists() {
                     return Err(format!("document not found: {}", doc_path.display()).into());
                 }
-                let proposed = run_extract_script(
+                let (proposed, logs) = run_extract_script(
                     &extension_dir,
                     &script_path,
                     &doc_path,
@@ -408,6 +460,7 @@ fn run_extraction_with_documents_dir(
                     extension_name,
                 )?;
                 all_proposed.extend(proposed);
+                all_logs.extend(logs);
             }
         }
         ExtractionMode::Rules(rules_rel_path) => {
@@ -442,6 +495,7 @@ fn run_extraction_with_documents_dir(
     Ok(ExtractionResult {
         proposed_transactions: all_proposed,
         document_names: document_names.to_vec(),
+        console_logs: all_logs,
     })
 }
 
@@ -457,7 +511,10 @@ fn run_extract_script(
     account_name: &str,
     label: Option<&str>,
     extension_name: &str,
-) -> Result<Vec<ExtractedTransaction>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<
+    (Vec<ExtractedTransaction>, Vec<ConsoleLogLine>),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     block_on_extract_script(run_extract_script_async(
         extension_dir,
         script_path,
@@ -482,7 +539,10 @@ async fn run_extract_script_async(
     account_name: &str,
     label: Option<&str>,
     extension_name: &str,
-) -> Result<Vec<ExtractedTransaction>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<
+    (Vec<ExtractedTransaction>, Vec<ConsoleLogLine>),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let context = build_extract_script_context(
         doc_path,
         doc_name,
@@ -505,6 +565,11 @@ async fn run_extract_script_async(
         crate::js_module_loader::entry_module_specifier(extension_dir, script_path)
             .map_err(|error| format!("failed to resolve extract module entrypoint: {error}"))?;
     let allow_package_resolution = extension_dir.join("package.json").is_file();
+
+    // Buffer that console callbacks write into; drained after async_with! completes.
+    let console_log: Arc<Mutex<Vec<ConsoleLogLine>>> = Arc::new(Mutex::new(Vec::new()));
+    // Keep a second reference outside the async_with! closure for draining.
+    let console_log_drain = Arc::clone(&console_log);
 
     let runtime = AsyncRuntime::new()?;
     runtime
@@ -537,6 +602,50 @@ async fn run_extract_script_async(
 
     let result_json: Result<String, String> = async_with!(context => |ctx| {
         init_quickjs_web_platform(&ctx)?;
+
+        // Install a collecting console global. Each method writes to stderr and
+        // appends to console_log. The formatter is non-throwing (no JSON.stringify).
+        // Keep aligned with sandbox.rs which uses llrt_console::init instead.
+        {
+            let console_obj = Object::new(ctx.clone())
+                .map_err(|error| format!("failed to create console object: {error}"))?;
+            for &(method, level, to_stderr) in &[
+                ("log",   "log",   false),
+                ("info",  "info",  false),
+                ("warn",  "warn",  true),
+                ("error", "error", true),
+                ("debug", "debug", false),
+            ] {
+                let lb = Arc::clone(&console_log);
+                let doc = doc_name.to_string();
+                let func = rquickjs::Function::new(
+                    ctx.clone(),
+                    move |_ctx: Ctx<'_>, args: Rest<Value<'_>>| -> rquickjs::Result<()> {
+                        let msg = format_console_args(&args);
+                        if to_stderr {
+                            eprintln!("[{level}] {msg}");
+                        } else {
+                            println!("[{level}] {msg}");
+                        }
+                        lb.lock().unwrap_or_else(|e| e.into_inner()).push(ConsoleLogLine {
+                            level: level.to_string(),
+                            message: msg,
+                            document_name: doc.clone(),
+                        });
+                        Ok(())
+                    },
+                )
+                .map_err(|error| format!("failed to create console.{method}: {error}"))?;
+                console_obj
+                    .set(method, func)
+                    .catch(&ctx)
+                    .map_err(|error| format!("failed to set console.{method}: {error}"))?;
+            }
+            ctx.globals()
+                .set("console", console_obj)
+                .catch(&ctx)
+                .map_err(|error| format!("failed to set console global: {error}"))?;
+        }
         let module_namespace = Module::import(&ctx, module_specifier.as_str())
             .catch(&ctx)
             .map_err(|error| format!("failed to import {}: {error}", script_path.display()))?
@@ -633,6 +742,15 @@ async fn run_extract_script_async(
             .map_err(|error| format!("failed to decode extractor result: {error}"))
     })
     .await;
+
+    // Drain the log buffer regardless of extraction success so callers always
+    // receive whatever lines were emitted before any error.
+    let logs: Vec<ConsoleLogLine> = console_log_drain
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .drain(..)
+        .collect();
+
     let result_json = result_json.map_err(io_error)?;
 
     let extracted: Vec<ExtractedTransaction> =
@@ -646,7 +764,7 @@ async fn run_extract_script_async(
         validate_extracted_transaction(txn, doc_name)?;
     }
 
-    Ok(extracted)
+    Ok((extracted, logs))
 }
 
 fn block_on_extract_script<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -1410,7 +1528,7 @@ export async function extract(context) {
         )
         .expect("write csv document");
 
-        let txns = run_extract_script(
+        let (txns, _logs) = run_extract_script(
             &root,
             &script_path,
             &doc_path,
@@ -1470,7 +1588,7 @@ export async function extract(context) {
         )
         .expect("write sidecar");
 
-        let txns = run_extract_script(
+        let (txns, _logs) = run_extract_script(
             &root,
             &script_path,
             &doc_path,
@@ -1535,7 +1653,7 @@ export async function extract(context) {
         )
         .expect("write csv document");
 
-        let txns = run_extract_script(
+        let (txns, _logs) = run_extract_script(
             &root,
             &script_path,
             &doc_path,
@@ -1599,7 +1717,7 @@ export async function extract(context) {
         )
         .expect("write csv document");
 
-        let txns = run_extract_script(
+        let (txns, _logs) = run_extract_script(
             &root,
             &script_path,
             &doc_path,
@@ -1666,7 +1784,7 @@ export async function extract(context) {
         )
         .expect("write csv document");
 
-        let txns = run_extract_script(
+        let (txns, _logs) = run_extract_script(
             &root,
             &script_path,
             &doc_path,
@@ -1766,7 +1884,7 @@ NEWFILEUID:NONE
         )
         .expect("write qfx sidecar");
 
-        let txns = run_extract_script(
+        let (txns, _logs) = run_extract_script(
             &extension_root,
             &script_path,
             &doc_path,
@@ -1874,5 +1992,106 @@ export function extract(_context) {
         assert!(err
             .to_string()
             .contains("extract(context) must return an array of transactions"));
+    }
+
+    #[test]
+    fn console_warn_does_not_crash_extraction() {
+        // Regression test: before console was installed in the QuickJS sandbox,
+        // calling console.warn() threw "console is not defined".
+        let root = temp_dir("extract-script-console-warn");
+        let documents_dir = root.join("documents");
+        fs::create_dir_all(&documents_dir).expect("create docs dir");
+
+        let script_path = root.join("extract.mjs");
+        fs::write(
+            &script_path,
+            r#"
+export function extract(context) {
+  console.warn("test warning from extract");
+  console.log("test log");
+  console.error("test error");
+  return [{
+    tdate: "2024-01-05",
+    tstatus: "Cleared",
+    tdescription: "Console test",
+    tcomment: "",
+    ttags: [["evidence", `${context.document.name}:1:1`]]
+  }];
+}
+"#,
+        )
+        .expect("write extract script");
+
+        let doc_name = "statement.csv";
+        let doc_path = documents_dir.join(doc_name);
+        fs::write(&doc_path, "date\n2024-01-05\n").expect("write csv document");
+
+        let (txns, logs) = run_extract_script(
+            &root,
+            &script_path,
+            &doc_path,
+            doc_name,
+            &documents_dir,
+            &root,
+            "Assets:Checking",
+            None,
+            "example-extension",
+        )
+        .expect("console.warn should not crash extraction");
+
+        assert_eq!(txns.len(), 1);
+        assert_eq!(logs.len(), 3);
+        assert_eq!(logs[0].level, "warn");
+        assert_eq!(logs[0].message, "test warning from extract");
+        assert_eq!(logs[0].document_name, doc_name);
+        assert_eq!(logs[1].level, "log");
+        assert_eq!(logs[2].level, "error");
+    }
+
+    #[test]
+    fn console_does_not_crash_on_non_stringifiable_args() {
+        // Objects, arrays, and undefined passed to console methods must not throw.
+        let root = temp_dir("extract-script-console-objects");
+        let documents_dir = root.join("documents");
+        fs::create_dir_all(&documents_dir).expect("create docs dir");
+
+        let script_path = root.join("extract.mjs");
+        fs::write(
+            &script_path,
+            r#"
+export function extract(context) {
+  console.warn({}, [1, 2, 3], undefined, null, true, 42);
+  return [];
+}
+"#,
+        )
+        .expect("write extract script");
+
+        let doc_name = "statement.csv";
+        let doc_path = documents_dir.join(doc_name);
+        fs::write(&doc_path, "date\n2024-01-05\n").expect("write csv document");
+
+        let (_txns, logs) = run_extract_script(
+            &root,
+            &script_path,
+            &doc_path,
+            doc_name,
+            &documents_dir,
+            &root,
+            "Assets:Checking",
+            None,
+            "example-extension",
+        )
+        .expect("console with non-string args should not crash extraction");
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].level, "warn");
+        // Each arg is rendered as a type-name placeholder or primitive string.
+        assert!(logs[0].message.contains("<object>"));
+        assert!(logs[0].message.contains("<array>"));
+        assert!(logs[0].message.contains("undefined"));
+        assert!(logs[0].message.contains("null"));
+        assert!(logs[0].message.contains("true"));
+        assert!(logs[0].message.contains("42"));
     }
 }

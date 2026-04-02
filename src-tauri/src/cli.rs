@@ -1104,75 +1104,113 @@ fn run_account_extract(
         return Ok(());
     }
 
-    let extraction = crate::extract::run_extraction_for_login_account(
-        &ledger_dir,
-        &login_name,
-        &label,
-        &gl_account,
-        &extension_name,
-        &document_names,
-    )
-    .map_err(|err| std::io::Error::other(err.to_string()))?;
-    let journal_path =
-        crate::account_journal::login_account_journal_path(&ledger_dir, &login_name, &label);
-    let existing_entries = crate::account_journal::read_journal_at_path(&journal_path)?;
+    let doc_count = document_names.len();
 
-    let config = crate::dedup::DedupConfig::default();
-    let mut all_updated = existing_entries;
+    // Run extraction + dedup + journal write, capturing any error so we can
+    // always flush the extract log (including console logs) even on failure.
+    let mut console_logs: Vec<crate::operations::ExtractConsoleLogLine> = Vec::new();
     let mut new_count = 0usize;
 
-    for doc_name in &extraction.document_names {
-        let doc_txns: Vec<_> = extraction
-            .proposed_transactions
-            .iter()
-            .filter(|t| {
-                t.evidence_refs()
-                    .iter()
-                    .any(|e| evidence_ref_matches_document(e, doc_name))
-            })
-            .cloned()
-            .collect();
-        if doc_txns.is_empty() {
-            continue;
-        }
-
-        let actions = crate::dedup::run_dedup(&all_updated, &doc_txns, doc_name, &config);
-        new_count += actions
-            .iter()
-            .filter(|a| matches!(a.result, crate::dedup::DedupResult::New))
-            .count();
-
-        let default_account = all_updated
-            .first()
-            .and_then(|e| e.postings.first())
-            .map(|p| p.account.clone())
-            .unwrap_or_else(|| gl_account.clone());
-        if default_account.is_empty() {
-            let has_implicit = doc_txns.iter().any(|t| t.tpostings.is_none());
-            if has_implicit {
-                return Err(std::io::Error::other(format!(
-                    "login '{login_name}' label '{label}': extractor produced a \
-                     transaction without explicit tpostings but no glAccount is \
-                     configured; set a GL account or fix the extractor"
-                ))
-                .into());
-            }
-        }
-        let unreconciled_equity = format!("Equity:Unreconciled:{login_name}:{label}");
-
-        all_updated = crate::dedup::apply_dedup_actions_for_login_account(
+    let outcome: Result<(), Box<dyn Error>> = (|| {
+        let extraction = crate::extract::run_extraction_for_login_account(
             &ledger_dir,
-            (&login_name, &label),
-            all_updated,
-            &actions,
-            &default_account,
-            &unreconciled_equity,
-            Some(&format!("{extension_name}:latest")),
+            &login_name,
+            &label,
+            &gl_account,
+            &extension_name,
+            &document_names,
         )
         .map_err(|err| std::io::Error::other(err.to_string()))?;
-    }
 
-    crate::account_journal::write_journal_at_path(&journal_path, &all_updated)?;
+        console_logs = extraction
+            .console_logs
+            .into_iter()
+            .map(|l| crate::operations::ExtractConsoleLogLine {
+                level: l.level,
+                message: l.message,
+                document_name: l.document_name,
+            })
+            .collect();
+
+        let journal_path =
+            crate::account_journal::login_account_journal_path(&ledger_dir, &login_name, &label);
+        let existing_entries = crate::account_journal::read_journal_at_path(&journal_path)?;
+
+        let config = crate::dedup::DedupConfig::default();
+        let mut all_updated = existing_entries;
+
+        for doc_name in &extraction.document_names {
+            let doc_txns: Vec<_> = extraction
+                .proposed_transactions
+                .iter()
+                .filter(|t| {
+                    t.evidence_refs()
+                        .iter()
+                        .any(|e| evidence_ref_matches_document(e, doc_name))
+                })
+                .cloned()
+                .collect();
+            if doc_txns.is_empty() {
+                continue;
+            }
+
+            let actions = crate::dedup::run_dedup(&all_updated, &doc_txns, doc_name, &config);
+            new_count += actions
+                .iter()
+                .filter(|a| matches!(a.result, crate::dedup::DedupResult::New))
+                .count();
+
+            let default_account = all_updated
+                .first()
+                .and_then(|e| e.postings.first())
+                .map(|p| p.account.clone())
+                .unwrap_or_else(|| gl_account.clone());
+            if default_account.is_empty() {
+                let has_implicit = doc_txns.iter().any(|t| t.tpostings.is_none());
+                if has_implicit {
+                    return Err(std::io::Error::other(format!(
+                        "login '{login_name}' label '{label}': extractor produced a \
+                         transaction without explicit tpostings but no glAccount is \
+                         configured; set a GL account or fix the extractor"
+                    ))
+                    .into());
+                }
+            }
+            let unreconciled_equity = format!("Equity:Unreconciled:{login_name}:{label}");
+
+            all_updated = crate::dedup::apply_dedup_actions_for_login_account(
+                &ledger_dir,
+                (&login_name, &label),
+                all_updated,
+                &actions,
+                &default_account,
+                &unreconciled_equity,
+                Some(&format!("{extension_name}:latest")),
+            )
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        }
+
+        crate::account_journal::write_journal_at_path(&journal_path, &all_updated)?;
+        Ok(())
+    })();
+
+    // Write extract log regardless of success/failure so console logs and errors
+    // are always persisted for later review.
+    let _ = crate::operations::append_extract_log_entry(
+        &ledger_dir,
+        &crate::operations::ExtractLogEntry {
+            login_name: login_name.clone(),
+            label: label.clone(),
+            timestamp: crate::operations::now_timestamp(),
+            success: outcome.is_ok(),
+            error: outcome.as_ref().err().map(|e| e.to_string()),
+            document_count: doc_count,
+            new_entry_count: new_count,
+            console_logs,
+        },
+    );
+
+    outcome?;
     println!("Extraction complete. Added {new_count} new transaction(s).");
     Ok(())
 }

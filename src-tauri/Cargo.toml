@@ -42,6 +42,7 @@ rquickjs = { version = "0.11", features = ["array-buffer", "classes", "futures",
 llrt_util = { git = "https://github.com/awslabs/llrt", package = "llrt_util", rev = "7d3953f7ccea72bc72b7bf01ca480e22106c6ecb" }
 llrt_buffer = { git = "https://github.com/awslabs/llrt", package = "llrt_buffer", rev = "7d3953f7ccea72bc72b7bf01ca480e22106c6ecb" }
 llrt_stream_web = { git = "https://github.com/awslabs/llrt", package = "llrt_stream_web", rev = "7d3953f7ccea72bc72b7bf01ca480e22106c6ecb" }
+llrt_console = { git = "https://github.com/awslabs/llrt", package = "llrt_console", rev = "7d3953f7ccea72bc72b7bf01ca480e22106c6ecb" }
 csv = "1.3"
 lopdf = "0.35"
 # Compatibility notes (verified with minimal repro crates in /tmp):

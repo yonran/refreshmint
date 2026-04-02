@@ -55,12 +55,17 @@ fn source_uses_static_module_syntax(source: &str) -> bool {
 fn init_quickjs_web_platform(ctx: &rquickjs::Ctx<'_>) -> Result<(), String> {
     // Keep these globals/modules aligned with extract.rs so driver and extractor
     // runtimes expose the same platform surface.
+    // Note: extract.rs installs a custom collecting console instead of
+    // llrt_console::init; sandbox.rs uses llrt_console directly (no log collection
+    // needed for interactive scrape sessions).
     llrt_buffer::init(ctx)
         .map_err(|error| format!("failed to init llrt buffer globals: {error}"))?;
     ctx.globals()
         .remove("Buffer")
         .map_err(|error| format!("failed to remove Buffer global: {error}"))?;
     llrt_util::init(ctx).map_err(|error| format!("failed to init llrt util globals: {error}"))?;
+    llrt_console::init(ctx)
+        .map_err(|error| format!("failed to init llrt console globals: {error}"))?;
     Ok(())
 }
 

@@ -247,6 +247,53 @@ pub fn read_scrape_log(ledger_dir: &Path, login_name: &str) -> io::Result<Vec<Sc
     read_jsonl(&login_scrape_log_path(ledger_dir, login_name))
 }
 
+/// A structured console log line emitted by an extractor script.
+// On-disk format: camelCase fields in JSONL.
+// Keep the field set aligned with ConsoleLogLine in extract.rs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractConsoleLogLine {
+    /// One of: "log", "info", "warn", "error", "debug"
+    pub level: String,
+    pub message: String,
+    /// The document that was being extracted when this line was emitted.
+    pub document_name: String,
+}
+
+/// An extract run log entry persisted per-login-account to
+/// `logins/<login>/accounts/<label>/extract-log.jsonl`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractLogEntry {
+    pub login_name: String,
+    pub label: String,
+    pub timestamp: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub document_count: usize,
+    pub new_entry_count: usize,
+    pub console_logs: Vec<ExtractConsoleLogLine>,
+}
+
+/// Returns the path to the per-login-account extract log.
+pub fn login_extract_log_path(ledger_dir: &Path, login_name: &str, label: &str) -> PathBuf {
+    ledger_dir
+        .join("logins")
+        .join(login_name)
+        .join("accounts")
+        .join(label)
+        .join("extract-log.jsonl")
+}
+
+/// Append an extract log entry to the per-login-account extract log.
+pub fn append_extract_log_entry(ledger_dir: &Path, entry: &ExtractLogEntry) -> io::Result<()> {
+    append_jsonl(
+        &login_extract_log_path(ledger_dir, &entry.login_name, &entry.label),
+        entry,
+    )
+}
+
 /// Generate an ISO 8601 timestamp for the current time.
 pub fn now_timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -431,6 +478,56 @@ mod tests {
         assert!(entries[1].success);
         assert!(entries[1].error.is_none());
         assert_eq!(entries[1].source, "manual");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn round_trip_extract_log() {
+        let root = temp_dir("extract-log");
+
+        let entry = ExtractLogEntry {
+            login_name: "target-yon".to_string(),
+            label: "_default".to_string(),
+            timestamp: now_timestamp(),
+            success: true,
+            error: None,
+            document_count: 2,
+            new_entry_count: 3,
+            console_logs: vec![
+                ExtractConsoleLogLine {
+                    level: "warn".to_string(),
+                    message: "payment sum 15.00 != grandTotal 15.50".to_string(),
+                    document_name: "order-123.json".to_string(),
+                },
+                ExtractConsoleLogLine {
+                    level: "log".to_string(),
+                    message: "processed 5 payments".to_string(),
+                    document_name: "order-456.json".to_string(),
+                },
+            ],
+        };
+
+        // Nonexistent login returns empty vec before any writes.
+        let before =
+            read_jsonl::<ExtractLogEntry>(&login_extract_log_path(&root, "target-yon", "_default"))
+                .unwrap();
+        assert!(before.is_empty());
+
+        append_extract_log_entry(&root, &entry).unwrap();
+
+        let entries =
+            read_jsonl::<ExtractLogEntry>(&login_extract_log_path(&root, "target-yon", "_default"))
+                .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].success);
+        assert!(entries[0].error.is_none());
+        assert_eq!(entries[0].document_count, 2);
+        assert_eq!(entries[0].new_entry_count, 3);
+        assert_eq!(entries[0].console_logs.len(), 2);
+        assert_eq!(entries[0].console_logs[0].level, "warn");
+        assert_eq!(entries[0].console_logs[0].document_name, "order-123.json");
+        assert_eq!(entries[0].console_logs[1].level, "log");
 
         let _ = fs::remove_dir_all(&root);
     }
