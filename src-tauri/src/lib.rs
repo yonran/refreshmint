@@ -810,85 +810,121 @@ fn run_login_account_extraction(
             .unwrap_or_default()
     };
 
-    let result = extract::run_extraction_for_login_account(
-        &target_dir,
-        &login_name,
-        &label,
-        &gl_account,
-        &extension_name,
-        &document_names,
-    )
-    .map_err(|err| err.to_string())?;
+    let doc_count = document_names.len();
 
-    let journal_path =
-        account_journal::login_account_journal_path(&target_dir, &login_name, &label);
-    let existing_entries =
-        account_journal::read_journal_at_path(&journal_path).map_err(|err| err.to_string())?;
-
-    let config = dedup::DedupConfig::default();
-    let mut all_updated = existing_entries;
+    // Run extraction + dedup + journal write, capturing any error so we can
+    // always flush the extract log (including console logs) even on failure.
+    let mut console_logs: Vec<operations::ExtractConsoleLogLine> = Vec::new();
     let mut new_count = 0usize;
 
-    for doc_name in &result.document_names {
-        let doc_txns: Vec<_> = result
-            .proposed_transactions
-            .iter()
-            .filter(|t| {
-                t.evidence_refs()
-                    .iter()
-                    .any(|e| evidence_ref_matches_document(e, doc_name))
-            })
-            .cloned()
-            .collect();
-
-        if doc_txns.is_empty() {
-            continue;
-        }
-
-        let actions = dedup::run_dedup(&all_updated, &doc_txns, doc_name, &config);
-        new_count += actions
-            .iter()
-            .filter(|a| matches!(a.result, dedup::DedupResult::New))
-            .count();
-
-        // When gl_account is empty (no glAccount configured), default_account
-        // falls back to "" on the very first extraction run (empty journal).
-        // This is safe only if every proposed transaction supplies explicit
-        // tpostings — if any transaction has tpostings: None, we fail loudly
-        // rather than silently writing blank-account journal entries.
-        let default_account = all_updated
-            .first()
-            .and_then(|e| e.postings.first())
-            .map(|p| p.account.clone())
-            .unwrap_or_else(|| gl_account.clone());
-        if default_account.is_empty() {
-            let has_implicit = doc_txns.iter().any(|t| t.tpostings.is_none());
-            if has_implicit {
-                return Err(format!(
-                    "login '{login_name}' label '{label}': extractor produced a \
-                     transaction without explicit tpostings but no glAccount is \
-                     configured; set a GL account or fix the extractor"
-                ));
-            }
-        }
-        let unreconciled_equity = format!("Equity:Unreconciled:{login_name}:{label}");
-
-        all_updated = dedup::apply_dedup_actions_for_login_account(
+    let outcome: Result<(), String> = (|| {
+        let result = extract::run_extraction_for_login_account(
             &target_dir,
-            (&login_name, &label),
-            all_updated,
-            &actions,
-            &default_account,
-            &unreconciled_equity,
-            Some(&format!("{extension_name}:latest")),
+            &login_name,
+            &label,
+            &gl_account,
+            &extension_name,
+            &document_names,
         )
         .map_err(|err| err.to_string())?;
-    }
 
-    account_journal::write_journal_at_path(&journal_path, &all_updated)
-        .map_err(|err| err.to_string())?;
+        console_logs = result
+            .console_logs
+            .into_iter()
+            .map(|l| operations::ExtractConsoleLogLine {
+                level: l.level,
+                message: l.message,
+                document_name: l.document_name,
+            })
+            .collect();
 
-    Ok(new_count)
+        let journal_path =
+            account_journal::login_account_journal_path(&target_dir, &login_name, &label);
+        let existing_entries =
+            account_journal::read_journal_at_path(&journal_path).map_err(|err| err.to_string())?;
+
+        let config = dedup::DedupConfig::default();
+        let mut all_updated = existing_entries;
+
+        for doc_name in &result.document_names {
+            let doc_txns: Vec<_> = result
+                .proposed_transactions
+                .iter()
+                .filter(|t| {
+                    t.evidence_refs()
+                        .iter()
+                        .any(|e| evidence_ref_matches_document(e, doc_name))
+                })
+                .cloned()
+                .collect();
+
+            if doc_txns.is_empty() {
+                continue;
+            }
+
+            let actions = dedup::run_dedup(&all_updated, &doc_txns, doc_name, &config);
+            new_count += actions
+                .iter()
+                .filter(|a| matches!(a.result, dedup::DedupResult::New))
+                .count();
+
+            // When gl_account is empty (no glAccount configured), default_account
+            // falls back to "" on the very first extraction run (empty journal).
+            // This is safe only if every proposed transaction supplies explicit
+            // tpostings — if any transaction has tpostings: None, we fail loudly
+            // rather than silently writing blank-account journal entries.
+            let default_account = all_updated
+                .first()
+                .and_then(|e| e.postings.first())
+                .map(|p| p.account.clone())
+                .unwrap_or_else(|| gl_account.clone());
+            if default_account.is_empty() {
+                let has_implicit = doc_txns.iter().any(|t| t.tpostings.is_none());
+                if has_implicit {
+                    return Err(format!(
+                        "login '{login_name}' label '{label}': extractor produced a \
+                         transaction without explicit tpostings but no glAccount is \
+                         configured; set a GL account or fix the extractor"
+                    ));
+                }
+            }
+            let unreconciled_equity = format!("Equity:Unreconciled:{login_name}:{label}");
+
+            all_updated = dedup::apply_dedup_actions_for_login_account(
+                &target_dir,
+                (&login_name, &label),
+                all_updated,
+                &actions,
+                &default_account,
+                &unreconciled_equity,
+                Some(&format!("{extension_name}:latest")),
+            )
+            .map_err(|err| err.to_string())?;
+        }
+
+        account_journal::write_journal_at_path(&journal_path, &all_updated)
+            .map_err(|err| err.to_string())?;
+
+        Ok(())
+    })();
+
+    // Write extract log regardless of success/failure so console logs and errors
+    // are always persisted for later review.
+    let _ = operations::append_extract_log_entry(
+        &target_dir,
+        &operations::ExtractLogEntry {
+            login_name: login_name.clone(),
+            label: label.clone(),
+            timestamp: operations::now_timestamp(),
+            success: outcome.is_ok(),
+            error: outcome.as_ref().err().cloned(),
+            document_count: doc_count,
+            new_entry_count: new_count,
+            console_logs,
+        },
+    );
+
+    outcome.map(|()| new_count)
 }
 
 #[tauri::command]
