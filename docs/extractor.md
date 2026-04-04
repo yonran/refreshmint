@@ -152,7 +152,7 @@ description %description
 amount %amount
 comment txid:%transactionid
 account1 Assets:Checking
-account2 Equity:Unreconciled:Checking
+account2 Equity:Staging:Checking
 ```
 
 Sample CSV content (save as `2026-01-31-sample.csv` under account documents):

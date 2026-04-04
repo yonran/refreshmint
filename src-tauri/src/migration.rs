@@ -24,11 +24,13 @@ pub fn migrate_ledger(
     ledger_dir: &Path,
     dry_run: bool,
 ) -> Result<MigrationOutcome, Box<dyn std::error::Error + Send + Sync>> {
-    let accounts_dir = ledger_dir.join("accounts");
     let mut outcome = MigrationOutcome {
         dry_run,
         ..MigrationOutcome::default()
     };
+    migrate_staging_account_names(ledger_dir, dry_run, &mut outcome)?;
+
+    let accounts_dir = ledger_dir.join("accounts");
     if !accounts_dir.exists() {
         return Ok(outcome);
     }
@@ -138,6 +140,43 @@ pub fn migrate_ledger(
         remove_dir_if_empty(&accounts_dir)?;
     }
     Ok(outcome)
+}
+
+fn migrate_staging_account_names(
+    ledger_dir: &Path,
+    dry_run: bool,
+    outcome: &mut MigrationOutcome,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut changed_paths = Vec::new();
+
+    let general_journal = ledger_dir.join("general.journal");
+    if rewrite_file_string(&general_journal, dry_run)? {
+        changed_paths.push("general.journal".to_string());
+    }
+
+    for journal_path in walk_account_journals(ledger_dir)? {
+        if rewrite_account_journal_staging_accounts(&journal_path, dry_run)? {
+            let rel = journal_path
+                .strip_prefix(ledger_dir)
+                .unwrap_or(&journal_path)
+                .display()
+                .to_string();
+            changed_paths.push(rel);
+        }
+    }
+
+    if !changed_paths.is_empty() {
+        let action = if dry_run { "would rename" } else { "renamed" };
+        outcome.warnings.push(format!(
+            "{action} legacy staging accounts from {} to {} in {} file(s): {}",
+            crate::staging::LEGACY_STAGING_PREFIX,
+            crate::staging::STAGING_PREFIX,
+            changed_paths.len(),
+            changed_paths.join(", ")
+        ));
+    }
+
+    Ok(())
 }
 
 pub fn repair_login_account_labels(
@@ -382,6 +421,59 @@ fn move_directory_contents(source_dir: &Path, target_dir: &Path) -> io::Result<(
 
     remove_dir_if_empty(source_dir)?;
     Ok(())
+}
+
+fn walk_account_journals(ledger_dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for root in [ledger_dir.join("accounts"), ledger_dir.join("logins")] {
+        if !root.exists() {
+            continue;
+        }
+        for path in walk_files(&root)? {
+            if path.file_name().and_then(std::ffi::OsStr::to_str) == Some("account.journal") {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn rewrite_file_string(path: &Path, dry_run: bool) -> io::Result<bool> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    let updated = content.replace(
+        crate::staging::LEGACY_STAGING_PREFIX,
+        crate::staging::STAGING_PREFIX,
+    );
+    if updated == content {
+        return Ok(false);
+    }
+    if !dry_run {
+        fs::write(path, updated)?;
+    }
+    Ok(true)
+}
+
+fn rewrite_account_journal_staging_accounts(path: &Path, dry_run: bool) -> io::Result<bool> {
+    let mut entries = crate::account_journal::read_journal_at_path(path)?;
+    let mut changed = false;
+    for entry in &mut entries {
+        for posting in &mut entry.postings {
+            let canonical = crate::staging::canonicalize_account_name(&posting.account);
+            if canonical != posting.account {
+                posting.account = canonical;
+                changed = true;
+            }
+        }
+    }
+    if changed && !dry_run {
+        crate::account_journal::write_journal_at_path(path, &entries)?;
+    }
+    Ok(changed)
 }
 
 fn move_file_if_exists(source: &Path, target: &Path) -> io::Result<()> {

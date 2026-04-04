@@ -84,9 +84,9 @@ A transaction was created by refreshmint bookkeeping logic rather than imported 
 
 ## Legacy Terms and How To Read Them
 
-### `Equity:Unreconciled:*`
+### `Equity:Staging:*`
 
-This is a legacy staging counterpart account used during extraction and pre-post review.
+This is the canonical staging counterpart account used during extraction and pre-post review.
 
 It does **not** mean statement reconciliation.
 
@@ -95,9 +95,11 @@ Interpret it as:
 - imported / extracted
 - not fully posted to intended GL accounts yet
 
-### `unreconciledCount`
+Legacy ledgers may still contain `Equity:Unreconciled:*` until migrated. Read it as the same staging concept.
 
-Old backend naming for what is now surfaced as `unpostedCount`.
+### `unpostedCount`
+
+Count of source-journal entries that still have unposted portions.
 
 Meaning:
 

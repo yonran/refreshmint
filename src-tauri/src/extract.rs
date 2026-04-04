@@ -229,14 +229,10 @@ impl ExtractedTransaction {
         }
     }
 
-    /// Convert to an AccountEntry with the given default account and legacy
-    /// staging counterpart account. `Equity:Unreconciled:*` is ETL staging,
-    /// not statement reconciliation state.
-    pub fn to_account_entry(
-        &self,
-        default_account: &str,
-        unreconciled_equity: &str,
-    ) -> AccountEntry {
+    /// Convert to an AccountEntry with the given default account and staging
+    /// counterpart account. Keep this aligned with `staging.rs`: this is ETL
+    /// staging, not statement reconciliation state.
+    pub fn to_account_entry(&self, default_account: &str, staging_account: &str) -> AccountEntry {
         let evidence = self.evidence_refs();
 
         let postings = if let Some(explicit) = &self.tpostings {
@@ -275,7 +271,7 @@ impl ExtractedTransaction {
                 }
             });
             postings.push(EntryPosting {
-                account: unreconciled_equity.to_string(),
+                account: staging_account.to_string(),
                 amount: counterpart_amount,
             });
             postings
@@ -1418,12 +1414,12 @@ mod tests {
             tpostings: None,
         };
 
-        let entry = txn.to_account_entry("Assets:Checking", "Equity:Unreconciled:Checking");
+        let entry = txn.to_account_entry("Assets:Checking", "Equity:Staging:Checking");
         assert_eq!(entry.date, "2024-02-15");
         assert_eq!(entry.status, EntryStatus::Cleared);
         assert_eq!(entry.postings.len(), 2);
         assert_eq!(entry.postings[0].account, "Assets:Checking");
-        assert_eq!(entry.postings[1].account, "Equity:Unreconciled:Checking");
+        assert_eq!(entry.postings[1].account, "Equity:Staging:Checking");
         assert!(entry.bank_id().is_some());
         assert_eq!(entry.bank_id().unwrap(), "FIT123");
     }
@@ -1445,7 +1441,7 @@ mod tests {
                     }]),
                 },
                 ExtractedPosting {
-                    paccount: "Equity:Unreconciled:Venmo".to_string(),
+                    paccount: "Equity:Staging:Venmo".to_string(),
                     pamount: Some(vec![ExtractedAmount {
                         acommodity: "USD".to_string(),
                         aquantity: "50.00".to_string(),
@@ -1454,10 +1450,10 @@ mod tests {
             ]),
         };
 
-        let entry = txn.to_account_entry("Assets:Checking", "Equity:Unreconciled:Checking");
+        let entry = txn.to_account_entry("Assets:Checking", "Equity:Staging:Checking");
         assert_eq!(entry.postings.len(), 2);
         assert_eq!(entry.postings[0].account, "Assets:Checking");
-        assert_eq!(entry.postings[1].account, "Equity:Unreconciled:Venmo");
+        assert_eq!(entry.postings[1].account, "Equity:Staging:Venmo");
     }
 
     #[test]

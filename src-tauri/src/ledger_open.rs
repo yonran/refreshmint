@@ -1,6 +1,6 @@
 use crate::hledger::{Amount, Posting, Side, Transaction};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::path::Path;
 use std::process::Command;
@@ -36,6 +36,17 @@ pub struct TransactionRow {
     pub accounts: String,
     pub totals: Option<Vec<AmountTotal>>,
     pub postings: Vec<PostingRow>,
+    pub bookkeeping: TransactionBookkeeping,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransactionBookkeeping {
+    pub generated: bool,
+    pub reconciled_session_ids: Vec<String>,
+    pub linked_record_ids: Vec<String>,
+    pub settlement_link_ids: Vec<String>,
+    pub soft_closed_period_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,7 +109,7 @@ pub fn open_ledger_dir(path: &Path) -> Result<LedgerView, Box<dyn std::error::Er
 
     let transactions = run_hledger_print(&journal_path)?;
     let accounts = build_account_rows(path, &transactions)?;
-    let transaction_rows = build_transaction_rows(&transactions);
+    let transaction_rows = build_transaction_rows(path, &transactions)?;
     let gl_account_conflicts = crate::login_config::find_gl_account_conflicts(path);
 
     Ok(LedgerView {
@@ -229,26 +240,123 @@ fn build_account_rows(
     Ok(rows)
 }
 
-pub(crate) fn build_transaction_rows(transactions: &[Transaction]) -> Vec<TransactionRow> {
-    transactions
+pub(crate) fn build_transaction_rows(
+    ledger_dir: &Path,
+    transactions: &[Transaction],
+) -> io::Result<Vec<TransactionRow>> {
+    let bookkeeping = TransactionBookkeepingMaps::load(ledger_dir)?;
+    Ok(transactions
         .iter()
-        .map(|txn| TransactionRow {
-            id: txn
+        .map(|txn| {
+            let id = txn
                 .ttags
                 .iter()
                 .find(|(k, _)| k == "id")
                 .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| txn.tindex.to_string()),
-            date: txn.tdate.clone(),
-            description: transaction_description(txn),
-            description_raw: txn.tdescription.clone(),
-            comment: txn.tcomment.clone(),
-            evidence: transaction_evidence(txn),
-            accounts: transaction_accounts(txn),
-            totals: transaction_amounts(txn),
-            postings: transaction_postings(txn),
+                .unwrap_or_else(|| txn.tindex.to_string());
+            let period_id = txn.tdate.get(0..7).map(ToOwned::to_owned);
+            TransactionRow {
+                id: id.clone(),
+                date: txn.tdate.clone(),
+                description: transaction_description(txn),
+                description_raw: txn.tdescription.clone(),
+                comment: txn.tcomment.clone(),
+                evidence: transaction_evidence(txn),
+                accounts: transaction_accounts(txn),
+                totals: transaction_amounts(txn),
+                postings: transaction_postings(txn),
+                bookkeeping: bookkeeping.row_for(&id, txn, period_id.as_deref()),
+            }
         })
-        .collect()
+        .collect())
+}
+
+#[derive(Default)]
+struct TransactionBookkeepingMaps {
+    reconciled_session_ids_by_txn: HashMap<String, BTreeSet<String>>,
+    linked_record_ids_by_txn: HashMap<String, BTreeSet<String>>,
+    settlement_link_ids_by_txn: HashMap<String, BTreeSet<String>>,
+    soft_closed_period_ids: BTreeSet<String>,
+}
+
+impl TransactionBookkeepingMaps {
+    fn load(ledger_dir: &Path) -> io::Result<Self> {
+        let mut maps = Self::default();
+
+        for session in crate::bookkeeping::list_reconciliation_sessions(ledger_dir)? {
+            if !matches!(
+                session.status,
+                crate::bookkeeping::ReconciliationSessionStatus::Finalized
+            ) {
+                continue;
+            }
+            for txn_id in session.reconciled_txn_ids {
+                maps.reconciled_session_ids_by_txn
+                    .entry(txn_id)
+                    .or_default()
+                    .insert(session.id.clone());
+            }
+        }
+
+        for link in crate::bookkeeping::list_links(ledger_dir)? {
+            let is_settlement = matches!(&link.kind, crate::bookkeeping::LinkKind::SettlementLink);
+            let refs = [link.left_ref.as_gl_txn_id(), link.right_ref.as_gl_txn_id()];
+            for txn_id in refs.into_iter().flatten() {
+                maps.linked_record_ids_by_txn
+                    .entry(txn_id.to_string())
+                    .or_default()
+                    .insert(link.id.clone());
+                if is_settlement {
+                    maps.settlement_link_ids_by_txn
+                        .entry(txn_id.to_string())
+                        .or_default()
+                        .insert(link.id.clone());
+                }
+            }
+        }
+
+        for close in crate::bookkeeping::list_period_closes(ledger_dir)? {
+            if matches!(
+                close.status,
+                crate::bookkeeping::PeriodCloseStatus::SoftClosed
+            ) {
+                maps.soft_closed_period_ids.insert(close.period_id);
+            }
+        }
+
+        Ok(maps)
+    }
+
+    fn row_for(
+        &self,
+        txn_id: &str,
+        txn: &Transaction,
+        period_id: Option<&str>,
+    ) -> TransactionBookkeeping {
+        TransactionBookkeeping {
+            generated: txn.tcomment.contains("generated-by: refreshmint-post"),
+            reconciled_session_ids: self
+                .reconciled_session_ids_by_txn
+                .get(txn_id)
+                .map(|ids| ids.iter().cloned().collect())
+                .unwrap_or_default(),
+            linked_record_ids: self
+                .linked_record_ids_by_txn
+                .get(txn_id)
+                .map(|ids| ids.iter().cloned().collect())
+                .unwrap_or_default(),
+            settlement_link_ids: self
+                .settlement_link_ids_by_txn
+                .get(txn_id)
+                .map(|ids| ids.iter().cloned().collect())
+                .unwrap_or_default(),
+            soft_closed_period_id: period_id.and_then(|period_id| {
+                self.soft_closed_period_ids
+                    .contains(period_id)
+                    .then(|| period_id.to_string())
+            }),
+        }
+    }
 }
 
 fn transaction_evidence(txn: &Transaction) -> Vec<String> {
@@ -473,6 +581,9 @@ fn totals_to_rows(totals: &BTreeMap<String, CommodityTotal>) -> Option<Vec<Amoun
 mod tests {
     use super::*;
     use crate::hledger::{SourcePos, SourceSpan, Status};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn dummy_source_pos() -> SourcePos {
         SourcePos {
@@ -500,6 +611,19 @@ mod tests {
             ttags,
             tpostings: vec![],
         }
+    }
+
+    fn temp_ledger_dir(prefix: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "refreshmint-ledger-open-{prefix}-{}-{now}.refreshmint",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
@@ -544,30 +668,112 @@ mod tests {
 
     #[test]
     fn build_transaction_rows_uses_id_tag_when_present() {
+        let root = temp_ledger_dir("id-tag");
         let uuid = "550e8400-e29b-41d4-a716-446655440000";
         let txn = make_txn(5, vec![("id".to_string(), uuid.to_string())], "");
-        let rows = build_transaction_rows(&[txn]);
+        let rows = build_transaction_rows(&root, &[txn]).unwrap();
         assert_eq!(rows[0].id, uuid);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn build_transaction_rows_falls_back_to_tindex_when_id_absent() {
+        let root = temp_ledger_dir("tindex");
         let txn = make_txn(7, vec![], "");
-        let rows = build_transaction_rows(&[txn]);
+        let rows = build_transaction_rows(&root, &[txn]).unwrap();
         assert_eq!(rows[0].id, "7");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn build_transaction_rows_extracts_evidence_from_comment_lines() {
+        let root = temp_ledger_dir("evidence");
         let txn = make_txn(
             9,
             vec![],
             "generated-by: refreshmint-post\nevidence: a.pdf#attachment\nevidence: a.pdf#attachment\nevidence: b.csv:2:1",
         );
-        let rows = build_transaction_rows(&[txn]);
+        let rows = build_transaction_rows(&root, &[txn]).unwrap();
         assert_eq!(
             rows[0].evidence,
             vec!["a.pdf#attachment".to_string(), "b.csv:2:1".to_string()]
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_transaction_rows_decorates_bookkeeping_state() {
+        let root = temp_ledger_dir("bookkeeping");
+        crate::bookkeeping::ensure_bookkeeping_layout(&root).unwrap();
+        let session = crate::bookkeeping::create_reconciliation_session(
+            &root,
+            crate::bookkeeping::NewReconciliationSessionInput {
+                gl_account: "Assets:Checking".to_string(),
+                statement_start_date: None,
+                statement_end_date: "2026-03-31".to_string(),
+                statement_starting_balance: None,
+                statement_ending_balance: "10 USD".to_string(),
+                currency: Some("USD".to_string()),
+                reconciled_txn_ids: vec!["gl-1".to_string()],
+                notes: None,
+            },
+        )
+        .unwrap();
+        crate::bookkeeping::finalize_reconciliation_session(&root, &session.id).unwrap();
+        crate::bookkeeping::create_link(
+            &root,
+            crate::bookkeeping::NewLinkRecordInput {
+                kind: crate::bookkeeping::LinkKind::SettlementLink,
+                left_ref: crate::bookkeeping::TypedRef {
+                    kind: crate::bookkeeping::TypedRefKind::GlTxn,
+                    id: Some("gl-1".to_string()),
+                    locator: None,
+                    entry_id: None,
+                    login_name: None,
+                    label: None,
+                    filename: None,
+                },
+                right_ref: crate::bookkeeping::TypedRef {
+                    kind: crate::bookkeeping::TypedRefKind::Document,
+                    id: None,
+                    locator: None,
+                    entry_id: None,
+                    login_name: Some("bank".to_string()),
+                    label: Some("checking".to_string()),
+                    filename: Some("stmt.pdf".to_string()),
+                },
+                amount: None,
+                notes: None,
+            },
+        )
+        .unwrap();
+        crate::bookkeeping::upsert_period_close(
+            &root,
+            crate::bookkeeping::UpsertPeriodCloseInput {
+                period_id: "2024-01".to_string(),
+                status: crate::bookkeeping::PeriodCloseStatus::SoftClosed,
+                closed_by: None,
+                notes: None,
+                reconciliation_session_ids: vec![],
+                adjustment_txn_ids: vec![],
+            },
+        )
+        .unwrap();
+
+        let txn = make_txn(
+            5,
+            vec![("id".to_string(), "gl-1".to_string())],
+            "generated-by: refreshmint-post",
+        );
+        let rows = build_transaction_rows(&root, &[txn]).unwrap();
+        assert!(rows[0].bookkeeping.generated);
+        assert_eq!(rows[0].bookkeeping.reconciled_session_ids, vec![session.id]);
+        assert_eq!(rows[0].bookkeeping.linked_record_ids.len(), 1);
+        assert_eq!(rows[0].bookkeeping.settlement_link_ids.len(), 1);
+        assert_eq!(
+            rows[0].bookkeeping.soft_closed_period_id.as_deref(),
+            Some("2024-01")
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }

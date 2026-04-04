@@ -99,6 +99,15 @@ pub struct TypedRef {
     pub filename: Option<String>,
 }
 
+impl TypedRef {
+    pub fn as_gl_txn_id(&self) -> Option<&str> {
+        match self.kind {
+            TypedRefKind::GlTxn => self.id.as_deref(),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TypedRefKind {

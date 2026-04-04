@@ -206,7 +206,7 @@ pub fn apply_dedup_actions(
     entries: Vec<AccountEntry>,
     actions: &[DedupAction],
     default_account: &str,
-    unreconciled_equity: &str,
+    staging_account: &str,
     extracted_by: Option<&str>,
 ) -> Result<Vec<AccountEntry>, Box<dyn std::error::Error + Send + Sync>> {
     let attachment_index = build_attachment_index_for_account(ledger_dir, account_name);
@@ -214,7 +214,7 @@ pub fn apply_dedup_actions(
         entries,
         actions,
         default_account,
-        unreconciled_equity,
+        staging_account,
         extracted_by,
         Some(&attachment_index),
         |op| operations::append_account_operation(ledger_dir, account_name, op),
@@ -228,7 +228,7 @@ pub fn apply_dedup_actions_for_login_account(
     entries: Vec<AccountEntry>,
     actions: &[DedupAction],
     default_account: &str,
-    unreconciled_equity: &str,
+    staging_account: &str,
     extracted_by: Option<&str>,
 ) -> Result<Vec<AccountEntry>, Box<dyn std::error::Error + Send + Sync>> {
     let (login_name, label) = login_account;
@@ -237,7 +237,7 @@ pub fn apply_dedup_actions_for_login_account(
         entries,
         actions,
         default_account,
-        unreconciled_equity,
+        staging_account,
         extracted_by,
         Some(&attachment_index),
         |op| operations::append_login_account_operation(ledger_dir, login_name, label, op),
@@ -248,7 +248,7 @@ fn apply_dedup_actions_with_logger<F>(
     mut entries: Vec<AccountEntry>,
     actions: &[DedupAction],
     default_account: &str,
-    unreconciled_equity: &str,
+    staging_account: &str,
     extracted_by: Option<&str>,
     attachment_index: Option<&AttachmentIndex>,
     mut log_operation: F,
@@ -323,7 +323,7 @@ where
             DedupResult::New => {
                 let mut entry = action
                     .proposed
-                    .to_account_entry(default_account, unreconciled_equity);
+                    .to_account_entry(default_account, staging_account);
                 if let Some(eb) = extracted_by {
                     entry.extracted_by = Some(eb.to_string());
                 }
@@ -547,7 +547,7 @@ fn update_entry_amount_from_proposed(entry: &mut AccountEntry, txn: &ExtractedTr
     if let Some(first) = entry.postings.first_mut() {
         first.amount = Some(primary_amount.clone());
     }
-    if entry.postings.len() == 2 && entry.postings[1].account.starts_with("Equity:Unreconciled") {
+    if entry.postings.len() == 2 && crate::staging::is_staging_account(&entry.postings[1].account) {
         let negated = SimpleAmount {
             commodity: primary_amount.commodity,
             quantity: negate_quantity(&primary_amount.quantity),
@@ -727,7 +727,7 @@ mod tests {
                     }),
                 },
                 EntryPosting {
-                    account: "Equity:Unreconciled".to_string(),
+                    account: "Equity:Staging".to_string(),
                     amount: None,
                 },
             ],
@@ -889,7 +889,7 @@ mod tests {
             existing,
             &actions,
             "Assets:Checking",
-            "Equity:Unreconciled:Checking",
+            "Equity:Staging:Checking",
             Some("test:latest"),
         )
         .expect("apply_dedup_actions");
@@ -954,7 +954,7 @@ mod tests {
             vec![],
             &actions,
             "Assets:Checking",
-            "Equity:Unreconciled:Checking",
+            "Equity:Staging:Checking",
             Some("providentcu:latest"),
         )
         .expect("apply login dedup actions");
@@ -1019,7 +1019,7 @@ mod tests {
             vec![],
             &actions,
             "Assets:Checking",
-            "Equity:Unreconciled:Checking",
+            "Equity:Staging:Checking",
             Some("providentcu:latest"),
         )
         .expect("apply login dedup actions");
@@ -1098,7 +1098,7 @@ mod tests {
             existing,
             &actions,
             "Assets:Checking",
-            "Equity:Unreconciled:Checking",
+            "Equity:Staging:Checking",
             Some("test:latest"),
         )
         .expect("apply_dedup_actions");

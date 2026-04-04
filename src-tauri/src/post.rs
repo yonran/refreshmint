@@ -1751,7 +1751,7 @@ mod tests {
                     }),
                 },
                 EntryPosting {
-                    account: "Equity:Unreconciled:Checking".to_string(),
+                    account: "Equity:Staging:Checking".to_string(),
                     amount: None,
                 },
             ],

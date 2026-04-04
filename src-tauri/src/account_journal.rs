@@ -503,7 +503,7 @@ mod tests {
                     }),
                 },
                 EntryPosting {
-                    account: "Equity:Unreconciled:Checking".to_string(),
+                    account: "Equity:Staging:Checking".to_string(),
                     amount: Some(SimpleAmount {
                         commodity: "USD".to_string(),
                         quantity: "21.32".to_string(),
@@ -553,7 +553,7 @@ mod tests {
                         }),
                     },
                     EntryPosting {
-                        account: "Equity:Unreconciled:Checking".to_string(),
+                        account: "Equity:Staging:Checking".to_string(),
                         amount: None,
                     },
                 ],
@@ -572,7 +572,7 @@ mod tests {
                         }),
                     },
                     EntryPosting {
-                        account: "Equity:Unreconciled:Checking".to_string(),
+                        account: "Equity:Staging:Checking".to_string(),
                         amount: None,
                     },
                 ],
@@ -607,7 +607,7 @@ mod tests {
                     }),
                 },
                 EntryPosting {
-                    account: "Equity:Unreconciled:Cash".to_string(),
+                    account: "Equity:Staging:Cash".to_string(),
                     amount: None,
                 },
             ],
@@ -670,7 +670,7 @@ mod tests {
                     }),
                 },
                 EntryPosting {
-                    account: "Equity:Unreconciled:Venmo".to_string(),
+                    account: "Equity:Staging:Venmo".to_string(),
                     amount: Some(SimpleAmount {
                         commodity: "USD".to_string(),
                         quantity: "50.00".to_string(),

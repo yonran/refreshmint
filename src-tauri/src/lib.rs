@@ -14,6 +14,7 @@ pub mod migration;
 pub mod operations;
 pub mod post;
 pub mod report;
+pub mod staging;
 pub mod transfer_detector;
 
 mod binpath;
@@ -766,13 +767,13 @@ fn run_extraction(
             .filter(|a| matches!(a.result, dedup::DedupResult::New))
             .count();
 
-        // Determine default account and unreconciled equity from existing entries or manifest
+        // Determine default account and staging account from existing entries or manifest.
         let default_account = all_updated
             .first()
             .and_then(|e| e.postings.first())
             .map(|p| p.account.clone())
             .unwrap_or_else(|| format!("Assets:{account_name}"));
-        let unreconciled_equity = format!("Equity:Unreconciled:{account_name}");
+        let staging_account = crate::staging::canonical_staging_account(&account_name);
 
         all_updated = dedup::apply_dedup_actions(
             &target_dir,
@@ -780,7 +781,7 @@ fn run_extraction(
             all_updated,
             &actions,
             &default_account,
-            &unreconciled_equity,
+            &staging_account,
             Some(&format!("{extension_name}:latest")),
         )
         .map_err(|err| err.to_string())?;
@@ -900,7 +901,8 @@ fn run_login_account_extraction(
                     ));
                 }
             }
-            let unreconciled_equity = format!("Equity:Unreconciled:{login_name}:{label}");
+            let staging_account =
+                crate::staging::canonical_staging_account(&format!("{login_name}:{label}"));
 
             all_updated = dedup::apply_dedup_actions_for_login_account(
                 &target_dir,
@@ -908,7 +910,7 @@ fn run_login_account_extraction(
                 all_updated,
                 &actions,
                 &default_account,
-                &unreconciled_equity,
+                &staging_account,
                 Some(&format!("{extension_name}:latest")),
             )
             .map_err(|err| err.to_string())?;
@@ -1445,7 +1447,7 @@ fn query_transactions(
     let journal_path = dir.join("general.journal");
     let tokens = ledger_open::tokenize_query(&query);
     ledger_open::run_hledger_print_with_query(&journal_path, &tokens)
-        .map(|txns| ledger_open::build_transaction_rows(&txns))
+        .and_then(|txns| ledger_open::build_transaction_rows(&dir, &txns))
         .map_err(|e| e.to_string())
 }
 
@@ -1464,7 +1466,8 @@ fn run_hledger_report(
 struct AccountJournalEntry {
     id: String,
     date: String,
-    status: String,
+    bank_status: String,
+    status_marker: String,
     description: String,
     comment: String,
     evidence: Vec<String>,
@@ -1904,10 +1907,10 @@ fn map_account_journal_entries(
         .into_iter()
         .map(|e| {
             let is_transfer = transfer_detector::is_probable_transfer(&e.description);
-            let status = match e.status {
-                account_journal::EntryStatus::Cleared => "cleared",
-                account_journal::EntryStatus::Pending => "pending",
-                account_journal::EntryStatus::Unmarked => "unmarked",
+            let (bank_status, status_marker) = match e.status {
+                account_journal::EntryStatus::Cleared => ("posted", "*"),
+                account_journal::EntryStatus::Pending => ("pending", "!"),
+                account_journal::EntryStatus::Unmarked => ("unknown", ""),
             };
             let amount = e
                 .postings
@@ -1918,7 +1921,8 @@ fn map_account_journal_entries(
             AccountJournalEntry {
                 id: e.id,
                 date: e.date,
-                status: status.to_string(),
+                bank_status: bank_status.to_string(),
+                status_marker: status_marker.to_string(),
                 description: e.description,
                 comment: e.comment,
                 evidence: e.evidence,

@@ -1176,7 +1176,8 @@ fn run_account_extract(
                     .into());
                 }
             }
-            let unreconciled_equity = format!("Equity:Unreconciled:{login_name}:{label}");
+            let staging_account =
+                crate::staging::canonical_staging_account(&format!("{login_name}:{label}"));
 
             all_updated = crate::dedup::apply_dedup_actions_for_login_account(
                 &ledger_dir,
@@ -1184,7 +1185,7 @@ fn run_account_extract(
                 all_updated,
                 &actions,
                 &default_account,
-                &unreconciled_equity,
+                &staging_account,
                 Some(&format!("{extension_name}:latest")),
             )
             .map_err(|err| std::io::Error::other(err.to_string()))?;
