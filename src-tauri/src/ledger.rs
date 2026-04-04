@@ -44,6 +44,7 @@ pub fn new_ledger_at_dir(target_dir: &Path) -> io::Result<()> {
     enable_bundle_attr_if_supported(target_dir)?;
     write_refreshmint_json(target_dir)?;
     create_general_journal(target_dir)?;
+    crate::bookkeeping::ensure_bookkeeping_layout(target_dir)?;
     init_git_repo(target_dir)?;
     Ok(())
 }

@@ -5,6 +5,7 @@ pub mod secret;
 
 pub mod account_config;
 pub mod account_journal;
+pub mod bookkeeping;
 pub mod categorize;
 pub mod dedup;
 pub mod extract;
@@ -145,6 +146,17 @@ pub fn run_with_context(
             get_login_account_journal,
             get_unposted,
             get_login_account_unposted,
+            list_reconciliation_sessions,
+            create_reconciliation_session,
+            update_reconciliation_session,
+            finalize_reconciliation_session,
+            reopen_reconciliation_session,
+            list_bookkeeping_links,
+            create_bookkeeping_link,
+            delete_bookkeeping_link,
+            list_period_closes,
+            upsert_period_close,
+            reopen_period_close,
             post_entry,
             post_login_account_entry,
             post_login_account_entry_split,
@@ -1512,6 +1524,109 @@ fn get_login_account_unposted(
     let entries = post::get_unposted_login_account(&target_dir, &login_name, &label)
         .map_err(|err| err.to_string())?;
     Ok(map_account_journal_entries(entries))
+}
+
+#[tauri::command]
+fn list_reconciliation_sessions(
+    ledger: String,
+) -> Result<Vec<bookkeeping::ReconciliationSession>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    bookkeeping::list_reconciliation_sessions(&target_dir).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn create_reconciliation_session(
+    ledger: String,
+    session: bookkeeping::NewReconciliationSessionInput,
+) -> Result<bookkeeping::ReconciliationSession, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    bookkeeping::create_reconciliation_session(&target_dir, session).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn update_reconciliation_session(
+    ledger: String,
+    session: bookkeeping::UpdateReconciliationSessionInput,
+) -> Result<bookkeeping::ReconciliationSession, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    bookkeeping::update_reconciliation_session(&target_dir, session).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn finalize_reconciliation_session(
+    ledger: String,
+    id: String,
+) -> Result<bookkeeping::ReconciliationSession, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let id = require_non_empty_input("id", id)?;
+    bookkeeping::finalize_reconciliation_session(&target_dir, &id).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn reopen_reconciliation_session(
+    ledger: String,
+    id: String,
+) -> Result<bookkeeping::ReconciliationSession, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let id = require_non_empty_input("id", id)?;
+    bookkeeping::reopen_reconciliation_session(&target_dir, &id).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn list_bookkeeping_links(ledger: String) -> Result<Vec<bookkeeping::LinkRecord>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    bookkeeping::list_links(&target_dir).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn create_bookkeeping_link(
+    ledger: String,
+    link: bookkeeping::NewLinkRecordInput,
+) -> Result<bookkeeping::LinkRecord, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    bookkeeping::create_link(&target_dir, link).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn delete_bookkeeping_link(ledger: String, id: String) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let id = require_non_empty_input("id", id)?;
+    bookkeeping::delete_link(&target_dir, &id).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn list_period_closes(ledger: String) -> Result<Vec<bookkeeping::PeriodClose>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    bookkeeping::list_period_closes(&target_dir).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn upsert_period_close(
+    ledger: String,
+    period_close: bookkeeping::UpsertPeriodCloseInput,
+) -> Result<bookkeeping::PeriodClose, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    bookkeeping::upsert_period_close(&target_dir, period_close).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn reopen_period_close(
+    ledger: String,
+    period_id: String,
+) -> Result<bookkeeping::PeriodClose, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    bookkeeping::reopen_period_close(&target_dir, &period_id).map_err(|err| err.to_string())
 }
 
 #[tauri::command]

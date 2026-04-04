@@ -54,7 +54,8 @@ pub fn post_entry(
         return Err(format!("entry {entry_id} has no postings to post").into());
     }
 
-    // Check if already reconciled
+    // Check whether this source entry or posting has already been materialized
+    // into the GL. This is distinct from statement reconciliation.
     if let Some(posting_idx) = posting_index {
         if entry
             .posted_postings
@@ -80,7 +81,7 @@ pub fn post_entry(
         posting_index,
     );
 
-    // Update account journal entry with reconciled tag
+    // Update the source entry with its GL posting reference.
     let gl_ref = format!("general.journal:{gl_txn_id}");
     if let Some(posting_idx) = posting_index {
         entries[entry_idx]
@@ -970,16 +971,16 @@ fn has_unposted_portion(entry: &AccountEntry) -> bool {
         return false;
     }
 
-    let mut reconciled_mask = vec![false; entry.postings.len()];
+    let mut posted_mask = vec![false; entry.postings.len()];
     for (idx, _) in &entry.posted_postings {
-        if *idx < reconciled_mask.len() {
-            reconciled_mask[*idx] = true;
+        if *idx < posted_mask.len() {
+            posted_mask[*idx] = true;
         }
     }
-    reconciled_mask.iter().any(|is_reconciled| !is_reconciled)
+    posted_mask.iter().any(|is_posted| !is_posted)
 }
 
-/// Format a GL transaction for reconciliation.
+/// Format a GL transaction produced from a source account-journal entry.
 fn format_gl_transaction(
     entry: &AccountEntry,
     source_locator: &str,

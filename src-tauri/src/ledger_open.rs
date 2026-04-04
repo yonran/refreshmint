@@ -15,19 +15,21 @@ pub struct LedgerView {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AccountRow {
     pub name: String,
     pub totals: Option<Vec<AmountTotal>>,
-    #[serde(rename = "unreconciledCount")]
-    pub unreconciled_count: usize,
+    /// Count of source-journal entries that still have unposted portions mapped
+    /// to this GL account. This is not statement reconciliation state.
+    pub unposted_count: usize,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TransactionRow {
     pub id: String,
     pub date: String,
     pub description: String,
-    #[serde(rename = "descriptionRaw")]
     pub description_raw: String,
     pub comment: String,
     pub evidence: Vec<String>,
@@ -37,6 +39,7 @@ pub struct TransactionRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AmountTotal {
     pub commodity: String,
     pub mantissa: String,
@@ -45,12 +48,14 @@ pub struct AmountTotal {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AmountStyleHint {
     pub side: Side,
     pub spaced: bool,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PostingRow {
     pub account: String,
     pub amount: Option<String>,
@@ -185,7 +190,7 @@ fn build_account_rows(
         }
     }
 
-    // Build GL account -> (login, label) map for unreconciled counts
+    // Build GL account -> (login, label) map for unposted source-entry counts.
     let mut gl_to_login: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     let logins = crate::login_config::list_logins(path)?;
     for login in &logins {
@@ -203,13 +208,13 @@ fn build_account_rows(
     let rows = accounts
         .into_iter()
         .map(|(name, totals)| {
-            let mut unreconciled_count = 0;
+            let mut unposted_count = 0;
             if let Some(mappings) = gl_to_login.get(&name) {
                 for (login, label) in mappings {
-                    if let Ok(unreconciled) =
+                    if let Ok(unposted) =
                         crate::post::get_unposted_login_account(path, login, label)
                     {
-                        unreconciled_count += unreconciled.len();
+                        unposted_count += unposted.len();
                     }
                 }
             }
@@ -217,7 +222,7 @@ fn build_account_rows(
             AccountRow {
                 name,
                 totals: totals.and_then(|totals| totals_to_rows(&totals)),
-                unreconciled_count,
+                unposted_count,
             }
         })
         .collect();

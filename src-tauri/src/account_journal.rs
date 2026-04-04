@@ -161,12 +161,12 @@ pub fn format_entry(entry: &AccountEntry) -> String {
         comments.push(format!("extracted-by: {extracted_by}"));
     }
 
-    // reconciled tag
+    // `posted:` links this source entry to a materialized GL transaction.
     if let Some(posted) = &entry.posted {
         comments.push(format!("posted: {posted}"));
     }
 
-    // reconciled-posting-N tags
+    // `posted-posting-N:` links one source posting to a materialized GL transaction.
     for (idx, gl_ref) in &entry.posted_postings {
         comments.push(format!("posted-posting-{idx}: {gl_ref}"));
     }

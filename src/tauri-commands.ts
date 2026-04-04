@@ -24,6 +24,90 @@ export interface AccountRow {
     unpostedCount: number;
 }
 
+export interface ReconciliationSession {
+    id: string;
+    glAccount: string;
+    statementStartDate: string | null;
+    statementEndDate: string;
+    statementStartingBalance: string | null;
+    statementEndingBalance: string;
+    currency: string | null;
+    status: 'draft' | 'finalized' | 'reopened';
+    reconciledTxnIds: string[];
+    notes: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface NewReconciliationSessionInput {
+    glAccount: string;
+    statementStartDate: string | null;
+    statementEndDate: string;
+    statementStartingBalance: string | null;
+    statementEndingBalance: string;
+    currency: string | null;
+    reconciledTxnIds: string[];
+    notes: string | null;
+}
+
+export interface UpdateReconciliationSessionInput extends NewReconciliationSessionInput {
+    id: string;
+}
+
+export type TypedRefKind = 'gl-txn' | 'login-entry' | 'document';
+
+export interface TypedRef {
+    kind: TypedRefKind;
+    id?: string | null;
+    locator?: string | null;
+    entryId?: string | null;
+    loginName?: string | null;
+    label?: string | null;
+    filename?: string | null;
+}
+
+export type LinkKind = 'evidence-link' | 'settlement-link' | 'source-link';
+
+export interface LinkRecord {
+    id: string;
+    kind: LinkKind;
+    leftRef: TypedRef;
+    rightRef: TypedRef;
+    amount: string | null;
+    notes: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface NewLinkRecordInput {
+    kind: LinkKind;
+    leftRef: TypedRef;
+    rightRef: TypedRef;
+    amount: string | null;
+    notes: string | null;
+}
+
+export type PeriodCloseStatus = 'draft' | 'soft-closed' | 'reopened';
+
+export interface PeriodClose {
+    periodId: string;
+    status: PeriodCloseStatus;
+    closedAt: string | null;
+    closedBy: string | null;
+    notes: string | null;
+    reconciliationSessionIds: string[];
+    adjustmentTxnIds: string[];
+}
+
+export interface UpsertPeriodCloseInput {
+    periodId: string;
+    status: PeriodCloseStatus;
+    closedBy: string | null;
+    notes: string | null;
+    reconciliationSessionIds: string[];
+    adjustmentTxnIds: string[];
+}
+
 export interface TransactionRow {
     id: string;
     date: string;
@@ -198,6 +282,78 @@ export async function validateTransactionText(
     transaction: string,
 ): Promise<void> {
     await invoke('validate_transaction_text', { ledger, transaction });
+}
+
+export async function listReconciliationSessions(
+    ledger: string,
+): Promise<ReconciliationSession[]> {
+    return invoke('list_reconciliation_sessions', { ledger });
+}
+
+export async function createReconciliationSession(
+    ledger: string,
+    session: NewReconciliationSessionInput,
+): Promise<ReconciliationSession> {
+    return invoke('create_reconciliation_session', { ledger, session });
+}
+
+export async function updateReconciliationSession(
+    ledger: string,
+    session: UpdateReconciliationSessionInput,
+): Promise<ReconciliationSession> {
+    return invoke('update_reconciliation_session', { ledger, session });
+}
+
+export async function finalizeReconciliationSession(
+    ledger: string,
+    id: string,
+): Promise<ReconciliationSession> {
+    return invoke('finalize_reconciliation_session', { ledger, id });
+}
+
+export async function reopenReconciliationSession(
+    ledger: string,
+    id: string,
+): Promise<ReconciliationSession> {
+    return invoke('reopen_reconciliation_session', { ledger, id });
+}
+
+export async function listBookkeepingLinks(
+    ledger: string,
+): Promise<LinkRecord[]> {
+    return invoke('list_bookkeeping_links', { ledger });
+}
+
+export async function createBookkeepingLink(
+    ledger: string,
+    link: NewLinkRecordInput,
+): Promise<LinkRecord> {
+    return invoke('create_bookkeeping_link', { ledger, link });
+}
+
+export async function deleteBookkeepingLink(
+    ledger: string,
+    id: string,
+): Promise<void> {
+    await invoke('delete_bookkeeping_link', { ledger, id });
+}
+
+export async function listPeriodCloses(ledger: string): Promise<PeriodClose[]> {
+    return invoke('list_period_closes', { ledger });
+}
+
+export async function upsertPeriodClose(
+    ledger: string,
+    periodClose: UpsertPeriodCloseInput,
+): Promise<PeriodClose> {
+    return invoke('upsert_period_close', { ledger, periodClose });
+}
+
+export async function reopenPeriodClose(
+    ledger: string,
+    periodId: string,
+): Promise<PeriodClose> {
+    return invoke('reopen_period_close', { ledger, periodId });
 }
 
 export async function listScrapeExtensions(ledger: string): Promise<string[]> {

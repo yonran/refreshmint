@@ -229,7 +229,9 @@ impl ExtractedTransaction {
         }
     }
 
-    /// Convert to an AccountEntry with the given default account and unreconciled equity account.
+    /// Convert to an AccountEntry with the given default account and legacy
+    /// staging counterpart account. `Equity:Unreconciled:*` is ETL staging,
+    /// not statement reconciliation state.
     pub fn to_account_entry(
         &self,
         default_account: &str,
