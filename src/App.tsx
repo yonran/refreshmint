@@ -41,6 +41,7 @@ import {
 import { PipelineTab } from './tabs/PipelineTab.tsx';
 import { ReportsTab } from './tabs/ReportsTab.tsx';
 import { ScrapeTab } from './tabs/ScrapeTab.tsx';
+import { BookkeepingTab } from './tabs/BookkeepingTab.tsx';
 import { TransactionsTab } from './tabs/TransactionsTab.tsx';
 import {
     createEmptyPipelineTabSession,
@@ -646,6 +647,7 @@ function App() {
         }
         const persistedTab: ActiveTab =
             activeTab === 'accounts' ||
+            activeTab === 'bookkeeping' ||
             activeTab === 'transactions' ||
             activeTab === 'scrape' ||
             activeTab === 'pipeline' ||
@@ -1082,6 +1084,19 @@ function App() {
                         </button>
                         <button
                             className={
+                                activeTab === 'bookkeeping'
+                                    ? 'tab active'
+                                    : 'tab'
+                            }
+                            onClick={() => {
+                                setActiveTab('bookkeeping');
+                            }}
+                            type="button"
+                        >
+                            Bookkeeping
+                        </button>
+                        <button
+                            className={
                                 activeTab === 'transactions'
                                     ? 'tab active'
                                     : 'tab'
@@ -1206,6 +1221,11 @@ function App() {
                                 onSelectAccount={handleSelectAccount}
                             />
                         </div>
+                    ) : activeTab === 'bookkeeping' ? (
+                        <BookkeepingTab
+                            ledger={ledger.path}
+                            accounts={ledger.accounts}
+                        />
                     ) : activeTab === 'transactions' ||
                       activeRecategorizeTab !== null ? (
                         <TransactionsTab

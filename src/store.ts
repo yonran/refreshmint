@@ -6,6 +6,7 @@ const ACTIVE_TAB_KEY = 'recentActiveTab';
 
 export type ActiveTab =
     | 'accounts'
+    | 'bookkeeping'
     | 'transactions'
     | 'scrape'
     | 'pipeline'
@@ -73,6 +74,7 @@ export async function getLastActiveTab(): Promise<ActiveTab | null> {
     const value = await store.get<unknown>(ACTIVE_TAB_KEY);
     if (
         value === 'accounts' ||
+        value === 'bookkeeping' ||
         value === 'transactions' ||
         value === 'scrape' ||
         value === 'pipeline' ||
