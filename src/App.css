@@ -734,6 +734,13 @@ details[open] > .disclosure-summary::before {
     color: #7a5500;
 }
 
+.transaction-bookkeeping-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-top: 0.25rem;
+}
+
 .pipeline-status-table {
     font-size: 0.82rem;
     border-collapse: collapse;

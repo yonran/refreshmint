@@ -58,6 +58,13 @@ export type LoginAccountRef = {
 
 export type TransactionsTabSession = {
     unpostedOnly: boolean;
+    bookkeepingFilter:
+        | 'all'
+        | 'reconciled'
+        | 'linked'
+        | 'settled'
+        | 'softClosed'
+        | 'generated';
     transactionDraft: TransactionDraft | null;
     rawDraft: string;
     entryMode: TransactionEntryMode;
@@ -219,6 +226,7 @@ export function createEmptyPipelineBulkSummary(): PipelineBulkSummary {
 export function createEmptyTransactionsTabSession(): TransactionsTabSession {
     return {
         unpostedOnly: false,
+        bookkeepingFilter: 'all',
         transactionDraft: null,
         rawDraft: '',
         entryMode: 'form',

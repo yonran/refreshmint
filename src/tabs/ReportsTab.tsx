@@ -442,7 +442,7 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                         setStatusCleared(e.target.checked);
                                     }}
                                 />
-                                <span>Cleared (-C)</span>
+                                <span>Cleared (-C, hledger status)</span>
                             </label>
                             <label className="checkbox-field">
                                 <input
@@ -452,7 +452,7 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                         setStatusPending(e.target.checked);
                                     }}
                                 />
-                                <span>Pending (-P)</span>
+                                <span>Pending (-P, hledger status)</span>
                             </label>
                             <label className="checkbox-field">
                                 <input
@@ -462,7 +462,7 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                         setStatusUnmarked(e.target.checked);
                                     }}
                                 />
-                                <span>Unmarked (-U)</span>
+                                <span>Unmarked (-U, hledger status)</span>
                             </label>
                             <label className="checkbox-field">
                                 <input

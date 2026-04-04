@@ -1820,20 +1820,35 @@ export function PipelineTab({
                                                                     '-'}
                                                             </td>
                                                             <td>
-                                                                {isUnposted ? (
-                                                                    <span className="status-chip">
-                                                                        unposted
-                                                                    </span>
-                                                                ) : needsSync ? (
-                                                                    <span className="status-chip status-chip-warning">
-                                                                        ⚠ needs
-                                                                        sync
-                                                                    </span>
-                                                                ) : (
-                                                                    <span className="status-chip status-chip-ok">
-                                                                        posted
-                                                                    </span>
-                                                                )}
+                                                                <div className="transaction-bookkeeping-badges">
+                                                                    {entry.bankStatus ===
+                                                                    'pending' ? (
+                                                                        <span className="status-chip status-chip-warning">
+                                                                            bank
+                                                                            pending
+                                                                        </span>
+                                                                    ) : entry.bankStatus ===
+                                                                      'posted' ? (
+                                                                        <span className="status-chip status-chip-ok">
+                                                                            bank
+                                                                            posted
+                                                                        </span>
+                                                                    ) : null}
+                                                                    {isUnposted ? (
+                                                                        <span className="status-chip">
+                                                                            unposted
+                                                                        </span>
+                                                                    ) : needsSync ? (
+                                                                        <span className="status-chip status-chip-warning">
+                                                                            needs
+                                                                            sync
+                                                                        </span>
+                                                                    ) : (
+                                                                        <span className="status-chip status-chip-ok">
+                                                                            posted
+                                                                        </span>
+                                                                    )}
+                                                                </div>
                                                             </td>
                                                             <td>
                                                                 <div className="pipeline-row-actions">

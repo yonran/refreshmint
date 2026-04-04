@@ -20,7 +20,12 @@ import {
     getSearchSuggestions,
     quoteHledgerValue,
 } from '../search-utils.ts';
-import { filterGlTransferCandidates } from '../gl-transfer-utils.ts';
+import {
+    filterGlTransferCandidates,
+    filterTransactionsByBookkeepingState,
+    hasStagingPosting,
+    type BookkeepingFilter,
+} from '../gl-transfer-utils.ts';
 import {
     type RecategorizeTab,
     type SimilarRecategorizeSeed,
@@ -99,7 +104,7 @@ function buildCurrentFilterQuery(
 ): string {
     return joinQueryClauses(
         transactionsSearch,
-        unpostedOnly ? 'acct:^Equity:Unreconciled' : '',
+        unpostedOnly ? "acct:'^Equity:(Staging|Unreconciled)'" : '',
     );
 }
 
@@ -109,6 +114,17 @@ function buildRecategorizeQuery(
     includeAll: boolean,
 ): string {
     return joinQueryClauses(seedQuery, includeAll ? '' : currentFilterQuery);
+}
+
+function isBookkeepingFilter(value: string): value is BookkeepingFilter {
+    return (
+        value === 'all' ||
+        value === 'reconciled' ||
+        value === 'linked' ||
+        value === 'settled' ||
+        value === 'softClosed' ||
+        value === 'generated'
+    );
 }
 
 interface RecategorizePostingOption {
@@ -283,6 +299,8 @@ export function TransactionsTab({
     onSessionChange,
 }: TransactionsTabProps) {
     const [unpostedOnly, setUnpostedOnly] = useState(session.unpostedOnly);
+    const [bookkeepingFilter, setBookkeepingFilter] =
+        useState<BookkeepingFilter>(session.bookkeepingFilter);
     const [transactionDraft, setTransactionDraft] = useState<TransactionDraft>(
         session.transactionDraft ?? createTransactionDraft(),
     );
@@ -339,6 +357,7 @@ export function TransactionsTab({
 
     sessionRef.current = {
         unpostedOnly,
+        bookkeepingFilter,
         transactionDraft,
         rawDraft,
         entryMode,
@@ -352,6 +371,7 @@ export function TransactionsTab({
 
     useEffect(() => {
         setUnpostedOnly(session.unpostedOnly);
+        setBookkeepingFilter(session.bookkeepingFilter);
         setTransactionDraft(
             session.transactionDraft ?? createTransactionDraft(),
         );
@@ -394,6 +414,7 @@ export function TransactionsTab({
         setSimilarAcSuggestions([]);
         setSimilarAcActiveIndex(-1);
         setUnpostedOnly(false);
+        setBookkeepingFilter('all');
     }, [ledgerPath]);
 
     // Apply cross-tab search navigation (e.g. from PipelineTab)
@@ -627,18 +648,18 @@ export function TransactionsTab({
 
     const filteredTransactions = (() => {
         const base = queryResults ?? ledger.transactions;
-        return base.filter((txn) => {
+        const unpostedFiltered = base.filter((txn) => {
             if (unpostedOnly) {
-                if (
-                    !txn.postings.some((p) =>
-                        p.account.startsWith('Equity:Unreconciled'),
-                    )
-                ) {
+                if (!hasStagingPosting(txn)) {
                     return false;
                 }
             }
             return true;
         });
+        return filterTransactionsByBookkeepingState(
+            unpostedFiltered,
+            bookkeepingFilter,
+        );
     })();
 
     const isNewTxnExpanded =
@@ -1564,12 +1585,34 @@ export function TransactionsTab({
                     />
                     <span>Unposted only</span>
                 </label>
-                {(transactionsSearch.trim() || unpostedOnly) && (
+                <label className="field">
+                    <span>Bookkeeping</span>
+                    <select
+                        value={bookkeepingFilter}
+                        onChange={(event) => {
+                            const { value } = event.target;
+                            if (isBookkeepingFilter(value)) {
+                                setBookkeepingFilter(value);
+                            }
+                        }}
+                    >
+                        <option value="all">All</option>
+                        <option value="reconciled">Reconciled</option>
+                        <option value="linked">Linked</option>
+                        <option value="settled">Settled</option>
+                        <option value="softClosed">Soft-closed</option>
+                        <option value="generated">Generated</option>
+                    </select>
+                </label>
+                {(transactionsSearch.trim() ||
+                    unpostedOnly ||
+                    bookkeepingFilter !== 'all') && (
                     <button
                         className="ghost-button"
                         onClick={() => {
                             setTransactionsSearch('');
                             setUnpostedOnly(false);
+                            setBookkeepingFilter('all');
                             setQueryResults(null);
                             setQueryError(null);
                         }}

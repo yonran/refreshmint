@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { filterGlTransferCandidates } from './gl-transfer-utils.ts';
+import {
+    filterGlTransferCandidates,
+    filterTransactionsByBookkeepingState,
+} from './gl-transfer-utils.ts';
 import type { TransactionRow } from './tauri-commands.ts';
 
 function makeTxn(
@@ -16,6 +19,13 @@ function makeTxn(
         accounts: '',
         totals: null,
         postings: [],
+        bookkeeping: {
+            generated: false,
+            reconciledSessionIds: [],
+            linkedRecordIds: [],
+            settlementLinkIds: [],
+            softClosedPeriodId: null,
+        },
         ...overrides,
     };
 }
@@ -155,5 +165,52 @@ describe('filterGlTransferCandidates', () => {
         );
         expect(result).toHaveLength(1);
         expect(result[0]?.id).toBe('a');
+    });
+});
+
+describe('filterTransactionsByBookkeepingState', () => {
+    it('filters reconciled transactions', () => {
+        const rows = [
+            makeTxn('a', {
+                bookkeeping: {
+                    generated: false,
+                    reconciledSessionIds: ['rec-1'],
+                    linkedRecordIds: [],
+                    settlementLinkIds: [],
+                    softClosedPeriodId: null,
+                },
+            }),
+            makeTxn('b'),
+        ];
+        expect(
+            filterTransactionsByBookkeepingState(rows, 'reconciled'),
+        ).toEqual([rows[0]]);
+    });
+
+    it('filters settled transactions separately from generic links', () => {
+        const linked = makeTxn('linked', {
+            bookkeeping: {
+                generated: false,
+                reconciledSessionIds: [],
+                linkedRecordIds: ['link-1'],
+                settlementLinkIds: [],
+                softClosedPeriodId: null,
+            },
+        });
+        const settled = makeTxn('settled', {
+            bookkeeping: {
+                generated: false,
+                reconciledSessionIds: [],
+                linkedRecordIds: ['link-2'],
+                settlementLinkIds: ['link-2'],
+                softClosedPeriodId: null,
+            },
+        });
+        expect(
+            filterTransactionsByBookkeepingState([linked, settled], 'linked'),
+        ).toEqual([linked, settled]);
+        expect(
+            filterTransactionsByBookkeepingState([linked, settled], 'settled'),
+        ).toEqual([settled]);
     });
 });

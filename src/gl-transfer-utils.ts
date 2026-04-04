@@ -1,5 +1,21 @@
 import type { TransactionRow } from './tauri-commands.ts';
 
+export type BookkeepingFilter =
+    | 'all'
+    | 'reconciled'
+    | 'linked'
+    | 'settled'
+    | 'softClosed'
+    | 'generated';
+
+export function hasStagingPosting(txn: TransactionRow): boolean {
+    return txn.postings.some(
+        (posting) =>
+            posting.account.startsWith('Equity:Staging') ||
+            posting.account.startsWith('Equity:Unreconciled'),
+    );
+}
+
 /**
  * Returns the subset of `transactions` that are valid candidates for manually
  * linking as the transfer counterpart of the transaction identified by
@@ -45,4 +61,28 @@ export function filterGlTransferCandidates(
                 t.description.toLowerCase().includes(q) || t.date.includes(q)
             );
         });
+}
+
+export function filterTransactionsByBookkeepingState(
+    transactions: TransactionRow[],
+    filter: BookkeepingFilter,
+): TransactionRow[] {
+    if (filter === 'all') {
+        return transactions;
+    }
+    return transactions.filter((txn) => {
+        if (filter === 'reconciled') {
+            return txn.bookkeeping.reconciledSessionIds.length > 0;
+        }
+        if (filter === 'linked') {
+            return txn.bookkeeping.linkedRecordIds.length > 0;
+        }
+        if (filter === 'settled') {
+            return txn.bookkeeping.settlementLinkIds.length > 0;
+        }
+        if (filter === 'softClosed') {
+            return txn.bookkeeping.softClosedPeriodId !== null;
+        }
+        return txn.bookkeeping.generated;
+    });
 }

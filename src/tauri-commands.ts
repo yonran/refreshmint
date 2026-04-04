@@ -118,6 +118,15 @@ export interface TransactionRow {
     accounts: string;
     totals: AmountTotal[] | null;
     postings: PostingRow[];
+    bookkeeping: TransactionBookkeeping;
+}
+
+export interface TransactionBookkeeping {
+    generated: boolean;
+    reconciledSessionIds: string[];
+    linkedRecordIds: string[];
+    settlementLinkIds: string[];
+    softClosedPeriodId: string | null;
 }
 
 export interface AmountTotal {
@@ -195,7 +204,8 @@ export interface DocumentWithInfo {
 export interface AccountJournalEntry {
     id: string;
     date: string;
-    status: 'cleared' | 'pending' | 'unmarked';
+    bankStatus: 'pending' | 'posted' | 'unknown';
+    statusMarker: '' | '!' | '*';
     description: string;
     comment: string;
     evidence: string[];

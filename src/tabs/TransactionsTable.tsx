@@ -135,6 +135,38 @@ function similarKey(txn: TransactionRow): string | null {
     return similarityGroupKey(txn);
 }
 
+function badgeLabel(base: string, count: number): string {
+    return count > 1 ? `${base} ×${count}` : base;
+}
+
+function bookkeepingBadges(txn: TransactionRow): string[] {
+    const badges: string[] = [];
+    if (txn.bookkeeping.generated) {
+        badges.push('generated');
+    }
+    if (txn.bookkeeping.reconciledSessionIds.length > 0) {
+        badges.push(
+            badgeLabel(
+                'reconciled',
+                txn.bookkeeping.reconciledSessionIds.length,
+            ),
+        );
+    }
+    if (txn.bookkeeping.settlementLinkIds.length > 0) {
+        badges.push(
+            badgeLabel('settled', txn.bookkeeping.settlementLinkIds.length),
+        );
+    } else if (txn.bookkeeping.linkedRecordIds.length > 0) {
+        badges.push(
+            badgeLabel('linked', txn.bookkeeping.linkedRecordIds.length),
+        );
+    }
+    if (txn.bookkeeping.softClosedPeriodId !== null) {
+        badges.push(`soft-closed ${txn.bookkeeping.softClosedPeriodId}`);
+    }
+    return badges;
+}
+
 export function AccountInput({
     value,
     onChange,
@@ -828,7 +860,24 @@ export function TransactionsTable({
                                                 openContextMenu(e, [...items]);
                                             }}
                                         >
-                                            {txn.description}
+                                            <div>{txn.description}</div>
+                                            {(() => {
+                                                const badges =
+                                                    bookkeepingBadges(txn);
+                                                return badges.length ===
+                                                    0 ? null : (
+                                                    <div className="transaction-bookkeeping-badges">
+                                                        {badges.map((badge) => (
+                                                            <span
+                                                                key={`${txn.id}:${badge}`}
+                                                                className="status-chip"
+                                                            >
+                                                                {badge}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                );
+                                            })()}
                                         </td>
                                         <td>
                                             {hasActions ? (
