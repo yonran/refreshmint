@@ -449,7 +449,9 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                         <p>
                             `Cleared` comes from hledger status. `Reconciled`
                             means the GL transaction ids are captured in one
-                            finalized statement session.
+                            finalized statement session. This section is still a
+                            manual session editor, not the guided reconciliation
+                            workflow yet.
                         </p>
                     </div>
                 </div>
@@ -521,7 +523,7 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                     </label>
                 </div>
                 <label className="field">
-                    <span>Reconciled GL transaction ids</span>
+                    <span>Session member GL transaction ids</span>
                     <textarea
                         value={reconciledTxnIds}
                         placeholder="gl-txn-1, gl-txn-2"
@@ -566,7 +568,7 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                             {sessions.length === 0 ? (
                                 <tr>
                                     <td colSpan={5} className="status-dim">
-                                        No reconciliation sessions yet.
+                                        No statement sessions yet.
                                     </td>
                                 </tr>
                             ) : (
@@ -629,7 +631,8 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                         <h3>Soft Close</h3>
                         <p>
                             Track reviewed periods separately from hledger
-                            cleared/reconciled transaction state.
+                            cleared state and finalized reconciliation-session
+                            membership.
                         </p>
                     </div>
                 </div>

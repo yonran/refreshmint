@@ -1670,7 +1670,7 @@ fn post_login_account_entry(
     let entry_id = require_non_empty_input("entry_id", entry_id)?;
     let counterpart_account = require_non_empty_input("counterpart_account", counterpart_account)?;
 
-    // Reject reconciliation when this login label's GL mapping is unset or conflicting.
+    // Reject source-entry posting when this login label's GL mapping is unset or conflicting.
     let _ = resolve_login_account_gl_account(&target_dir, &login_name, &label)?;
 
     post::post_login_account_entry(
@@ -1698,7 +1698,7 @@ fn post_login_account_entry_split(
     let label = require_label_input(label)?;
     let entry_id = require_non_empty_input("entry_id", entry_id)?;
 
-    // Reject reconciliation when this login label's GL mapping is unset or conflicting.
+    // Reject source-entry posting when this login label's GL mapping is unset or conflicting.
     let _ = resolve_login_account_gl_account(&target_dir, &login_name, &label)?;
 
     post::post_login_account_entry_split(

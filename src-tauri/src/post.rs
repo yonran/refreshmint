@@ -19,10 +19,10 @@ pub struct SplitCounterpart {
     pub amount: Option<String>,
 }
 
-/// Post a single account journal entry to the GL by assigning a counterpart account.
+/// Materialize a single account journal entry into the GL by assigning a counterpart account.
 ///
 /// For single-posting entries, creates a GL transaction with the real counterpart.
-/// For multi-posting entries, reconciles a specific posting by index.
+/// For multi-posting entries, materializes a specific posting by index.
 ///
 /// Returns the GL transaction ID.
 pub fn post_entry(
@@ -55,7 +55,7 @@ pub fn post_entry(
     }
 
     // Check whether this source entry or posting has already been materialized
-    // into the GL. This is distinct from statement reconciliation.
+    // into the GL. This is separate from statement reconciliation.
     if let Some(posting_idx) = posting_index {
         if entry
             .posted_postings
