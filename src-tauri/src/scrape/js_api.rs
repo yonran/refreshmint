@@ -7410,6 +7410,99 @@ fn matches_filter(
     true
 }
 
+/// Recursively collect documents from `dir` into `docs`, building relative
+/// paths from `documents_dir` (the account documents root).  Sidecars are
+/// looked up as `documents_dir/<relative>-info.json`.
+fn collect_account_documents_in_dir(
+    documents_dir: &std::path::Path,
+    dir: &std::path::Path,
+    prefix: &str,
+    filter: &std::collections::BTreeMap<String, serde_json::Value>,
+    acct_label: &str,
+    docs: &mut Vec<AccountDocumentSummary>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let os_name = entry.file_name();
+        let name = os_name.to_string_lossy();
+        let relative = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+
+        if file_type.is_dir() {
+            collect_account_documents_in_dir(
+                documents_dir,
+                &entry.path(),
+                &relative,
+                filter,
+                acct_label,
+                docs,
+            )?;
+            continue;
+        }
+
+        if !file_type.is_file() || relative.ends_with("-info.json") {
+            continue;
+        }
+
+        let sidecar_path = documents_dir.join(format!("{relative}-info.json"));
+        let info: Option<crate::scrape::DocumentInfo> = if sidecar_path.exists() {
+            std::fs::read_to_string(&sidecar_path)
+                .ok()
+                .and_then(|content| serde_json::from_str(&content).ok())
+        } else {
+            None
+        };
+
+        if let Some(info) = info {
+            if matches_filter(&info, filter) {
+                let mut metadata = info.metadata;
+                metadata.insert(
+                    "label".to_string(),
+                    serde_json::Value::String(acct_label.to_string()),
+                );
+                metadata.insert(
+                    "mimeType".to_string(),
+                    serde_json::Value::String(info.mime_type),
+                );
+                metadata.insert(
+                    "coverageEndDate".to_string(),
+                    serde_json::Value::String(info.coverage_end_date),
+                );
+                metadata.insert(
+                    "extensionName".to_string(),
+                    serde_json::Value::String(info.extension_name),
+                );
+                metadata.insert(
+                    "scrapedAt".to_string(),
+                    serde_json::Value::String(info.scraped_at),
+                );
+                if let Some(url) = info.original_url {
+                    metadata.insert("originalUrl".to_string(), serde_json::Value::String(url));
+                }
+                docs.push(AccountDocumentSummary {
+                    filename: relative,
+                    metadata,
+                });
+            }
+        } else if filter.is_empty() {
+            let mut metadata = BTreeMap::new();
+            metadata.insert(
+                "label".to_string(),
+                serde_json::Value::String(acct_label.to_string()),
+            );
+            docs.push(AccountDocumentSummary {
+                filename: relative,
+                metadata,
+            });
+        }
+    }
+    Ok(())
+}
+
 struct SaveResourceOptions {
     coverage_end_date: Option<String>,
     original_url: Option<String>,
@@ -7682,74 +7775,15 @@ impl RefreshmintApi {
             );
 
             if documents_dir.exists() {
-                for entry in std::fs::read_dir(&documents_dir)
-                    .map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?
-                {
-                    let entry =
-                        entry.map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?;
-                    let file_name = entry.file_name().to_string_lossy().to_string();
-                    if file_name.ends_with("-info.json") || !entry.path().is_file() {
-                        continue;
-                    }
-
-                    let sidecar_path = documents_dir.join(format!("{file_name}-info.json"));
-                    let info = if sidecar_path.exists() {
-                        std::fs::read_to_string(&sidecar_path)
-                            .ok()
-                            .and_then(|content| {
-                                serde_json::from_str::<crate::scrape::DocumentInfo>(&content).ok()
-                            })
-                    } else {
-                        None
-                    };
-
-                    if let Some(info) = info {
-                        if matches_filter(&info, &filter) {
-                            let mut metadata = info.metadata;
-                            metadata.insert(
-                                "label".to_string(),
-                                serde_json::Value::String(acct_label.clone()),
-                            );
-                            metadata.insert(
-                                "mimeType".to_string(),
-                                serde_json::Value::String(info.mime_type),
-                            );
-                            metadata.insert(
-                                "coverageEndDate".to_string(),
-                                serde_json::Value::String(info.coverage_end_date),
-                            );
-                            metadata.insert(
-                                "extensionName".to_string(),
-                                serde_json::Value::String(info.extension_name),
-                            );
-                            metadata.insert(
-                                "scrapedAt".to_string(),
-                                serde_json::Value::String(info.scraped_at),
-                            );
-                            if let Some(url) = info.original_url {
-                                metadata.insert(
-                                    "originalUrl".to_string(),
-                                    serde_json::Value::String(url),
-                                );
-                            }
-                            docs.push(AccountDocumentSummary {
-                                filename: file_name,
-                                metadata,
-                            });
-                        }
-                    } else if filter.is_empty() {
-                        // Include docs without sidecars only if no filter is requested
-                        let mut metadata = BTreeMap::new();
-                        metadata.insert(
-                            "label".to_string(),
-                            serde_json::Value::String(acct_label.clone()),
-                        );
-                        docs.push(AccountDocumentSummary {
-                            filename: file_name,
-                            metadata,
-                        });
-                    }
-                }
+                collect_account_documents_in_dir(
+                    &documents_dir,
+                    &documents_dir,
+                    "",
+                    &filter,
+                    &acct_label,
+                    &mut docs,
+                )
+                .map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?;
             }
         }
         docs.sort_by(|a, b| {

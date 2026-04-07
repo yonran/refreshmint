@@ -652,9 +652,14 @@ async function dismissStatementUnavailableMessageIfPossible() {
     return String(result || '');
 }
 
+/**
+ * @typedef {{ filename: string, metadata: Record<string, string> }} AccountDocumentSummary
+ */
+
 async function loadExistingDocumentIndex() {
     // UNTESTED: this depends on newly added refreshmint.listAccountDocuments().
     var docsJson = await refreshmint.listAccountDocuments();
+    /** @type {AccountDocumentSummary[]} */
     var docs = JSON.parse(docsJson || '[]');
     var latestCsvCoverage = '';
     var latestPdfCoverage = '';
@@ -666,8 +671,7 @@ async function loadExistingDocumentIndex() {
         var filename = String(doc.filename || '');
         var lower = filename.toLowerCase();
         var coverage =
-            String(doc.coverageEndDate || '') ||
-            filenameCoveragePrefix(filename);
+            doc.metadata['coverageEndDate'] || filenameCoveragePrefix(filename);
         if (!coverage) continue;
         if (lower.endsWith('.csv')) {
             csvCoverageSet[coverage] = true;
