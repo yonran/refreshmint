@@ -10,6 +10,14 @@ import tseslint from 'typescript-eslint';
 import { defineConfig } from 'eslint/config';
 import { flatConfigs as importFlatConfigs } from 'eslint-plugin-import-x';
 import { getGitUserIgnoreFile } from './scripts/get-git-user-ignore-file.mts';
+import diff from 'eslint-plugin-diff';
+
+// When ESLINT_DIFF=1, apply eslint-plugin-diff as a processor so that strict
+// type-checked rules (no-unsafe-*, etc.) only report on changed lines.
+// Set ESLINT_PLUGIN_DIFF_COMMIT=<base> (e.g. "main") to check all lines
+// changed since that commit rather than only staged changes.
+// Used by `npm run lint-diff`; regular `npm run lint` uses disableTypeChecked.
+const isDiff = process.env['ESLINT_DIFF'] === '1';
 
 const vitePublicResolver = {
     name: 'vite-public',
@@ -107,11 +115,16 @@ export default defineConfig(
             'import-x/no-cycle': 'error',
         },
     },
-    {
-        files: ['**/*.js', '**/*.mjs'],
-        // eslint-disable-next-line import-x/no-named-as-default-member
-        ...tseslint.configs.disableTypeChecked,
-    },
+    // eslint-disable-next-line import-x/no-named-as-default-member
+    ...(isDiff
+        ? diff.configs['flat/diff']
+        : [
+              {
+                  files: ['**/*.js', '**/*.mjs'],
+                  // eslint-disable-next-line import-x/no-named-as-default-member
+                  ...tseslint.configs.disableTypeChecked,
+              },
+          ]),
     {
         files: [
             'builtin-extensions/**/*.{js,mjs,ts,mts}',

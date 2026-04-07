@@ -48,6 +48,37 @@ explaining why `rename_all = "camelCase"` is omitted.
 - For **posting-level UI guards** (context menu items, inline chips) that should apply to any non-balance-sheet posting — not just uncategorized ones — use `isNonBalanceSheet` rather than `isUnknown`.
 - To identify a GL transaction that was posted by refreshmint (and is therefore eligible for `merge_gl_transfer`), check `t.comment.includes('generated-by: refreshmint-post')`.
 
+## Linting
+
+`npm run lint` uses `eslint-plugin-diff` and only reports violations on lines
+present in the git diff (staged changes by default). To check all lines
+changed on a branch versus a base commit, set `ESLINT_PLUGIN_DIFF_COMMIT`:
+
+```bash
+ESLINT_PLUGIN_DIFF_COMMIT=main npm run lint
+```
+
+Always run this before committing any change to a `.mjs` or `.js` driver file
+so that new code is checked against the full set of strict type-checked rules.
+
+## Linting
+
+Two lint commands are available:
+
+- `npm run lint` — standard rules on all files (`.mjs`/`.js` files use relaxed
+  type-checking via `disableTypeChecked`).
+- `npm run lint-diff` — strict type-checked rules (`no-unsafe-*`, etc.) applied
+  only to lines present in the current git diff (staged changes by default).
+
+Always run `lint-diff` after editing `.mjs` or `.js` driver files. To check
+all lines changed on a branch vs a base commit:
+
+```bash
+ESLINT_PLUGIN_DIFF_COMMIT=main npm run lint-diff
+```
+
+Both commands run in the pre-commit hook and in CI.
+
 ## Scraping
 
 Read [scraper.md](./docs/scraper.md) before you edit any extension driver which scrapes an account.

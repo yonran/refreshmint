@@ -9,9 +9,13 @@ echo "Running pre-commit checks..."
 echo "  → Type checking..."
 npm run typecheck
 
-# Run ESLint + Prettier
+# Run ESLint + Prettier (less-strict rules, all files)
 echo "  → Linting & formatting..."
 npm run lint
+
+# Run ESLint with stricter type-checked rules on changed lines only
+echo "  → Strict lint on diff..."
+npm run lint-diff
 
 echo "  → Cargo check..."
 cd src-tauri

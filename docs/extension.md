@@ -208,9 +208,33 @@ Run:
 npm run build:extensions
 npm run typecheck
 npm run lint
+npm run lint-diff
 ```
 
-Both commands include builtin extensions and `.agents/skills` source.
+Both `typecheck` and `lint` include builtin extensions and `.agents/skills` source.
+
+`npm run lint-diff` uses `eslint-plugin-diff` to apply strict type-checked rules
+(`no-unsafe-*`, etc.) only to lines present in the current `git diff --cached`
+(staged changes). This allows gradual adoption of strict rules without requiring
+all existing violations to be fixed at once.
+
+To check all lines changed since a base commit (e.g. before opening a PR):
+
+```bash
+ESLINT_PLUGIN_DIFF_COMMIT=main npm run lint-diff
+```
+
+`npm run lint` uses `eslint-plugin-diff` and only reports ESLint violations on
+lines that appear in the current `git diff --cached` (staged changes). This
+allows strict type-checked rules (`no-unsafe-*`, etc.) to be enabled globally
+while existing violations in untouched lines are suppressed until those lines
+are modified.
+
+To check all lines changed since a base commit (e.g. before opening a PR):
+
+```bash
+ESLINT_PLUGIN_DIFF_COMMIT=main npm run lint
+```
 
 ## Build runtime-ready artifacts
 
