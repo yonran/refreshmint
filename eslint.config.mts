@@ -10,7 +10,7 @@ import tseslint from 'typescript-eslint';
 import { defineConfig } from 'eslint/config';
 import { flatConfigs as importFlatConfigs } from 'eslint-plugin-import-x';
 import { getGitUserIgnoreFile } from './scripts/get-git-user-ignore-file.mts';
-import diff from 'eslint-plugin-diff';
+import { configs as diffConfigs } from 'eslint-plugin-diff';
 
 // When ESLINT_DIFF=1, apply eslint-plugin-diff as a processor so that strict
 // type-checked rules (no-unsafe-*, etc.) only report on changed lines.
@@ -115,9 +115,8 @@ export default defineConfig(
             'import-x/no-cycle': 'error',
         },
     },
-    // eslint-disable-next-line import-x/no-named-as-default-member
     ...(isDiff
-        ? diff.configs['flat/diff']
+        ? diffConfigs['flat/diff']
         : [
               {
                   files: ['**/*.js', '**/*.mjs'],
