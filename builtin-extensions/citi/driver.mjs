@@ -982,7 +982,7 @@ async function scrapeDashboardActivityCsvs(page) {
         ];
         const csv = csvLines.join('\n') + '\n';
         await refreshmint.saveResource(filename, utf8Bytes(csv), {
-            coverageEndDate,
+            coverageEndDate: coverageEndDate ?? undefined,
             mimeType: 'text/csv',
             label: accountInfo.label,
             accountName: accountInfo.accountName,

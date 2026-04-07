@@ -2052,6 +2052,12 @@ async function downloadStatementsSinceLastScrape(
             continue;
         }
 
+        if (!download) {
+            throw new Error(
+                'Unexpected: no download and no URL fallback for entry: ' +
+                    (entry.rowText || '(no-row-text)'),
+            );
+        }
         var suggested =
             download.suggestedFilename ||
             statementFallbackFilename(coverage, i);

@@ -1,9 +1,14 @@
+/**
+ * @param {unknown} value
+ * @param {{ depth?: number } | undefined} [options]
+ * @returns {string}
+ */
 function inspect(value, options = undefined) {
     const maxDepth =
         typeof options === 'object' &&
         options !== null &&
         Number.isFinite(options.depth)
-            ? Math.max(0, Math.floor(options.depth))
+            ? Math.max(0, Math.floor(options.depth ?? 0))
             : 6;
     const seen = new WeakSet();
 

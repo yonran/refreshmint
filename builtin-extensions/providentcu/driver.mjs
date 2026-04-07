@@ -30,6 +30,7 @@ const ZELLE_URL = `${BASE_URL}/ProvidentOnlineBanking/ZelleDirect.aspx`;
 
 // Configuration for efficient scraping and debugging
 const DOWNLOAD_LIMIT = null; // Set to number to limit downloads per run
+/** @type {string | null} */
 const SKIP_BEFORE_DATE = null; // Format: YYYY-MM-DD e.g. "2026-01-01"
 // Phases to run: comma-separated subset of 'accounts,statements,zelle', or null = all.
 // Override without editing via: --option phases=zelle
@@ -658,7 +659,9 @@ async function handleAccountSummary(context) {
             return { progressName: `navigating to activity: ${account}` };
         } else {
             refreshmint.log(`Account button not found for ${account}`);
-            context.completedAccounts.add(context.pendingAccounts.shift());
+            context.completedAccounts.add(
+                context.pendingAccounts.shift() ?? '',
+            );
             return { progressName: `skipped account ${account}` };
         }
     }
@@ -1798,7 +1801,7 @@ async function scanCheckAttachmentsOnHistoryTable(
         if (!byMonth.has(candidate.month)) {
             byMonth.set(candidate.month, []);
         }
-        byMonth.get(candidate.month).push(candidate);
+        byMonth.get(candidate.month)?.push(candidate);
     }
 
     const currentMonth = currentMonthIso();
@@ -2015,7 +2018,7 @@ async function handleAccountActivity(context) {
         `  Attachment summary (${label}): candidates=${activityStats.attachmentCandidates}, attempted=${activityStats.attachmentAttempted}, downloaded=${activityStats.attachmentDownloaded}, existing=${activityStats.attachmentSkippedExisting}, failed=${activityStats.attachmentFailed}, monthsChecked=${activityStats.attachmentMonthsChecked}, monthsSkippedCheckpoint=${activityStats.attachmentMonthsSkippedCheckpoint}`,
     );
 
-    context.completedAccounts.add(context.pendingAccounts.shift());
+    context.completedAccounts.add(context.pendingAccounts.shift() ?? '');
     refreshmint.log('Navigating back to Account Summary...');
     await page.goto(SUMMARY_URL);
     await waitMs(page, 2000);
