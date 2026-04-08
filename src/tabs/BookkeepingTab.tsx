@@ -17,14 +17,17 @@ import {
     type PeriodClose,
     type PeriodCloseStatus,
     type ReconciliationSession,
+    type TransactionRow,
     type TypedRef,
     type TypedRefKind,
     upsertPeriodClose,
 } from '../tauri-commands.ts';
+import { filterReconciliationCandidates } from '../gl-transfer-utils.ts';
 
 interface Props {
     ledger: string;
     accounts: AccountRow[];
+    transactions: TransactionRow[];
 }
 
 type TypedRefDraft = {
@@ -219,7 +222,7 @@ function TypedRefFields({
     );
 }
 
-export function BookkeepingTab({ ledger, accounts }: Props) {
+export function BookkeepingTab({ ledger, accounts, transactions }: Props) {
     const [sessions, setSessions] = useState<ReconciliationSession[]>([]);
     const [links, setLinks] = useState<LinkRecord[]>([]);
     const [periodCloses, setPeriodCloses] = useState<PeriodClose[]>([]);
@@ -234,7 +237,7 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
         useState('');
     const [statementEndingBalance, setStatementEndingBalance] = useState('');
     const [statementCurrency, setStatementCurrency] = useState('');
-    const [reconciledTxnIds, setReconciledTxnIds] = useState('');
+    const [selectedTxnIds, setSelectedTxnIds] = useState<string[]>([]);
     const [sessionNotes, setSessionNotes] = useState('');
 
     const [periodId, setPeriodId] = useState(currentPeriodId());
@@ -262,6 +265,26 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                 .sort((a, b) => a.localeCompare(b)),
         [accounts],
     );
+    const reconciliationCandidates = useMemo(
+        () =>
+            filterReconciliationCandidates(
+                transactions,
+                glAccount,
+                statementStartDate,
+                statementEndDate,
+            ),
+        [transactions, glAccount, statementStartDate, statementEndDate],
+    );
+    const selectedCandidateCount = useMemo(
+        () =>
+            reconciliationCandidates.filter((txn) =>
+                selectedTxnIds.includes(txn.id),
+            ).length,
+        [reconciliationCandidates, selectedTxnIds],
+    );
+    const allCandidatesSelected =
+        reconciliationCandidates.length > 0 &&
+        selectedCandidateCount === reconciliationCandidates.length;
 
     const reload = useCallback(async () => {
         setLoading(true);
@@ -287,6 +310,15 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
         void reload();
     }, [reload]);
 
+    useEffect(() => {
+        const visibleIds = new Set(
+            reconciliationCandidates.map((txn) => txn.id),
+        );
+        setSelectedTxnIds((current) =>
+            current.filter((txnId) => visibleIds.has(txnId)),
+        );
+    }, [reconciliationCandidates]);
+
     async function handleCreateSession() {
         setError(null);
         setStatus('Creating reconciliation session…');
@@ -298,20 +330,28 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                 statementStartingBalance: trimToNull(statementStartingBalance),
                 statementEndingBalance,
                 currency: trimToNull(statementCurrency),
-                reconciledTxnIds: parseListInput(reconciledTxnIds),
+                reconciledTxnIds: selectedTxnIds,
                 notes: trimToNull(sessionNotes),
             };
             await createReconciliationSession(ledger, input);
             setStatus('Reconciliation session created.');
             setStatementStartingBalance('');
             setStatementEndingBalance('');
-            setReconciledTxnIds('');
+            setSelectedTxnIds([]);
             setSessionNotes('');
             await reload();
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
             setStatus(null);
         }
+    }
+
+    function toggleTxnSelection(txnId: string) {
+        setSelectedTxnIds((current) =>
+            current.includes(txnId)
+                ? current.filter((id) => id !== txnId)
+                : [...current, txnId],
+        );
     }
 
     async function handleFinalizeSession(id: string) {
@@ -523,14 +563,12 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                     </label>
                 </div>
                 <label className="field">
-                    <span>Session member GL transaction ids</span>
-                    <textarea
-                        value={reconciledTxnIds}
-                        placeholder="gl-txn-1, gl-txn-2"
-                        onChange={(event) => {
-                            setReconciledTxnIds(event.target.value);
-                        }}
-                    />
+                    <span>Candidate summary</span>
+                    <div className="status-dim">
+                        {glAccount.trim().length === 0
+                            ? 'Choose a GL account to load candidate transactions.'
+                            : `${selectedCandidateCount} of ${reconciliationCandidates.length} candidate transaction(s) selected`}
+                    </div>
                 </label>
                 <label className="field">
                     <span>Notes</span>
@@ -545,13 +583,123 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                 <div className="pipeline-actions">
                     <button
                         type="button"
+                        className="ghost-button"
+                        disabled={reconciliationCandidates.length === 0}
+                        onClick={() => {
+                            setSelectedTxnIds(
+                                allCandidatesSelected
+                                    ? []
+                                    : reconciliationCandidates.map(
+                                          (txn) => txn.id,
+                                      ),
+                            );
+                        }}
+                    >
+                        {allCandidatesSelected
+                            ? 'Clear Candidate Selection'
+                            : 'Select All Candidates'}
+                    </button>
+                    <button
+                        type="button"
                         className="primary-button"
+                        disabled={selectedTxnIds.length === 0}
                         onClick={() => {
                             void handleCreateSession();
                         }}
                     >
                         Create Session
                     </button>
+                </div>
+                <div className="table-wrap">
+                    <table className="ledger-table">
+                        <thead>
+                            <tr>
+                                <th>
+                                    <input
+                                        type="checkbox"
+                                        checked={allCandidatesSelected}
+                                        disabled={
+                                            reconciliationCandidates.length ===
+                                            0
+                                        }
+                                        onChange={() => {
+                                            setSelectedTxnIds(
+                                                allCandidatesSelected
+                                                    ? []
+                                                    : reconciliationCandidates.map(
+                                                          (txn) => txn.id,
+                                                      ),
+                                            );
+                                        }}
+                                    />
+                                </th>
+                                <th>Date</th>
+                                <th>Description</th>
+                                <th>Amount</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {reconciliationCandidates.length === 0 ? (
+                                <tr>
+                                    <td colSpan={5} className="status-dim">
+                                        No candidate transactions for this
+                                        account/date range.
+                                    </td>
+                                </tr>
+                            ) : (
+                                reconciliationCandidates.map((txn) => {
+                                    const accountAmounts = txn.postings
+                                        .filter(
+                                            (posting) =>
+                                                posting.account === glAccount,
+                                        )
+                                        .map((posting) => posting.amount ?? '—')
+                                        .join(', ');
+                                    return (
+                                        <tr key={txn.id}>
+                                            <td>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={selectedTxnIds.includes(
+                                                        txn.id,
+                                                    )}
+                                                    onChange={() => {
+                                                        toggleTxnSelection(
+                                                            txn.id,
+                                                        );
+                                                    }}
+                                                />
+                                            </td>
+                                            <td className="mono">{txn.date}</td>
+                                            <td>
+                                                <div>{txn.description}</div>
+                                                <div className="status-dim mono">
+                                                    {txn.id}
+                                                </div>
+                                            </td>
+                                            <td className="mono">
+                                                {accountAmounts}
+                                            </td>
+                                            <td>
+                                                {txn.bookkeeping
+                                                    .reconciledSessionIds
+                                                    .length > 0 ? (
+                                                    <span className="status-chip status-chip-warning">
+                                                        reconciled
+                                                    </span>
+                                                ) : (
+                                                    <span className="status-chip">
+                                                        open
+                                                    </span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            )}
+                        </tbody>
+                    </table>
                 </div>
                 <div className="table-wrap">
                     <table className="ledger-table">
