@@ -388,10 +388,12 @@ export async function startScrapeDebugSession(
 export async function startScrapeDebugSessionForLogin(
     ledger: string,
     loginName: string,
+    headless = false,
 ): Promise<string> {
     return invoke('start_scrape_debug_session_for_login', {
         ledger,
         loginName,
+        headless,
     });
 }
 
@@ -936,8 +938,14 @@ export async function runScrapeForLogin(
     ledger: string,
     loginName: string,
     source: 'manual' | 'auto' = 'manual',
+    headless = false,
 ): Promise<void> {
-    await invoke('run_scrape_for_login', { ledger, loginName, source });
+    await invoke('run_scrape_for_login', {
+        ledger,
+        loginName,
+        source,
+        headless,
+    });
 }
 
 export async function getScrapeLog(

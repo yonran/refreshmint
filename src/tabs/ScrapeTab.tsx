@@ -86,6 +86,7 @@ interface ScrapeTabProps {
     onScrapeComplete: (loginName: string) => Promise<void>;
     onScrapeAll: () => void;
     autoScrapeActive: string | null;
+    headlessScrape: boolean;
 }
 
 function secretDomainKey(domain: string): string {
@@ -118,6 +119,7 @@ export function ScrapeTab({
     onScrapeComplete,
     onScrapeAll,
     autoScrapeActive,
+    headlessScrape,
 }: ScrapeTabProps) {
     const [selectedPipelineLabel, setSelectedPipelineLabel] = useState<
         string | null
@@ -918,6 +920,7 @@ export function ScrapeTab({
             const socket = await startScrapeDebugSessionForLogin(
                 ledger.path,
                 loginName,
+                headlessScrape,
             );
             setScrapeDebugSocket(socket);
             setScrapeStatus(`Debug session started. Socket: ${socket}`);
@@ -1649,7 +1652,12 @@ export function ScrapeTab({
         setScrapeStatus(`Running scrape for ${loginName}...`);
         const timestamp = new Date().toISOString();
         try {
-            await runScrapeForLogin(ledger.path, loginName);
+            await runScrapeForLogin(
+                ledger.path,
+                loginName,
+                'manual',
+                headlessScrape,
+            );
             localStorage.setItem(`lastScrape:${loginName}`, timestamp);
             setScrapeStatus(`Scrape completed for ${loginName}.`);
             await onScrapeComplete(loginName);

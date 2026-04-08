@@ -19,6 +19,7 @@ pub struct ScrapeConfig {
     pub extension_name: String,
     pub ledger_dir: PathBuf,
     pub profile_override: Option<PathBuf>,
+    pub headless: bool,
     pub prompt_overrides: js_api::PromptOverrides,
     pub prompt_requires_override: bool,
     /// When set, `refreshmint.prompt()` asks the host app for a response
@@ -490,9 +491,10 @@ pub async fn run_scrape_async(
     eprintln!("Profile dir: {}", profile_dir.display());
 
     eprintln!("Launching browser...");
-    let (browser_instance, handler_handle) = browser::launch_browser(&chrome_path, &profile_dir)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    let (browser_instance, handler_handle) =
+        browser::launch_browser(&chrome_path, &profile_dir, config.headless)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
     eprintln!("Browser launched.");
     let browser = Arc::new(Mutex::new(browser_instance));
 
@@ -989,7 +991,7 @@ mod tests {
             let chrome_path = browser::find_chrome_binary()
                 .unwrap_or_else(|err| panic!("failed to find browser binary: {err}"));
             let (browser_instance, handler_handle) =
-                browser::launch_browser(&chrome_path, &profile_dir)
+                browser::launch_browser(&chrome_path, &profile_dir, false)
                     .await
                     .unwrap_or_else(|err| panic!("failed to launch browser: {err}"));
             let browser = Arc::new(Mutex::new(browser_instance));

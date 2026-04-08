@@ -286,6 +286,7 @@ fn locator_api_works() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -341,6 +342,7 @@ fn get_by_role_api_works() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -395,6 +397,7 @@ fn shadow_dom_api_works() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };

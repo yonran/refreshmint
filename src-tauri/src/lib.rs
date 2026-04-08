@@ -393,6 +393,7 @@ fn get_login_extraction_support(
 fn start_scrape_debug_session_for_login(
     ledger: String,
     login_name: String,
+    headless: bool,
 ) -> Result<String, String> {
     let login_name = require_login_name_input(login_name)?;
 
@@ -426,6 +427,7 @@ fn start_scrape_debug_session_for_login(
         extension_name: extension,
         ledger_dir: target_dir,
         profile_override: None,
+        headless,
         socket_path: Some(socket_path.clone()),
         prompt_requires_override: false,
     };
@@ -448,7 +450,7 @@ fn start_scrape_debug_session_for_login(
 fn start_scrape_debug_session(ledger: String, account: String) -> Result<String, String> {
     // Compatibility alias for legacy account-keyed callers.
     let login_name = require_non_empty_input("account", account)?;
-    start_scrape_debug_session_for_login(ledger, login_name)
+    start_scrape_debug_session_for_login(ledger, login_name, false)
 }
 
 #[tauri::command]
@@ -587,6 +589,7 @@ async fn run_scrape_for_login(
     ledger: String,
     login_name: String,
     source: String,
+    headless: bool,
 ) -> Result<(), String> {
     let login_name = require_login_name_input(login_name)?;
 
@@ -612,6 +615,7 @@ async fn run_scrape_for_login(
             extension_name: extension,
             ledger_dir: target_dir.clone(),
             profile_override: None,
+            headless,
             prompt_overrides: scrape::js_api::PromptOverrides::new(),
             prompt_requires_override: false,
             prompt_ui_handler: Some(prompt_ui_handler),
@@ -646,7 +650,7 @@ async fn run_scrape(
     account: String,
 ) -> Result<(), String> {
     let login_name = require_non_empty_input("account", account)?;
-    run_scrape_for_login(app_handle, ledger, login_name, "manual".to_string()).await
+    run_scrape_for_login(app_handle, ledger, login_name, "manual".to_string(), false).await
 }
 
 #[tauri::command]

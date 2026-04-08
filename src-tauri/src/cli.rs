@@ -176,6 +176,8 @@ struct DebugStartArgs {
     profile: Option<PathBuf>,
     #[arg(long)]
     socket: Option<PathBuf>,
+    #[arg(long)]
+    headless: bool,
 }
 
 #[derive(Args)]
@@ -283,6 +285,8 @@ struct ScrapeArgs {
     ledger: Option<PathBuf>,
     #[arg(long)]
     profile: Option<PathBuf>,
+    #[arg(long)]
+    headless: bool,
     #[arg(
         long,
         value_name = "MESSAGE=VALUE",
@@ -729,6 +733,7 @@ fn run_debug_start(
         extension_name,
         ledger_dir,
         profile_override: args.profile,
+        headless: args.headless,
         socket_path: Some(socket),
         prompt_requires_override: true,
     };
@@ -1014,6 +1019,7 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
         extension_name,
         ledger_dir,
         profile_override: args.profile,
+        headless: args.headless,
         prompt_overrides,
         prompt_requires_override: true,
         prompt_ui_handler: None,

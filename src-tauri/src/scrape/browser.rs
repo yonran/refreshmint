@@ -125,6 +125,7 @@ fn chrome_candidates() -> Vec<PathBuf> {
 pub async fn launch_browser(
     chrome_path: &Path,
     profile_dir: &Path,
+    headless: bool,
 ) -> Result<(Browser, tokio::task::JoinHandle<()>), Box<dyn Error>> {
     std::fs::create_dir_all(profile_dir)?;
 
@@ -136,7 +137,7 @@ pub async fn launch_browser(
         .arg("--disable-extensions")
         .launch_timeout(std::time::Duration::from_secs(30));
 
-    let force_headless = std::env::var_os("REFRESHMINT_BROWSER_HEADLESS").is_some();
+    let force_headless = headless || std::env::var_os("REFRESHMINT_BROWSER_HEADLESS").is_some();
     let is_linux_ci = cfg!(target_os = "linux") && std::env::var_os("CI").is_some();
     let use_headless = force_headless || is_linux_ci;
     eprintln!(

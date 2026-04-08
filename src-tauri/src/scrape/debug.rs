@@ -7,6 +7,7 @@ pub struct DebugStartConfig {
     pub extension_name: String,
     pub ledger_dir: PathBuf,
     pub profile_override: Option<PathBuf>,
+    pub headless: bool,
     pub socket_path: Option<PathBuf>,
     pub prompt_requires_override: bool,
 }
@@ -419,7 +420,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
             eprintln!("Profile dir: {}", profile_dir.display());
 
             let (browser_instance, handler) =
-                super::browser::launch_browser(&chrome_path, &profile_dir)
+                super::browser::launch_browser(&chrome_path, &profile_dir, config.headless)
                     .await
                     .map_err(|err| err.to_string())?;
             let browser = Arc::new(Mutex::new(browser_instance));

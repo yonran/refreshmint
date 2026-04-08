@@ -73,6 +73,9 @@ function App() {
     const [autoScrapeIntervalHours, setAutoScrapeIntervalHours] = useState(() =>
         Number(localStorage.getItem('pref:autoScrapeIntervalHours') ?? '24'),
     );
+    const [headlessScrape, setHeadlessScrape] = useState(
+        () => localStorage.getItem('pref:headlessScrape') === 'true',
+    );
     const [autoScrapeQueue, setAutoScrapeQueue] = useState<string[]>([]);
     const [autoScrapeActive, setAutoScrapeActive] = useState<string | null>(
         null,
@@ -478,7 +481,7 @@ function App() {
         setAutoScrapeActive(loginName);
         setAutoScrapeQueue(rest);
         const timestamp = new Date().toISOString();
-        void runScrapeForLogin(ledger.path, loginName, 'auto')
+        void runScrapeForLogin(ledger.path, loginName, 'auto', headlessScrape)
             .then(async () => {
                 localStorage.setItem(`lastScrape:${loginName}`, timestamp);
                 await autoEtlForLoginRef.current?.(loginName);
@@ -492,7 +495,7 @@ function App() {
                 setAutoEtlStatus(null);
                 setScrapeLogVersion((v) => v + 1);
             });
-    }, [ledger, autoScrapeQueue, autoScrapeActive]);
+    }, [ledger, autoScrapeQueue, autoScrapeActive, headlessScrape]);
 
     useEffect(() => {
         if (ledgerPath === null) {
@@ -1336,6 +1339,27 @@ function App() {
                                     />
                                 </label>
                             </section>
+                            <section className="preferences-section">
+                                <h3>Browser</h3>
+                                <label className="checkbox-field">
+                                    <input
+                                        type="checkbox"
+                                        checked={headlessScrape}
+                                        onChange={(e) => {
+                                            const v = e.target.checked;
+                                            setHeadlessScrape(v);
+                                            localStorage.setItem(
+                                                'pref:headlessScrape',
+                                                String(v),
+                                            );
+                                        }}
+                                    />
+                                    <span>
+                                        Run scrapes headlessly (no browser
+                                        window)
+                                    </span>
+                                </label>
+                            </section>
                         </div>
                     ) : (
                         <ScrapeTab
@@ -1373,6 +1397,7 @@ function App() {
                             }}
                             onScrapeAll={handleScrapeAll}
                             autoScrapeActive={autoScrapeActive}
+                            headlessScrape={headlessScrape}
                         />
                     )}
                 </section>

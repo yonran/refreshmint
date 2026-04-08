@@ -77,6 +77,7 @@ mod unix_only {
             extension_name: "smoke-ext".to_string(),
             ledger_dir: ledger_dir.clone(),
             profile_override: Some(profile_dir),
+            headless: false,
             socket_path: Some(socket_path.clone()),
             prompt_requires_override: false,
         };

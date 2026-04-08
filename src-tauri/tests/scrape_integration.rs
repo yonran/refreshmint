@@ -998,6 +998,7 @@ fn scrape_smoke_driver_writes_output() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1060,6 +1061,7 @@ fn scrape_popup_wait_for_event_switches_tab() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1107,6 +1109,7 @@ fn scrape_screenshot_api_returns_bytes_and_writes_paths() -> Result<(), Box<dyn 
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir.clone()),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1180,6 +1183,7 @@ fn scrape_popup_waiter_rejects_when_popup_closes() -> Result<(), Box<dyn Error>>
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1230,6 +1234,7 @@ fn scrape_click_reports_overlay_interception() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1288,6 +1293,7 @@ fn scrape_goto_handles_same_url_and_hash_navigation() -> Result<(), Box<dyn Erro
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1351,6 +1357,7 @@ fn scrape_frame_methods_switch_context() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1408,6 +1415,7 @@ fn scrape_frame_methods_switch_context_cross_origin_oopif() -> Result<(), Box<dy
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1463,6 +1471,7 @@ fn scrape_network_request_response_api_works() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1538,6 +1547,7 @@ fn scrape_network_matchers_work() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1616,6 +1626,7 @@ fn scrape_network_wait_for_event_aliases_work() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1690,6 +1701,7 @@ fn scrape_network_wait_for_event_options_work() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1762,6 +1774,7 @@ fn scrape_network_lifecycle_events_work() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
@@ -1838,6 +1851,7 @@ fn scrape_network_redirects_work() -> Result<(), Box<dyn Error>> {
         ledger_dir: ledger_dir.clone(),
         profile_override: Some(profile_dir),
         prompt_overrides: app_lib::scrape::js_api::PromptOverrides::new(),
+        headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
     };
