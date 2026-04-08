@@ -1266,7 +1266,14 @@ async function collectStatementEntries() {
             if (!looksDownload) continue;
             var row = node.closest("tr, li, .row, .statement-row, .statement-item, article, section, div");
             var rowText = norm(row ? row.textContent || "" : text);
+            // Exclude empty template/placeholder rows used by the Bank of America UI.
+            // When real document details are missing, these render generically as "View PDF for  for ".
             if (rowText.toLowerCase().indexOf('for  for') !== -1) continue;
+            
+            // Exclude legal notices (like "Change in Terms") which are not standard bank statements
+            // and trigger different download behaviors that break the scraper.
+            if (rowText.toLowerCase().indexOf('change in terms') !== -1) continue;
+            
             if (rowText.length < 12) continue;
             var selector = cssPath(node);
             if (!selector) continue;
