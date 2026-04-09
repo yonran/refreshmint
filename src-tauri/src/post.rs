@@ -1713,10 +1713,10 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "refreshmint-rec-{prefix}-{}-{now}",
+            "refreshmint-rec-{prefix}-{}-{now}.refreshmint",
             std::process::id()
         ));
-        fs::create_dir_all(&dir).unwrap();
+        crate::ledger::new_ledger_at_dir(&dir).unwrap();
         dir
     }
 
