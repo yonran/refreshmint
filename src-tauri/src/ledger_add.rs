@@ -93,12 +93,11 @@ pub fn add_transaction_text(
 ) -> Result<LedgerView, Box<dyn std::error::Error>> {
     let journal_path = prepare_ledger(ledger_dir)?;
     let serialized = ensure_trailing_newline(transaction);
-    let (serialized, inserted_ids) = crate::gl_journal::ensure_journal_has_ids(&serialized);
+    let (serialized, _) = crate::gl_journal::ensure_journal_has_ids(&serialized);
     run_hledger_check(&serialized, &[], "transaction-only")?;
     run_hledger_check(&serialized, &[&journal_path], "journal-plus-transaction")?;
     append_transaction(&journal_path, &serialized)?;
     let commit_message = transaction_commit_message_from_text(&serialized);
-    let _ = inserted_ids;
     crate::ledger::commit_general_journal(ledger_dir, &commit_message)?;
     crate::ledger_open::open_ledger_dir(ledger_dir)
 }

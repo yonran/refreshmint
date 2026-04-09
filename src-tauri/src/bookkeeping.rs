@@ -158,13 +158,6 @@ pub struct UpsertPeriodCloseInput {
     pub adjustment_txn_ids: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReconciliationCandidate {
-    #[serde(flatten)]
-    pub transaction: crate::ledger_open::TransactionRow,
-}
-
 pub fn bookkeeping_dir(ledger_dir: &Path) -> PathBuf {
     ledger_dir.join(BOOKKEEPING_DIR)
 }
@@ -385,7 +378,7 @@ pub fn query_reconciliation_candidates(
     gl_account: &str,
     statement_start_date: Option<&str>,
     statement_end_date: &str,
-) -> io::Result<Vec<ReconciliationCandidate>> {
+) -> io::Result<Vec<crate::ledger_open::TransactionRow>> {
     let gl_account = require_non_empty("gl_account", gl_account.to_string())?;
     let statement_end_date = require_date("statement_end_date", statement_end_date.to_string())?;
     let statement_start_date = match statement_start_date {
@@ -411,11 +404,7 @@ pub fn query_reconciliation_candidates(
             txn.tdate.as_str() <= statement_end_date.as_str()
         })
         .collect();
-    crate::ledger_open::build_transaction_rows(ledger_dir, &filtered).map(|rows| {
-        rows.into_iter()
-            .map(|transaction| ReconciliationCandidate { transaction })
-            .collect()
-    })
+    crate::ledger_open::build_transaction_rows(ledger_dir, &filtered)
 }
 
 pub fn repair_gl_txn_refs_after_merge(
@@ -466,16 +455,30 @@ pub fn repair_gl_txn_refs_after_merge(
                     ),
                 ));
             }
-            validate_reconciliation_date(
-                new_txn.date,
-                session.statement_start_date.as_deref(),
-                &session.statement_end_date,
-                new_txn_id,
-            )?;
+            let session_start = session
+                .statement_start_date
+                .as_deref()
+                .map(|s| {
+                    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|err| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("statement_start_date must be YYYY-MM-DD: {err}"),
+                        )
+                    })
+                })
+                .transpose()?;
+            let session_end =
+                chrono::NaiveDate::parse_from_str(&session.statement_end_date, "%Y-%m-%d")
+                    .map_err(|err| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("statement_end_date must be YYYY-MM-DD: {err}"),
+                        )
+                    })?;
+            validate_reconciliation_date(new_txn.date, session_start, session_end, new_txn_id)?;
         }
     }
     affected_finalized_sessions.sort();
-    affected_finalized_sessions.dedup();
     if affected_finalized_sessions.len() > 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -793,6 +796,22 @@ fn validate_reconciliation_membership(
     txn_ids: &[String],
 ) -> io::Result<()> {
     let gl_txn_index = GlTxnIndex::load(ledger_dir)?;
+    let start = statement_start_date
+        .map(|s| {
+            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("statement_start_date must be YYYY-MM-DD: {err}"),
+                )
+            })
+        })
+        .transpose()?;
+    let end = chrono::NaiveDate::parse_from_str(statement_end_date, "%Y-%m-%d").map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("statement_end_date must be YYYY-MM-DD: {err}"),
+        )
+    })?;
     for txn_id in txn_ids {
         let Some(record) = gl_txn_index.records.get(txn_id) else {
             return Err(io::Error::new(
@@ -808,29 +827,18 @@ fn validate_reconciliation_membership(
                 ),
             ));
         }
-        validate_reconciliation_date(
-            record.date,
-            statement_start_date,
-            statement_end_date,
-            txn_id,
-        )?;
+        validate_reconciliation_date(record.date, start, end, txn_id)?;
     }
     Ok(())
 }
 
 fn validate_reconciliation_date(
     txn_date: chrono::NaiveDate,
-    statement_start_date: Option<&str>,
-    statement_end_date: &str,
+    statement_start_date: Option<chrono::NaiveDate>,
+    statement_end_date: chrono::NaiveDate,
     txn_id: &str,
 ) -> io::Result<()> {
     if let Some(start) = statement_start_date {
-        let start = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d").map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("statement_start_date must be YYYY-MM-DD: {err}"),
-            )
-        })?;
         if txn_date < start {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -838,13 +846,7 @@ fn validate_reconciliation_date(
             ));
         }
     }
-    let end = chrono::NaiveDate::parse_from_str(statement_end_date, "%Y-%m-%d").map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("statement_end_date must be YYYY-MM-DD: {err}"),
-        )
-    })?;
-    if txn_date > end {
+    if txn_date > statement_end_date {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("GL transaction {txn_id} is after statement end date"),

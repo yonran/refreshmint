@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
     filterGlTransferCandidates,
-    filterReconciliationCandidates,
     filterTransactionsByBookkeepingState,
 } from './gl-transfer-utils.ts';
 import type { TransactionRow } from './tauri-commands.ts';
@@ -213,83 +212,5 @@ describe('filterTransactionsByBookkeepingState', () => {
         expect(
             filterTransactionsByBookkeepingState([linked, settled], 'settled'),
         ).toEqual([settled]);
-    });
-});
-
-describe('filterReconciliationCandidates', () => {
-    it('filters to transactions touching the chosen account', () => {
-        const rows = [
-            makeTxn('a', {
-                postings: [
-                    {
-                        account: 'Assets:Checking',
-                        amount: '-10.00 USD',
-                        comment: '',
-                        totals: null,
-                    },
-                ],
-            }),
-            makeTxn('b', {
-                postings: [
-                    {
-                        account: 'Expenses:Food',
-                        amount: '10.00 USD',
-                        comment: '',
-                        totals: null,
-                    },
-                ],
-            }),
-        ];
-        expect(
-            filterReconciliationCandidates(rows, 'Assets:Checking', '', '').map(
-                (txn) => txn.id,
-            ),
-        ).toEqual(['a']);
-    });
-
-    it('filters by inclusive statement date bounds', () => {
-        const rows = [
-            makeTxn('a', {
-                date: '2026-03-01',
-                postings: [
-                    {
-                        account: 'Assets:Checking',
-                        amount: '-10.00 USD',
-                        comment: '',
-                        totals: null,
-                    },
-                ],
-            }),
-            makeTxn('b', {
-                date: '2026-03-31',
-                postings: [
-                    {
-                        account: 'Assets:Checking',
-                        amount: '-20.00 USD',
-                        comment: '',
-                        totals: null,
-                    },
-                ],
-            }),
-            makeTxn('c', {
-                date: '2026-04-01',
-                postings: [
-                    {
-                        account: 'Assets:Checking',
-                        amount: '-30.00 USD',
-                        comment: '',
-                        totals: null,
-                    },
-                ],
-            }),
-        ];
-        expect(
-            filterReconciliationCandidates(
-                rows,
-                'Assets:Checking',
-                '2026-03-01',
-                '2026-03-31',
-            ).map((txn) => txn.id),
-        ).toEqual(['a', 'b']);
     });
 });

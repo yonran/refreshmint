@@ -86,31 +86,3 @@ export function filterTransactionsByBookkeepingState(
         return txn.bookkeeping.generated;
     });
 }
-
-export function filterReconciliationCandidates(
-    transactions: TransactionRow[],
-    glAccount: string,
-    statementStartDate: string,
-    statementEndDate: string,
-): TransactionRow[] {
-    const account = glAccount.trim();
-    const start = statementStartDate.trim();
-    const end = statementEndDate.trim();
-
-    if (account.length === 0) {
-        return [];
-    }
-
-    return transactions.filter((txn) => {
-        if (!txn.postings.some((posting) => posting.account === account)) {
-            return false;
-        }
-        if (start.length > 0 && txn.date < start) {
-            return false;
-        }
-        if (end.length > 0 && txn.date > end) {
-            return false;
-        }
-        return true;
-    });
-}

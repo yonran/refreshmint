@@ -314,13 +314,12 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
             setSessions(nextSessions);
             setLinks(nextLinks);
             setPeriodCloses(nextPeriodCloses);
-            await reloadCandidates();
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
         } finally {
             setLoading(false);
         }
-    }, [ledger, reloadCandidates]);
+    }, [ledger]);
 
     useEffect(() => {
         void reload();
@@ -360,6 +359,7 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
             setSelectedTxnIds([]);
             setSessionNotes('');
             await reload();
+            await reloadCandidates();
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
             setStatus(null);
@@ -381,6 +381,7 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
             await finalizeReconciliationSession(ledger, id);
             setStatus(`Reconciliation session ${id} finalized.`);
             await reload();
+            await reloadCandidates();
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
             setStatus(null);
@@ -394,6 +395,7 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
             await reopenReconciliationSession(ledger, id);
             setStatus(`Reconciliation session ${id} reopened.`);
             await reload();
+            await reloadCandidates();
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
             setStatus(null);
@@ -414,6 +416,7 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
             });
             setStatus(`Saved close state for ${periodId}.`);
             await reload();
+            await reloadCandidates();
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
             setStatus(null);
@@ -427,6 +430,7 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
             await reopenPeriodClose(ledger, periodId);
             setStatus(`Reopened ${periodId}.`);
             await reload();
+            await reloadCandidates();
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
             setStatus(null);
@@ -451,6 +455,7 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
             setLinkAmount('');
             setLinkNotes('');
             await reload();
+            await reloadCandidates();
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
             setStatus(null);
@@ -464,6 +469,7 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
             await deleteBookkeepingLink(ledger, id);
             setStatus(`Deleted link ${id}.`);
             await reload();
+            await reloadCandidates();
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
             setStatus(null);

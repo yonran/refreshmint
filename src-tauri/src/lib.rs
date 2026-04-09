@@ -1550,7 +1550,7 @@ fn query_reconciliation_candidates(
     gl_account: String,
     statement_start_date: Option<String>,
     statement_end_date: String,
-) -> Result<Vec<bookkeeping::ReconciliationCandidate>, String> {
+) -> Result<Vec<ledger_open::TransactionRow>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
     let gl_account = require_non_empty_input("glAccount", gl_account)?;
