@@ -976,6 +976,20 @@ export async function queryTransactions(
     return invoke<TransactionRow[]>('query_transactions', { ledger, query });
 }
 
+export async function queryReconciliationCandidates(
+    ledger: string,
+    glAccount: string,
+    statementStartDate: string | null,
+    statementEndDate: string,
+): Promise<TransactionRow[]> {
+    return invoke<TransactionRow[]>('query_reconciliation_candidates', {
+        ledger,
+        glAccount,
+        statementStartDate,
+        statementEndDate,
+    });
+}
+
 export interface HledgerReportResult {
     rows: string[][]; // all rows including header; empty for text commands
     text: string | null; // plain text output for stats/activity

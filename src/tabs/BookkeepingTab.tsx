@@ -16,18 +16,17 @@ import {
     type NewReconciliationSessionInput,
     type PeriodClose,
     type PeriodCloseStatus,
+    queryReconciliationCandidates,
     type ReconciliationSession,
     type TransactionRow,
     type TypedRef,
     type TypedRefKind,
     upsertPeriodClose,
 } from '../tauri-commands.ts';
-import { filterReconciliationCandidates } from '../gl-transfer-utils.ts';
 
 interface Props {
     ledger: string;
     accounts: AccountRow[];
-    transactions: TransactionRow[];
 }
 
 type TypedRefDraft = {
@@ -222,10 +221,13 @@ function TypedRefFields({
     );
 }
 
-export function BookkeepingTab({ ledger, accounts, transactions }: Props) {
+export function BookkeepingTab({ ledger, accounts }: Props) {
     const [sessions, setSessions] = useState<ReconciliationSession[]>([]);
     const [links, setLinks] = useState<LinkRecord[]>([]);
     const [periodCloses, setPeriodCloses] = useState<PeriodClose[]>([]);
+    const [reconciliationCandidates, setReconciliationCandidates] = useState<
+        TransactionRow[]
+    >([]);
     const [loading, setLoading] = useState(false);
     const [status, setStatus] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -265,26 +267,39 @@ export function BookkeepingTab({ ledger, accounts, transactions }: Props) {
                 .sort((a, b) => a.localeCompare(b)),
         [accounts],
     );
-    const reconciliationCandidates = useMemo(
+    const selectableCandidateIds = useMemo(
         () =>
-            filterReconciliationCandidates(
-                transactions,
-                glAccount,
-                statementStartDate,
-                statementEndDate,
-            ),
-        [transactions, glAccount, statementStartDate, statementEndDate],
+            reconciliationCandidates
+                .filter(
+                    (txn) => txn.bookkeeping.reconciledSessionIds.length === 0,
+                )
+                .map((txn) => txn.id),
+        [reconciliationCandidates],
     );
     const selectedCandidateCount = useMemo(
         () =>
-            reconciliationCandidates.filter((txn) =>
-                selectedTxnIds.includes(txn.id),
+            selectableCandidateIds.filter((txnId) =>
+                selectedTxnIds.includes(txnId),
             ).length,
-        [reconciliationCandidates, selectedTxnIds],
+        [selectableCandidateIds, selectedTxnIds],
     );
     const allCandidatesSelected =
-        reconciliationCandidates.length > 0 &&
-        selectedCandidateCount === reconciliationCandidates.length;
+        selectableCandidateIds.length > 0 &&
+        selectedCandidateCount === selectableCandidateIds.length;
+
+    const reloadCandidates = useCallback(async () => {
+        if (glAccount.trim().length === 0) {
+            setReconciliationCandidates([]);
+            return;
+        }
+        const nextCandidates = await queryReconciliationCandidates(
+            ledger,
+            glAccount,
+            trimToNull(statementStartDate),
+            statementEndDate,
+        );
+        setReconciliationCandidates(nextCandidates);
+    }, [glAccount, ledger, statementEndDate, statementStartDate]);
 
     const reload = useCallback(async () => {
         setLoading(true);
@@ -299,25 +314,30 @@ export function BookkeepingTab({ ledger, accounts, transactions }: Props) {
             setSessions(nextSessions);
             setLinks(nextLinks);
             setPeriodCloses(nextPeriodCloses);
+            await reloadCandidates();
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
         } finally {
             setLoading(false);
         }
-    }, [ledger]);
+    }, [ledger, reloadCandidates]);
 
     useEffect(() => {
         void reload();
     }, [reload]);
 
     useEffect(() => {
-        const visibleIds = new Set(
-            reconciliationCandidates.map((txn) => txn.id),
-        );
+        void reloadCandidates().catch((err: unknown) => {
+            setError(err instanceof Error ? err.message : String(err));
+        });
+    }, [reloadCandidates]);
+
+    useEffect(() => {
+        const visibleIds = new Set(selectableCandidateIds);
         setSelectedTxnIds((current) =>
             current.filter((txnId) => visibleIds.has(txnId)),
         );
-    }, [reconciliationCandidates]);
+    }, [selectableCandidateIds]);
 
     async function handleCreateSession() {
         setError(null);
@@ -567,7 +587,7 @@ export function BookkeepingTab({ ledger, accounts, transactions }: Props) {
                     <div className="status-dim">
                         {glAccount.trim().length === 0
                             ? 'Choose a GL account to load candidate transactions.'
-                            : `${selectedCandidateCount} of ${reconciliationCandidates.length} candidate transaction(s) selected`}
+                            : `${selectedCandidateCount} of ${selectableCandidateIds.length} open candidate transaction(s) selected`}
                     </div>
                 </label>
                 <label className="field">
@@ -584,14 +604,12 @@ export function BookkeepingTab({ ledger, accounts, transactions }: Props) {
                     <button
                         type="button"
                         className="ghost-button"
-                        disabled={reconciliationCandidates.length === 0}
+                        disabled={selectableCandidateIds.length === 0}
                         onClick={() => {
                             setSelectedTxnIds(
                                 allCandidatesSelected
                                     ? []
-                                    : reconciliationCandidates.map(
-                                          (txn) => txn.id,
-                                      ),
+                                    : selectableCandidateIds,
                             );
                         }}
                     >
@@ -619,16 +637,13 @@ export function BookkeepingTab({ ledger, accounts, transactions }: Props) {
                                         type="checkbox"
                                         checked={allCandidatesSelected}
                                         disabled={
-                                            reconciliationCandidates.length ===
-                                            0
+                                            selectableCandidateIds.length === 0
                                         }
                                         onChange={() => {
                                             setSelectedTxnIds(
                                                 allCandidatesSelected
                                                     ? []
-                                                    : reconciliationCandidates.map(
-                                                          (txn) => txn.id,
-                                                      ),
+                                                    : selectableCandidateIds,
                                             );
                                         }}
                                     />
@@ -649,6 +664,9 @@ export function BookkeepingTab({ ledger, accounts, transactions }: Props) {
                                 </tr>
                             ) : (
                                 reconciliationCandidates.map((txn) => {
+                                    const isSelectable =
+                                        txn.bookkeeping.reconciledSessionIds
+                                            .length === 0;
                                     const accountAmounts = txn.postings
                                         .filter(
                                             (posting) =>
@@ -664,6 +682,7 @@ export function BookkeepingTab({ ledger, accounts, transactions }: Props) {
                                                     checked={selectedTxnIds.includes(
                                                         txn.id,
                                                     )}
+                                                    disabled={!isSelectable}
                                                     onChange={() => {
                                                         toggleTxnSelection(
                                                             txn.id,
@@ -686,7 +705,7 @@ export function BookkeepingTab({ ledger, accounts, transactions }: Props) {
                                                     .reconciledSessionIds
                                                     .length > 0 ? (
                                                     <span className="status-chip status-chip-warning">
-                                                        reconciled
+                                                        reconciled elsewhere
                                                     </span>
                                                 ) : (
                                                     <span className="status-chip">

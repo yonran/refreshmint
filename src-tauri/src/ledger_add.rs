@@ -78,6 +78,7 @@ pub fn add_transaction_to_ledger(
         transaction.comment.as_deref(),
         &postings,
     );
+    let (serialized, _, _) = crate::gl_journal::ensure_block_has_id(&serialized);
     let commit_message = transaction_commit_message(&transaction.date, &transaction.description);
     run_hledger_check(&serialized, &[], "transaction-only")?;
     run_hledger_check(&serialized, &[&journal_path], "journal-plus-transaction")?;
@@ -92,10 +93,12 @@ pub fn add_transaction_text(
 ) -> Result<LedgerView, Box<dyn std::error::Error>> {
     let journal_path = prepare_ledger(ledger_dir)?;
     let serialized = ensure_trailing_newline(transaction);
+    let (serialized, inserted_ids) = crate::gl_journal::ensure_journal_has_ids(&serialized);
     run_hledger_check(&serialized, &[], "transaction-only")?;
     run_hledger_check(&serialized, &[&journal_path], "journal-plus-transaction")?;
     append_transaction(&journal_path, &serialized)?;
     let commit_message = transaction_commit_message_from_text(&serialized);
+    let _ = inserted_ids;
     crate::ledger::commit_general_journal(ledger_dir, &commit_message)?;
     crate::ledger_open::open_ledger_dir(ledger_dir)
 }
@@ -327,4 +330,82 @@ fn append_transaction(journal_path: &Path, transaction: &str) -> io::Result<()> 
     }
     file.write_all(transaction.as_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_ledger_dir(prefix: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "refreshmint-ledger-add-{prefix}-{}-{now}.refreshmint",
+            std::process::id()
+        ));
+        crate::ledger::new_ledger_at_dir(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn add_transaction_to_ledger_injects_gl_id_tag() {
+        let root = temp_ledger_dir("structured");
+        let _ = add_transaction_to_ledger(
+            &root,
+            NewTransaction {
+                date: "2026-04-01".to_string(),
+                description: "Example".to_string(),
+                comment: None,
+                postings: vec![
+                    NewPosting {
+                        account: "Assets:Cash".to_string(),
+                        amount: Some("1 USD".to_string()),
+                        comment: None,
+                    },
+                    NewPosting {
+                        account: "Income:Test".to_string(),
+                        amount: None,
+                        comment: None,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let content = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(content.contains("; id: "));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_transaction_text_preserves_existing_gl_id_tag() {
+        let root = temp_ledger_dir("raw-preserve");
+        let _ = add_transaction_text(
+            &root,
+            "2026-04-01 Example  ; id: custom-gl-id\n  Assets:Cash  1 USD\n  Income:Test\n",
+        )
+        .unwrap();
+        let content = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(content.contains("id: custom-gl-id"));
+        assert_eq!(content.matches("id: custom-gl-id").count(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_transaction_text_injects_gl_id_tag_when_missing() {
+        let root = temp_ledger_dir("raw-inject");
+        let _ = add_transaction_text(
+            &root,
+            "2026-04-01 Example\n  Assets:Cash  1 USD\n  Income:Test\n",
+        )
+        .unwrap();
+        let content = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(content.contains("; id: "));
+        let _ = fs::remove_dir_all(root);
+    }
 }

@@ -318,7 +318,7 @@ fn find_gl_block(ledger_dir: &Path, gl_txn_id: &str) -> io::Result<Option<String
     }
     let content = fs::read_to_string(&journal_path)?;
     let marker = format!("id: {gl_txn_id}");
-    Ok(split_journal_blocks(&content)
+    Ok(crate::gl_journal::split_journal_blocks(&content)
         .into_iter()
         .find(|block| block.contains(&marker)))
 }
@@ -1226,7 +1226,7 @@ fn remove_gl_transaction(
     let mut kept_blocks = Vec::new();
     let mut removed_block = None;
 
-    for block in split_journal_blocks(&content) {
+    for block in crate::gl_journal::split_journal_blocks(&content) {
         if removed_block.is_none() && block.contains(&marker) {
             removed_block = Some(block);
         } else {
@@ -1250,7 +1250,7 @@ fn replace_gl_block(ledger_dir: &Path, gl_txn_id: &str, new_block: &str) -> io::
     let content = fs::read_to_string(&journal_path)?;
     let marker = format!("id: {gl_txn_id}");
     let mut replaced = false;
-    let blocks: Vec<String> = split_journal_blocks(&content)
+    let blocks: Vec<String> = crate::gl_journal::split_journal_blocks(&content)
         .into_iter()
         .map(|block| {
             if !replaced && block.contains(&marker) {
@@ -1408,32 +1408,6 @@ pub fn sync_gl_transaction(
     Ok(gl_txn_id)
 }
 
-fn split_journal_blocks(content: &str) -> Vec<String> {
-    let mut blocks = Vec::new();
-    let mut current = String::new();
-
-    for line in content.lines() {
-        let starts_new_block = !line.trim().is_empty()
-            && !line.starts_with(' ')
-            && !line.starts_with('\t')
-            && !current.trim().is_empty();
-        if starts_new_block {
-            blocks.push(current.trim_end().to_string());
-            current.clear();
-        }
-        if !current.is_empty() {
-            current.push('\n');
-        }
-        current.push_str(line);
-    }
-
-    if !current.trim().is_empty() {
-        blocks.push(current.trim_end().to_string());
-    }
-
-    blocks
-}
-
 fn replace_posting_account(line: &str, new_account: &str) -> String {
     let indent_end = line
         .char_indices()
@@ -1491,7 +1465,7 @@ pub fn recategorize_gl_transaction(
     let mut found = false;
     let mut replaced_any = false;
 
-    let blocks: Vec<String> = split_journal_blocks(&content)
+    let blocks: Vec<String> = crate::gl_journal::split_journal_blocks(&content)
         .into_iter()
         .map(|block| {
             if !found && block.contains(&marker) {
@@ -1657,7 +1631,7 @@ pub fn merge_gl_transfer(
     let original_gl_content = fs::read_to_string(&gl_journal_path)?;
     let marker1 = format!("id: {txn_id_1}");
     let marker2 = format!("id: {txn_id_2}");
-    let kept_blocks: Vec<String> = split_journal_blocks(&original_gl_content)
+    let kept_blocks: Vec<String> = crate::gl_journal::split_journal_blocks(&original_gl_content)
         .into_iter()
         .filter(|block| !block.contains(&marker1) && !block.contains(&marker2))
         .collect();
@@ -1685,6 +1659,18 @@ pub fn merge_gl_transfer(
         }
     }
     if let Err(err) = fs::write(&gl_journal_path, &new_gl_content) {
+        let _ = account_journal::write_journal_at_path(&path1, &original_entries1);
+        if !same_file {
+            let _ = account_journal::write_journal_at_path(&path2, &original_entries2);
+        }
+        return Err(err.into());
+    }
+    if let Err(err) = crate::bookkeeping::repair_gl_txn_refs_after_merge(
+        ledger_dir,
+        &[txn_id_1, txn_id_2],
+        &new_uuid,
+    ) {
+        let _ = fs::write(&gl_journal_path, &original_gl_content);
         let _ = account_journal::write_journal_at_path(&path1, &original_entries1);
         if !same_file {
             let _ = account_journal::write_journal_at_path(&path2, &original_entries2);

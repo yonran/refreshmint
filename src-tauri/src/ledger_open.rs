@@ -248,11 +248,8 @@ pub(crate) fn build_transaction_rows(
     Ok(transactions
         .iter()
         .map(|txn| {
-            let id = txn
-                .ttags
-                .iter()
-                .find(|(k, _)| k == "id")
-                .map(|(_, v)| v.clone())
+            let id = gl_transaction_id(txn)
+                .map(ToOwned::to_owned)
                 .unwrap_or_else(|| txn.tindex.to_string());
             let period_id = txn.tdate.get(0..7).map(ToOwned::to_owned);
             TransactionRow {
@@ -269,6 +266,13 @@ pub(crate) fn build_transaction_rows(
             }
         })
         .collect())
+}
+
+pub(crate) fn gl_transaction_id(txn: &Transaction) -> Option<&str> {
+    txn.ttags
+        .iter()
+        .find(|(key, value)| key == "id" && !value.trim().is_empty())
+        .map(|(_, value)| value.as_str())
 }
 
 #[derive(Default)]
@@ -705,6 +709,11 @@ mod tests {
     fn build_transaction_rows_decorates_bookkeeping_state() {
         let root = temp_ledger_dir("bookkeeping");
         crate::bookkeeping::ensure_bookkeeping_layout(&root).unwrap();
+        fs::write(
+            root.join("general.journal"),
+            "2026-03-15 Example  ; id: gl-1\n  Assets:Checking  -10 USD\n  Expenses:Food  10 USD\n",
+        )
+        .unwrap();
         let session = crate::bookkeeping::create_reconciliation_session(
             &root,
             crate::bookkeeping::NewReconciliationSessionInput {

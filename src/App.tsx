@@ -1228,7 +1228,6 @@ function App() {
                         <BookkeepingTab
                             ledger={ledger.path}
                             accounts={ledger.accounts}
-                            transactions={ledger.transactions}
                         />
                     ) : activeTab === 'transactions' ||
                       activeRecategorizeTab !== null ? (

@@ -150,6 +150,14 @@ fn migrate_staging_account_names(
     let mut changed_paths = Vec::new();
 
     let general_journal = ledger_dir.join("general.journal");
+    let inserted_ids = ensure_general_journal_ids(&general_journal, dry_run)?;
+    if !inserted_ids.is_empty() {
+        let action = if dry_run { "would assign" } else { "assigned" };
+        outcome.warnings.push(format!(
+            "{action} stable GL ids for {} transaction(s) in general.journal",
+            inserted_ids.len()
+        ));
+    }
     if rewrite_file_string(&general_journal, dry_run)? {
         changed_paths.push("general.journal".to_string());
     }
@@ -177,6 +185,22 @@ fn migrate_staging_account_names(
     }
 
     Ok(())
+}
+
+fn ensure_general_journal_ids(path: &Path, dry_run: bool) -> io::Result<Vec<String>> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    let (updated, inserted_ids) = crate::gl_journal::ensure_journal_has_ids(&content);
+    if inserted_ids.is_empty() {
+        return Ok(inserted_ids);
+    }
+    if !dry_run {
+        fs::write(path, updated)?;
+    }
+    Ok(inserted_ids)
 }
 
 pub fn repair_login_account_labels(
@@ -816,6 +840,28 @@ mod tests {
         assert_eq!(outcome.migrated.len(), 1);
         assert!(ledger_dir.join("accounts").join(account_name).exists());
         assert!(!ledger_dir.join("logins").join("chase-driver").exists());
+
+        let _ = fs::remove_dir_all(&ledger_dir);
+    }
+
+    #[test]
+    fn migrate_backfills_missing_general_journal_ids() {
+        let ledger_dir = temp_dir("general-journal-ids");
+        fs::write(
+            ledger_dir.join("general.journal"),
+            "2026-01-01 Missing id\n  Assets:Cash  1 USD\n  Income:Test\n\n2026-01-02 Existing  ; id: keep-me\n  Assets:Cash  -1 USD\n  Income:Test  1 USD\n",
+        )
+        .unwrap();
+
+        let outcome = migrate_ledger(&ledger_dir, false).unwrap();
+        assert!(outcome
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("stable GL ids")));
+        let content = fs::read_to_string(ledger_dir.join("general.journal")).unwrap();
+        assert!(content.contains("2026-01-01 Missing id  ; id: "));
+        assert!(content.contains("id: keep-me"));
+        assert_eq!(content.matches("id: keep-me").count(), 1);
 
         let _ = fs::remove_dir_all(&ledger_dir);
     }

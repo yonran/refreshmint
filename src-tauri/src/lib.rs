@@ -20,6 +20,7 @@ pub mod transfer_detector;
 mod binpath;
 mod builtin_extensions;
 mod extension;
+mod gl_journal;
 mod js_module_loader;
 mod ledger;
 mod ledger_add;
@@ -148,6 +149,7 @@ pub fn run_with_context(
             get_unposted,
             get_login_account_unposted,
             list_reconciliation_sessions,
+            query_reconciliation_candidates,
             create_reconciliation_session,
             update_reconciliation_session,
             finalize_reconciliation_session,
@@ -1540,6 +1542,26 @@ fn list_reconciliation_sessions(
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
     bookkeeping::list_reconciliation_sessions(&target_dir).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn query_reconciliation_candidates(
+    ledger: String,
+    gl_account: String,
+    statement_start_date: Option<String>,
+    statement_end_date: String,
+) -> Result<Vec<bookkeeping::ReconciliationCandidate>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let gl_account = require_non_empty_input("glAccount", gl_account)?;
+    let statement_end_date = require_non_empty_input("statementEndDate", statement_end_date)?;
+    bookkeeping::query_reconciliation_candidates(
+        &target_dir,
+        &gl_account,
+        statement_start_date.as_deref(),
+        &statement_end_date,
+    )
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
