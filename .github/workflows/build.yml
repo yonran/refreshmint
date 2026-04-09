@@ -52,6 +52,26 @@ jobs:
             - name: Download hledger sidecar
               run: bash scripts/download-sidecar.sh ${{ matrix.target }}
 
+            - name: Expose hledger sidecar on PATH (Unix)
+              if: runner.os != 'Windows'
+              run: |
+                  # Unit tests call the development fallback path, which expects
+                  # a plain `hledger` binary on PATH outside the packaged app.
+                  ln -sf "$(pwd)/src-tauri/binaries/hledger-${{ matrix.target }}" "$RUNNER_TEMP/hledger"
+                  chmod +x "$RUNNER_TEMP/hledger"
+                  echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+                  hledger --version
+
+            - name: Expose hledger sidecar on PATH (Windows)
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  # Unit tests call the development fallback path, which expects
+                  # a plain `hledger.exe` on PATH outside the packaged app.
+                  Copy-Item "src-tauri/binaries/hledger-${{ matrix.target }}.exe" "$env:RUNNER_TEMP\hledger.exe"
+                  $env:RUNNER_TEMP | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                  hledger.exe --version
+
             - name: Build frontend
               run: npm run build
 
