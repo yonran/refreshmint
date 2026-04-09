@@ -60,7 +60,7 @@ jobs:
                   ln -sf "$(pwd)/src-tauri/binaries/hledger-${{ matrix.target }}" "$RUNNER_TEMP/hledger"
                   chmod +x "$RUNNER_TEMP/hledger"
                   echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-                  hledger --version
+                  "$RUNNER_TEMP/hledger" --version
 
             - name: Expose hledger sidecar on PATH (Windows)
               if: runner.os == 'Windows'
@@ -70,7 +70,7 @@ jobs:
                   # a plain `hledger.exe` on PATH outside the packaged app.
                   Copy-Item "src-tauri/binaries/hledger-${{ matrix.target }}.exe" "$env:RUNNER_TEMP\hledger.exe"
                   $env:RUNNER_TEMP | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-                  hledger.exe --version
+                  & "$env:RUNNER_TEMP\hledger.exe" --version
 
             - name: Build frontend
               run: npm run build
