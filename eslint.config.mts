@@ -38,12 +38,16 @@ const vitePublicResolver = {
     },
 };
 
+const userGitIgnoreFile = getGitUserIgnoreFile();
+
 export default defineConfig(
     includeIgnoreFile(
         fileURLToPath(new URL('.gitignore', import.meta.url)),
         'project .gitignore',
     ),
-    includeIgnoreFile(getGitUserIgnoreFile(), 'user git excludeFile'),
+    ...(fs.existsSync(userGitIgnoreFile)
+        ? [includeIgnoreFile(userGitIgnoreFile, 'user git excludeFile')]
+        : []),
     js.configs.recommended,
 
     importFlatConfigs.recommended,
