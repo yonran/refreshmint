@@ -7396,6 +7396,13 @@ fn matches_filter(
                 .map(|s| serde_json::Value::String(s.clone())),
             "extensionName" => Some(serde_json::Value::String(info.extension_name.clone())),
             "scrapedAt" => Some(serde_json::Value::String(info.scraped_at.clone())),
+            "extractionError" => info
+                .extraction_error
+                .as_ref()
+                .map(|s| serde_json::Value::String(s.clone())),
+            "extractionAttempts" => {
+                Some(serde_json::Value::Number(info.extraction_attempts.into()))
+            }
             _ => info.metadata.get(key).cloned(),
         };
 
@@ -7458,6 +7465,16 @@ fn collect_account_documents_in_dir(
         };
 
         if let Some(info) = info {
+            // Hide documents whose extraction has failed but is still retriable:
+            // the driver will not see them and will re-download on the next scrape.
+            // Once extraction_attempts reaches MAX_EXTRACTION_ATTEMPTS the document
+            // re-appears so the driver skips it and the UI can surface the failure.
+            if info.extraction_error.is_some()
+                && info.extraction_attempts < crate::scrape::MAX_EXTRACTION_ATTEMPTS
+            {
+                continue;
+            }
+
             if matches_filter(&info, filter) {
                 let mut metadata = info.metadata;
                 metadata.insert(
@@ -7482,6 +7499,18 @@ fn collect_account_documents_in_dir(
                 );
                 if let Some(url) = info.original_url {
                     metadata.insert("originalUrl".to_string(), serde_json::Value::String(url));
+                }
+                if let Some(ref err) = info.extraction_error {
+                    metadata.insert(
+                        "extractionError".to_string(),
+                        serde_json::Value::String(err.clone()),
+                    );
+                }
+                if info.extraction_attempts > 0 {
+                    metadata.insert(
+                        "extractionAttempts".to_string(),
+                        serde_json::Value::Number(info.extraction_attempts.into()),
+                    );
                 }
                 docs.push(AccountDocumentSummary {
                     filename: relative,
@@ -8762,6 +8791,8 @@ mod tests {
             date_range_start: None,
             date_range_end: None,
             metadata,
+            extraction_error: None,
+            extraction_attempts: 0,
         };
 
         // Exact match

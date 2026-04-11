@@ -260,6 +260,16 @@ pub struct ExtractConsoleLogLine {
     pub document_name: String,
 }
 
+/// A per-document extraction failure recorded in the extract log.
+// Keep in sync with extract::DocumentError.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentError {
+    pub document_name: String,
+    pub error: String,
+    pub extraction_attempts: u32,
+}
+
 /// An extract run log entry persisted per-login-account to
 /// `logins/<login>/accounts/<label>/extract-log.jsonl`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,6 +284,8 @@ pub struct ExtractLogEntry {
     pub document_count: usize,
     pub new_entry_count: usize,
     pub console_logs: Vec<ExtractConsoleLogLine>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub failed_documents: Vec<DocumentError>,
 }
 
 /// Returns the path to the per-login-account extract log.
@@ -506,6 +518,7 @@ mod tests {
                     document_name: "order-456.json".to_string(),
                 },
             ],
+            failed_documents: Vec::new(),
         };
 
         // Nonexistent login returns empty vec before any writes.

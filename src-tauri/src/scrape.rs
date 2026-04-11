@@ -168,6 +168,17 @@ pub fn generate_scrape_session_id() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
 }
 
+/// Maximum number of extraction attempts before a document is marked as a permanent failure.
+///
+/// Used by `collect_account_documents_in_dir` (to hide retriable failures from
+/// `listAccountDocuments`) and by `finalize_staged_resources` (to decide whether
+/// to atomically replace an existing failed document slot).
+pub const MAX_EXTRACTION_ATTEMPTS: u32 = 2;
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
 /// Document info sidecar written alongside each evidence document.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DocumentInfo {
@@ -193,6 +204,19 @@ pub struct DocumentInfo {
     pub date_range_end: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Set when the extractor fails on this document.  Cleared on success.
+    #[serde(rename = "extractionError", skip_serializing_if = "Option::is_none")]
+    pub extraction_error: Option<String>,
+    /// Number of consecutive failed extraction attempts.  Incremented by the
+    /// extractor on each failure; cleared (reset to 0) on success.
+    /// When this reaches `MAX_EXTRACTION_ATTEMPTS` the document re-appears in
+    /// `listAccountDocuments` so drivers stop re-downloading it.
+    #[serde(
+        rename = "extractionAttempts",
+        default,
+        skip_serializing_if = "is_zero_u32"
+    )]
+    pub extraction_attempts: u32,
 }
 
 fn default_document_label() -> String {
@@ -255,21 +279,39 @@ pub fn finalize_staged_resources(
         );
         std::fs::create_dir_all(&documents_dir)?;
 
-        let final_filename =
+        // Check if the slot already holds a retriable extraction failure.
+        // If so, we carry over the attempt count (so the extractor knows this
+        // is a re-download) and atomically replace the old file.
+        let candidate_filename =
             date_prefixed_filename(coverage_date, &resource.filename, &documents_dir);
-        let final_path = documents_dir.join(&final_filename);
+        let candidate_path = documents_dir.join(&candidate_filename);
+        let carry_over_attempts: u32 = if candidate_path.exists() {
+            let sidecar = documents_dir.join(format!("{candidate_filename}-info.json"));
+            let existing: Option<DocumentInfo> = std::fs::read_to_string(&sidecar)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok());
+            match existing {
+                Some(ref info)
+                    if info.extraction_error.is_some()
+                        && info.extraction_attempts < MAX_EXTRACTION_ATTEMPTS =>
+                {
+                    info.extraction_attempts
+                }
+                _ => 0,
+            }
+        } else {
+            0
+        };
+
+        // If carry_over_attempts > 0 we are replacing an existing failed slot:
+        // date_prefixed_filename returned the same name (collision), so we need
+        // to pick the right name.  Since the candidate already exists, we use it
+        // as the target (we will rename over it atomically below).
+        let final_filename = candidate_filename;
+        let final_path = candidate_path;
         if let Some(parent) = final_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-
-        // Copy from staging to documents dir
-        std::fs::copy(&resource.staging_path, &final_path).map_err(|e| {
-            format!(
-                "failed to copy {} to {}: {e}",
-                resource.staging_path.display(),
-                final_path.display()
-            )
-        })?;
 
         // Guess MIME type from extension
         let mime = resource
@@ -277,7 +319,8 @@ pub fn finalize_staged_resources(
             .clone()
             .unwrap_or_else(|| guess_mime_type(&resource.filename));
 
-        // Write sidecar
+        // Build new sidecar, carrying over the previous attempt count so the
+        // extractor knows how many times this document has already been tried.
         let info = DocumentInfo {
             mime_type: mime,
             original_url: resource.original_url.clone(),
@@ -290,14 +333,50 @@ pub fn finalize_staged_resources(
             date_range_start: inner.session_metadata.date_range_start.clone(),
             date_range_end: inner.session_metadata.date_range_end.clone(),
             metadata: resource.metadata.clone(),
+            extraction_error: None,
+            extraction_attempts: carry_over_attempts,
         };
 
         let sidecar_path = documents_dir.join(format!("{final_filename}-info.json"));
         if let Some(parent) = sidecar_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+
+        // Atomic write: stage to .tmp files then rename over the destination.
+        // This prevents a window where neither the old nor new file exists.
+        let tmp_path = final_path.with_extension("tmp");
+        let sidecar_tmp = {
+            let mut p = sidecar_path.clone();
+            let name = p
+                .file_name()
+                .map(|n| format!("{}.tmp", n.to_string_lossy()))
+                .unwrap_or_else(|| "sidecar.tmp".to_string());
+            p.set_file_name(name);
+            p
+        };
+        std::fs::copy(&resource.staging_path, &tmp_path).map_err(|e| {
+            format!(
+                "failed to copy {} to {}: {e}",
+                resource.staging_path.display(),
+                tmp_path.display()
+            )
+        })?;
         let sidecar_json = serde_json::to_string_pretty(&info)?;
-        std::fs::write(&sidecar_path, sidecar_json)?;
+        std::fs::write(&sidecar_tmp, &sidecar_json)?;
+        std::fs::rename(&tmp_path, &final_path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            let _ = std::fs::remove_file(&sidecar_tmp);
+            format!("failed to finalize {}: {e}", final_path.display())
+        })?;
+        std::fs::rename(&sidecar_tmp, &sidecar_path).map_err(|e| {
+            // The document file was already renamed; log but don't fail.
+            // The sidecar will be stale (old content) until the next scrape.
+            eprintln!(
+                "warning: failed to finalize sidecar {}: {e}",
+                sidecar_path.display()
+            );
+            e
+        })?;
 
         finalized_names.push(final_filename);
     }

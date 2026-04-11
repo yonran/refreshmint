@@ -351,10 +351,25 @@ pub fn validate_extracted_transaction(
     Ok(())
 }
 
+/// An extraction failure for a single document.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentError {
+    pub document_name: String,
+    pub error: String,
+    /// The cumulative number of failed extraction attempts recorded in the
+    /// document's `-info.json` sidecar after this failure (including this one).
+    pub extraction_attempts: u32,
+}
+
 /// Result of running extraction on a set of documents.
 pub struct ExtractionResult {
     pub proposed_transactions: Vec<ExtractedTransaction>,
+    /// Names of documents that were successfully extracted.
     pub document_names: Vec<String>,
+    /// Documents that failed extraction.  The overall extraction run is still
+    /// considered a partial success when this list is non-empty.
+    pub failed_documents: Vec<DocumentError>,
     /// Console log lines emitted by the extractor script across all documents.
     pub console_logs: Vec<ConsoleLogLine>,
 }
@@ -433,6 +448,8 @@ fn run_extraction_with_documents_dir(
 
     let mut all_proposed = Vec::new();
     let mut all_logs: Vec<ConsoleLogLine> = Vec::new();
+    let mut successful_doc_names: Vec<String> = Vec::new();
+    let mut failed_documents: Vec<DocumentError> = Vec::new();
 
     match extraction_mode {
         ExtractionMode::Script(script_rel_path) => {
@@ -444,9 +461,14 @@ fn run_extraction_with_documents_dir(
             for doc_name in document_names {
                 let doc_path = documents_dir.join(doc_name);
                 if !doc_path.exists() {
-                    return Err(format!("document not found: {}", doc_path.display()).into());
+                    failed_documents.push(DocumentError {
+                        document_name: doc_name.clone(),
+                        error: format!("document not found: {}", doc_path.display()),
+                        extraction_attempts: 0,
+                    });
+                    continue;
                 }
-                let (proposed, logs) = run_extract_script(
+                match run_extract_script(
                     &extension_dir,
                     &script_path,
                     &doc_path,
@@ -456,9 +478,34 @@ fn run_extraction_with_documents_dir(
                     account_name,
                     label,
                     extension_name,
-                )?;
-                all_proposed.extend(proposed);
-                all_logs.extend(logs);
+                ) {
+                    Ok((proposed, logs)) => {
+                        // On success: clear any prior extraction error from the sidecar.
+                        if let Ok(Some(mut info)) = read_document_info(documents_dir, doc_name) {
+                            if info.extraction_error.is_some() {
+                                info.extraction_error = None;
+                                info.extraction_attempts = 0;
+                                let _ = write_document_info(documents_dir, doc_name, &info);
+                            }
+                        }
+                        all_proposed.extend(proposed);
+                        all_logs.extend(logs);
+                        successful_doc_names.push(doc_name.clone());
+                    }
+                    Err(err) => {
+                        // Increment attempt count in the sidecar (best-effort).
+                        let new_attempts = update_sidecar_extraction_error(
+                            documents_dir,
+                            doc_name,
+                            &err.to_string(),
+                        );
+                        failed_documents.push(DocumentError {
+                            document_name: doc_name.clone(),
+                            error: err.to_string(),
+                            extraction_attempts: new_attempts,
+                        });
+                    }
+                }
             }
         }
         ExtractionMode::Rules(rules_rel_path) => {
@@ -470,29 +517,65 @@ fn run_extraction_with_documents_dir(
             for doc_name in document_names {
                 let doc_path = documents_dir.join(doc_name);
                 if !doc_path.exists() {
-                    return Err(format!("document not found: {}", doc_path.display()).into());
+                    failed_documents.push(DocumentError {
+                        document_name: doc_name.clone(),
+                        error: format!("document not found: {}", doc_path.display()),
+                        extraction_attempts: 0,
+                    });
+                    continue;
                 }
                 if !doc_name.to_ascii_lowercase().ends_with(".csv") {
-                    return Err(format!(
-                        "rules extraction only supports CSV documents, got: {doc_name}"
-                    )
-                    .into());
+                    let err =
+                        format!("rules extraction only supports CSV documents, got: {doc_name}");
+                    let new_attempts =
+                        update_sidecar_extraction_error(documents_dir, doc_name, &err);
+                    failed_documents.push(DocumentError {
+                        document_name: doc_name.clone(),
+                        error: err,
+                        extraction_attempts: new_attempts,
+                    });
+                    continue;
                 }
 
-                let proposed = run_rules_extraction(
+                match run_rules_extraction(
                     &rules_path,
                     &doc_path,
                     doc_name,
                     manifest.id_field.as_deref(),
-                )?;
-                all_proposed.extend(proposed);
+                ) {
+                    Ok(proposed) => {
+                        // On success: clear any prior extraction error from the sidecar.
+                        if let Ok(Some(mut info)) = read_document_info(documents_dir, doc_name) {
+                            if info.extraction_error.is_some() {
+                                info.extraction_error = None;
+                                info.extraction_attempts = 0;
+                                let _ = write_document_info(documents_dir, doc_name, &info);
+                            }
+                        }
+                        all_proposed.extend(proposed);
+                        successful_doc_names.push(doc_name.clone());
+                    }
+                    Err(err) => {
+                        let new_attempts = update_sidecar_extraction_error(
+                            documents_dir,
+                            doc_name,
+                            &err.to_string(),
+                        );
+                        failed_documents.push(DocumentError {
+                            document_name: doc_name.clone(),
+                            error: err.to_string(),
+                            extraction_attempts: new_attempts,
+                        });
+                    }
+                }
             }
         }
     }
 
     Ok(ExtractionResult {
         proposed_transactions: all_proposed,
-        document_names: document_names.to_vec(),
+        document_names: successful_doc_names,
+        failed_documents,
         console_logs: all_logs,
     })
 }
@@ -846,6 +929,41 @@ fn read_document_info(
         ))
     })?;
     Ok(Some(info))
+}
+
+/// Overwrite the `-info.json` sidecar for a document.  Failures are
+/// non-fatal: callers use `let _` since losing the attempt count is
+/// recoverable (the document simply gets another full set of attempts).
+fn write_document_info(
+    documents_dir: &Path,
+    doc_name: &str,
+    info: &crate::scrape::DocumentInfo,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let sidecar_path = documents_dir.join(format!("{doc_name}-info.json"));
+    let json = serde_json::to_string_pretty(info)?;
+    std::fs::write(&sidecar_path, json)?;
+    Ok(())
+}
+
+/// Increment `extractionAttempts` and set `extractionError` in the document
+/// sidecar.  Returns the new attempt count (or 1 if the sidecar could not be
+/// read/written, so the caller always gets a sensible value to report).
+fn update_sidecar_extraction_error(
+    documents_dir: &Path,
+    doc_name: &str,
+    error_message: &str,
+) -> u32 {
+    let existing = read_document_info(documents_dir, doc_name).ok().flatten();
+    let new_attempts = existing
+        .as_ref()
+        .map(|i| i.extraction_attempts + 1)
+        .unwrap_or(1);
+    if let Some(mut info) = existing {
+        info.extraction_error = Some(error_message.to_string());
+        info.extraction_attempts = new_attempts;
+        let _ = write_document_info(documents_dir, doc_name, &info);
+    }
+    new_attempts
 }
 
 fn detect_document_format(
@@ -2091,5 +2209,156 @@ export function extract(context) {
         assert!(logs[0].message.contains("null"));
         assert!(logs[0].message.contains("true"));
         assert!(logs[0].message.contains("42"));
+    }
+
+    /// Set up a minimal extension directory with an extract.mjs script.
+    /// The extension is placed at `ledger_dir/extensions/test-ext/` so that
+    /// `resolve_extension_dir(ledger_dir, "test-ext")` finds it.
+    fn write_extension(ledger_dir: &std::path::Path, script_body: &str) {
+        let ext_dir = ledger_dir.join("extensions").join("test-ext");
+        fs::create_dir_all(&ext_dir).expect("create extension dir");
+        fs::write(
+            ext_dir.join("manifest.json"),
+            r#"{"name":"test-ext","extract":"extract.mjs"}"#,
+        )
+        .expect("write manifest");
+        fs::write(ext_dir.join("extract.mjs"), script_body).expect("write extract.mjs");
+    }
+
+    /// Write a minimal `-info.json` sidecar for a document.
+    fn write_sidecar(documents_dir: &std::path::Path, doc_name: &str, extra: &str) {
+        let sidecar = documents_dir.join(format!("{doc_name}-info.json"));
+        let content = format!(
+            r#"{{"mimeType":"text/csv","scrapedAt":"2026-01-01T00:00:00Z","extensionName":"test-ext","loginName":"test","label":"_default","scrapeSessionId":"s","coverageEndDate":"2026-01-01"{}}}"#,
+            if extra.is_empty() {
+                String::new()
+            } else {
+                format!(",{extra}")
+            }
+        );
+        fs::write(sidecar, content).expect("write sidecar");
+    }
+
+    #[test]
+    fn extraction_continues_past_bad_document_and_updates_sidecar() {
+        // Two documents: one that extracts successfully, one that throws.
+        // The overall run should partially succeed; the bad document's sidecar
+        // should record extractionAttempts=1 and extractionError.
+        let root = temp_dir("extract-per-doc-error");
+        let documents_dir = root.join("documents");
+        fs::create_dir_all(&documents_dir).expect("create docs dir");
+
+        write_extension(
+            &root,
+            r#"
+export async function extract(context) {
+  const row = context.csv?.[1];
+  if (row?.[0] === 'FAIL') throw new Error('deliberate failure for test');
+  return [{
+    tdate: "2026-01-05",
+    tstatus: "Cleared",
+    tdescription: "Good row",
+    tcomment: "",
+    ttags: [["evidence", `${context.document.name}:2:1`]]
+  }];
+}
+"#,
+        );
+
+        let good_doc = "2026-01-05-good.csv";
+        let bad_doc = "2026-01-05-bad.csv";
+        fs::write(documents_dir.join(good_doc), "col\nOK\n").expect("write good doc");
+        fs::write(documents_dir.join(bad_doc), "col\nFAIL\n").expect("write bad doc");
+        // Both documents have sidecars so update_sidecar_extraction_error can write back.
+        write_sidecar(&documents_dir, good_doc, "");
+        write_sidecar(&documents_dir, bad_doc, "");
+
+        let result = run_extraction_with_documents_dir(
+            &root,
+            &documents_dir,
+            "Assets:Checking",
+            None,
+            "test-ext",
+            &[good_doc.to_string(), bad_doc.to_string()],
+        )
+        .expect("run_extraction_with_documents_dir should succeed even with bad doc");
+
+        // Good doc was extracted; bad doc is in failed_documents.
+        assert_eq!(result.document_names, vec![good_doc.to_string()]);
+        assert_eq!(result.failed_documents.len(), 1);
+        assert_eq!(result.failed_documents[0].document_name, bad_doc);
+        assert_eq!(result.failed_documents[0].extraction_attempts, 1);
+        assert!(result.failed_documents[0]
+            .error
+            .contains("deliberate failure"));
+
+        // The bad document's sidecar must be updated on disk.
+        let sidecar_text = fs::read_to_string(documents_dir.join(format!("{bad_doc}-info.json")))
+            .expect("read bad sidecar");
+        let sidecar: serde_json::Value =
+            serde_json::from_str(&sidecar_text).expect("parse bad sidecar");
+        assert_eq!(sidecar["extractionAttempts"], 1);
+        assert!(sidecar["extractionError"]
+            .as_str()
+            .unwrap()
+            .contains("deliberate failure"));
+
+        // The good document's sidecar should NOT have extractionError.
+        let good_sidecar_text =
+            fs::read_to_string(documents_dir.join(format!("{good_doc}-info.json")))
+                .expect("read good sidecar");
+        assert!(!good_sidecar_text.contains("extractionError"));
+    }
+
+    #[test]
+    fn extraction_success_clears_prior_extraction_error_in_sidecar() {
+        // Document whose sidecar already has extractionError=1. On successful
+        // extraction the error fields must be cleared.
+        let root = temp_dir("extract-clears-error");
+        let documents_dir = root.join("documents");
+        fs::create_dir_all(&documents_dir).expect("create docs dir");
+
+        write_extension(
+            &root,
+            r#"
+export async function extract(context) {
+  return [{
+    tdate: "2026-01-05",
+    tstatus: "Cleared",
+    tdescription: "Recovered",
+    tcomment: "",
+    ttags: [["evidence", `${context.document.name}:1:1`]]
+  }];
+}
+"#,
+        );
+
+        let doc_name = "2026-01-05-stmt.csv";
+        fs::write(documents_dir.join(doc_name), "col\nOK\n").expect("write doc");
+        // Sidecar pre-populated with a prior failure.
+        write_sidecar(
+            &documents_dir,
+            doc_name,
+            r#""extractionAttempts":1,"extractionError":"previous failure""#,
+        );
+
+        let result = run_extraction_with_documents_dir(
+            &root,
+            &documents_dir,
+            "Assets:Checking",
+            None,
+            "test-ext",
+            &[doc_name.to_string()],
+        )
+        .expect("extraction should succeed");
+
+        assert_eq!(result.document_names, vec![doc_name.to_string()]);
+        assert!(result.failed_documents.is_empty());
+
+        // Sidecar must no longer contain extractionError.
+        let sidecar_text = fs::read_to_string(documents_dir.join(format!("{doc_name}-info.json")))
+            .expect("read sidecar");
+        assert!(!sidecar_text.contains("extractionError"));
+        assert!(!sidecar_text.contains("extractionAttempts"));
     }
 }

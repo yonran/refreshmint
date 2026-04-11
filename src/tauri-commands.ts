@@ -496,17 +496,42 @@ export async function runExtraction(
     });
 }
 
+export interface DocumentError {
+    documentName: string;
+    error: string;
+    extractionAttempts: number;
+}
+
+export interface ExtractionCommandResult {
+    newEntryCount: number;
+    failedDocuments: DocumentError[];
+}
+
 export async function runLoginAccountExtraction(
     ledger: string,
     loginName: string,
     label: string,
     documentNames: string[],
-): Promise<number> {
+): Promise<ExtractionCommandResult> {
     return invoke('run_login_account_extraction', {
         ledger,
         loginName,
         label,
         documentNames,
+    });
+}
+
+export async function resetDocumentExtractionFailure(
+    ledger: string,
+    loginName: string,
+    label: string,
+    filename: string,
+): Promise<void> {
+    return invoke('reset_document_extraction_failure', {
+        ledger,
+        loginName,
+        label,
+        filename,
     });
 }
 

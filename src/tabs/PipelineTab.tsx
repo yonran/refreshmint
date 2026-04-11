@@ -678,12 +678,13 @@ export function PipelineTab({
         setIsRunningExtraction(true);
         setPipelineStatus(`Running extraction for ${documentName}...`);
         try {
-            const newCount = await runLoginAccountExtraction(
+            const result = await runLoginAccountExtraction(
                 ledgerPath,
                 loginName,
                 label,
                 [documentName],
             );
+            const newCount = result.newEntryCount;
             const [journal, unposted] = await Promise.all([
                 getLoginAccountJournal(ledgerPath, loginName, label),
                 getLoginAccountUnposted(ledgerPath, loginName, label),
@@ -945,13 +946,13 @@ export function PipelineTab({
                     if (docs.length === 0) {
                         continue;
                     }
-                    const newCount = await runLoginAccountExtraction(
+                    const result = await runLoginAccountExtraction(
                         ledgerPath,
                         account.loginName,
                         account.label,
                         docs.map((doc) => doc.filename),
                     );
-                    totalNew += newCount;
+                    totalNew += result.newEntryCount;
                     succeeded += 1;
                     if (selectedKey === accountKey) {
                         refreshSelected = true;

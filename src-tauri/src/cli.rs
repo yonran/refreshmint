@@ -1214,6 +1214,7 @@ fn run_account_extract(
             document_count: doc_count,
             new_entry_count: new_count,
             console_logs,
+            failed_documents: Vec::new(),
         },
     );
 

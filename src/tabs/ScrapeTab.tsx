@@ -1451,7 +1451,7 @@ export function ScrapeTab({
             `Running extraction for ${documentNames.length} document(s)...`,
         );
         try {
-            const newCount = await runLoginAccountExtraction(
+            const result = await runLoginAccountExtraction(
                 ledger.path,
                 loginName,
                 label,
@@ -1462,6 +1462,7 @@ export function ScrapeTab({
                 label,
                 selectedPipelineGlAccount,
             );
+            const newCount = result.newEntryCount;
             setPipelineStatus(
                 `Extraction complete. Added ${newCount} new transaction(s).`,
             );

@@ -144,6 +144,7 @@ pub fn run_with_context(
             read_attachment_data_url,
             run_extraction,
             run_login_account_extraction,
+            reset_document_extraction_failure,
             get_account_journal,
             get_login_account_journal,
             get_unposted,
@@ -800,13 +801,21 @@ fn run_extraction(
     Ok(new_count)
 }
 
+/// Returned by `run_login_account_extraction`.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtractionCommandResult {
+    pub new_entry_count: usize,
+    pub failed_documents: Vec<extract::DocumentError>,
+}
+
 #[tauri::command]
 fn run_login_account_extraction(
     ledger: String,
     login_name: String,
     label: String,
     document_names: Vec<String>,
-) -> Result<usize, String> {
+) -> Result<ExtractionCommandResult, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
     let label = require_label_input(label)?;
@@ -835,6 +844,7 @@ fn run_login_account_extraction(
     // always flush the extract log (including console logs) even on failure.
     let mut console_logs: Vec<operations::ExtractConsoleLogLine> = Vec::new();
     let mut new_count = 0usize;
+    let mut failed_documents: Vec<extract::DocumentError> = Vec::new();
 
     let outcome: Result<(), String> = (|| {
         let result = extract::run_extraction_for_login_account(
@@ -856,6 +866,8 @@ fn run_login_account_extraction(
                 document_name: l.document_name,
             })
             .collect();
+
+        failed_documents = result.failed_documents.clone();
 
         let journal_path =
             account_journal::login_account_journal_path(&target_dir, &login_name, &label);
@@ -941,10 +953,45 @@ fn run_login_account_extraction(
             document_count: doc_count,
             new_entry_count: new_count,
             console_logs,
+            failed_documents: failed_documents
+                .iter()
+                .map(|d| operations::DocumentError {
+                    document_name: d.document_name.clone(),
+                    error: d.error.clone(),
+                    extraction_attempts: d.extraction_attempts,
+                })
+                .collect(),
         },
     );
 
-    outcome.map(|()| new_count)
+    outcome.map(|()| ExtractionCommandResult {
+        new_entry_count: new_count,
+        failed_documents,
+    })
+}
+
+#[tauri::command]
+fn reset_document_extraction_failure(
+    ledger: String,
+    login_name: String,
+    label: String,
+    filename: String,
+) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_login_name_input(login_name)?;
+    let label = require_label_input(label)?;
+    let documents_dir = login_config::login_account_documents_dir(&target_dir, &login_name, &label);
+    let doc_path = documents_dir.join(&filename);
+    let sidecar_path = documents_dir.join(format!("{filename}-info.json"));
+    // Delete both file and sidecar so the driver sees the slot as empty on the
+    // next scrape and re-downloads the document.
+    if doc_path.exists() {
+        std::fs::remove_file(&doc_path).map_err(|e| e.to_string())?;
+    }
+    if sidecar_path.exists() {
+        std::fs::remove_file(&sidecar_path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

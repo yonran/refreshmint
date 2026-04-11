@@ -934,6 +934,8 @@ mod tests {
                 "attachmentKey".to_string(),
                 serde_json::Value::String("check:123|2026-02-01|-25.00".to_string()),
             )]),
+            extraction_error: None,
+            extraction_attempts: 0,
         };
         fs::write(docs_dir.join(attachment_file), b"img").expect("write attachment doc");
         fs::write(
@@ -999,6 +1001,8 @@ mod tests {
                 "attachmentKey".to_string(),
                 serde_json::Value::String("check:123|2026-02-01|25.00".to_string()),
             )]),
+            extraction_error: None,
+            extraction_attempts: 0,
         };
         fs::write(docs_dir.join(attachment_file), b"img").expect("write attachment doc");
         fs::write(
