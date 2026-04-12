@@ -984,6 +984,10 @@ fn reset_document_extraction_failure(
     let login_name = require_login_name_input(login_name)?;
     let label = require_label_input(label)?;
     let documents_dir = login_config::login_account_documents_dir(&target_dir, &login_name, &label);
+    // Reject filenames containing path separators or `..` to prevent path traversal.
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return Err(format!("invalid filename: {filename:?}"));
+    }
     let doc_path = documents_dir.join(&filename);
     let sidecar_path = documents_dir.join(format!("{filename}-info.json"));
     // Delete both file and sidecar so the driver sees the slot as empty on the

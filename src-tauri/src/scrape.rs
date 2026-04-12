@@ -368,15 +368,14 @@ pub fn finalize_staged_resources(
             let _ = std::fs::remove_file(&sidecar_tmp);
             format!("failed to finalize {}: {e}", final_path.display())
         })?;
-        std::fs::rename(&sidecar_tmp, &sidecar_path).map_err(|e| {
+        if let Err(e) = std::fs::rename(&sidecar_tmp, &sidecar_path) {
             // The document file was already renamed; log but don't fail.
             // The sidecar will be stale (old content) until the next scrape.
             eprintln!(
                 "warning: failed to finalize sidecar {}: {e}",
                 sidecar_path.display()
             );
-            e
-        })?;
+        }
 
         finalized_names.push(final_filename);
     }
