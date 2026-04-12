@@ -610,7 +610,10 @@ async fn run_scrape_for_login(
             .map_err(|err| err.to_string())?;
         let prompt_ui_handler = {
             let app_handle = app_handle.clone();
-            std::sync::Arc::new(move |message: String| request_prompt_answer(&app_handle, message))
+            let login_name = login_name.clone();
+            std::sync::Arc::new(move |message: String| {
+                request_prompt_answer(&app_handle, login_name.clone(), message)
+            })
         };
 
         let config = scrape::ScrapeConfig {
@@ -2022,6 +2025,7 @@ fn send_prompt_answer(answer: Option<String>, state: &PromptAnswerState) -> Resu
 
 fn request_prompt_answer(
     app_handle: &tauri::AppHandle,
+    login_name: String,
     message: String,
 ) -> Result<Option<String>, String> {
     let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
@@ -2033,13 +2037,17 @@ fn request_prompt_answer(
 
     #[derive(serde::Serialize, Clone)]
     struct PromptRequestedPayload {
+        login_name: String,
         message: String,
     }
 
     app_handle
         .emit(
             "refreshmint://prompt-requested",
-            PromptRequestedPayload { message },
+            PromptRequestedPayload {
+                login_name,
+                message,
+            },
         )
         .map_err(|e| format!("prompt emit failed: {e}"))?;
 

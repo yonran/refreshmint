@@ -83,6 +83,7 @@ function App() {
     const [autoEtlStatus, setAutoEtlStatus] = useState<string | null>(null);
     const [autoEtlErrors, setAutoEtlErrors] = useState<string | null>(null);
     const [promptRequest, setPromptRequest] = useState<{
+        loginName: string;
         message: string;
     } | null>(null);
     const [scrapeLogVersion, setScrapeLogVersion] = useState(0);
@@ -329,10 +330,13 @@ function App() {
     // Listen for prompt requests from the Rust scrape driver and surface them
     // as a blocking modal so the user can supply MFA codes etc.
     useEffect(() => {
-        const unlisten = listen<{ message: string }>(
+        const unlisten = listen<{ login_name: string; message: string }>(
             'refreshmint://prompt-requested',
             (event) => {
-                setPromptRequest({ message: event.payload.message });
+                setPromptRequest({
+                    loginName: event.payload.login_name,
+                    message: event.payload.message,
+                });
             },
         );
         return () => {
@@ -1408,7 +1412,7 @@ function App() {
                         role="dialog"
                         aria-modal="true"
                     >
-                        <h3>Scraper prompt</h3>
+                        <h3>Scraper prompt — {promptRequest.loginName}</h3>
                         <p>{promptRequest.message}</p>
                         <input
                             ref={promptInputRef}
