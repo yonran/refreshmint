@@ -719,6 +719,75 @@ export async function syncGlTransaction(
     return invoke('sync_gl_transaction', { ledger, loginName, label, entryId });
 }
 
+export type ImportAnomalyKind =
+    | 'finalized-missing-from-covered-export'
+    | 'unsafe-pending-retirement'
+    | 'duplicate-import-repair-skipped';
+
+export type ImportAnomalyStatus = 'open' | 'reviewed';
+
+export interface ImportAnomaly {
+    id: string;
+    kind: ImportAnomalyKind;
+    status: ImportAnomalyStatus;
+    loginName: string;
+    label: string;
+    sourceEntryId: string;
+    glTxnId?: string | null;
+    date: string;
+    amount?: string | null;
+    description: string;
+    evidence: string[];
+    coverageDocument: string;
+    safeToRetire: boolean;
+    safetyReasons: string[];
+    linkedReversalRef?: TypedRef | null;
+    notes?: string | null;
+    createdAt: string;
+    updatedAt: string;
+    reviewedAt?: string | null;
+}
+
+export async function listImportAnomalies(
+    ledger: string,
+): Promise<ImportAnomaly[]> {
+    return invoke('list_import_anomalies', { ledger });
+}
+
+export async function reviewImportAnomaly(
+    ledger: string,
+    anomaly: { id: string; notes?: string | null },
+): Promise<ImportAnomaly> {
+    return invoke('review_import_anomaly', { ledger, anomaly });
+}
+
+export async function linkImportAnomalyReversal(
+    ledger: string,
+    anomaly: {
+        id: string;
+        reversalRef: TypedRef;
+        notes?: string | null;
+    },
+): Promise<ImportAnomaly> {
+    return invoke('link_import_anomaly_reversal', { ledger, anomaly });
+}
+
+export async function retireLoginAccountEntry(
+    ledger: string,
+    loginName: string,
+    label: string,
+    entryId: string,
+    reason: string,
+): Promise<void> {
+    await invoke('retire_login_account_entry', {
+        ledger,
+        loginName,
+        label,
+        entryId,
+        reason,
+    });
+}
+
 export interface TransferMatch {
     accountLocator: string;
     entryId: string;

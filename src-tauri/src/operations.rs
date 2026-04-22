@@ -51,6 +51,15 @@ pub enum AccountOperation {
         scrape_session_id: String,
         timestamp: String,
     },
+
+    /// Records that a provisional source entry was explicitly retired.
+    #[serde(rename = "entry-retired")]
+    EntryRetired {
+        #[serde(rename = "entryId")]
+        entry_id: String,
+        reason: String,
+        timestamp: String,
+    },
 }
 
 /// Dedup override action: force two entries to match, or prevent them from matching.
@@ -117,6 +126,22 @@ pub enum GlOperation {
         gl_txn_id: String,
         /// Snapshot of all source entries after the sync (for audit/replay).
         sources: Vec<SyncSource>,
+        timestamp: String,
+    },
+
+    /// Records a code-driven import duplicate repair.
+    #[serde(rename = "import-duplicate-repair")]
+    ImportDuplicateRepair {
+        account: String,
+        #[serde(rename = "keptEntryId")]
+        kept_entry_id: String,
+        #[serde(rename = "removedEntryId")]
+        removed_entry_id: String,
+        #[serde(rename = "keptGlTxnId")]
+        kept_gl_txn_id: Option<String>,
+        #[serde(rename = "removedGlTxnId")]
+        removed_gl_txn_id: Option<String>,
+        reason: String,
         timestamp: String,
     },
 }

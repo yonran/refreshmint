@@ -1408,6 +1408,90 @@ pub fn sync_gl_transaction(
     Ok(gl_txn_id)
 }
 
+pub fn retire_login_account_entry(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    entry_id: &str,
+    reason: &str,
+    lock_owner: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _gl_lock =
+        login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "retire-login-entry")?;
+    let _login_lock = login_config::acquire_login_lock_with_metadata(
+        ledger_dir,
+        login_name,
+        lock_owner,
+        "retire-login-entry",
+    )?;
+
+    let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
+    let mut entries = account_journal::read_journal_at_path(&journal_path)?;
+    let original_entries = entries.clone();
+    let entry_idx = entries
+        .iter()
+        .position(|e| e.id == entry_id)
+        .ok_or_else(|| format!("entry not found: {entry_id}"))?;
+    let entry = entries[entry_idx].clone();
+
+    if !entry.posted_postings.is_empty() {
+        return Err(format!("entry {entry_id} has partially posted split rows").into());
+    }
+
+    let mut removed_gl_txn = None;
+    let gl_txn_id = entry.posted.as_deref().map(|gl_ref| {
+        gl_ref
+            .strip_prefix("general.journal:")
+            .unwrap_or(gl_ref)
+            .to_string()
+    });
+    if let Some(gl_txn_id) = gl_txn_id.as_deref() {
+        let blockers = crate::bookkeeping::gl_txn_removal_blockers(ledger_dir, gl_txn_id)?;
+        if !blockers.is_empty() {
+            return Err(format!(
+                "cannot retire entry {entry_id}; GL transaction {gl_txn_id} is protected: {}",
+                blockers.join(", ")
+            )
+            .into());
+        }
+        let source_locator = format!("logins/{login_name}/accounts/{label}");
+        let other_sides = preload_other_sides(ledger_dir, gl_txn_id, &source_locator, entry_id)?;
+        if !other_sides.is_empty() {
+            return Err(format!(
+                "cannot retire entry {entry_id}; GL transaction {gl_txn_id} has other source entries"
+            )
+            .into());
+        }
+        removed_gl_txn = remove_gl_transaction(ledger_dir, gl_txn_id)?;
+    }
+
+    entries.remove(entry_idx);
+    if let Err(err) = account_journal::write_journal_at_path(&journal_path, &entries) {
+        if let Some(removed) = &removed_gl_txn {
+            let gl_journal_path = ledger_dir.join("general.journal");
+            let _ = append_to_journal(&gl_journal_path, removed);
+        }
+        return Err(err.into());
+    }
+
+    let op = operations::AccountOperation::EntryRetired {
+        entry_id: entry_id.to_string(),
+        reason: reason.to_string(),
+        timestamp: operations::now_timestamp(),
+    };
+    if let Err(err) = operations::append_login_account_operation(ledger_dir, login_name, label, &op)
+    {
+        let _ = account_journal::write_journal_at_path(&journal_path, &original_entries);
+        if let Some(removed) = removed_gl_txn {
+            let gl_journal_path = ledger_dir.join("general.journal");
+            let _ = append_to_journal(&gl_journal_path, &removed);
+        }
+        return Err(err.into());
+    }
+
+    Ok(())
+}
+
 fn replace_posting_account(line: &str, new_account: &str) -> String {
     let indent_end = line
         .char_indices()

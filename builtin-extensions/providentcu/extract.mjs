@@ -48,7 +48,9 @@ async function extractCsv(context) {
                 : tamount;
 
             // Build description
+            if (typeof description !== 'string') return null;
             let tdescription = description.trim();
+            const pending = /\s*\(Pending\)$/i.test(tdescription);
             // Remove "(Pending)" suffix if present
             tdescription = tdescription.replace(/\s*\(Pending\)$/i, '');
 
@@ -77,7 +79,7 @@ async function extractCsv(context) {
 
             return {
                 tdate,
-                tstatus: 'Cleared',
+                tstatus: pending ? 'Pending' : 'Cleared',
                 tdescription,
                 tcomment,
                 ttags,

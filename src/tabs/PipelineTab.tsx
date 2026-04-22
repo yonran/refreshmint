@@ -15,8 +15,10 @@ import {
     getLoginExtractionSupport,
     getLockStatusSnapshot,
     getUnpostedEntriesForTransfer,
+    listImportAnomalies,
     type LoginConfig,
     type LockStatusSnapshot,
+    type ImportAnomaly,
     listLoginAccountDocuments,
     type DocumentWithInfo,
     type LedgerView,
@@ -26,12 +28,14 @@ import {
     readLoginAccountDocumentText,
     postLoginAccountEntrySplit,
     postLoginAccountTransfer,
+    retireLoginAccountEntry,
     runLoginAccountExtraction,
     setLoginAccount,
     startLockMetadataWatch,
     stopLockMetadataWatch,
     suggestCategories,
     syncGlTransaction,
+    reviewImportAnomaly,
     type UnpostedTransferResult,
 } from '../tauri-commands.ts';
 import {
@@ -118,6 +122,8 @@ export function PipelineTab({
     >(new Set(session.pipelineSelectedEntryIds));
     const [pipelineCategorySuggestions, setPipelineCategorySuggestions] =
         useState<Record<string, CategoryResult>>({});
+    const [importAnomalies, setImportAnomalies] = useState<ImportAnomaly[]>([]);
+    const [busyAnomalyId, setBusyAnomalyId] = useState<string | null>(null);
     const [pipelineGlAccountDraft, setPipelineGlAccountDraft] = useState(
         session.pipelineGlAccountDraft,
     );
@@ -685,12 +691,21 @@ export function PipelineTab({
                 [documentName],
             );
             const newCount = result.newEntryCount;
-            const [journal, unposted] = await Promise.all([
+            const [journal, unposted, anomalies] = await Promise.all([
                 getLoginAccountJournal(ledgerPath, loginName, label),
                 getLoginAccountUnposted(ledgerPath, loginName, label),
+                listImportAnomalies(ledgerPath),
             ]);
             setAccountJournalEntries(journal);
             setUnpostedEntries(unposted);
+            setImportAnomalies(
+                anomalies.filter(
+                    (anomaly) =>
+                        anomaly.status === 'open' &&
+                        anomaly.loginName === loginName &&
+                        anomaly.label === label,
+                ),
+            );
             setPipelineStatus(
                 `Extraction complete. ${newCount} new entr${newCount === 1 ? 'y' : 'ies'} added.`,
             );
@@ -706,12 +721,21 @@ export function PipelineTab({
     async function refreshPipelineLoginAccountData() {
         if (!selectedLoginAccount) return;
         const { loginName, label } = selectedLoginAccount;
-        const [fetchedJournal, fetchedUnposted] = await Promise.all([
+        const [fetchedJournal, fetchedUnposted, anomalies] = await Promise.all([
             getLoginAccountJournal(ledgerPath, loginName, label),
             getLoginAccountUnposted(ledgerPath, loginName, label),
+            listImportAnomalies(ledgerPath),
         ]);
         setAccountJournalEntries(fetchedJournal);
         setUnpostedEntries(fetchedUnposted);
+        setImportAnomalies(
+            anomalies.filter(
+                (anomaly) =>
+                    anomaly.status === 'open' &&
+                    anomaly.loginName === loginName &&
+                    anomaly.label === label,
+            ),
+        );
         // Reload full ledger so Transactions tab and GL Rows stay in sync.
         onLedgerRefresh();
         // Non-blocking re-run of suggestCategories to refresh mismatch flags
@@ -1097,6 +1121,45 @@ export function PipelineTab({
             setPipelineStatus(`Sync failed: ${String(error)}`);
         } finally {
             setBusyPostEntryId(null);
+        }
+    }
+
+    async function handleReviewAnomaly(anomalyId: string) {
+        setBusyAnomalyId(anomalyId);
+        try {
+            await reviewImportAnomaly(ledgerPath, {
+                id: anomalyId,
+                notes: 'Reviewed in Pipeline',
+            });
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus('Import anomaly marked reviewed.');
+        } catch (error) {
+            setPipelineStatus(`Review failed: ${String(error)}`);
+        } finally {
+            setBusyAnomalyId(null);
+        }
+    }
+
+    async function handleRetireAnomalySource(anomaly: ImportAnomaly) {
+        setBusyAnomalyId(anomaly.id);
+        try {
+            await retireLoginAccountEntry(
+                ledgerPath,
+                anomaly.loginName,
+                anomaly.label,
+                anomaly.sourceEntryId,
+                `import anomaly ${anomaly.id}: ${anomaly.kind}`,
+            );
+            await reviewImportAnomaly(ledgerPath, {
+                id: anomaly.id,
+                notes: 'Retired source entry from Pipeline',
+            });
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(`Retired source entry ${anomaly.sourceEntryId}.`);
+        } catch (error) {
+            setPipelineStatus(`Retire failed: ${String(error)}`);
+        } finally {
+            setBusyAnomalyId(null);
         }
     }
 
@@ -1711,6 +1774,114 @@ export function PipelineTab({
                                     </button>
                                 </div>
                             </div>
+                            {importAnomalies.length > 0 && (
+                                <div className="pipeline-panel">
+                                    <h3>Import anomalies</h3>
+                                    <div className="table-wrap">
+                                        <table className="ledger-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Kind</th>
+                                                    <th>Date</th>
+                                                    <th>Description</th>
+                                                    <th>Amount</th>
+                                                    <th>Reason</th>
+                                                    <th>Actions</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {importAnomalies.map(
+                                                    (anomaly) => (
+                                                        <tr key={anomaly.id}>
+                                                            <td>
+                                                                {anomaly.kind}
+                                                            </td>
+                                                            <td className="mono">
+                                                                {anomaly.date}
+                                                            </td>
+                                                            <td>
+                                                                {
+                                                                    anomaly.description
+                                                                }
+                                                            </td>
+                                                            <td className="mono">
+                                                                {anomaly.amount ??
+                                                                    '-'}
+                                                            </td>
+                                                            <td>
+                                                                {anomaly
+                                                                    .safetyReasons
+                                                                    .length ===
+                                                                0
+                                                                    ? anomaly.coverageDocument
+                                                                    : anomaly.safetyReasons.join(
+                                                                          ', ',
+                                                                      )}
+                                                            </td>
+                                                            <td>
+                                                                <div className="txn-actions">
+                                                                    {anomaly.glTxnId !=
+                                                                        null && (
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            onClick={() => {
+                                                                                if (
+                                                                                    anomaly.glTxnId !=
+                                                                                    null
+                                                                                )
+                                                                                    onViewGlTransaction(
+                                                                                        anomaly.glTxnId,
+                                                                                    );
+                                                                            }}
+                                                                        >
+                                                                            View
+                                                                            GL
+                                                                        </button>
+                                                                    )}
+                                                                    <button
+                                                                        type="button"
+                                                                        className="ghost-button"
+                                                                        disabled={
+                                                                            busyAnomalyId ===
+                                                                            anomaly.id
+                                                                        }
+                                                                        onClick={() => {
+                                                                            void handleReviewAnomaly(
+                                                                                anomaly.id,
+                                                                            );
+                                                                        }}
+                                                                    >
+                                                                        Dismiss
+                                                                    </button>
+                                                                    {anomaly.safeToRetire && (
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            disabled={
+                                                                                busyAnomalyId ===
+                                                                                anomaly.id
+                                                                            }
+                                                                            onClick={() => {
+                                                                                void handleRetireAnomalySource(
+                                                                                    anomaly,
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            Retire
+                                                                            source
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    ),
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
                             <div className="table-wrap">
                                 <table className="ledger-table">
                                     <thead>

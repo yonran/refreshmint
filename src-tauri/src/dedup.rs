@@ -244,6 +244,92 @@ pub fn apply_dedup_actions_for_login_account(
     )
 }
 
+pub fn apply_coverage_lifecycle_for_login_account(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    document_name: &str,
+    proposed: &[ExtractedTransaction],
+    mut entries: Vec<AccountEntry>,
+) -> Result<Vec<AccountEntry>, Box<dyn std::error::Error + Send + Sync>> {
+    let Some((coverage_start, coverage_end)) =
+        document_coverage_for_login_account(ledger_dir, login_name, label, document_name)?
+    else {
+        return Ok(entries);
+    };
+
+    let mut retained = Vec::with_capacity(entries.len());
+    for entry in entries.drain(..) {
+        if !entry_date_is_covered(&entry.date, coverage_start, coverage_end) {
+            retained.push(entry);
+            continue;
+        }
+        if proposed.iter().any(|txn| entry_matches_txn(&entry, txn)) {
+            retained.push(entry);
+            continue;
+        }
+        if entry
+            .evidence
+            .iter()
+            .any(|ev| entry_is_from_same_document_evidence(ev, document_name))
+        {
+            retained.push(entry);
+            continue;
+        }
+
+        match entry.status {
+            EntryStatus::Pending if entry.posted.is_none() && entry.posted_postings.is_empty() => {
+                let op = operations::AccountOperation::EntryRetired {
+                    entry_id: entry.id.clone(),
+                    reason: format!(
+                        "pending source entry absent from covered document {document_name}"
+                    ),
+                    timestamp: operations::now_timestamp(),
+                };
+                operations::append_login_account_operation(ledger_dir, login_name, label, &op)?;
+            }
+            EntryStatus::Pending => {
+                create_missing_import_anomaly(
+                    ledger_dir,
+                    MissingImportAnomaly {
+                        login_name,
+                        label,
+                        document_name,
+                        entry: &entry,
+                        kind: crate::bookkeeping::ImportAnomalyKind::UnsafePendingRetirement,
+                        safe_to_retire: false,
+                        safety_reasons: vec![
+                            "pending entry is already posted or partially posted".to_string()
+                        ],
+                    },
+                )?;
+                retained.push(entry);
+            }
+            EntryStatus::Cleared => {
+                create_missing_import_anomaly(
+                    ledger_dir,
+                    MissingImportAnomaly {
+                        login_name,
+                        label,
+                        document_name,
+                        entry: &entry,
+                        kind:
+                            crate::bookkeeping::ImportAnomalyKind::FinalizedMissingFromCoveredExport,
+                        safe_to_retire: false,
+                        safety_reasons: vec![
+                            "bank-cleared source entries are authoritative".to_string()
+                        ],
+                    },
+                )?;
+                retained.push(entry);
+            }
+            EntryStatus::Unmarked => retained.push(entry),
+        }
+    }
+
+    Ok(retained)
+}
+
 fn apply_dedup_actions_with_logger<F>(
     mut entries: Vec<AccountEntry>,
     actions: &[DedupAction],
@@ -411,9 +497,43 @@ fn match_proposed(
         }
     }
 
-    // Step 3: Fuzzy match (across other documents)
-    let mut fuzzy_candidates = Vec::new();
+    // Step 3: Pending→finalized. Run before generic fuzzy matching so the
+    // apply step updates the provisional source entry to the finalized bank row.
     let txn_amount = txn_primary_amount(txn);
+    if txn.status() == EntryStatus::Cleared {
+        let mut pending_candidates = Vec::new();
+        for (i, entry) in existing.iter().enumerate() {
+            if matched[i] {
+                continue;
+            }
+            if entry.status != EntryStatus::Pending {
+                continue;
+            }
+            if entry_is_from_same_document(entry, source_document) {
+                continue;
+            }
+            if !dates_within_tolerance(&entry.date, &txn.tdate, config.pending_finalized_days) {
+                continue;
+            }
+            if amounts_within_tolerance(
+                &entry_primary_amount(entry),
+                &txn_amount,
+                config.pending_finalized_amount_abs,
+                config.pending_finalized_amount_pct,
+            ) && descriptions_similar(&entry.description, &txn.tdescription)
+            {
+                pending_candidates.push(i);
+            }
+        }
+        if pending_candidates.len() == 1 {
+            return DedupResult::PendingToFinalized {
+                existing_index: pending_candidates[0],
+            };
+        }
+    }
+
+    // Step 4: Fuzzy match (across other documents)
+    let mut fuzzy_candidates = Vec::new();
 
     for (i, entry) in existing.iter().enumerate() {
         if matched[i] {
@@ -439,38 +559,6 @@ fn match_proposed(
         };
     }
 
-    // Step 4: Pending→finalized
-    if txn.status() == EntryStatus::Cleared {
-        let mut pending_candidates = Vec::new();
-        for (i, entry) in existing.iter().enumerate() {
-            if matched[i] {
-                continue;
-            }
-            if entry.status != EntryStatus::Pending {
-                continue;
-            }
-            if entry_is_from_same_document(entry, source_document) {
-                continue;
-            }
-            if !dates_within_tolerance(&entry.date, &txn.tdate, config.pending_finalized_days) {
-                continue;
-            }
-            if amounts_within_tolerance(
-                &entry_primary_amount(entry),
-                &txn_amount,
-                config.pending_finalized_amount_abs,
-                config.pending_finalized_amount_pct,
-            ) {
-                pending_candidates.push(i);
-            }
-        }
-        if pending_candidates.len() == 1 {
-            return DedupResult::PendingToFinalized {
-                existing_index: pending_candidates[0],
-            };
-        }
-    }
-
     // Step 5: Ambiguous (multiple fuzzy candidates)
     if fuzzy_candidates.len() > 1 {
         return DedupResult::Ambiguous {
@@ -483,13 +571,107 @@ fn match_proposed(
 }
 
 fn entry_is_from_same_document(entry: &AccountEntry, source_document: &str) -> bool {
-    entry.evidence.iter().any(|ev| {
-        ev.starts_with(source_document)
-            && ev
-                .get(source_document.len()..)
-                .map(|rest| rest.starts_with(':') || rest.starts_with('#'))
-                .unwrap_or(false)
-    })
+    entry
+        .evidence
+        .iter()
+        .any(|ev| entry_is_from_same_document_evidence(ev, source_document))
+}
+
+fn entry_is_from_same_document_evidence(evidence_ref: &str, source_document: &str) -> bool {
+    evidence_ref.starts_with(source_document)
+        && evidence_ref
+            .get(source_document.len()..)
+            .map(|rest| rest.starts_with(':') || rest.starts_with('#'))
+            .unwrap_or(false)
+}
+
+fn document_coverage_for_login_account(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    document_name: &str,
+) -> Result<Option<(chrono::NaiveDate, chrono::NaiveDate)>, Box<dyn std::error::Error + Send + Sync>>
+{
+    let document = crate::extract::list_documents_for_login_account(ledger_dir, login_name, label)?
+        .into_iter()
+        .find(|doc| doc.filename == document_name);
+    let Some(info) = document.and_then(|doc| doc.info) else {
+        return Ok(None);
+    };
+    let end_raw = info
+        .date_range_end
+        .as_deref()
+        .unwrap_or(&info.coverage_end_date);
+    let end = chrono::NaiveDate::parse_from_str(end_raw, "%Y-%m-%d")?;
+    let start = match info.date_range_start.as_deref() {
+        Some(start_raw) => chrono::NaiveDate::parse_from_str(start_raw, "%Y-%m-%d")?,
+        None => end,
+    };
+    Ok(Some((start, end)))
+}
+
+fn entry_date_is_covered(
+    entry_date: &str,
+    coverage_start: chrono::NaiveDate,
+    coverage_end: chrono::NaiveDate,
+) -> bool {
+    let Ok(date) = chrono::NaiveDate::parse_from_str(entry_date, "%Y-%m-%d") else {
+        return false;
+    };
+    date >= coverage_start && date <= coverage_end
+}
+
+fn entry_matches_txn(entry: &AccountEntry, txn: &ExtractedTransaction) -> bool {
+    entry.date == txn.tdate
+        && amounts_equal(&entry_primary_amount(entry), &txn_primary_amount(txn))
+        && descriptions_similar(&entry.description, &txn.tdescription)
+}
+
+struct MissingImportAnomaly<'a> {
+    login_name: &'a str,
+    label: &'a str,
+    document_name: &'a str,
+    entry: &'a AccountEntry,
+    kind: crate::bookkeeping::ImportAnomalyKind,
+    safe_to_retire: bool,
+    safety_reasons: Vec<String>,
+}
+
+fn create_missing_import_anomaly(
+    ledger_dir: &Path,
+    anomaly: MissingImportAnomaly<'_>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let amount = anomaly
+        .entry
+        .postings
+        .first()
+        .and_then(|posting| posting.amount.as_ref())
+        .map(|amount| format!("{} {}", amount.quantity, amount.commodity));
+    let gl_txn_id = anomaly.entry.posted.as_deref().map(|posted| {
+        posted
+            .strip_prefix("general.journal:")
+            .unwrap_or(posted)
+            .to_string()
+    });
+    crate::bookkeeping::create_import_anomaly(
+        ledger_dir,
+        crate::bookkeeping::NewImportAnomalyInput {
+            kind: anomaly.kind,
+            login_name: anomaly.login_name.to_string(),
+            label: anomaly.label.to_string(),
+            source_entry_id: anomaly.entry.id.clone(),
+            gl_txn_id,
+            date: anomaly.entry.date.clone(),
+            amount,
+            description: anomaly.entry.description.clone(),
+            evidence: anomaly.entry.evidence.clone(),
+            coverage_document: anomaly.document_name.to_string(),
+            safe_to_retire: anomaly.safe_to_retire,
+            safety_reasons: anomaly.safety_reasons,
+            notes: None,
+        },
+    )?;
+    Ok(())
 }
 
 fn has_content_changed(entry: &AccountEntry, txn: &ExtractedTransaction) -> bool {
@@ -687,7 +869,13 @@ pub(crate) fn descriptions_similar(a: &str, b: &str) -> bool {
 fn normalize_description(desc: &str) -> String {
     desc.to_ascii_uppercase()
         .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -854,6 +1042,42 @@ mod tests {
     }
 
     #[test]
+    fn descriptions_similar_treats_punctuation_as_separators() {
+        assert!(descriptions_similar(
+            "LEMONADE-METROMILE INS, +18447338666, NY",
+            "LEMONADE-METROMILE INS   WWW.LEMONADE.NY",
+        ));
+    }
+
+    #[test]
+    fn cleared_card_row_finalizes_prior_pending_card_row() {
+        let existing = vec![make_entry(
+            "e1",
+            "2026-03-23",
+            "LEMONADE-METROMILE INS, +18447338666, NY",
+            EntryStatus::Pending,
+            "-57.97",
+            &["pending.csv:2:1"],
+        )];
+
+        let mut txn = make_txn(
+            "2026-03-23",
+            "LEMONADE-METROMILE INS   WWW.LEMONADE.NY",
+            "Cleared",
+            "cleared.csv:2:1",
+        );
+        txn.ttags
+            .push(("amount".to_string(), "-57.97 USD".to_string()));
+
+        let actions = run_dedup(&existing, &[txn], "cleared.csv", &DedupConfig::default());
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            actions[0].result,
+            DedupResult::PendingToFinalized { existing_index: 0 }
+        ));
+    }
+
+    #[test]
     fn dates_within_tolerance_basic() {
         assert!(dates_within_tolerance("2024-01-01", "2024-01-01", 1));
         assert!(dates_within_tolerance("2024-01-01", "2024-01-02", 1));
@@ -902,6 +1126,128 @@ mod tests {
             .expect("first posting amount");
         assert_eq!(updated_amount, "-11.50");
         assert_eq!(updated[0].status, EntryStatus::Cleared);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn write_login_document_info(
+        root: &Path,
+        login: &str,
+        label: &str,
+        filename: &str,
+        start: &str,
+        end: &str,
+    ) {
+        let docs_dir = root
+            .join("logins")
+            .join(login)
+            .join("accounts")
+            .join(label)
+            .join("documents");
+        fs::create_dir_all(&docs_dir).expect("create docs dir");
+        fs::write(docs_dir.join(filename), b"Date,Description,Amount\n").expect("write doc");
+        let info = crate::scrape::DocumentInfo {
+            mime_type: "text/csv".to_string(),
+            original_url: None,
+            scraped_at: "2026-04-01T00:00:00Z".to_string(),
+            extension_name: "providentcu".to_string(),
+            login_name: login.to_string(),
+            label: label.to_string(),
+            scrape_session_id: "sess-1".to_string(),
+            coverage_end_date: end.to_string(),
+            date_range_start: Some(start.to_string()),
+            date_range_end: Some(end.to_string()),
+            metadata: std::collections::BTreeMap::new(),
+            extraction_error: None,
+            extraction_attempts: 0,
+        };
+        fs::write(
+            docs_dir.join(format!("{filename}-info.json")),
+            serde_json::to_string_pretty(&info).expect("serialize sidecar"),
+        )
+        .expect("write sidecar");
+    }
+
+    #[test]
+    fn coverage_lifecycle_retires_missing_unposted_pending_entry() {
+        let root = temp_dir("coverage-retires-pending");
+        write_login_document_info(
+            &root,
+            "provident",
+            "card",
+            "activity.csv",
+            "2026-03-01",
+            "2026-03-31",
+        );
+        let existing = vec![make_entry(
+            "pending-1",
+            "2026-03-23",
+            "PENDING HOLD",
+            EntryStatus::Pending,
+            "-57.97",
+            &["old.csv:2:1"],
+        )];
+
+        let updated = apply_coverage_lifecycle_for_login_account(
+            &root,
+            "provident",
+            "card",
+            "activity.csv",
+            &[],
+            existing,
+        )
+        .expect("apply lifecycle");
+
+        assert!(updated.is_empty());
+        let ops =
+            operations::read_login_account_operations(&root, "provident", "card").expect("ops");
+        assert!(matches!(
+            ops.as_slice(),
+            [operations::AccountOperation::EntryRetired { entry_id, .. }]
+                if entry_id == "pending-1"
+        ));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn coverage_lifecycle_flags_missing_cleared_entry() {
+        let root = temp_dir("coverage-flags-cleared");
+        write_login_document_info(
+            &root,
+            "provident",
+            "card",
+            "activity.csv",
+            "2026-03-01",
+            "2026-03-31",
+        );
+        let existing = vec![make_entry(
+            "cleared-1",
+            "2026-03-23",
+            "CLEARED PURCHASE",
+            EntryStatus::Cleared,
+            "-57.97",
+            &["old.csv:2:1"],
+        )];
+
+        let updated = apply_coverage_lifecycle_for_login_account(
+            &root,
+            "provident",
+            "card",
+            "activity.csv",
+            &[],
+            existing,
+        )
+        .expect("apply lifecycle");
+
+        assert_eq!(updated.len(), 1);
+        let anomalies = crate::bookkeeping::list_import_anomalies(&root).expect("anomalies");
+        assert_eq!(anomalies.len(), 1);
+        assert!(matches!(
+            anomalies[0].kind,
+            crate::bookkeeping::ImportAnomalyKind::FinalizedMissingFromCoveredExport
+        ));
+        assert_eq!(anomalies[0].source_entry_id, "cleared-1");
 
         let _ = fs::remove_dir_all(&root);
     }

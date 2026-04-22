@@ -29,6 +29,7 @@ pub fn migrate_ledger(
         ..MigrationOutcome::default()
     };
     migrate_staging_account_names(ledger_dir, dry_run, &mut outcome)?;
+    repair_duplicate_imports(ledger_dir, dry_run, &mut outcome)?;
 
     let accounts_dir = ledger_dir.join("accounts");
     if !accounts_dir.exists() {
@@ -140,6 +141,217 @@ pub fn migrate_ledger(
         remove_dir_if_empty(&accounts_dir)?;
     }
     Ok(outcome)
+}
+
+fn repair_duplicate_imports(
+    ledger_dir: &Path,
+    dry_run: bool,
+    outcome: &mut MigrationOutcome,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut repaired = 0usize;
+    for login_name in crate::login_config::list_logins(ledger_dir)? {
+        let config = crate::login_config::read_login_config(ledger_dir, &login_name);
+        for label in config.accounts.keys() {
+            let journal_path =
+                crate::account_journal::login_account_journal_path(ledger_dir, &login_name, label);
+            if !journal_path.exists() {
+                continue;
+            }
+            let mut entries = crate::account_journal::read_journal_at_path(&journal_path)?;
+            while let Some(repair) = find_duplicate_import_repair(&entries) {
+                let removed_entry = entries[repair.remove_idx].clone();
+                let kept_entry = entries[repair.keep_idx].clone();
+                let removed_gl_txn_id = removed_entry.posted.as_deref().map(|posted| {
+                    posted
+                        .strip_prefix("general.journal:")
+                        .unwrap_or(posted)
+                        .to_string()
+                });
+                let kept_gl_txn_id = kept_entry.posted.as_deref().map(|posted| {
+                    posted
+                        .strip_prefix("general.journal:")
+                        .unwrap_or(posted)
+                        .to_string()
+                });
+                let blockers = match removed_gl_txn_id.as_deref() {
+                    Some(gl_txn_id) => {
+                        let mut blockers =
+                            crate::bookkeeping::gl_txn_removal_blockers(ledger_dir, gl_txn_id)?;
+                        if general_journal_block_source_count(ledger_dir, gl_txn_id)? != Some(1) {
+                            blockers.push(
+                                "GL transaction is not a single-source generated import"
+                                    .to_string(),
+                            );
+                        }
+                        blockers
+                    }
+                    None => Vec::new(),
+                };
+                if !blockers.is_empty() {
+                    if !dry_run {
+                        crate::bookkeeping::create_import_anomaly(
+                            ledger_dir,
+                            crate::bookkeeping::NewImportAnomalyInput {
+                                kind: crate::bookkeeping::ImportAnomalyKind::DuplicateImportRepairSkipped,
+                                login_name: login_name.clone(),
+                                label: label.clone(),
+                                source_entry_id: removed_entry.id.clone(),
+                                gl_txn_id: removed_gl_txn_id,
+                                date: removed_entry.date.clone(),
+                                amount: removed_entry
+                                    .postings
+                                    .first()
+                                    .and_then(|p| p.amount.as_ref())
+                                    .map(|a| format!("{} {}", a.quantity, a.commodity)),
+                                description: removed_entry.description.clone(),
+                                evidence: removed_entry.evidence.clone(),
+                                coverage_document: removed_entry
+                                    .evidence
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_else(|| "unknown".to_string()),
+                                safe_to_retire: false,
+                                safety_reasons: blockers,
+                                notes: Some(
+                                    "duplicate import repair skipped by migration".to_string(),
+                                ),
+                            },
+                        )?;
+                    }
+                    break;
+                }
+
+                repaired += 1;
+                if dry_run {
+                    break;
+                }
+
+                for evidence in removed_entry.evidence {
+                    entries[repair.keep_idx].add_evidence(evidence);
+                }
+                entries.remove(repair.remove_idx);
+                crate::account_journal::write_journal_at_path(&journal_path, &entries)?;
+                if let Some(gl_txn_id) = removed_gl_txn_id.as_deref() {
+                    remove_general_journal_block_by_id(ledger_dir, gl_txn_id)?;
+                }
+                crate::operations::append_gl_operation(
+                    ledger_dir,
+                    &crate::operations::GlOperation::ImportDuplicateRepair {
+                        account: format!("logins/{login_name}/accounts/{label}"),
+                        kept_entry_id: kept_entry.id,
+                        removed_entry_id: removed_entry.id,
+                        kept_gl_txn_id,
+                        removed_gl_txn_id,
+                        reason: "historical pending import duplicated by finalized bank row"
+                            .to_string(),
+                        timestamp: crate::operations::now_timestamp(),
+                    },
+                )?;
+            }
+        }
+    }
+    if repaired > 0 {
+        let action = if dry_run { "would repair" } else { "repaired" };
+        outcome.warnings.push(format!(
+            "{action} {repaired} duplicate imported transaction(s)"
+        ));
+    }
+    Ok(())
+}
+
+struct DuplicateImportRepair {
+    keep_idx: usize,
+    remove_idx: usize,
+}
+
+fn find_duplicate_import_repair(
+    entries: &[crate::account_journal::AccountEntry],
+) -> Option<DuplicateImportRepair> {
+    for (left_idx, left) in entries.iter().enumerate() {
+        for (right_idx, right) in entries.iter().enumerate().skip(left_idx + 1) {
+            if left.date != right.date {
+                continue;
+            }
+            if entry_primary_quantity(left) != entry_primary_quantity(right) {
+                continue;
+            }
+            if !crate::dedup::descriptions_similar(&left.description, &right.description) {
+                continue;
+            }
+            let left_pending = is_probable_pending_origin(left);
+            let right_pending = is_probable_pending_origin(right);
+            if left_pending == right_pending {
+                continue;
+            }
+            let (keep_idx, remove_idx) = if left_pending {
+                (right_idx, left_idx)
+            } else {
+                (left_idx, right_idx)
+            };
+            return Some(DuplicateImportRepair {
+                keep_idx,
+                remove_idx,
+            });
+        }
+    }
+    None
+}
+
+fn entry_primary_quantity(entry: &crate::account_journal::AccountEntry) -> Option<String> {
+    entry
+        .postings
+        .first()
+        .and_then(|p| p.amount.as_ref())
+        .map(|amount| amount.quantity.clone())
+}
+
+fn is_probable_pending_origin(entry: &crate::account_journal::AccountEntry) -> bool {
+    matches!(entry.status, crate::account_journal::EntryStatus::Pending)
+        || (entry.description.contains('+') && !entry.description.contains("WWW."))
+}
+
+fn remove_general_journal_block_by_id(ledger_dir: &Path, gl_txn_id: &str) -> io::Result<()> {
+    let path = ledger_dir.join("general.journal");
+    let content = fs::read_to_string(&path)?;
+    let marker = format!("id: {gl_txn_id}");
+    let mut removed = false;
+    let mut kept_blocks = Vec::new();
+    for block in content.split("\n\n") {
+        if !removed && block.contains(&marker) {
+            removed = true;
+            continue;
+        }
+        kept_blocks.push(block);
+    }
+    if !removed {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("GL transaction not found: {gl_txn_id}"),
+        ));
+    }
+    let mut updated = kept_blocks.join("\n\n");
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    fs::write(path, updated)
+}
+
+fn general_journal_block_source_count(
+    ledger_dir: &Path,
+    gl_txn_id: &str,
+) -> io::Result<Option<usize>> {
+    let path = ledger_dir.join("general.journal");
+    let content = fs::read_to_string(&path)?;
+    let marker = format!("id: {gl_txn_id}");
+    Ok(content
+        .split("\n\n")
+        .find(|block| block.contains(&marker))
+        .map(|block| {
+            block
+                .lines()
+                .filter(|line| line.contains("; source:"))
+                .count()
+        }))
 }
 
 fn migrate_staging_account_names(
@@ -862,6 +1074,92 @@ mod tests {
         assert!(content.contains("2026-01-01 Missing id  ; id: "));
         assert!(content.contains("id: keep-me"));
         assert_eq!(content.matches("id: keep-me").count(), 1);
+
+        let _ = fs::remove_dir_all(&ledger_dir);
+    }
+
+    #[test]
+    fn migrate_repairs_historical_pending_duplicate_import() {
+        let ledger_dir = temp_dir("duplicate-import");
+        let login_name = "provident";
+        let label = "card";
+        let mut config = crate::login_config::LoginConfig {
+            extension: Some("providentcu".to_string()),
+            accounts: BTreeMap::new(),
+        };
+        config.accounts.insert(
+            label.to_string(),
+            crate::login_config::LoginAccountConfig {
+                gl_account: Some("Liabilities:Provident:Visa".to_string()),
+            },
+        );
+        crate::login_config::write_login_config(&ledger_dir, login_name, &config).unwrap();
+        let journal_path =
+            crate::account_journal::login_account_journal_path(&ledger_dir, login_name, label);
+        fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+        crate::account_journal::write_journal_at_path(
+            &journal_path,
+            &[
+                crate::account_journal::AccountEntry {
+                    id: "pending-entry".to_string(),
+                    date: "2026-03-23".to_string(),
+                    status: crate::account_journal::EntryStatus::Cleared,
+                    description: "LEMONADE-METROMILE INS, +18447338666, NY".to_string(),
+                    comment: String::new(),
+                    evidence: vec!["pending.csv:2:1".to_string()],
+                    postings: vec![crate::account_journal::EntryPosting {
+                        account: "Liabilities:Provident:Visa".to_string(),
+                        amount: Some(crate::account_journal::SimpleAmount {
+                            commodity: "USD".to_string(),
+                            quantity: "-57.97".to_string(),
+                        }),
+                    }],
+                    tags: Vec::new(),
+                    extracted_by: None,
+                    posted: Some("general.journal:gl-pending".to_string()),
+                    posted_postings: Vec::new(),
+                },
+                crate::account_journal::AccountEntry {
+                    id: "final-entry".to_string(),
+                    date: "2026-03-23".to_string(),
+                    status: crate::account_journal::EntryStatus::Cleared,
+                    description: "LEMONADE-METROMILE INS   WWW.LEMONADE.NY".to_string(),
+                    comment: String::new(),
+                    evidence: vec!["final.csv:2:1".to_string()],
+                    postings: vec![crate::account_journal::EntryPosting {
+                        account: "Liabilities:Provident:Visa".to_string(),
+                        amount: Some(crate::account_journal::SimpleAmount {
+                            commodity: "USD".to_string(),
+                            quantity: "-57.97".to_string(),
+                        }),
+                    }],
+                    tags: Vec::new(),
+                    extracted_by: None,
+                    posted: Some("general.journal:gl-final".to_string()),
+                    posted_postings: Vec::new(),
+                },
+            ],
+        )
+        .unwrap();
+        fs::write(
+            ledger_dir.join("general.journal"),
+            "2026-03-23 * LEMONADE-METROMILE INS, +18447338666, NY  ; id: gl-pending\n  ; source: logins/provident/accounts/card:pending-entry\n  Liabilities:Provident:Visa  -57.97 USD\n  Expenses:Unknown  57.97 USD\n\n2026-03-23 * LEMONADE-METROMILE INS   WWW.LEMONADE.NY  ; id: gl-final\n  ; source: logins/provident/accounts/card:final-entry\n  Liabilities:Provident:Visa  -57.97 USD\n  Expenses:Unknown  57.97 USD\n",
+        )
+        .unwrap();
+
+        let outcome = migrate_ledger(&ledger_dir, false).unwrap();
+        assert!(outcome
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("duplicate imported transaction")));
+
+        let entries = crate::account_journal::read_journal_at_path(&journal_path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "final-entry");
+        assert!(entries[0].evidence.iter().any(|ev| ev == "pending.csv:2:1"));
+        let gl = fs::read_to_string(ledger_dir.join("general.journal")).unwrap();
+        assert!(!gl.contains("gl-pending"));
+        assert!(gl.contains("gl-final"));
 
         let _ = fs::remove_dir_all(&ledger_dir);
     }

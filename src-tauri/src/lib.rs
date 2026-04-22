@@ -161,11 +161,15 @@ pub fn run_with_context(
             list_period_closes,
             upsert_period_close,
             reopen_period_close,
+            list_import_anomalies,
+            review_import_anomaly,
+            link_import_anomaly_reversal,
             post_entry,
             post_login_account_entry,
             post_login_account_entry_split,
             unpost_entry,
             unpost_login_account_entry,
+            retire_login_account_entry,
             post_transfer,
             post_login_account_transfer,
             get_unposted_entries_for_transfer,
@@ -935,6 +939,15 @@ fn run_login_account_extraction(
                 Some(&format!("{extension_name}:latest")),
             )
             .map_err(|err| err.to_string())?;
+            all_updated = dedup::apply_coverage_lifecycle_for_login_account(
+                &target_dir,
+                &login_name,
+                &label,
+                doc_name,
+                &doc_txns,
+                all_updated,
+            )
+            .map_err(|err| err.to_string())?;
         }
 
         account_journal::write_journal_at_path(&journal_path, &all_updated)
@@ -1686,6 +1699,33 @@ fn delete_bookkeeping_link(ledger: String, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn list_import_anomalies(ledger: String) -> Result<Vec<bookkeeping::ImportAnomaly>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    bookkeeping::list_import_anomalies(&target_dir).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn review_import_anomaly(
+    ledger: String,
+    anomaly: bookkeeping::ReviewImportAnomalyInput,
+) -> Result<bookkeeping::ImportAnomaly, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    bookkeeping::review_import_anomaly(&target_dir, anomaly).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn link_import_anomaly_reversal(
+    ledger: String,
+    anomaly: bookkeeping::LinkImportAnomalyReversalInput,
+) -> Result<bookkeeping::ImportAnomaly, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    bookkeeping::link_import_anomaly_reversal(&target_dir, anomaly).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn list_period_closes(ledger: String) -> Result<Vec<bookkeeping::PeriodClose>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
@@ -1829,6 +1869,24 @@ fn unpost_login_account_entry(
         "gui",
     )
     .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn retire_login_account_entry(
+    ledger: String,
+    login_name: String,
+    label: String,
+    entry_id: String,
+    reason: String,
+) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let login_name = require_non_empty_input("loginName", login_name)?;
+    let label = require_non_empty_input("label", label)?;
+    let entry_id = require_non_empty_input("entryId", entry_id)?;
+    let reason = require_non_empty_input("reason", reason)?;
+    post::retire_login_account_entry(&target_dir, &login_name, &label, &entry_id, &reason, "ui")
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

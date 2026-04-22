@@ -28,6 +28,9 @@ function extractCsvRow(row, index, context) {
     if (row.length < 5) return null;
     const [date, description, amount, note] = row;
     if (!date || !description || !amount) return null;
+    if (typeof description !== 'string') return null;
+    const tdescription = description.trim();
+    if (!tdescription) return null;
 
     const tdate = parseDate(date);
     if (!tdate) return null;
@@ -41,7 +44,7 @@ function extractCsvRow(row, index, context) {
     return {
         tdate,
         tstatus: 'Cleared',
-        tdescription: String(description).trim(),
+        tdescription,
         tcomment: String(note || '').trim(),
         ttags: [
             ['evidence', `${context.document.name}:${index + 2}:1`],

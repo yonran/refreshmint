@@ -1195,6 +1195,15 @@ fn run_account_extract(
                 Some(&format!("{extension_name}:latest")),
             )
             .map_err(|err| std::io::Error::other(err.to_string()))?;
+            all_updated = crate::dedup::apply_coverage_lifecycle_for_login_account(
+                &ledger_dir,
+                &login_name,
+                &label,
+                doc_name,
+                &doc_txns,
+                all_updated,
+            )
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
         }
 
         crate::account_journal::write_journal_at_path(&journal_path, &all_updated)?;

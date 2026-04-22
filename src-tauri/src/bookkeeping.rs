@@ -8,6 +8,7 @@ const BOOKKEEPING_DIR: &str = "bookkeeping";
 const RECONCILIATION_SESSIONS_DIR: &str = "reconciliation-sessions";
 const LINKS_DIR: &str = "links";
 const PERIOD_CLOSES_DIR: &str = "period-closes";
+const IMPORT_ANOMALIES_DIR: &str = "import-anomalies";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -158,6 +159,82 @@ pub struct UpsertPeriodCloseInput {
     pub adjustment_txn_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportAnomaly {
+    pub id: String,
+    pub kind: ImportAnomalyKind,
+    pub status: ImportAnomalyStatus,
+    pub login_name: String,
+    pub label: String,
+    pub source_entry_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gl_txn_id: Option<String>,
+    pub date: String,
+    pub amount: Option<String>,
+    pub description: String,
+    pub evidence: Vec<String>,
+    pub coverage_document: String,
+    pub safe_to_retire: bool,
+    pub safety_reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linked_reversal_ref: Option<TypedRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportAnomalyKind {
+    FinalizedMissingFromCoveredExport,
+    UnsafePendingRetirement,
+    DuplicateImportRepairSkipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportAnomalyStatus {
+    Open,
+    Reviewed,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewImportAnomalyInput {
+    pub kind: ImportAnomalyKind,
+    pub login_name: String,
+    pub label: String,
+    pub source_entry_id: String,
+    pub gl_txn_id: Option<String>,
+    pub date: String,
+    pub amount: Option<String>,
+    pub description: String,
+    pub evidence: Vec<String>,
+    pub coverage_document: String,
+    pub safe_to_retire: bool,
+    pub safety_reasons: Vec<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewImportAnomalyInput {
+    pub id: String,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkImportAnomalyReversalInput {
+    pub id: String,
+    pub reversal_ref: TypedRef,
+    pub notes: Option<String>,
+}
+
 pub fn bookkeeping_dir(ledger_dir: &Path) -> PathBuf {
     ledger_dir.join(BOOKKEEPING_DIR)
 }
@@ -166,6 +243,7 @@ pub fn ensure_bookkeeping_layout(ledger_dir: &Path) -> io::Result<()> {
     fs::create_dir_all(reconciliation_sessions_dir(ledger_dir))?;
     fs::create_dir_all(links_dir(ledger_dir))?;
     fs::create_dir_all(period_closes_dir(ledger_dir))?;
+    fs::create_dir_all(import_anomalies_dir(ledger_dir))?;
     Ok(())
 }
 
@@ -548,6 +626,42 @@ pub fn repair_gl_txn_refs_after_merge(
     apply_bookkeeping_updates(ledger_dir, &updates)
 }
 
+pub fn gl_txn_removal_blockers(ledger_dir: &Path, gl_txn_id: &str) -> io::Result<Vec<String>> {
+    let gl_txn_id = gl_txn_id.trim();
+    if gl_txn_id.is_empty() {
+        return Ok(vec!["missing GL transaction id".to_string()]);
+    }
+
+    let mut blockers = Vec::new();
+    for session in list_reconciliation_sessions(ledger_dir)? {
+        if matches!(session.status, ReconciliationSessionStatus::Finalized)
+            && session.reconciled_txn_ids.iter().any(|id| id == gl_txn_id)
+        {
+            blockers.push(format!("reconciled in finalized session {}", session.id));
+        }
+    }
+
+    for link in list_links(ledger_dir)? {
+        let left_matches = link.left_ref.as_gl_txn_id() == Some(gl_txn_id);
+        let right_matches = link.right_ref.as_gl_txn_id() == Some(gl_txn_id);
+        if left_matches || right_matches {
+            blockers.push(format!("linked by {}", link.id));
+        }
+    }
+
+    for close in list_period_closes(ledger_dir)? {
+        if matches!(close.status, PeriodCloseStatus::SoftClosed)
+            && close.adjustment_txn_ids.iter().any(|id| id == gl_txn_id)
+        {
+            blockers.push(format!("soft-closed in period {}", close.period_id));
+        }
+    }
+
+    blockers.sort();
+    blockers.dedup();
+    Ok(blockers)
+}
+
 pub fn reopen_period_close(ledger_dir: &Path, period_id: &str) -> io::Result<PeriodClose> {
     let normalized = require_period_id(period_id.to_string())?;
     let path = period_close_path(ledger_dir, &normalized);
@@ -555,6 +669,93 @@ pub fn reopen_period_close(ledger_dir: &Path, period_id: &str) -> io::Result<Per
     close.status = PeriodCloseStatus::Reopened;
     write_json(&path, &close)?;
     Ok(close)
+}
+
+pub fn list_import_anomalies(ledger_dir: &Path) -> io::Result<Vec<ImportAnomaly>> {
+    let mut anomalies: Vec<ImportAnomaly> =
+        read_json_objects_from_dir(&import_anomalies_dir(ledger_dir))?;
+    anomalies.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(anomalies)
+}
+
+pub fn create_import_anomaly(
+    ledger_dir: &Path,
+    input: NewImportAnomalyInput,
+) -> io::Result<ImportAnomaly> {
+    ensure_bookkeeping_layout(ledger_dir)?;
+    for anomaly in list_import_anomalies(ledger_dir)? {
+        if anomaly.status == ImportAnomalyStatus::Open
+            && anomaly.kind == input.kind
+            && anomaly.login_name == input.login_name
+            && anomaly.label == input.label
+            && anomaly.source_entry_id == input.source_entry_id
+            && anomaly.coverage_document == input.coverage_document
+        {
+            return Ok(anomaly);
+        }
+    }
+    let now = crate::operations::now_timestamp();
+    let anomaly = ImportAnomaly {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: input.kind,
+        status: ImportAnomalyStatus::Open,
+        login_name: require_non_empty("login_name", input.login_name)?,
+        label: require_non_empty("label", input.label)?,
+        source_entry_id: require_non_empty("source_entry_id", input.source_entry_id)?,
+        gl_txn_id: normalize_optional_string(input.gl_txn_id),
+        date: require_date("date", input.date)?,
+        amount: normalize_optional_string(input.amount),
+        description: require_non_empty("description", input.description)?,
+        evidence: normalize_ids(input.evidence),
+        coverage_document: require_non_empty("coverage_document", input.coverage_document)?,
+        safe_to_retire: input.safe_to_retire,
+        safety_reasons: normalize_ids(input.safety_reasons),
+        linked_reversal_ref: None,
+        notes: normalize_optional_string(input.notes),
+        created_at: now.clone(),
+        updated_at: now,
+        reviewed_at: None,
+    };
+    write_json(&import_anomaly_path(ledger_dir, &anomaly.id), &anomaly)?;
+    Ok(anomaly)
+}
+
+pub fn review_import_anomaly(
+    ledger_dir: &Path,
+    input: ReviewImportAnomalyInput,
+) -> io::Result<ImportAnomaly> {
+    let id = require_non_empty("id", input.id)?;
+    let mut anomaly = read_required_json::<ImportAnomaly>(&import_anomaly_path(ledger_dir, &id))?;
+    let now = crate::operations::now_timestamp();
+    anomaly.status = ImportAnomalyStatus::Reviewed;
+    anomaly.notes = normalize_optional_string(input.notes).or(anomaly.notes);
+    anomaly.updated_at = now.clone();
+    anomaly.reviewed_at = Some(now);
+    write_json(&import_anomaly_path(ledger_dir, &anomaly.id), &anomaly)?;
+    Ok(anomaly)
+}
+
+pub fn link_import_anomaly_reversal(
+    ledger_dir: &Path,
+    input: LinkImportAnomalyReversalInput,
+) -> io::Result<ImportAnomaly> {
+    let id = require_non_empty("id", input.id)?;
+    let gl_txn_index = if matches!(input.reversal_ref.kind, TypedRefKind::GlTxn) {
+        Some(GlTxnIndex::load(ledger_dir)?)
+    } else {
+        None
+    };
+    validate_typed_ref("reversal_ref", &input.reversal_ref, gl_txn_index.as_ref())?;
+    let mut anomaly = read_required_json::<ImportAnomaly>(&import_anomaly_path(ledger_dir, &id))?;
+    anomaly.linked_reversal_ref = Some(input.reversal_ref);
+    anomaly.notes = normalize_optional_string(input.notes).or(anomaly.notes);
+    anomaly.updated_at = crate::operations::now_timestamp();
+    write_json(&import_anomaly_path(ledger_dir, &anomaly.id), &anomaly)?;
+    Ok(anomaly)
 }
 
 fn set_reconciliation_status(
@@ -582,6 +783,10 @@ fn period_closes_dir(ledger_dir: &Path) -> PathBuf {
     bookkeeping_dir(ledger_dir).join(PERIOD_CLOSES_DIR)
 }
 
+fn import_anomalies_dir(ledger_dir: &Path) -> PathBuf {
+    bookkeeping_dir(ledger_dir).join(IMPORT_ANOMALIES_DIR)
+}
+
 fn reconciliation_session_path(ledger_dir: &Path, id: &str) -> PathBuf {
     reconciliation_sessions_dir(ledger_dir).join(format!("{id}.json"))
 }
@@ -592,6 +797,10 @@ fn link_path(ledger_dir: &Path, id: &str) -> PathBuf {
 
 fn period_close_path(ledger_dir: &Path, period_id: &str) -> PathBuf {
     period_closes_dir(ledger_dir).join(format!("{period_id}.json"))
+}
+
+fn import_anomaly_path(ledger_dir: &Path, id: &str) -> PathBuf {
+    import_anomalies_dir(ledger_dir).join(format!("{id}.json"))
 }
 
 fn require_non_empty(field_name: &str, value: String) -> io::Result<String> {
@@ -1151,6 +1360,144 @@ mod tests {
 
         delete_link(&root, &created.id).unwrap();
         assert!(list_links(&root).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn import_anomalies_round_trip_review_and_link() {
+        let root = temp_ledger_dir("import-anomaly");
+        write_general_journal(
+            &root,
+            "2026-03-03 Reversal  ; id: gl-reversal\n  Assets:Checking  25 USD\n  Expenses:Food  -25 USD\n",
+        );
+
+        let created = create_import_anomaly(
+            &root,
+            NewImportAnomalyInput {
+                kind: ImportAnomalyKind::FinalizedMissingFromCoveredExport,
+                login_name: "provident".to_string(),
+                label: "card".to_string(),
+                source_entry_id: "entry-1".to_string(),
+                gl_txn_id: Some("gl-original".to_string()),
+                date: "2026-03-03".to_string(),
+                amount: Some("-25 USD".to_string()),
+                description: "Example".to_string(),
+                evidence: vec!["old.csv:2:1".to_string()],
+                coverage_document: "new.csv".to_string(),
+                safe_to_retire: false,
+                safety_reasons: vec!["bank-cleared source entries are authoritative".to_string()],
+                notes: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(list_import_anomalies(&root).unwrap().len(), 1);
+
+        let linked = link_import_anomaly_reversal(
+            &root,
+            LinkImportAnomalyReversalInput {
+                id: created.id.clone(),
+                reversal_ref: TypedRef {
+                    kind: TypedRefKind::GlTxn,
+                    id: Some("gl-reversal".to_string()),
+                    locator: None,
+                    entry_id: None,
+                    login_name: None,
+                    label: None,
+                    filename: None,
+                },
+                notes: Some("Matched refund".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            linked
+                .linked_reversal_ref
+                .as_ref()
+                .and_then(TypedRef::as_gl_txn_id),
+            Some("gl-reversal")
+        );
+
+        let reviewed = review_import_anomaly(
+            &root,
+            ReviewImportAnomalyInput {
+                id: created.id,
+                notes: Some("Done".to_string()),
+            },
+        )
+        .unwrap();
+        assert!(matches!(reviewed.status, ImportAnomalyStatus::Reviewed));
+        assert!(reviewed.reviewed_at.is_some());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn gl_txn_removal_blockers_detect_reconciliation_link_and_close() {
+        let root = temp_ledger_dir("removal-blockers");
+        write_general_journal(
+            &root,
+            "2026-03-03 Example  ; id: gl-1\n  Assets:Checking  -25 USD\n  Expenses:Food  25 USD\n",
+        );
+        let session = create_reconciliation_session(
+            &root,
+            NewReconciliationSessionInput {
+                gl_account: "Assets:Checking".to_string(),
+                statement_start_date: Some("2026-03-01".to_string()),
+                statement_end_date: "2026-03-31".to_string(),
+                statement_starting_balance: None,
+                statement_ending_balance: "0 USD".to_string(),
+                currency: Some("USD".to_string()),
+                reconciled_txn_ids: vec!["gl-1".to_string()],
+                notes: None,
+            },
+        )
+        .unwrap();
+        finalize_reconciliation_session(&root, &session.id).unwrap();
+        create_link(
+            &root,
+            NewLinkRecordInput {
+                kind: LinkKind::EvidenceLink,
+                left_ref: TypedRef {
+                    kind: TypedRefKind::GlTxn,
+                    id: Some("gl-1".to_string()),
+                    locator: None,
+                    entry_id: None,
+                    login_name: None,
+                    label: None,
+                    filename: None,
+                },
+                right_ref: TypedRef {
+                    kind: TypedRefKind::Document,
+                    id: None,
+                    locator: None,
+                    entry_id: None,
+                    login_name: Some("bank".to_string()),
+                    label: Some("checking".to_string()),
+                    filename: Some("receipt.pdf".to_string()),
+                },
+                amount: None,
+                notes: None,
+            },
+        )
+        .unwrap();
+        upsert_period_close(
+            &root,
+            UpsertPeriodCloseInput {
+                period_id: "2026-03".to_string(),
+                status: PeriodCloseStatus::SoftClosed,
+                closed_by: Some("owner".to_string()),
+                notes: None,
+                reconciliation_session_ids: vec![session.id],
+                adjustment_txn_ids: vec!["gl-1".to_string()],
+            },
+        )
+        .unwrap();
+
+        let blockers = gl_txn_removal_blockers(&root, "gl-1").unwrap();
+        assert!(blockers.iter().any(|b| b.contains("reconciled")));
+        assert!(blockers.iter().any(|b| b.contains("linked")));
+        assert!(blockers.iter().any(|b| b.contains("soft-closed")));
 
         let _ = fs::remove_dir_all(root);
     }
