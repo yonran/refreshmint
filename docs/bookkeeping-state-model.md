@@ -1,6 +1,6 @@
 # Bookkeeping State Model
 
-Last updated: April 3, 2026
+Last updated: April 30, 2026
 
 ## Summary
 
@@ -177,6 +177,271 @@ Current source-of-truth split:
 - hledger status markers live in `general.journal`
 - source posting refs live in account journals
 - reconciliation membership, links, and close state live in `bookkeeping/`
+
+## Row-Level Factual Propositions
+
+This section defines what each durable row or object asserts. The distinction
+matters because refreshmint can regenerate derived rows, but it must preserve
+observed facts and explicit user choices.
+
+### Source Account Journals
+
+File pattern:
+
+```text
+logins/<login>/accounts/<label>/account.journal
+accounts/<account>/account.journal
+```
+
+Each hledger transaction block asserts one imported source event for that
+source account.
+
+- Header date/status/description: the institution or importer reported this
+  source event with that date, lifecycle marker, and description.
+- Posting lines: the source event changed the source account by the posted
+  amount or amounts.
+- `id` tag: this is the stable refreshmint identity for that source event.
+- `evidence` tags: the event was derived from those scrape rows, document
+  rows, or other external locators.
+- Extracted tags such as `bankId`, `amount`, `fitId`, or merchant fields:
+  the importer observed those source-system fields.
+- `posted` tag: the whole source event has been materialized into the named
+  `general.journal` transaction.
+- `posted-posting-N` tag: posting `N` of a split source event has been
+  materialized into the named `general.journal` transaction.
+
+Pending source entries assert that the institution currently reports a
+provisional event. Cleared source entries assert that the institution reports a
+finalized event. If a finalized source entry later disappears from a covered
+export, refreshmint treats that as an import anomaly instead of silently
+deleting it.
+
+### General Journal
+
+File pattern:
+
+```text
+general.journal
+```
+
+Each hledger transaction block asserts one accounting transaction in the GL.
+
+- Header date/status/payee/narration: the accounting transaction has that
+  date, lifecycle marker, and description in the ledger.
+- Posting lines: the accounting transaction affects those GL accounts by those
+  amounts.
+- `id` tag: this is the stable refreshmint identity for that GL transaction.
+- `source` tags: this GL transaction was generated from, synced from, or
+  manually linked to those source entries.
+- `generated-by: refreshmint-post`: refreshmint generated the transaction from
+  source posting automation, so operations such as sync, undo, and transfer
+  merge may treat it as app-managed.
+
+`general.journal` is the current accounting surface. Rows in account journals,
+operations logs, resolutions, links, and reconciliation files explain where
+that surface came from and what actions are allowed to modify it.
+
+### Account Operations Logs
+
+File patterns:
+
+```text
+logins/<login>/accounts/<label>/operations.jsonl
+accounts/<account>/operations.jsonl
+```
+
+Each JSONL row asserts that a source-account operation happened at
+`timestamp`. These rows are an audit trail and replay aid; the current source
+state still comes from `account.journal`.
+
+- `entry-created`: refreshmint created or re-derived the source entry with the
+  given stable `entryId`, evidence, date, amount, and tags.
+- `manual-add`: a user manually created the source entry.
+- `dedup-override`: a user or repair flow forced or prevented a proposed
+  source dedup match.
+- `remove-scrape`: a scrape session's imported effects were removed.
+- `entry-retired`: refreshmint intentionally retired a provisional source
+  entry for the stated reason.
+
+### GL Operations Log
+
+File pattern:
+
+```text
+operations.jsonl
+```
+
+Each JSONL row asserts that a GL-level operation happened at `timestamp`.
+
+- `post`: a source entry, or one posting of a source entry, was posted to a
+  counterpart GL account.
+- `post-split`: a source entry was posted across multiple counterpart GL
+  accounts.
+- `transfer-match`: two or more source entries were matched as one
+  inter-account transfer.
+- `undo-post`: a previous post operation was undone for that source entry or
+  posting.
+- `sync-transaction`: an app-managed GL transaction was updated in place to
+  match the listed source snapshots.
+- `import-duplicate-repair`: refreshmint removed a duplicate import artifact,
+  preserving the kept and removed source/GL identities for audit.
+
+These rows say what refreshmint did. They do not by themselves prove that a
+bank reported a transaction; that proposition comes from source journal rows
+and their evidence.
+
+### Automation Resolutions
+
+File pattern:
+
+```text
+bookkeeping/resolutions/<resolution-id>.json
+```
+
+Each JSON object asserts an active or disabled durable preference, constraint,
+or manual conclusion. Resolutions are inputs to proposal generation; proposals
+can be regenerated from current ledger state and active resolutions.
+
+- `category`: the subject source entry should post to the account or parts in
+  `parts`.
+- `posting-split`: the subject source entry should be split across the
+  accounts and amounts in `parts`.
+- `transfer-link`: the subject source entries should be treated as one
+  transfer.
+- `transfer-split`: the subject transfer should be represented by the parts
+  in `parts`.
+- `same-source`: the subject refs represent the same external source event.
+- `not-same-source`: the subject refs must not be deduplicated or merged
+  together.
+- `ignore-source`: automation should not act on the subject source entry.
+- `pending-retired`: the subject pending source entry was intentionally
+  retired.
+- `reversal-link`: the subject refs form a reversal relationship.
+
+`status: disabled` preserves the historical user choice while removing it from
+future automation decisions.
+
+### Automation Proposals
+
+Automation proposals are returned by commands and are not durable rows. A
+proposal asserts only that, given the current source journals, GL, anomalies,
+and active resolutions, refreshmint currently recommends or blocks an action.
+
+- `reasons`: the facts, rules, model suggestions, or resolutions that led to
+  the proposal.
+- `blockers`: conditions that must be resolved before the proposal can be
+  applied.
+- `policyDecision`: whether refreshmint may auto-apply, should ask for review,
+  must block, or should skip.
+- `reversible`: whether the resulting operation can be undone automatically,
+  conditionally, or not safely.
+
+Because proposals are derived, they should be explained and reviewable, but the
+user-facing steering state belongs in resolutions.
+
+### Import Anomalies
+
+File pattern:
+
+```text
+bookkeeping/import-anomalies/<anomaly-id>.json
+```
+
+Each JSON object asserts that refreshmint found an import inconsistency that
+needs review.
+
+- `finalized-missing-from-covered-export`: a finalized source or GL event was
+  missing from an export that claims to cover the event's date.
+- `unsafe-pending-retirement`: a pending source entry disappeared, but
+  refreshmint could not prove that retiring it is safe.
+- `duplicate-import-repair-skipped`: refreshmint detected a duplicate import
+  candidate but skipped automatic repair.
+- `safeToRetire`: refreshmint's current safety conclusion for retiring the
+  source entry.
+- `safetyReasons`: the concrete checks behind that conclusion.
+- `status: reviewed`: a user or automation reviewed the anomaly; it does not
+  necessarily mean the source fact was true.
+
+An anomaly row does not assert that the bank was wrong. It asserts that the
+ledger and available evidence disagree in a way that should not be hidden.
+
+### Bookkeeping Links
+
+File pattern:
+
+```text
+bookkeeping/links/<link-id>.json
+```
+
+Each JSON object asserts an explicit relationship between two typed refs.
+
+- `evidence-link`: one object is supported by or derived from the other.
+- `settlement-link`: the relationship resolves an open balance-sheet position
+  such as an accrual, deferral, payable, or receivable.
+- `source-link`: the two objects share source provenance.
+- `amount`: optional amount scope for the relationship.
+
+Links are not categories and do not replace postings. They assert
+relationships between already identifiable objects.
+
+### Reconciliation Sessions
+
+File pattern:
+
+```text
+bookkeeping/reconciliation-sessions/<session-id>.json
+```
+
+Each JSON object asserts a statement-reconciliation session for one GL account.
+
+- Statement fields: the user entered or imported the statement period and
+  balance facts.
+- `reconciledTxnIds`: those GL transaction ids are included in the session.
+- `status: draft`: the session is editable review state.
+- `status: finalized`: the listed transactions are reconciled to the statement
+  as of the session's finalization.
+- `status: reopened`: a previously finalized reconciliation was reopened.
+
+Reconciliation membership is intentionally separate from hledger cleared
+status.
+
+### Period Closes
+
+File pattern:
+
+```text
+bookkeeping/period-closes/<YYYY-MM>.json
+```
+
+Each JSON object asserts review state for an accounting period.
+
+- `draft`: close work exists but the period is not protected.
+- `soft-closed`: the period was reviewed and later edits should warn or gate.
+- `reopened`: a previously soft-closed period was reopened.
+- `reconciliationSessionIds`: reconciliations considered in the close.
+- `adjustmentTxnIds`: GL adjustments considered in the close.
+
+Period closes are review/protection state, not bank-cleared or reconciled
+markers.
+
+### Scrape And Extract Logs
+
+File patterns:
+
+```text
+logins/<login>/scrape-log.jsonl
+logins/<login>/extract-log.jsonl
+```
+
+Each JSONL row asserts that an external data-gathering run happened.
+
+- Scrape log row: a scrape was attempted for the login, with success or error
+  state and manual or automatic source.
+- Extract log row: document extraction was attempted, with discovered document
+  results, console output, or errors.
+
+These logs are operational evidence. They do not by themselves create source
+transactions; source transactions are created by account-journal rows.
 
 ## Relationship To Schedules
 

@@ -16,6 +16,7 @@ import {
     getLockStatusSnapshot,
     getUnpostedEntriesForTransfer,
     applyAutomationProposal,
+    createResolution,
     listAutomationProposals,
     type AutomationProposal,
     listImportAnomalies,
@@ -40,6 +41,7 @@ import {
     syncGlTransaction,
     reviewImportAnomaly,
     type UnpostedTransferResult,
+    type TypedRef,
 } from '../tauri-commands.ts';
 import {
     type LoginAccountRef,
@@ -68,6 +70,20 @@ interface PipelineTabProps {
     onSessionChange: (
         updater: (current: PipelineTabSession) => PipelineTabSession,
     ) => void;
+}
+
+function loginEntryRef(
+    loginName: string,
+    label: string,
+    entryId: string,
+): TypedRef {
+    return {
+        kind: 'login-entry',
+        locator: `logins/${loginName}/accounts/${label}`,
+        entryId,
+        loginName,
+        label,
+    };
 }
 
 export function PipelineTab({
@@ -871,6 +887,17 @@ export function PipelineTab({
         setBusyPostEntryId(entryId);
         setSplitModalEntryId(null);
         try {
+            await createResolution(ledgerPath, {
+                kind: 'posting-split',
+                subjectRefs: [loginEntryRef(loginName, label, entryId)],
+                parts: rows.map((r) => ({
+                    account: r.account.trim(),
+                    amount: r.amount.trim() || null,
+                    ref: null,
+                    notes: null,
+                })),
+                notes: 'Created from Pipeline split post',
+            });
             const glId = await postLoginAccountEntrySplit(
                 ledgerPath,
                 loginName,
@@ -886,6 +913,40 @@ export function PipelineTab({
             void refreshPipelineBulkStats();
         } catch (error) {
             setPipelineStatus(`Split post failed: ${String(error)}`);
+        } finally {
+            setBusyPostEntryId(null);
+        }
+    }
+
+    async function handleCreateCategoryResolution(
+        entry: AccountJournalEntry,
+        account: string,
+    ) {
+        if (!selectedLoginAccount) return;
+        const trimmed = account.trim();
+        if (!trimmed) return;
+        const { loginName, label } = selectedLoginAccount;
+        setBusyPostEntryId(entry.id);
+        try {
+            await createResolution(ledgerPath, {
+                kind: 'category',
+                subjectRefs: [loginEntryRef(loginName, label, entry.id)],
+                parts: [
+                    {
+                        account: trimmed,
+                        amount: null,
+                        ref: null,
+                        notes: null,
+                    },
+                ],
+                notes: 'Created from Pipeline category suggestion',
+            });
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(`Saved category resolution for ${entry.id}.`);
+        } catch (error) {
+            setPipelineStatus(
+                `Save category resolution failed: ${String(error)}`,
+            );
         } finally {
             setBusyPostEntryId(null);
         }
@@ -1838,6 +1899,21 @@ export function PipelineTab({
                                                                 .proposedResult
                                                                 .transferMatch
                                                                 ?.entryId ??
+                                                            (proposal
+                                                                .proposedResult
+                                                                .parts.length >
+                                                            0
+                                                                ? proposal.proposedResult.parts
+                                                                      .map(
+                                                                          (
+                                                                              part,
+                                                                          ) =>
+                                                                              `${part.account ?? '(account)'} ${part.amount ?? ''}`.trim(),
+                                                                      )
+                                                                      .join(
+                                                                          ' + ',
+                                                                      )
+                                                                : null) ??
                                                             proposal
                                                                 .proposedResult
                                                                 .notes ??
@@ -1857,6 +1933,8 @@ export function PipelineTab({
                                                                 .length === 0 &&
                                                             (proposal.kind ===
                                                                 'post-category' ||
+                                                                proposal.kind ===
+                                                                    'post-split' ||
                                                                 proposal.kind ===
                                                                     'link-transfer' ||
                                                                 proposal.kind ===
@@ -2230,6 +2308,26 @@ export function PipelineTab({
                                                                             >
                                                                                 Split
                                                                             </button>
+                                                                            {suggestion?.suggested !=
+                                                                                null && (
+                                                                                <button
+                                                                                    type="button"
+                                                                                    className="ghost-button"
+                                                                                    disabled={
+                                                                                        isBusy
+                                                                                    }
+                                                                                    onClick={() => {
+                                                                                        void handleCreateCategoryResolution(
+                                                                                            entry,
+                                                                                            suggestion.suggested ??
+                                                                                                '',
+                                                                                        );
+                                                                                    }}
+                                                                                >
+                                                                                    Remember
+                                                                                    category
+                                                                                </button>
+                                                                            )}
                                                                             {(entry.isTransfer ||
                                                                                 transferMatch !==
                                                                                     null) && (

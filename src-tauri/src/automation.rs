@@ -103,6 +103,7 @@ pub enum AutomationProposalKind {
 pub struct ProposalResult {
     pub suggested_account: Option<String>,
     pub transfer_match: Option<ProposalTransferMatch>,
+    pub parts: Vec<ResolutionPart>,
     pub import_anomaly_id: Option<String>,
     pub resolution_id: Option<String>,
     pub notes: Option<String>,
@@ -446,6 +447,14 @@ fn resolution_backed_proposals(
                     }));
                 }
             }
+            ResolutionKind::PostingSplit => {
+                if resolution.parts.len() >= 2 {
+                    proposals.push(post_split_proposal(login_name, label, entry, resolution));
+                }
+            }
+            ResolutionKind::SameSource | ResolutionKind::NotSameSource => {
+                proposals.push(source_relationship_proposal(&source_ref, resolution));
+            }
             _ => {}
         }
     }
@@ -467,6 +476,7 @@ fn gl_proposals(
                 proposed_result: ProposalResult {
                     suggested_account: None,
                     transfer_match: None,
+                    parts: Vec::new(),
                     import_anomaly_id: None,
                     resolution_id: None,
                     notes: Some(transfer.description),
@@ -534,6 +544,7 @@ fn import_anomaly_proposals(
             proposed_result: ProposalResult {
                 suggested_account: None,
                 transfer_match: None,
+                parts: Vec::new(),
                 import_anomaly_id: Some(anomaly.id),
                 resolution_id: None,
                 notes: Some(anomaly.description),
@@ -581,6 +592,35 @@ fn apply_proposal(
                 &entry_id,
                 &account,
                 None,
+                "automation",
+            )
+        }
+        AutomationProposalKind::PostSplit => {
+            let Some((login_name, label, entry_id)) =
+                proposal.subject_refs.iter().find_map(parse_login_entry_ref)
+            else {
+                return Err("post-split proposal missing source entry ref".into());
+            };
+            let counterparts = proposal
+                .proposed_result
+                .parts
+                .into_iter()
+                .map(|part| {
+                    let account = part
+                        .account
+                        .ok_or_else(|| "post-split part is missing account".to_string())?;
+                    Ok(crate::post::SplitCounterpart {
+                        account,
+                        amount: part.amount,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            crate::post::post_login_account_entry_split(
+                ledger_dir,
+                &login_name,
+                &label,
+                &entry_id,
+                counterparts,
                 "automation",
             )
         }
@@ -641,9 +681,78 @@ fn proposal_is_applyable(proposal: &AutomationProposal) -> bool {
     matches!(
         proposal.kind,
         AutomationProposalKind::PostCategory
+            | AutomationProposalKind::PostSplit
             | AutomationProposalKind::LinkTransfer
             | AutomationProposalKind::RetirePending
     )
+}
+
+fn post_split_proposal(
+    login_name: &str,
+    label: &str,
+    entry: &AccountEntry,
+    resolution: &Resolution,
+) -> AutomationProposal {
+    let refs = vec![login_entry_ref(login_name, label, &entry.id)];
+    AutomationProposal {
+        id: proposal_id("post-split", &refs, Some(&resolution.id)),
+        kind: AutomationProposalKind::PostSplit,
+        subject_refs: refs,
+        proposed_result: ProposalResult {
+            suggested_account: None,
+            transfer_match: None,
+            parts: resolution.parts.clone(),
+            import_anomaly_id: None,
+            resolution_id: Some(resolution.id.clone()),
+            notes: Some(entry.description.clone()),
+        },
+        reasons: vec![ProposalReason {
+            field: "resolution".to_string(),
+            result: ProposalReasonResult::DerivedFromResolution,
+            detail: resolution.id.clone(),
+            weight: Some(ProposalReasonWeight::Exact),
+        }],
+        blockers: Vec::new(),
+        policy_decision: ProposalPolicyDecision::Auto,
+        reversible: ProposalReversibility::Conditional,
+    }
+}
+
+fn source_relationship_proposal(
+    source_ref: &TypedRef,
+    resolution: &Resolution,
+) -> AutomationProposal {
+    let kind = match resolution.kind {
+        ResolutionKind::SameSource => AutomationProposalKind::MergeSource,
+        ResolutionKind::NotSameSource => AutomationProposalKind::PreventMerge,
+        _ => AutomationProposalKind::ReviewAnomaly,
+    };
+    AutomationProposal {
+        id: proposal_id(
+            "source-relationship",
+            &resolution.subject_refs,
+            Some(&resolution.id),
+        ),
+        kind,
+        subject_refs: resolution.subject_refs.clone(),
+        proposed_result: ProposalResult {
+            suggested_account: None,
+            transfer_match: None,
+            parts: Vec::new(),
+            import_anomaly_id: None,
+            resolution_id: Some(resolution.id.clone()),
+            notes: source_ref.entry_id.clone(),
+        },
+        reasons: vec![ProposalReason {
+            field: "resolution".to_string(),
+            result: ProposalReasonResult::DerivedFromResolution,
+            detail: resolution.id.clone(),
+            weight: Some(ProposalReasonWeight::Exact),
+        }],
+        blockers: Vec::new(),
+        policy_decision: ProposalPolicyDecision::Skip,
+        reversible: ProposalReversibility::No,
+    }
 }
 
 fn post_category_proposal(
@@ -663,6 +772,7 @@ fn post_category_proposal(
         proposed_result: ProposalResult {
             suggested_account: Some(account.to_string()),
             transfer_match: None,
+            parts: Vec::new(),
             import_anomaly_id: None,
             resolution_id,
             notes: Some(entry.description.clone()),
@@ -703,6 +813,7 @@ fn link_transfer_proposal(input: LinkTransferProposalInput<'_>) -> AutomationPro
                 entry_id: input.other_entry_id.to_string(),
                 matched_amount: input.matched_amount.to_string(),
             }),
+            parts: Vec::new(),
             import_anomaly_id: None,
             resolution_id: input.resolution_id,
             notes: Some(input.entry.description.clone()),
@@ -754,6 +865,7 @@ fn sync_posted_proposal(
         proposed_result: ProposalResult {
             suggested_account: None,
             transfer_match: None,
+            parts: Vec::new(),
             import_anomaly_id: None,
             resolution_id: None,
             notes: Some(entry.description.clone()),
@@ -959,6 +1071,53 @@ mod tests {
         Ok(dir)
     }
 
+    fn write_test_login_entry(
+        root: &Path,
+        login_name: &str,
+        label: &str,
+        entry_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut config = crate::login_config::LoginConfig {
+            extension: Some("test".to_string()),
+            accounts: BTreeMap::new(),
+        };
+        config.accounts.insert(
+            label.to_string(),
+            crate::login_config::LoginAccountConfig {
+                gl_account: Some("Assets:Checking".to_string()),
+            },
+        );
+        crate::login_config::write_login_config(root, login_name, &config)?;
+        let journal_path = account_journal::login_account_journal_path(root, login_name, label);
+        let journal_parent = journal_path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "journal path has no parent")
+        })?;
+        fs::create_dir_all(journal_parent)?;
+        account_journal::write_journal_at_path(
+            &journal_path,
+            &[AccountEntry {
+                id: entry_id.to_string(),
+                date: "2026-04-01".to_string(),
+                status: account_journal::EntryStatus::Cleared,
+                description: "Cafe".to_string(),
+                comment: String::new(),
+                evidence: vec!["doc.csv:2:1".to_string()],
+                postings: vec![account_journal::EntryPosting {
+                    account: "Assets:Checking".to_string(),
+                    amount: Some(account_journal::SimpleAmount {
+                        quantity: "-12.50".to_string(),
+                        commodity: "USD".to_string(),
+                    }),
+                }],
+                tags: Vec::new(),
+                extracted_by: None,
+                posted: None,
+                posted_postings: Vec::new(),
+            }],
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn resolutions_round_trip_and_disable() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     {
@@ -990,44 +1149,7 @@ mod tests {
         let root = temp_dir("category-proposal")?;
         let login_name = "bank";
         let label = "checking";
-        let mut config = crate::login_config::LoginConfig {
-            extension: Some("test".to_string()),
-            accounts: BTreeMap::new(),
-        };
-        config.accounts.insert(
-            label.to_string(),
-            crate::login_config::LoginAccountConfig {
-                gl_account: Some("Assets:Checking".to_string()),
-            },
-        );
-        crate::login_config::write_login_config(&root, login_name, &config)?;
-        let journal_path = account_journal::login_account_journal_path(&root, login_name, label);
-        let journal_parent = journal_path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "journal path has no parent")
-        })?;
-        fs::create_dir_all(journal_parent)?;
-        account_journal::write_journal_at_path(
-            &journal_path,
-            &[AccountEntry {
-                id: "entry-1".to_string(),
-                date: "2026-04-01".to_string(),
-                status: account_journal::EntryStatus::Cleared,
-                description: "Cafe".to_string(),
-                comment: String::new(),
-                evidence: vec!["doc.csv:2:1".to_string()],
-                postings: vec![account_journal::EntryPosting {
-                    account: "Assets:Checking".to_string(),
-                    amount: Some(account_journal::SimpleAmount {
-                        quantity: "-12.50".to_string(),
-                        commodity: "USD".to_string(),
-                    }),
-                }],
-                tags: Vec::new(),
-                extracted_by: None,
-                posted: None,
-                posted_postings: Vec::new(),
-            }],
-        )?;
+        write_test_login_entry(&root, login_name, label, "entry-1")?;
         create_resolution(
             &root,
             NewResolutionInput {
@@ -1057,6 +1179,92 @@ mod tests {
                 && proposal.policy_decision == ProposalPolicyDecision::Auto
                 && proposal.proposed_result.suggested_account.as_deref() == Some("Expenses:Dining")
         }));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn posting_split_resolution_generates_auto_post_split_proposal(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("split-proposal")?;
+        let login_name = "bank";
+        let label = "checking";
+        write_test_login_entry(&root, login_name, label, "entry-1")?;
+        create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::PostingSplit,
+                subject_refs: vec![login_entry_ref(login_name, label, "entry-1")],
+                parts: vec![
+                    ResolutionPart {
+                        amount: Some("5.00 USD".to_string()),
+                        account: Some("Expenses:Coffee".to_string()),
+                        ref_: None,
+                        notes: None,
+                    },
+                    ResolutionPart {
+                        amount: None,
+                        account: Some("Expenses:Dining".to_string()),
+                        ref_: None,
+                        notes: None,
+                    },
+                ],
+                notes: None,
+            },
+        )?;
+
+        let proposals = list_automation_proposals(
+            &root,
+            AutomationScope {
+                login_name: Some(login_name.to_string()),
+                label: Some(label.to_string()),
+                include_gl: Some(false),
+            },
+        )?;
+
+        assert!(proposals.iter().any(|proposal| {
+            proposal.kind == AutomationProposalKind::PostSplit
+                && proposal.policy_decision == ProposalPolicyDecision::Auto
+                && proposal.proposed_result.parts.len() == 2
+        }));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn same_and_not_same_source_resolutions_are_visible_as_proposals(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("source-relationship");
+        let root = root?;
+        let login_name = "bank";
+        let label = "checking";
+        write_test_login_entry(&root, login_name, label, "entry-1")?;
+        let entry_1 = login_entry_ref(login_name, label, "entry-1");
+        let entry_2 = login_entry_ref(login_name, label, "entry-2");
+        create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::NotSameSource,
+                subject_refs: vec![entry_1, entry_2],
+                parts: Vec::new(),
+                notes: None,
+            },
+        )?;
+
+        let proposals = list_automation_proposals(
+            &root,
+            AutomationScope {
+                login_name: Some(login_name.to_string()),
+                label: Some(label.to_string()),
+                include_gl: Some(false),
+            },
+        )?;
+
+        assert!(proposals
+            .iter()
+            .any(|proposal| proposal.kind == AutomationProposalKind::PreventMerge));
 
         let _ = fs::remove_dir_all(root);
         Ok(())

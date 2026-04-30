@@ -200,6 +200,7 @@ export interface ProposalTransferMatch {
 export interface ProposalResult {
     suggestedAccount?: string | null;
     transferMatch?: ProposalTransferMatch | null;
+    parts: ResolutionPart[];
     importAnomalyId?: string | null;
     resolutionId?: string | null;
     notes?: string | null;
