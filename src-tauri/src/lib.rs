@@ -5,6 +5,7 @@ pub mod secret;
 
 pub mod account_config;
 pub mod account_journal;
+pub mod automation;
 pub mod bookkeeping;
 pub mod categorize;
 pub mod dedup;
@@ -161,6 +162,12 @@ pub fn run_with_context(
             list_period_closes,
             upsert_period_close,
             reopen_period_close,
+            list_resolutions,
+            create_resolution,
+            disable_resolution,
+            list_automation_proposals,
+            apply_automation_proposal,
+            apply_automation_policy,
             list_import_anomalies,
             review_import_anomaly,
             link_import_anomaly_reversal,
@@ -1750,6 +1757,59 @@ fn reopen_period_close(
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
     bookkeeping::reopen_period_close(&target_dir, &period_id).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn list_resolutions(ledger: String) -> Result<Vec<automation::Resolution>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    automation::list_resolutions(&target_dir).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn create_resolution(
+    ledger: String,
+    resolution: automation::NewResolutionInput,
+) -> Result<automation::Resolution, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    automation::create_resolution(&target_dir, resolution).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn disable_resolution(ledger: String, id: String) -> Result<automation::Resolution, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let id = require_non_empty_input("id", id)?;
+    automation::disable_resolution(&target_dir, &id).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn list_automation_proposals(
+    ledger: String,
+    scope: automation::AutomationScope,
+) -> Result<Vec<automation::AutomationProposal>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    automation::list_automation_proposals(&target_dir, scope).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn apply_automation_proposal(ledger: String, proposal_id: String) -> Result<String, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let proposal_id = require_non_empty_input("proposalId", proposal_id)?;
+    automation::apply_automation_proposal(&target_dir, &proposal_id).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn apply_automation_policy(
+    ledger: String,
+    scope: automation::AutomationScope,
+) -> Result<Vec<String>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    automation::apply_automation_policy(&target_dir, scope).map_err(|err| err.to_string())
 }
 
 #[tauri::command]

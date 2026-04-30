@@ -139,8 +139,6 @@ pub enum DedupResult {
 pub struct DedupConfig {
     /// Maximum number of days difference for fuzzy date matching.
     pub date_tolerance_days: i64,
-    /// Maximum number of days for pending→finalized transition.
-    pub pending_finalized_days: i64,
     /// Amount tolerance for pending→finalized (absolute).
     pub pending_finalized_amount_abs: f64,
     /// Amount tolerance for pending→finalized (relative, e.g. 0.20 = 20%).
@@ -151,7 +149,6 @@ impl Default for DedupConfig {
     fn default() -> Self {
         Self {
             date_tolerance_days: 1,
-            pending_finalized_days: 7,
             pending_finalized_amount_abs: 5.0,
             pending_finalized_amount_pct: 0.20,
         }
@@ -512,7 +509,7 @@ fn match_proposed(
             if entry_is_from_same_document(entry, source_document) {
                 continue;
             }
-            if !dates_within_tolerance(&entry.date, &txn.tdate, config.pending_finalized_days) {
+            if !dates_within_tolerance(&entry.date, &txn.tdate, config.date_tolerance_days) {
                 continue;
             }
             if amounts_within_tolerance(

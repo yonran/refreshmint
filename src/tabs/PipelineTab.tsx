@@ -15,6 +15,9 @@ import {
     getLoginExtractionSupport,
     getLockStatusSnapshot,
     getUnpostedEntriesForTransfer,
+    applyAutomationProposal,
+    listAutomationProposals,
+    type AutomationProposal,
     listImportAnomalies,
     type LoginConfig,
     type LockStatusSnapshot,
@@ -123,6 +126,10 @@ export function PipelineTab({
     const [pipelineCategorySuggestions, setPipelineCategorySuggestions] =
         useState<Record<string, CategoryResult>>({});
     const [importAnomalies, setImportAnomalies] = useState<ImportAnomaly[]>([]);
+    const [automationProposals, setAutomationProposals] = useState<
+        AutomationProposal[]
+    >([]);
+    const [busyProposalId, setBusyProposalId] = useState<string | null>(null);
     const [busyAnomalyId, setBusyAnomalyId] = useState<string | null>(null);
     const [pipelineGlAccountDraft, setPipelineGlAccountDraft] = useState(
         session.pipelineGlAccountDraft,
@@ -691,13 +698,21 @@ export function PipelineTab({
                 [documentName],
             );
             const newCount = result.newEntryCount;
-            const [journal, unposted, anomalies] = await Promise.all([
-                getLoginAccountJournal(ledgerPath, loginName, label),
-                getLoginAccountUnposted(ledgerPath, loginName, label),
-                listImportAnomalies(ledgerPath),
-            ]);
+            const [journal, unposted, anomalies, proposals] = await Promise.all(
+                [
+                    getLoginAccountJournal(ledgerPath, loginName, label),
+                    getLoginAccountUnposted(ledgerPath, loginName, label),
+                    listImportAnomalies(ledgerPath),
+                    listAutomationProposals(ledgerPath, {
+                        loginName,
+                        label,
+                        includeGl: false,
+                    }),
+                ],
+            );
             setAccountJournalEntries(journal);
             setUnpostedEntries(unposted);
+            setAutomationProposals(proposals);
             setImportAnomalies(
                 anomalies.filter(
                     (anomaly) =>
@@ -721,13 +736,20 @@ export function PipelineTab({
     async function refreshPipelineLoginAccountData() {
         if (!selectedLoginAccount) return;
         const { loginName, label } = selectedLoginAccount;
-        const [fetchedJournal, fetchedUnposted, anomalies] = await Promise.all([
-            getLoginAccountJournal(ledgerPath, loginName, label),
-            getLoginAccountUnposted(ledgerPath, loginName, label),
-            listImportAnomalies(ledgerPath),
-        ]);
+        const [fetchedJournal, fetchedUnposted, anomalies, proposals] =
+            await Promise.all([
+                getLoginAccountJournal(ledgerPath, loginName, label),
+                getLoginAccountUnposted(ledgerPath, loginName, label),
+                listImportAnomalies(ledgerPath),
+                listAutomationProposals(ledgerPath, {
+                    loginName,
+                    label,
+                    includeGl: false,
+                }),
+            ]);
         setAccountJournalEntries(fetchedJournal);
         setUnpostedEntries(fetchedUnposted);
+        setAutomationProposals(proposals);
         setImportAnomalies(
             anomalies.filter(
                 (anomaly) =>
@@ -1160,6 +1182,23 @@ export function PipelineTab({
             setPipelineStatus(`Retire failed: ${String(error)}`);
         } finally {
             setBusyAnomalyId(null);
+        }
+    }
+
+    async function handleApplyAutomationProposal(proposal: AutomationProposal) {
+        setBusyProposalId(proposal.id);
+        try {
+            const result = await applyAutomationProposal(
+                ledgerPath,
+                proposal.id,
+            );
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(`Applied ${proposal.kind}: ${result}`);
+            void refreshPipelineBulkStats();
+        } catch (error) {
+            setPipelineStatus(`Automation failed: ${String(error)}`);
+        } finally {
+            setBusyProposalId(null);
         }
     }
 
@@ -1774,6 +1813,119 @@ export function PipelineTab({
                                     </button>
                                 </div>
                             </div>
+                            {automationProposals.length > 0 && (
+                                <div className="pipeline-panel">
+                                    <h3>Automation proposals</h3>
+                                    <div className="table-wrap">
+                                        <table className="ledger-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Kind</th>
+                                                    <th>Policy</th>
+                                                    <th>Result</th>
+                                                    <th>Reasons</th>
+                                                    <th>Actions</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {automationProposals.map(
+                                                    (proposal) => {
+                                                        const result =
+                                                            proposal
+                                                                .proposedResult
+                                                                .suggestedAccount ??
+                                                            proposal
+                                                                .proposedResult
+                                                                .transferMatch
+                                                                ?.entryId ??
+                                                            proposal
+                                                                .proposedResult
+                                                                .notes ??
+                                                            proposal
+                                                                .proposedResult
+                                                                .importAnomalyId ??
+                                                            '-';
+                                                        const reasons =
+                                                            proposal.reasons
+                                                                .map(
+                                                                    (reason) =>
+                                                                        `${reason.field}: ${reason.detail}`,
+                                                                )
+                                                                .join(', ');
+                                                        const isApplyable =
+                                                            proposal.blockers
+                                                                .length === 0 &&
+                                                            (proposal.kind ===
+                                                                'post-category' ||
+                                                                proposal.kind ===
+                                                                    'link-transfer' ||
+                                                                proposal.kind ===
+                                                                    'retire-pending');
+                                                        return (
+                                                            <tr
+                                                                key={
+                                                                    proposal.id
+                                                                }
+                                                            >
+                                                                <td>
+                                                                    {
+                                                                        proposal.kind
+                                                                    }
+                                                                </td>
+                                                                <td>
+                                                                    {
+                                                                        proposal.policyDecision
+                                                                    }
+                                                                </td>
+                                                                <td>
+                                                                    {result}
+                                                                </td>
+                                                                <td>
+                                                                    {proposal
+                                                                        .blockers
+                                                                        .length ===
+                                                                    0
+                                                                        ? reasons
+                                                                        : proposal.blockers
+                                                                              .map(
+                                                                                  (
+                                                                                      blocker,
+                                                                                  ) =>
+                                                                                      blocker.detail,
+                                                                              )
+                                                                              .join(
+                                                                                  ', ',
+                                                                              )}
+                                                                </td>
+                                                                <td>
+                                                                    <div className="txn-actions">
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            disabled={
+                                                                                !isApplyable ||
+                                                                                busyProposalId ===
+                                                                                    proposal.id
+                                                                            }
+                                                                            onClick={() => {
+                                                                                void handleApplyAutomationProposal(
+                                                                                    proposal,
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            Apply
+                                                                        </button>
+                                                                    </div>
+                                                                </td>
+                                                            </tr>
+                                                        );
+                                                    },
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
                             {importAnomalies.length > 0 && (
                                 <div className="pipeline-panel">
                                     <h3>Import anomalies</h3>

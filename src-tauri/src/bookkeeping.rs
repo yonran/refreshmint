@@ -83,7 +83,7 @@ pub enum LinkKind {
     SourceLink,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypedRef {
     pub kind: TypedRefKind,
@@ -110,7 +110,7 @@ impl TypedRef {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TypedRefKind {
     GlTxn,

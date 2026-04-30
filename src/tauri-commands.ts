@@ -108,6 +108,153 @@ export interface UpsertPeriodCloseInput {
     adjustmentTxnIds: string[];
 }
 
+export type ResolutionKind =
+    | 'same-source'
+    | 'not-same-source'
+    | 'category'
+    | 'posting-split'
+    | 'transfer-link'
+    | 'transfer-split'
+    | 'ignore-source'
+    | 'pending-retired'
+    | 'reversal-link';
+
+export type ResolutionStatus = 'active' | 'disabled';
+
+export interface ResolutionPart {
+    amount?: string | null;
+    account?: string | null;
+    ref?: TypedRef | null;
+    notes?: string | null;
+}
+
+export interface Resolution {
+    id: string;
+    kind: ResolutionKind;
+    status: ResolutionStatus;
+    subjectRefs: TypedRef[];
+    parts: ResolutionPart[];
+    notes?: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface NewResolutionInput {
+    kind: ResolutionKind;
+    subjectRefs: TypedRef[];
+    parts: ResolutionPart[];
+    notes?: string | null;
+}
+
+export interface AutomationScope {
+    loginName?: string | null;
+    label?: string | null;
+    includeGl?: boolean | null;
+}
+
+export type AutomationProposalKind =
+    | 'merge-source'
+    | 'prevent-merge'
+    | 'retire-pending'
+    | 'post-category'
+    | 'post-split'
+    | 'link-transfer'
+    | 'split-transfer'
+    | 'merge-gl-transfer'
+    | 'sync-posted'
+    | 'review-anomaly';
+
+export type ProposalPolicyDecision = 'auto' | 'review' | 'blocked' | 'skip';
+
+export type ProposalReversibility = 'yes' | 'conditional' | 'no';
+
+export type ProposalReasonResult =
+    | 'matched'
+    | 'similar'
+    | 'derived-from-resolution'
+    | 'model-suggested'
+    | 'covered-by-export'
+    | 'blocked';
+
+export type ProposalReasonWeight = 'exact' | 'strong' | 'weak';
+
+export interface ProposalReason {
+    field: string;
+    result: ProposalReasonResult;
+    detail: string;
+    weight?: ProposalReasonWeight | null;
+}
+
+export interface ProposalBlocker {
+    code: string;
+    detail: string;
+}
+
+export interface ProposalTransferMatch {
+    loginName: string;
+    label: string;
+    entryId: string;
+    matchedAmount: string;
+}
+
+export interface ProposalResult {
+    suggestedAccount?: string | null;
+    transferMatch?: ProposalTransferMatch | null;
+    importAnomalyId?: string | null;
+    resolutionId?: string | null;
+    notes?: string | null;
+}
+
+export interface AutomationProposal {
+    id: string;
+    kind: AutomationProposalKind;
+    subjectRefs: TypedRef[];
+    proposedResult: ProposalResult;
+    reasons: ProposalReason[];
+    blockers: ProposalBlocker[];
+    policyDecision: ProposalPolicyDecision;
+    reversible: ProposalReversibility;
+}
+
+export async function listResolutions(ledger: string): Promise<Resolution[]> {
+    return invoke('list_resolutions', { ledger });
+}
+
+export async function createResolution(
+    ledger: string,
+    resolution: NewResolutionInput,
+): Promise<Resolution> {
+    return invoke('create_resolution', { ledger, resolution });
+}
+
+export async function disableResolution(
+    ledger: string,
+    id: string,
+): Promise<Resolution> {
+    return invoke('disable_resolution', { ledger, id });
+}
+
+export async function listAutomationProposals(
+    ledger: string,
+    scope: AutomationScope,
+): Promise<AutomationProposal[]> {
+    return invoke('list_automation_proposals', { ledger, scope });
+}
+
+export async function applyAutomationProposal(
+    ledger: string,
+    proposalId: string,
+): Promise<string> {
+    return invoke('apply_automation_proposal', { ledger, proposalId });
+}
+
+export async function applyAutomationPolicy(
+    ledger: string,
+    scope: AutomationScope,
+): Promise<string[]> {
+    return invoke('apply_automation_policy', { ledger, scope });
+}
+
 export interface TransactionRow {
     id: string;
     date: string;
