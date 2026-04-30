@@ -321,6 +321,12 @@ can be regenerated from current ledger state and active resolutions.
 `status: disabled` preserves the historical user choice while removing it from
 future automation decisions.
 
+For source deduplication, these relationship resolutions are actionable when
+they pair a `login-entry` ref with an evidence/document ref such as
+`statement.csv:12:1`. A `same-source` row forces the incoming extracted row for
+that evidence ref to merge into the named source entry; a `not-same-source` row
+prevents heuristic matching between them.
+
 ### Automation Proposals
 
 Automation proposals are returned by commands and are not durable rows. A
@@ -355,7 +361,9 @@ needs review.
 - `unsafe-pending-retirement`: a pending source entry disappeared, but
   refreshmint could not prove that retiring it is safe.
 - `duplicate-import-repair-skipped`: refreshmint detected a duplicate import
-  candidate but skipped automatic repair.
+  candidate but skipped automatic repair. For ambiguous dedup, one anomaly is
+  created for each candidate source entry, and `evidence` names the incoming
+  extracted row that needs a `same-source` or `not-same-source` decision.
 - `safeToRetire`: refreshmint's current safety conclusion for retiring the
   source entry.
 - `safetyReasons`: the concrete checks behind that conclusion.

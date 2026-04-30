@@ -907,7 +907,15 @@ fn run_login_account_extraction(
                 continue;
             }
 
-            let actions = dedup::run_dedup(&all_updated, &doc_txns, doc_name, &config);
+            let actions = dedup::run_dedup_for_login_account(
+                &target_dir,
+                &login_name,
+                &label,
+                &all_updated,
+                &doc_txns,
+                doc_name,
+                &config,
+            );
             new_count += actions
                 .iter()
                 .filter(|a| matches!(a.result, dedup::DedupResult::New))

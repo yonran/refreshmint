@@ -86,6 +86,15 @@ function loginEntryRef(
     };
 }
 
+function evidenceRef(ref: string): TypedRef {
+    return {
+        kind: 'document',
+        locator: ref,
+        id: ref,
+        filename: ref,
+    };
+}
+
 export function PipelineTab({
     ledger,
     isActive,
@@ -1246,6 +1255,45 @@ export function PipelineTab({
         }
     }
 
+    async function handleCreateSourceRelationshipResolution(
+        anomaly: ImportAnomaly,
+        kind: 'same-source' | 'not-same-source',
+    ) {
+        const evidence = anomaly.evidence[0]?.trim();
+        if (evidence == null || evidence.length === 0) {
+            setPipelineStatus('No evidence ref is available for this anomaly.');
+            return;
+        }
+        setBusyAnomalyId(anomaly.id);
+        try {
+            await createResolution(ledgerPath, {
+                kind,
+                subjectRefs: [
+                    loginEntryRef(
+                        anomaly.loginName,
+                        anomaly.label,
+                        anomaly.sourceEntryId,
+                    ),
+                    evidenceRef(evidence),
+                ],
+                parts: [],
+                notes: `Created from import anomaly ${anomaly.id}`,
+            });
+            await reviewImportAnomaly(ledgerPath, {
+                id: anomaly.id,
+                notes: `Saved ${kind} resolution from Pipeline`,
+            });
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(
+                `Saved ${kind} resolution for ${anomaly.sourceEntryId}.`,
+            );
+        } catch (error) {
+            setPipelineStatus(`Save resolution failed: ${String(error)}`);
+        } finally {
+            setBusyAnomalyId(null);
+        }
+    }
+
     async function handleApplyAutomationProposal(proposal: AutomationProposal) {
         setBusyProposalId(proposal.id);
         try {
@@ -2102,6 +2150,48 @@ export function PipelineTab({
                                                                             source
                                                                         </button>
                                                                     )}
+                                                                    {anomaly.kind ===
+                                                                        'duplicate-import-repair-skipped' &&
+                                                                        anomaly
+                                                                            .evidence
+                                                                            .length >
+                                                                            0 && (
+                                                                            <>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    className="ghost-button"
+                                                                                    disabled={
+                                                                                        busyAnomalyId ===
+                                                                                        anomaly.id
+                                                                                    }
+                                                                                    onClick={() => {
+                                                                                        void handleCreateSourceRelationshipResolution(
+                                                                                            anomaly,
+                                                                                            'same-source',
+                                                                                        );
+                                                                                    }}
+                                                                                >
+                                                                                    Merge
+                                                                                </button>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    className="ghost-button"
+                                                                                    disabled={
+                                                                                        busyAnomalyId ===
+                                                                                        anomaly.id
+                                                                                    }
+                                                                                    onClick={() => {
+                                                                                        void handleCreateSourceRelationshipResolution(
+                                                                                            anomaly,
+                                                                                            'not-same-source',
+                                                                                        );
+                                                                                    }}
+                                                                                >
+                                                                                    Keep
+                                                                                    separate
+                                                                                </button>
+                                                                            </>
+                                                                        )}
                                                                 </div>
                                                             </td>
                                                         </tr>

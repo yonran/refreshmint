@@ -1,4 +1,5 @@
 use crate::account_journal::{AccountEntry, EntryStatus, SimpleAmount};
+use crate::bookkeeping::{TypedRef, TypedRefKind};
 use crate::extract::ExtractedTransaction;
 use crate::operations;
 
@@ -127,6 +128,8 @@ pub enum DedupResult {
     BankIdMatch { existing_index: usize },
     /// Fuzzy matched an existing entry (date ±1 day, same amount, similar description).
     FuzzyMatch { existing_index: usize },
+    /// Explicitly matched by a durable same-source resolution.
+    ResolutionMatch { existing_index: usize },
     /// Pending→finalized transition.
     PendingToFinalized { existing_index: usize },
     /// New transaction, no match found.
@@ -143,6 +146,65 @@ pub struct DedupConfig {
     pub pending_finalized_amount_abs: f64,
     /// Amount tolerance for pending→finalized (relative, e.g. 0.20 = 20%).
     pub pending_finalized_amount_pct: f64,
+}
+
+#[derive(Default)]
+pub struct DedupPolicy {
+    same_source: BTreeSet<(String, String)>,
+    not_same_source: BTreeSet<(String, String)>,
+}
+
+impl DedupPolicy {
+    fn force_match(&mut self, entry_id: &str, evidence_ref: &str) {
+        self.same_source
+            .insert((entry_id.to_string(), evidence_ref.to_string()));
+    }
+
+    fn prevent_match(&mut self, entry_id: &str, evidence_ref: &str) {
+        self.not_same_source
+            .insert((entry_id.to_string(), evidence_ref.to_string()));
+    }
+
+    fn forces_match(&self, entry_id: &str, evidence_refs: &[String]) -> bool {
+        evidence_refs.iter().any(|evidence_ref| {
+            self.same_source
+                .contains(&(entry_id.to_string(), evidence_ref.clone()))
+        })
+    }
+
+    fn prevents_match(&self, entry_id: &str, evidence_refs: &[String]) -> bool {
+        evidence_refs.iter().any(|evidence_ref| {
+            self.not_same_source
+                .contains(&(entry_id.to_string(), evidence_ref.clone()))
+        })
+    }
+}
+
+fn login_entry_id(subject: &TypedRef, login_name: &str, label: &str) -> Option<String> {
+    if subject.kind != TypedRefKind::LoginEntry {
+        return None;
+    }
+    if subject.login_name.as_deref() != Some(login_name) {
+        return None;
+    }
+    if subject.label.as_deref() != Some(label) {
+        return None;
+    }
+    subject.entry_id.clone()
+}
+
+fn evidence_ref_values(subject: &TypedRef) -> Vec<String> {
+    [
+        subject.locator.as_deref(),
+        subject.id.as_deref(),
+        subject.filename.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(ToString::to_string)
+    .collect()
 }
 
 impl Default for DedupConfig {
@@ -164,16 +226,57 @@ pub fn run_dedup(
     source_document: &str,
     config: &DedupConfig,
 ) -> Vec<DedupAction> {
+    run_dedup_with_policy(
+        existing,
+        proposed,
+        source_document,
+        config,
+        &DedupPolicy::default(),
+    )
+}
+
+pub fn run_dedup_for_login_account(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    existing: &[AccountEntry],
+    proposed: &[ExtractedTransaction],
+    source_document: &str,
+    config: &DedupConfig,
+) -> Vec<DedupAction> {
+    let policy =
+        DedupPolicy::from_resolutions(ledger_dir, login_name, label).unwrap_or_else(|err| {
+            eprintln!("warning: failed to load dedup resolutions: {err}");
+            DedupPolicy::default()
+        });
+    run_dedup_with_policy(existing, proposed, source_document, config, &policy)
+}
+
+pub fn run_dedup_with_policy(
+    existing: &[AccountEntry],
+    proposed: &[ExtractedTransaction],
+    source_document: &str,
+    config: &DedupConfig,
+    policy: &DedupPolicy,
+) -> Vec<DedupAction> {
     let mut actions = Vec::new();
     // Track which existing entries have been matched (one-time consumption).
     let mut matched_existing: Vec<bool> = vec![false; existing.len()];
 
     for txn in proposed {
-        let result = match_proposed(existing, txn, source_document, config, &matched_existing);
+        let result = match_proposed(
+            existing,
+            txn,
+            source_document,
+            config,
+            &matched_existing,
+            policy,
+        );
         match &result {
             DedupResult::SameEvidence { existing_index, .. }
             | DedupResult::BankIdMatch { existing_index }
             | DedupResult::FuzzyMatch { existing_index }
+            | DedupResult::ResolutionMatch { existing_index }
             | DedupResult::PendingToFinalized { existing_index } => {
                 matched_existing[*existing_index] = true;
             }
@@ -181,6 +284,7 @@ pub fn run_dedup(
         }
         actions.push(DedupAction {
             proposed: txn.clone(),
+            source_document: source_document.to_string(),
             result,
         });
     }
@@ -188,9 +292,52 @@ pub fn run_dedup(
     actions
 }
 
+impl DedupPolicy {
+    fn from_resolutions(ledger_dir: &Path, login_name: &str, label: &str) -> std::io::Result<Self> {
+        let mut policy = DedupPolicy::default();
+        for resolution in crate::automation::list_resolutions(ledger_dir)?
+            .into_iter()
+            .filter(|resolution| resolution.status == crate::automation::ResolutionStatus::Active)
+        {
+            if !matches!(
+                resolution.kind,
+                crate::automation::ResolutionKind::SameSource
+                    | crate::automation::ResolutionKind::NotSameSource
+            ) {
+                continue;
+            }
+            let entry_ids = resolution
+                .subject_refs
+                .iter()
+                .filter_map(|subject| login_entry_id(subject, login_name, label))
+                .collect::<Vec<_>>();
+            let evidence_refs = resolution
+                .subject_refs
+                .iter()
+                .flat_map(evidence_ref_values)
+                .collect::<Vec<_>>();
+            for entry_id in &entry_ids {
+                for evidence_ref in &evidence_refs {
+                    match resolution.kind {
+                        crate::automation::ResolutionKind::SameSource => {
+                            policy.force_match(entry_id, evidence_ref);
+                        }
+                        crate::automation::ResolutionKind::NotSameSource => {
+                            policy.prevent_match(entry_id, evidence_ref);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(policy)
+    }
+}
+
 /// A dedup action: the proposed transaction paired with its match result.
 pub struct DedupAction {
     pub proposed: ExtractedTransaction,
+    pub source_document: String,
     pub result: DedupResult,
 }
 
@@ -230,6 +377,7 @@ pub fn apply_dedup_actions_for_login_account(
 ) -> Result<Vec<AccountEntry>, Box<dyn std::error::Error + Send + Sync>> {
     let (login_name, label) = login_account;
     let attachment_index = build_attachment_index_for_login_account(ledger_dir, login_name, label);
+    create_ambiguous_dedup_anomalies(ledger_dir, login_name, label, &entries, actions)?;
     apply_dedup_actions_with_logger(
         entries,
         actions,
@@ -327,6 +475,50 @@ pub fn apply_coverage_lifecycle_for_login_account(
     Ok(retained)
 }
 
+fn create_ambiguous_dedup_anomalies(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    entries: &[AccountEntry],
+    actions: &[DedupAction],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for action in actions {
+        let DedupResult::Ambiguous { candidate_indices } = &action.result else {
+            continue;
+        };
+        for candidate_index in candidate_indices {
+            let Some(entry) = entries.get(*candidate_index) else {
+                continue;
+            };
+            crate::bookkeeping::create_import_anomaly(
+                ledger_dir,
+                crate::bookkeeping::NewImportAnomalyInput {
+                    kind: crate::bookkeeping::ImportAnomalyKind::DuplicateImportRepairSkipped,
+                    login_name: login_name.to_string(),
+                    label: label.to_string(),
+                    source_entry_id: entry.id.clone(),
+                    gl_txn_id: entry.posted.as_deref().map(gl_ref_txn_id),
+                    date: action.proposed.tdate.clone(),
+                    amount: txn_primary_simple_amount(&action.proposed)
+                        .map(|amount| format!("{} {}", amount.quantity, amount.commodity)),
+                    description: action.proposed.tdescription.clone(),
+                    evidence: action.proposed.evidence_refs(),
+                    coverage_document: action.source_document.clone(),
+                    safe_to_retire: false,
+                    safety_reasons: vec![
+                        "multiple existing source entries match this extracted row".to_string(),
+                    ],
+                    notes: Some(format!(
+                        "candidate source entry {}; choose same-source or not-same-source",
+                        entry.id
+                    )),
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn apply_dedup_actions_with_logger<F>(
     mut entries: Vec<AccountEntry>,
     actions: &[DedupAction],
@@ -360,7 +552,8 @@ where
                 }
             }
             DedupResult::BankIdMatch { existing_index }
-            | DedupResult::FuzzyMatch { existing_index } => {
+            | DedupResult::FuzzyMatch { existing_index }
+            | DedupResult::ResolutionMatch { existing_index } => {
                 for ev in action.proposed.evidence_refs() {
                     entries[*existing_index].add_evidence(ev);
                 }
@@ -448,12 +641,31 @@ fn match_proposed(
     source_document: &str,
     config: &DedupConfig,
     matched: &[bool],
+    policy: &DedupPolicy,
 ) -> DedupResult {
     let evidence_refs = txn.evidence_refs();
 
+    // Step 0: Explicit source-relationship resolutions.
+    let forced_candidates = existing
+        .iter()
+        .enumerate()
+        .filter(|(i, entry)| !matched[*i] && policy.forces_match(&entry.id, &evidence_refs))
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    if forced_candidates.len() == 1 {
+        return DedupResult::ResolutionMatch {
+            existing_index: forced_candidates[0],
+        };
+    }
+    if forced_candidates.len() > 1 {
+        return DedupResult::Ambiguous {
+            candidate_indices: forced_candidates,
+        };
+    }
+
     // Step 1: Same-evidence match
     for (i, entry) in existing.iter().enumerate() {
-        if matched[i] {
+        if matched[i] || policy.prevents_match(&entry.id, &evidence_refs) {
             continue;
         }
         for ev in &evidence_refs {
@@ -471,7 +683,7 @@ fn match_proposed(
     if let Some(bank_id) = txn.bank_id() {
         let mut candidates = Vec::new();
         for (i, entry) in existing.iter().enumerate() {
-            if matched[i] {
+            if matched[i] || policy.prevents_match(&entry.id, &evidence_refs) {
                 continue;
             }
             // Only match across different documents
@@ -500,7 +712,7 @@ fn match_proposed(
     if txn.status() == EntryStatus::Cleared {
         let mut pending_candidates = Vec::new();
         for (i, entry) in existing.iter().enumerate() {
-            if matched[i] {
+            if matched[i] || policy.prevents_match(&entry.id, &evidence_refs) {
                 continue;
             }
             if entry.status != EntryStatus::Pending {
@@ -533,7 +745,7 @@ fn match_proposed(
     let mut fuzzy_candidates = Vec::new();
 
     for (i, entry) in existing.iter().enumerate() {
-        if matched[i] {
+        if matched[i] || policy.prevents_match(&entry.id, &evidence_refs) {
             continue;
         }
         if entry_is_from_same_document(entry, source_document) {
@@ -644,12 +856,7 @@ fn create_missing_import_anomaly(
         .first()
         .and_then(|posting| posting.amount.as_ref())
         .map(|amount| format!("{} {}", amount.quantity, amount.commodity));
-    let gl_txn_id = anomaly.entry.posted.as_deref().map(|posted| {
-        posted
-            .strip_prefix("general.journal:")
-            .unwrap_or(posted)
-            .to_string()
-    });
+    let gl_txn_id = anomaly.entry.posted.as_deref().map(gl_ref_txn_id);
     crate::bookkeeping::create_import_anomaly(
         ledger_dir,
         crate::bookkeeping::NewImportAnomalyInput {
@@ -669,6 +876,13 @@ fn create_missing_import_anomaly(
         },
     )?;
     Ok(())
+}
+
+fn gl_ref_txn_id(posted: &str) -> String {
+    posted
+        .strip_prefix("general.journal:")
+        .unwrap_or(posted)
+        .to_string()
 }
 
 fn has_content_changed(entry: &AccountEntry, txn: &ExtractedTransaction) -> bool {
@@ -989,6 +1203,62 @@ mod tests {
 
         let actions = run_dedup(&existing, &proposed, "doc-b.csv", &DedupConfig::default());
         assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0].result, DedupResult::New));
+    }
+
+    #[test]
+    fn policy_same_source_forces_match_to_evidence_ref() {
+        let existing = vec![make_entry(
+            "e1",
+            "2024-01-01",
+            "Different",
+            EntryStatus::Cleared,
+            "-10.00",
+            &["doc-a.csv:1:1"],
+        )];
+        let proposed = vec![make_txn("2024-02-01", "Other", "Cleared", "doc-b.csv:9:1")];
+        let mut policy = DedupPolicy::default();
+        policy.force_match("e1", "doc-b.csv:9:1");
+
+        let actions = run_dedup_with_policy(
+            &existing,
+            &proposed,
+            "doc-b.csv",
+            &DedupConfig::default(),
+            &policy,
+        );
+
+        assert!(matches!(
+            actions[0].result,
+            DedupResult::ResolutionMatch { existing_index: 0 }
+        ));
+    }
+
+    #[test]
+    fn policy_not_same_source_blocks_heuristic_match() {
+        let existing = vec![make_entry(
+            "e1",
+            "2024-01-01",
+            "Test",
+            EntryStatus::Cleared,
+            "-10.00",
+            &["doc-a.csv:1:1"],
+        )];
+        let mut proposed = make_txn("2024-01-01", "Test", "Cleared", "doc-b.csv:9:1");
+        proposed
+            .ttags
+            .push(("amount".to_string(), "-10.00 USD".to_string()));
+        let mut policy = DedupPolicy::default();
+        policy.prevent_match("e1", "doc-b.csv:9:1");
+
+        let actions = run_dedup_with_policy(
+            &existing,
+            &[proposed],
+            "doc-b.csv",
+            &DedupConfig::default(),
+            &policy,
+        );
+
         assert!(matches!(actions[0].result, DedupResult::New));
     }
 
@@ -1418,6 +1688,62 @@ mod tests {
         let actions = run_dedup(&existing, &[proposed], "doc-b.csv", &DedupConfig::default());
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0].result, DedupResult::Ambiguous { .. }));
+    }
+
+    #[test]
+    fn ambiguous_login_dedup_creates_review_anomalies() {
+        let root = temp_dir("ambiguous-dedup-anomaly");
+        let mut existing = vec![
+            make_entry(
+                "e1",
+                "2024-01-01",
+                "Transfer A",
+                EntryStatus::Cleared,
+                "-10.00",
+                &["doc-a.csv:1:1"],
+            ),
+            make_entry(
+                "e2",
+                "2024-01-01",
+                "Transfer B",
+                EntryStatus::Cleared,
+                "-10.00",
+                &["doc-c.csv:1:1"],
+            ),
+        ];
+        existing[0]
+            .tags
+            .push(("bankId".to_string(), "FIT-123".to_string()));
+        existing[1]
+            .tags
+            .push(("bankId".to_string(), "FIT-123".to_string()));
+        let mut proposed = make_txn("2024-01-01", "Transfer", "Cleared", "doc-b.csv:1:1");
+        proposed
+            .ttags
+            .push(("bankId".to_string(), "FIT-123".to_string()));
+        let actions = run_dedup(&existing, &[proposed], "doc-b.csv", &DedupConfig::default());
+
+        let updated = apply_dedup_actions_for_login_account(
+            &root,
+            ("bank", "checking"),
+            existing,
+            &actions,
+            "Assets:Checking",
+            "Equity:Staging:Checking",
+            Some("test:latest"),
+        )
+        .expect("apply login dedup actions");
+        let anomalies = crate::bookkeeping::list_import_anomalies(&root).expect("anomalies");
+
+        assert_eq!(updated.len(), 2);
+        assert_eq!(anomalies.len(), 2);
+        assert!(anomalies.iter().all(|anomaly| {
+            anomaly.kind == crate::bookkeeping::ImportAnomalyKind::DuplicateImportRepairSkipped
+                && anomaly.coverage_document == "doc-b.csv"
+                && anomaly.evidence == vec!["doc-b.csv:1:1".to_string()]
+        }));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

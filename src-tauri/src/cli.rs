@@ -1160,7 +1160,15 @@ fn run_account_extract(
                 continue;
             }
 
-            let actions = crate::dedup::run_dedup(&all_updated, &doc_txns, doc_name, &config);
+            let actions = crate::dedup::run_dedup_for_login_account(
+                &ledger_dir,
+                &login_name,
+                &label,
+                &all_updated,
+                &doc_txns,
+                doc_name,
+                &config,
+            );
             new_count += actions
                 .iter()
                 .filter(|a| matches!(a.result, crate::dedup::DedupResult::New))
