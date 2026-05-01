@@ -17,9 +17,12 @@ import {
     getUnpostedEntriesForTransfer,
     applyAutomationProposal,
     createResolution,
+    disableResolution,
     listAutomationProposals,
     type AutomationProposal,
     listImportAnomalies,
+    listResolutions,
+    type Resolution,
     type LoginConfig,
     type LockStatusSnapshot,
     type ImportAnomaly,
@@ -95,6 +98,41 @@ function evidenceRef(ref: string): TypedRef {
     };
 }
 
+function refLabel(ref: TypedRef): string {
+    if (ref.kind === 'login-entry') {
+        return `${ref.loginName ?? '?'}:${ref.label ?? '?'}:${ref.entryId ?? ref.id ?? '?'}`;
+    }
+    return ref.locator ?? ref.filename ?? ref.id ?? ref.kind;
+}
+
+function resolutionResultLabel(resolution: Resolution): string {
+    if (resolution.parts.length > 0) {
+        return resolution.parts
+            .map((part) =>
+                `${part.account ?? refLabel(part.ref ?? { kind: 'document' })} ${part.amount ?? ''}`.trim(),
+            )
+            .join(' + ');
+    }
+    return resolution.subjectRefs.map(refLabel).join(' <-> ');
+}
+
+function filterLoginAccountResolutions(
+    resolutions: Resolution[],
+    loginName: string,
+    label: string,
+): Resolution[] {
+    return resolutions.filter(
+        (resolution) =>
+            resolution.status === 'active' &&
+            resolution.subjectRefs.some(
+                (ref) =>
+                    ref.kind === 'login-entry' &&
+                    ref.loginName === loginName &&
+                    ref.label === label,
+            ),
+    );
+}
+
 export function PipelineTab({
     ledger,
     isActive,
@@ -154,8 +192,14 @@ export function PipelineTab({
     const [automationProposals, setAutomationProposals] = useState<
         AutomationProposal[]
     >([]);
+    const [activeResolutions, setActiveResolutions] = useState<Resolution[]>(
+        [],
+    );
     const [busyProposalId, setBusyProposalId] = useState<string | null>(null);
     const [busyAnomalyId, setBusyAnomalyId] = useState<string | null>(null);
+    const [busyResolutionId, setBusyResolutionId] = useState<string | null>(
+        null,
+    );
     const [pipelineGlAccountDraft, setPipelineGlAccountDraft] = useState(
         session.pipelineGlAccountDraft,
     );
@@ -571,6 +615,9 @@ export function PipelineTab({
     // Load documents and journal entries for the selected login account.
     useEffect(() => {
         if (selectedLoginAccount === null) {
+            setActiveResolutions([]);
+            setAutomationProposals([]);
+            setImportAnomalies([]);
             return;
         }
 
@@ -583,29 +630,61 @@ export function PipelineTab({
                 listLoginAccountDocuments(ledgerPath, loginName, label),
                 getLoginAccountJournal(ledgerPath, loginName, label),
                 getLoginAccountUnposted(ledgerPath, loginName, label),
+                listImportAnomalies(ledgerPath),
+                listAutomationProposals(ledgerPath, {
+                    loginName,
+                    label,
+                    includeGl: false,
+                }),
+                listResolutions(ledgerPath),
             ])
-                .then(([fetchedDocuments, fetchedJournal, fetchedUnposted]) => {
-                    if (cancelled) {
-                        return;
-                    }
-                    setDocuments(fetchedDocuments);
-                    setAccountJournalEntries(fetchedJournal);
-                    setUnpostedEntries(fetchedUnposted);
-                    // Non-blocking category suggestions (fail-open)
-                    const reqId = ++suggestRequestId.current;
-                    suggestCategories(ledgerPath, loginName, label)
-                        .then((result) => {
-                            if (
-                                !cancelled &&
-                                reqId === suggestRequestId.current
-                            ) {
-                                setPipelineCategorySuggestions(result);
-                            }
-                        })
-                        .catch((err: unknown) => {
-                            console.error('suggestCategories failed:', err);
-                        });
-                })
+                .then(
+                    ([
+                        fetchedDocuments,
+                        fetchedJournal,
+                        fetchedUnposted,
+                        anomalies,
+                        proposals,
+                        resolutions,
+                    ]) => {
+                        if (cancelled) {
+                            return;
+                        }
+                        setDocuments(fetchedDocuments);
+                        setAccountJournalEntries(fetchedJournal);
+                        setUnpostedEntries(fetchedUnposted);
+                        setAutomationProposals(proposals);
+                        setActiveResolutions(
+                            filterLoginAccountResolutions(
+                                resolutions,
+                                loginName,
+                                label,
+                            ),
+                        );
+                        setImportAnomalies(
+                            anomalies.filter(
+                                (anomaly) =>
+                                    anomaly.status === 'open' &&
+                                    anomaly.loginName === loginName &&
+                                    anomaly.label === label,
+                            ),
+                        );
+                        // Non-blocking category suggestions (fail-open)
+                        const reqId = ++suggestRequestId.current;
+                        suggestCategories(ledgerPath, loginName, label)
+                            .then((result) => {
+                                if (
+                                    !cancelled &&
+                                    reqId === suggestRequestId.current
+                                ) {
+                                    setPipelineCategorySuggestions(result);
+                                }
+                            })
+                            .catch((err: unknown) => {
+                                console.error('suggestCategories failed:', err);
+                            });
+                    },
+                )
                 .catch((error: unknown) => {
                     if (!cancelled) {
                         setPipelineStatus(
@@ -723,8 +802,8 @@ export function PipelineTab({
                 [documentName],
             );
             const newCount = result.newEntryCount;
-            const [journal, unposted, anomalies, proposals] = await Promise.all(
-                [
+            const [journal, unposted, anomalies, proposals, resolutions] =
+                await Promise.all([
                     getLoginAccountJournal(ledgerPath, loginName, label),
                     getLoginAccountUnposted(ledgerPath, loginName, label),
                     listImportAnomalies(ledgerPath),
@@ -733,11 +812,14 @@ export function PipelineTab({
                         label,
                         includeGl: false,
                     }),
-                ],
-            );
+                    listResolutions(ledgerPath),
+                ]);
             setAccountJournalEntries(journal);
             setUnpostedEntries(unposted);
             setAutomationProposals(proposals);
+            setActiveResolutions(
+                filterLoginAccountResolutions(resolutions, loginName, label),
+            );
             setImportAnomalies(
                 anomalies.filter(
                     (anomaly) =>
@@ -761,20 +843,29 @@ export function PipelineTab({
     async function refreshPipelineLoginAccountData() {
         if (!selectedLoginAccount) return;
         const { loginName, label } = selectedLoginAccount;
-        const [fetchedJournal, fetchedUnposted, anomalies, proposals] =
-            await Promise.all([
-                getLoginAccountJournal(ledgerPath, loginName, label),
-                getLoginAccountUnposted(ledgerPath, loginName, label),
-                listImportAnomalies(ledgerPath),
-                listAutomationProposals(ledgerPath, {
-                    loginName,
-                    label,
-                    includeGl: false,
-                }),
-            ]);
+        const [
+            fetchedJournal,
+            fetchedUnposted,
+            anomalies,
+            proposals,
+            resolutions,
+        ] = await Promise.all([
+            getLoginAccountJournal(ledgerPath, loginName, label),
+            getLoginAccountUnposted(ledgerPath, loginName, label),
+            listImportAnomalies(ledgerPath),
+            listAutomationProposals(ledgerPath, {
+                loginName,
+                label,
+                includeGl: false,
+            }),
+            listResolutions(ledgerPath),
+        ]);
         setAccountJournalEntries(fetchedJournal);
         setUnpostedEntries(fetchedUnposted);
         setAutomationProposals(proposals);
+        setActiveResolutions(
+            filterLoginAccountResolutions(resolutions, loginName, label),
+        );
         setImportAnomalies(
             anomalies.filter(
                 (anomaly) =>
@@ -1308,6 +1399,19 @@ export function PipelineTab({
             setPipelineStatus(`Automation failed: ${String(error)}`);
         } finally {
             setBusyProposalId(null);
+        }
+    }
+
+    async function handleDisableResolution(resolution: Resolution) {
+        setBusyResolutionId(resolution.id);
+        try {
+            await disableResolution(ledgerPath, resolution.id);
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(`Disabled ${resolution.kind} decision.`);
+        } catch (error) {
+            setPipelineStatus(`Disable decision failed: ${String(error)}`);
+        } finally {
+            setBusyResolutionId(null);
         }
     }
 
@@ -2052,6 +2156,64 @@ export function PipelineTab({
                                     </div>
                                 </div>
                             )}
+                            {activeResolutions.length > 0 && (
+                                <div className="pipeline-panel">
+                                    <h3>Saved decisions</h3>
+                                    <div className="table-wrap">
+                                        <table className="ledger-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Kind</th>
+                                                    <th>Decision</th>
+                                                    <th>Notes</th>
+                                                    <th>Actions</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {activeResolutions.map(
+                                                    (resolution) => (
+                                                        <tr key={resolution.id}>
+                                                            <td>
+                                                                {
+                                                                    resolution.kind
+                                                                }
+                                                            </td>
+                                                            <td>
+                                                                {resolutionResultLabel(
+                                                                    resolution,
+                                                                )}
+                                                            </td>
+                                                            <td>
+                                                                {resolution.notes ??
+                                                                    '-'}
+                                                            </td>
+                                                            <td>
+                                                                <div className="txn-actions">
+                                                                    <button
+                                                                        type="button"
+                                                                        className="ghost-button"
+                                                                        disabled={
+                                                                            busyResolutionId ===
+                                                                            resolution.id
+                                                                        }
+                                                                        onClick={() => {
+                                                                            void handleDisableResolution(
+                                                                                resolution,
+                                                                            );
+                                                                        }}
+                                                                    >
+                                                                        Disable
+                                                                    </button>
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    ),
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
                             {importAnomalies.length > 0 && (
                                 <div className="pipeline-panel">
                                     <h3>Import anomalies</h3>
@@ -2063,6 +2225,8 @@ export function PipelineTab({
                                                     <th>Date</th>
                                                     <th>Description</th>
                                                     <th>Amount</th>
+                                                    <th>Source entry</th>
+                                                    <th>Evidence</th>
                                                     <th>Reason</th>
                                                     <th>Actions</th>
                                                 </tr>
@@ -2085,6 +2249,21 @@ export function PipelineTab({
                                                             <td className="mono">
                                                                 {anomaly.amount ??
                                                                     '-'}
+                                                            </td>
+                                                            <td className="mono">
+                                                                {
+                                                                    anomaly.sourceEntryId
+                                                                }
+                                                            </td>
+                                                            <td>
+                                                                {anomaly
+                                                                    .evidence
+                                                                    .length ===
+                                                                0
+                                                                    ? '-'
+                                                                    : anomaly.evidence.join(
+                                                                          ', ',
+                                                                      )}
                                                             </td>
                                                             <td>
                                                                 {anomaly
