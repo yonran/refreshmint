@@ -116,6 +116,7 @@ pub enum TypedRefKind {
     GlTxn,
     LoginEntry,
     Document,
+    EvidenceRow,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -923,6 +924,14 @@ fn validate_typed_ref(
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("{field_name}.filename is required for document refs"),
+                ));
+            }
+        }
+        TypedRefKind::EvidenceRow => {
+            if value.locator.as_deref().map_or(true, str::is_empty) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{field_name}.locator is required for evidence-row refs"),
                 ));
             }
         }

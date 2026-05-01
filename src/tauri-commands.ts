@@ -54,7 +54,11 @@ export interface UpdateReconciliationSessionInput extends NewReconciliationSessi
     id: string;
 }
 
-export type TypedRefKind = 'gl-txn' | 'login-entry' | 'document';
+export type TypedRefKind =
+    | 'gl-txn'
+    | 'login-entry'
+    | 'document'
+    | 'evidence-row';
 
 export interface TypedRef {
     kind: TypedRefKind;

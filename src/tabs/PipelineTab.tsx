@@ -91,10 +91,9 @@ function loginEntryRef(
 
 function evidenceRef(ref: string): TypedRef {
     return {
-        kind: 'document',
+        kind: 'evidence-row',
         locator: ref,
         id: ref,
-        filename: ref,
     };
 }
 

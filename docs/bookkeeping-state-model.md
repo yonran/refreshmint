@@ -322,10 +322,12 @@ can be regenerated from current ledger state and active resolutions.
 future automation decisions.
 
 For source deduplication, these relationship resolutions are actionable when
-they pair a `login-entry` ref with an evidence/document ref such as
+they pair a `login-entry` ref with an `evidence-row` ref such as
 `statement.csv:12:1`. A `same-source` row forces the incoming extracted row for
 that evidence ref to merge into the named source entry; a `not-same-source` row
-prevents heuristic matching between them.
+prevents heuristic matching between them. Older resolutions may encode the same
+evidence locator as a `document` ref; dedup reads those for compatibility, but
+new decisions should use `evidence-row`.
 
 ### Automation Proposals
 

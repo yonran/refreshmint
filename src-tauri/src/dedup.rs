@@ -194,6 +194,19 @@ fn login_entry_id(subject: &TypedRef, login_name: &str, label: &str) -> Option<S
 }
 
 fn evidence_ref_values(subject: &TypedRef) -> Vec<String> {
+    if subject.kind == TypedRefKind::EvidenceRow {
+        return [subject.locator.as_deref(), subject.id.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .collect();
+    }
+
+    // Backward compatibility for resolutions created before evidence-row refs
+    // existed: Pipeline stored evidence locators as document refs with the same
+    // value in locator/id/filename.
     [
         subject.locator.as_deref(),
         subject.id.as_deref(),
@@ -1232,6 +1245,66 @@ mod tests {
             actions[0].result,
             DedupResult::ResolutionMatch { existing_index: 0 }
         ));
+    }
+
+    #[test]
+    fn evidence_row_resolution_forces_login_dedup_match() {
+        let root = temp_dir("evidence-row-resolution");
+        crate::automation::create_resolution(
+            &root,
+            crate::automation::NewResolutionInput {
+                kind: crate::automation::ResolutionKind::SameSource,
+                subject_refs: vec![
+                    TypedRef {
+                        kind: TypedRefKind::LoginEntry,
+                        id: None,
+                        locator: Some("logins/bank/accounts/checking".to_string()),
+                        entry_id: Some("e1".to_string()),
+                        login_name: Some("bank".to_string()),
+                        label: Some("checking".to_string()),
+                        filename: None,
+                    },
+                    TypedRef {
+                        kind: TypedRefKind::EvidenceRow,
+                        id: None,
+                        locator: Some("doc-b.csv:9:1".to_string()),
+                        entry_id: None,
+                        login_name: None,
+                        label: None,
+                        filename: None,
+                    },
+                ],
+                parts: Vec::new(),
+                notes: None,
+            },
+        )
+        .expect("create resolution");
+        let existing = vec![make_entry(
+            "e1",
+            "2024-01-01",
+            "Different",
+            EntryStatus::Cleared,
+            "-10.00",
+            &["doc-a.csv:1:1"],
+        )];
+        let proposed = vec![make_txn("2024-02-01", "Other", "Cleared", "doc-b.csv:9:1")];
+
+        let actions = run_dedup_for_login_account(
+            &root,
+            "bank",
+            "checking",
+            &existing,
+            &proposed,
+            "doc-b.csv",
+            &DedupConfig::default(),
+        );
+
+        assert!(matches!(
+            actions[0].result,
+            DedupResult::ResolutionMatch { existing_index: 0 }
+        ));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -39,7 +39,12 @@ type TypedRefDraft = {
     filename: string;
 };
 
-const TYPED_REF_KINDS: TypedRefKind[] = ['gl-txn', 'login-entry', 'document'];
+const TYPED_REF_KINDS: TypedRefKind[] = [
+    'gl-txn',
+    'login-entry',
+    'document',
+    'evidence-row',
+];
 const PERIOD_CLOSE_STATUSES: PeriodCloseStatus[] = [
     'draft',
     'soft-closed',
