@@ -199,19 +199,17 @@ pub fn list_resolutions(ledger_dir: &Path) -> io::Result<Vec<Resolution>> {
 pub fn create_resolution(ledger_dir: &Path, input: NewResolutionInput) -> io::Result<Resolution> {
     ensure_automation_layout(ledger_dir)?;
     validate_resolution_input(&input)?;
-    let id = stable_id(
-        &serde_json::to_string(&(&input.kind, &input.subject_refs, &input.parts))
-            .map_err(json_error)?,
-    );
+    let fingerprint = resolution_fingerprint(&input.kind, &input.subject_refs, &input.parts)?;
+    for existing in list_resolutions(ledger_dir)? {
+        if resolution_matches_fingerprint(&existing, &fingerprint)? {
+            if existing.status == ResolutionStatus::Active {
+                return Ok(existing);
+            }
+            return reactivate_resolution(ledger_dir, existing, input);
+        }
+    }
+    let id = stable_id(&fingerprint);
     let now = crate::operations::now_timestamp();
-    let path = resolution_path(ledger_dir, &id);
-    let created_at = if path.exists() {
-        let existing: Resolution =
-            serde_json::from_str(&fs::read_to_string(&path)?).map_err(json_error)?;
-        existing.created_at
-    } else {
-        now.clone()
-    };
     let resolution = Resolution {
         id,
         kind: input.kind,
@@ -219,7 +217,7 @@ pub fn create_resolution(ledger_dir: &Path, input: NewResolutionInput) -> io::Re
         subject_refs: input.subject_refs,
         parts: input.parts,
         notes: normalize_optional(input.notes),
-        created_at,
+        created_at: now.clone(),
         updated_at: now,
     };
     fs::write(
@@ -227,6 +225,68 @@ pub fn create_resolution(ledger_dir: &Path, input: NewResolutionInput) -> io::Re
         serde_json::to_string_pretty(&resolution).map_err(json_error)?,
     )?;
     Ok(resolution)
+}
+
+fn reactivate_resolution(
+    ledger_dir: &Path,
+    existing: Resolution,
+    input: NewResolutionInput,
+) -> io::Result<Resolution> {
+    let resolution = Resolution {
+        id: existing.id,
+        kind: input.kind,
+        status: ResolutionStatus::Active,
+        subject_refs: input.subject_refs,
+        parts: input.parts,
+        notes: normalize_optional(input.notes),
+        created_at: existing.created_at,
+        updated_at: crate::operations::now_timestamp(),
+    };
+    fs::write(
+        resolution_path(ledger_dir, &resolution.id),
+        serde_json::to_string_pretty(&resolution).map_err(json_error)?,
+    )?;
+    Ok(resolution)
+}
+
+fn resolution_matches_fingerprint(resolution: &Resolution, fingerprint: &str) -> io::Result<bool> {
+    Ok(resolution_fingerprint(
+        &resolution.kind,
+        &resolution.subject_refs,
+        &resolution.parts,
+    )? == fingerprint)
+}
+
+fn resolution_fingerprint(
+    kind: &ResolutionKind,
+    subject_refs: &[TypedRef],
+    parts: &[ResolutionPart],
+) -> io::Result<String> {
+    serde_json::to_string(&(kind, canonical_subject_refs(kind, subject_refs), parts))
+        .map_err(json_error)
+}
+
+fn canonical_subject_refs(kind: &ResolutionKind, refs: &[TypedRef]) -> Vec<TypedRef> {
+    let mut refs = refs.to_vec();
+    if resolution_subject_order_is_commutative(kind) {
+        refs.sort_by_key(typed_ref_sort_key);
+    }
+    refs
+}
+
+fn resolution_subject_order_is_commutative(kind: &ResolutionKind) -> bool {
+    matches!(
+        kind,
+        ResolutionKind::SameSource
+            | ResolutionKind::NotSameSource
+            | ResolutionKind::TransferLink
+            | ResolutionKind::TransferSplit
+            | ResolutionKind::ReversalLink
+    )
+}
+
+fn typed_ref_sort_key(value: &TypedRef) -> String {
+    serde_json::to_string(value).unwrap_or_default()
 }
 
 pub fn disable_resolution(ledger_dir: &Path, id: &str) -> io::Result<Resolution> {
@@ -1139,6 +1199,40 @@ mod tests {
         assert_eq!(list_resolutions(&root)?.len(), 1);
         let disabled = disable_resolution(&root, &created.id)?;
         assert_eq!(disabled.status, ResolutionStatus::Disabled);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn commutative_resolutions_are_idempotent(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("resolution-idempotent")?;
+        let left = login_entry_ref("bank", "checking", "entry-1");
+        let right = login_entry_ref("card", "primary", "entry-2");
+        let first = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::TransferLink,
+                subject_refs: vec![left.clone(), right.clone()],
+                parts: Vec::new(),
+                notes: Some("first".to_string()),
+            },
+        )?;
+        let second = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::TransferLink,
+                subject_refs: vec![right, left],
+                parts: Vec::new(),
+                notes: Some("second".to_string()),
+            },
+        )?;
+        let resolutions = list_resolutions(&root)?;
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].notes.as_deref(), Some("first"));
+
         let _ = fs::remove_dir_all(root);
         Ok(())
     }
