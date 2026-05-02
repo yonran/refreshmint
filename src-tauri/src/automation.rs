@@ -1417,6 +1417,52 @@ mod tests {
     }
 
     #[test]
+    fn ignore_source_resolution_suppresses_entry_proposals(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("ignore-source-proposal")?;
+        let login_name = "bank";
+        let label = "checking";
+        write_test_login_entry(&root, login_name, label, "entry-1")?;
+        create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::Category,
+                subject_refs: vec![login_entry_ref(login_name, label, "entry-1")],
+                parts: vec![ResolutionPart {
+                    amount: None,
+                    account: Some("Expenses:Dining".to_string()),
+                    ref_: None,
+                    notes: None,
+                }],
+                notes: None,
+            },
+        )?;
+        create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::IgnoreSource,
+                subject_refs: vec![login_entry_ref(login_name, label, "entry-1")],
+                parts: Vec::new(),
+                notes: None,
+            },
+        )?;
+
+        let proposals = list_automation_proposals(
+            &root,
+            AutomationScope {
+                login_name: Some(login_name.to_string()),
+                label: Some(label.to_string()),
+                include_gl: Some(false),
+            },
+        )?;
+
+        assert!(proposals.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
     fn same_and_not_same_source_resolutions_are_visible_as_proposals(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let root = temp_dir("source-relationship");

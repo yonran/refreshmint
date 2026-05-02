@@ -1076,6 +1076,28 @@ export function PipelineTab({
         }
     }
 
+    async function handleCreateIgnoreSourceResolution(
+        entry: AccountJournalEntry,
+    ) {
+        if (!selectedLoginAccount) return;
+        const { loginName, label } = selectedLoginAccount;
+        setBusyPostEntryId(entry.id);
+        try {
+            await createResolution(ledgerPath, {
+                kind: 'ignore-source',
+                subjectRefs: [loginEntryRef(loginName, label, entry.id)],
+                parts: [],
+                notes: 'Created from Pipeline account row',
+            });
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(`Ignored automation for ${entry.id}.`);
+        } catch (error) {
+            setPipelineStatus(`Ignore automation failed: ${String(error)}`);
+        } finally {
+            setBusyPostEntryId(null);
+        }
+    }
+
     async function handlePipelinePostEntry(entryId: string) {
         setBusyPostEntryId(entryId);
         try {
@@ -2669,6 +2691,21 @@ export function PipelineTab({
                                                                                     Transfer
                                                                                 </button>
                                                                             )}
+                                                                            <button
+                                                                                type="button"
+                                                                                className="ghost-button"
+                                                                                disabled={
+                                                                                    isBusy
+                                                                                }
+                                                                                onClick={() => {
+                                                                                    void handleCreateIgnoreSourceResolution(
+                                                                                        entry,
+                                                                                    );
+                                                                                }}
+                                                                            >
+                                                                                Ignore
+                                                                                automation
+                                                                            </button>
                                                                         </>
                                                                     ) : (
                                                                         <>
