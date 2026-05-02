@@ -132,6 +132,22 @@ function filterLoginAccountResolutions(
     );
 }
 
+async function createTransferLinkResolution(
+    ledgerPath: string,
+    left: LoginAccountRef & { entryId: string },
+    right: LoginAccountRef & { entryId: string },
+): Promise<Resolution> {
+    return createResolution(ledgerPath, {
+        kind: 'transfer-link',
+        subjectRefs: [
+            loginEntryRef(left.loginName, left.label, left.entryId),
+            loginEntryRef(right.loginName, right.label, right.entryId),
+        ],
+        parts: [],
+        notes: 'Created from Pipeline transfer link',
+    });
+}
+
 export function PipelineTab({
     ledger,
     isActive,
@@ -928,6 +944,15 @@ export function PipelineTab({
                     `Transfer: could not parse locator: ${locator}`,
                 );
             }
+            await createTransferLinkResolution(
+                ledgerPath,
+                { loginName, label, entryId },
+                {
+                    loginName: otherLoginName,
+                    label: otherLabel,
+                    entryId: suggestion.transferMatch.entryId,
+                },
+            );
             const glId = await postLoginAccountTransfer(
                 ledgerPath,
                 loginName,
@@ -1444,6 +1469,19 @@ export function PipelineTab({
         setBusyPostEntryId(transferModalEntryId);
         setTransferModalEntryId(null);
         try {
+            await createTransferLinkResolution(
+                ledgerPath,
+                {
+                    loginName,
+                    label,
+                    entryId: transferModalEntryId,
+                },
+                {
+                    loginName: other.loginName,
+                    label: other.label,
+                    entryId: other.entry.id,
+                },
+            );
             const glId = await postLoginAccountTransfer(
                 ledgerPath,
                 loginName,
