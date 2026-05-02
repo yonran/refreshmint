@@ -1357,6 +1357,18 @@ export function PipelineTab({
                 anomaly.sourceEntryId,
                 `import anomaly ${anomaly.id}: ${anomaly.kind}`,
             );
+            await createResolution(ledgerPath, {
+                kind: 'pending-retired',
+                subjectRefs: [
+                    loginEntryRef(
+                        anomaly.loginName,
+                        anomaly.label,
+                        anomaly.sourceEntryId,
+                    ),
+                ],
+                parts: [],
+                notes: `Created from import anomaly ${anomaly.id}`,
+            });
             await reviewImportAnomaly(ledgerPath, {
                 id: anomaly.id,
                 notes: 'Retired source entry from Pipeline',

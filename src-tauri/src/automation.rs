@@ -515,6 +515,21 @@ fn resolution_backed_proposals(
             ResolutionKind::SameSource | ResolutionKind::NotSameSource => {
                 proposals.push(source_relationship_proposal(&source_ref, resolution));
             }
+            ResolutionKind::PendingRetired => {
+                proposals.push(pending_retired_proposal(
+                    login_name,
+                    label,
+                    entry,
+                    Some(resolution.id.clone()),
+                    ProposalPolicyDecision::Auto,
+                    ProposalReason {
+                        field: "resolution".to_string(),
+                        result: ProposalReasonResult::DerivedFromResolution,
+                        detail: resolution.id.clone(),
+                        weight: Some(ProposalReasonWeight::Exact),
+                    },
+                ));
+            }
             _ => {}
         }
     }
@@ -778,6 +793,34 @@ fn post_split_proposal(
     }
 }
 
+fn pending_retired_proposal(
+    login_name: &str,
+    label: &str,
+    entry: &AccountEntry,
+    resolution_id: Option<String>,
+    policy_decision: ProposalPolicyDecision,
+    reason: ProposalReason,
+) -> AutomationProposal {
+    let refs = vec![login_entry_ref(login_name, label, &entry.id)];
+    AutomationProposal {
+        id: proposal_id("retire-pending", &refs, resolution_id.as_deref()),
+        kind: AutomationProposalKind::RetirePending,
+        subject_refs: refs,
+        proposed_result: ProposalResult {
+            suggested_account: None,
+            transfer_match: None,
+            parts: Vec::new(),
+            import_anomaly_id: None,
+            resolution_id,
+            notes: Some(entry.description.clone()),
+        },
+        reasons: vec![reason],
+        blockers: Vec::new(),
+        policy_decision,
+        reversible: ProposalReversibility::Conditional,
+    }
+}
+
 fn source_relationship_proposal(
     source_ref: &TypedRef,
     resolution: &Resolution,
@@ -980,6 +1023,7 @@ impl<'a> ActiveResolutions<'a> {
                     | ResolutionKind::TransferLink
                     | ResolutionKind::TransferSplit
                     | ResolutionKind::IgnoreSource
+                    | ResolutionKind::PendingRetired
             )
         })
     }
@@ -1007,11 +1051,20 @@ fn validate_resolution_input(input: &NewResolutionInput) -> io::Result<()> {
         }
         ResolutionKind::TransferLink
         | ResolutionKind::SameSource
-        | ResolutionKind::NotSameSource => {
+        | ResolutionKind::NotSameSource
+        | ResolutionKind::ReversalLink => {
             if input.subject_refs.len() < 2 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "this resolution kind requires at least two subject refs",
+                ));
+            }
+        }
+        ResolutionKind::TransferSplit => {
+            if input.subject_refs.len() < 2 || input.parts.len() < 2 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "transfer split resolutions require at least two subject refs and two parts",
                 ));
             }
         }
@@ -1321,6 +1374,42 @@ mod tests {
             proposal.kind == AutomationProposalKind::PostSplit
                 && proposal.policy_decision == ProposalPolicyDecision::Auto
                 && proposal.proposed_result.parts.len() == 2
+        }));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn pending_retired_resolution_generates_auto_retire_proposal(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("pending-retired-proposal")?;
+        let login_name = "bank";
+        let label = "checking";
+        write_test_login_entry(&root, login_name, label, "entry-1")?;
+        let resolution = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::PendingRetired,
+                subject_refs: vec![login_entry_ref(login_name, label, "entry-1")],
+                parts: Vec::new(),
+                notes: None,
+            },
+        )?;
+
+        let proposals = list_automation_proposals(
+            &root,
+            AutomationScope {
+                login_name: Some(login_name.to_string()),
+                label: Some(label.to_string()),
+                include_gl: Some(false),
+            },
+        )?;
+
+        assert!(proposals.iter().any(|proposal| {
+            proposal.kind == AutomationProposalKind::RetirePending
+                && proposal.policy_decision == ProposalPolicyDecision::Auto
+                && proposal.proposed_result.resolution_id.as_deref() == Some(&resolution.id)
         }));
 
         let _ = fs::remove_dir_all(root);
