@@ -120,15 +120,13 @@ function filterLoginAccountResolutions(
     loginName: string,
     label: string,
 ): Resolution[] {
-    return resolutions.filter(
-        (resolution) =>
-            resolution.status === 'active' &&
-            resolution.subjectRefs.some(
-                (ref) =>
-                    ref.kind === 'login-entry' &&
-                    ref.loginName === loginName &&
-                    ref.label === label,
-            ),
+    return resolutions.filter((resolution) =>
+        resolution.subjectRefs.some(
+            (ref) =>
+                ref.kind === 'login-entry' &&
+                ref.loginName === loginName &&
+                ref.label === label,
+        ),
     );
 }
 
@@ -2228,6 +2226,7 @@ export function PipelineTab({
                                             <thead>
                                                 <tr>
                                                     <th>Kind</th>
+                                                    <th>Status</th>
                                                     <th>Decision</th>
                                                     <th>Updated</th>
                                                     <th>Notes</th>
@@ -2241,6 +2240,11 @@ export function PipelineTab({
                                                             <td>
                                                                 {
                                                                     resolution.kind
+                                                                }
+                                                            </td>
+                                                            <td>
+                                                                {
+                                                                    resolution.status
                                                                 }
                                                             </td>
                                                             <td>
@@ -2270,8 +2274,10 @@ export function PipelineTab({
                                                                         type="button"
                                                                         className="ghost-button"
                                                                         disabled={
+                                                                            resolution.status !==
+                                                                                'active' ||
                                                                             busyResolutionId ===
-                                                                            resolution.id
+                                                                                resolution.id
                                                                         }
                                                                         onClick={() => {
                                                                             void handleDisableResolution(
