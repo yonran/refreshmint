@@ -1126,6 +1126,12 @@ fn validate_resolution_input(input: &NewResolutionInput) -> io::Result<()> {
                     "this resolution kind requires at least two subject refs",
                 ));
             }
+            if !input.parts.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "this resolution kind must not include parts",
+                ));
+            }
         }
         ResolutionKind::TransferSplit => {
             if input.subject_refs.len() < 2 || input.parts.len() < 2 {
@@ -1619,6 +1625,37 @@ mod tests {
         let err = match result {
             Err(err) => err,
             Ok(_) => return Err("pending-retired with parts should fail".into()),
+        };
+        assert!(err.to_string().contains("must not include parts"));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn relationship_resolutions_reject_parts(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("relationship-validation")?;
+        let result = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::ReversalLink,
+                subject_refs: vec![
+                    login_entry_ref("bank", "checking", "entry-1"),
+                    gl_txn_ref("txn-1"),
+                ],
+                parts: vec![ResolutionPart {
+                    amount: None,
+                    account: Some("Expenses:Dining".to_string()),
+                    ref_: None,
+                    notes: None,
+                }],
+                notes: None,
+            },
+        );
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => return Err("reversal-link with parts should fail".into()),
         };
         assert!(err.to_string().contains("must not include parts"));
 
