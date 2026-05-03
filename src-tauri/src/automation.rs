@@ -79,6 +79,7 @@ pub struct AutomationProposal {
     pub proposed_result: ProposalResult,
     pub reasons: Vec<ProposalReason>,
     pub blockers: Vec<ProposalBlocker>,
+    pub can_apply: bool,
     pub policy_decision: ProposalPolicyDecision,
     pub reversible: ProposalReversibility,
 }
@@ -563,6 +564,7 @@ fn gl_proposals(
                     weight: Some(ProposalReasonWeight::Strong),
                 }],
                 blockers: Vec::new(),
+                can_apply: proposal_kind_is_applyable(&AutomationProposalKind::MergeGlTransfer),
                 policy_decision: ProposalPolicyDecision::Review,
                 reversible: ProposalReversibility::Conditional,
             });
@@ -635,6 +637,11 @@ fn import_anomaly_proposals(
             } else {
                 blockers
             },
+            can_apply: proposal_kind_is_applyable(if anomaly.safe_to_retire {
+                &AutomationProposalKind::RetirePending
+            } else {
+                &AutomationProposalKind::ReviewAnomaly
+            }),
             policy_decision: if anomaly.safe_to_retire {
                 ProposalPolicyDecision::Auto
             } else {
@@ -778,8 +785,12 @@ fn apply_proposal(
 }
 
 fn proposal_is_applyable(proposal: &AutomationProposal) -> bool {
+    proposal_kind_is_applyable(&proposal.kind)
+}
+
+fn proposal_kind_is_applyable(kind: &AutomationProposalKind) -> bool {
     matches!(
-        proposal.kind,
+        kind,
         AutomationProposalKind::PostCategory
             | AutomationProposalKind::PostSplit
             | AutomationProposalKind::LinkTransfer
@@ -815,6 +826,7 @@ fn post_split_proposal(
             weight: Some(ProposalReasonWeight::Exact),
         }],
         blockers: Vec::new(),
+        can_apply: proposal_kind_is_applyable(&AutomationProposalKind::PostSplit),
         policy_decision: ProposalPolicyDecision::Auto,
         reversible: ProposalReversibility::Conditional,
     }
@@ -843,6 +855,7 @@ fn pending_retired_proposal(
         },
         reasons: vec![reason],
         blockers: Vec::new(),
+        can_apply: proposal_kind_is_applyable(&AutomationProposalKind::RetirePending),
         policy_decision,
         reversible: ProposalReversibility::Conditional,
     }
@@ -857,6 +870,7 @@ fn source_relationship_proposal(
         ResolutionKind::NotSameSource => AutomationProposalKind::PreventMerge,
         _ => AutomationProposalKind::ReviewAnomaly,
     };
+    let can_apply = proposal_kind_is_applyable(&kind);
     AutomationProposal {
         id: proposal_id(
             "source-relationship",
@@ -880,6 +894,7 @@ fn source_relationship_proposal(
             weight: Some(ProposalReasonWeight::Exact),
         }],
         blockers: Vec::new(),
+        can_apply,
         policy_decision: ProposalPolicyDecision::Skip,
         reversible: ProposalReversibility::No,
     }
@@ -909,6 +924,7 @@ fn post_category_proposal(
         },
         reasons: vec![reason],
         blockers: Vec::new(),
+        can_apply: proposal_kind_is_applyable(&AutomationProposalKind::PostCategory),
         policy_decision,
         reversible: ProposalReversibility::Yes,
     }
@@ -959,6 +975,7 @@ fn link_transfer_proposal(input: LinkTransferProposalInput<'_>) -> AutomationPro
             weight: Some(ProposalReasonWeight::Strong),
         }],
         blockers: Vec::new(),
+        can_apply: proposal_kind_is_applyable(&AutomationProposalKind::LinkTransfer),
         policy_decision: input.policy_decision,
         reversible: ProposalReversibility::Conditional,
     }
@@ -1002,6 +1019,7 @@ fn sync_posted_proposal(
         },
         reasons,
         blockers: Vec::new(),
+        can_apply: proposal_kind_is_applyable(&AutomationProposalKind::SyncPosted),
         policy_decision: ProposalPolicyDecision::Review,
         reversible: ProposalReversibility::Conditional,
     }
@@ -1535,6 +1553,7 @@ mod tests {
             },
             reasons: Vec::new(),
             blockers: Vec::new(),
+            can_apply: proposal_kind_is_applyable(&AutomationProposalKind::SyncPosted),
             policy_decision: ProposalPolicyDecision::Review,
             reversible: ProposalReversibility::Conditional,
         };
@@ -1552,6 +1571,7 @@ mod tests {
             },
             reasons: Vec::new(),
             blockers: Vec::new(),
+            can_apply: proposal_kind_is_applyable(&AutomationProposalKind::MergeGlTransfer),
             policy_decision: ProposalPolicyDecision::Review,
             reversible: ProposalReversibility::Conditional,
         };

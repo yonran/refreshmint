@@ -217,6 +217,7 @@ export interface AutomationProposal {
     proposedResult: ProposalResult;
     reasons: ProposalReason[];
     blockers: ProposalBlocker[];
+    canApply: boolean;
     policyDecision: ProposalPolicyDecision;
     reversible: ProposalReversibility;
 }

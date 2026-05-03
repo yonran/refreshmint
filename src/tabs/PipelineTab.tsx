@@ -2154,18 +2154,7 @@ export function PipelineTab({
                                                         const isApplyable =
                                                             proposal.blockers
                                                                 .length === 0 &&
-                                                            (proposal.kind ===
-                                                                'post-category' ||
-                                                                proposal.kind ===
-                                                                    'post-split' ||
-                                                                proposal.kind ===
-                                                                    'link-transfer' ||
-                                                                proposal.kind ===
-                                                                    'retire-pending' ||
-                                                                proposal.kind ===
-                                                                    'sync-posted' ||
-                                                                proposal.kind ===
-                                                                    'merge-gl-transfer');
+                                                            proposal.canApply;
                                                         return (
                                                             <tr
                                                                 key={
