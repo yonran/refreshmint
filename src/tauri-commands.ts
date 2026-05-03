@@ -240,6 +240,13 @@ export async function disableResolution(
     return invoke('disable_resolution', { ledger, id });
 }
 
+export async function enableResolution(
+    ledger: string,
+    id: string,
+): Promise<Resolution> {
+    return invoke('enable_resolution', { ledger, id });
+}
+
 export async function listAutomationProposals(
     ledger: string,
     scope: AutomationScope,

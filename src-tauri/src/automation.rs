@@ -291,11 +291,23 @@ fn typed_ref_sort_key(value: &TypedRef) -> String {
 }
 
 pub fn disable_resolution(ledger_dir: &Path, id: &str) -> io::Result<Resolution> {
+    update_resolution_status(ledger_dir, id, ResolutionStatus::Disabled)
+}
+
+pub fn enable_resolution(ledger_dir: &Path, id: &str) -> io::Result<Resolution> {
+    update_resolution_status(ledger_dir, id, ResolutionStatus::Active)
+}
+
+fn update_resolution_status(
+    ledger_dir: &Path,
+    id: &str,
+    status: ResolutionStatus,
+) -> io::Result<Resolution> {
     let id = require_non_empty("id", id)?;
     let path = resolution_path(ledger_dir, id);
     let mut resolution: Resolution =
         serde_json::from_str(&fs::read_to_string(&path)?).map_err(json_error)?;
-    resolution.status = ResolutionStatus::Disabled;
+    resolution.status = status;
     resolution.updated_at = crate::operations::now_timestamp();
     fs::write(
         &path,
@@ -1331,6 +1343,8 @@ mod tests {
         assert_eq!(list_resolutions(&root)?.len(), 1);
         let disabled = disable_resolution(&root, &created.id)?;
         assert_eq!(disabled.status, ResolutionStatus::Disabled);
+        let enabled = enable_resolution(&root, &created.id)?;
+        assert_eq!(enabled.status, ResolutionStatus::Active);
         let _ = fs::remove_dir_all(root);
         Ok(())
     }

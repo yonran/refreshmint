@@ -18,6 +18,7 @@ import {
     applyAutomationProposal,
     createResolution,
     disableResolution,
+    enableResolution,
     listAutomationProposals,
     type AutomationProposal,
     listImportAnomalies,
@@ -1471,6 +1472,19 @@ export function PipelineTab({
         }
     }
 
+    async function handleEnableResolution(resolution: Resolution) {
+        setBusyResolutionId(resolution.id);
+        try {
+            await enableResolution(ledgerPath, resolution.id);
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(`Enabled ${resolution.kind} decision.`);
+        } catch (error) {
+            setPipelineStatus(`Enable decision failed: ${String(error)}`);
+        } finally {
+            setBusyResolutionId(null);
+        }
+    }
+
     async function handleOpenTransferModal(entryId: string) {
         if (!selectedLoginAccount) return;
         const { loginName, label } = selectedLoginAccount;
@@ -2286,6 +2300,23 @@ export function PipelineTab({
                                                                         }}
                                                                     >
                                                                         Disable
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        className="ghost-button"
+                                                                        disabled={
+                                                                            resolution.status !==
+                                                                                'disabled' ||
+                                                                            busyResolutionId ===
+                                                                                resolution.id
+                                                                        }
+                                                                        onClick={() => {
+                                                                            void handleEnableResolution(
+                                                                                resolution,
+                                                                            );
+                                                                        }}
+                                                                    >
+                                                                        Enable
                                                                     </button>
                                                                 </div>
                                                             </td>

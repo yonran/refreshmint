@@ -165,6 +165,7 @@ pub fn run_with_context(
             list_resolutions,
             create_resolution,
             disable_resolution,
+            enable_resolution,
             list_automation_proposals,
             apply_automation_proposal,
             apply_automation_policy,
@@ -1790,6 +1791,14 @@ fn disable_resolution(ledger: String, id: String) -> Result<automation::Resoluti
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
     let id = require_non_empty_input("id", id)?;
     automation::disable_resolution(&target_dir, &id).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn enable_resolution(ledger: String, id: String) -> Result<automation::Resolution, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let id = require_non_empty_input("id", id)?;
+    automation::enable_resolution(&target_dir, &id).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
