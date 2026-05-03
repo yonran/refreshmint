@@ -2229,6 +2229,7 @@ export function PipelineTab({
                                                 <tr>
                                                     <th>Kind</th>
                                                     <th>Decision</th>
+                                                    <th>Updated</th>
                                                     <th>Notes</th>
                                                     <th>Actions</th>
                                                 </tr>
@@ -2247,9 +2248,21 @@ export function PipelineTab({
                                                                     resolution,
                                                                 )}
                                                             </td>
+                                                            <td className="mono">
+                                                                {
+                                                                    resolution.updatedAt
+                                                                }
+                                                            </td>
                                                             <td>
-                                                                {resolution.notes ??
-                                                                    '-'}
+                                                                <div>
+                                                                    {resolution.notes ??
+                                                                        '-'}
+                                                                </div>
+                                                                <div className="hint mono">
+                                                                    {
+                                                                        resolution.id
+                                                                    }
+                                                                </div>
                                                             </td>
                                                             <td>
                                                                 <div className="txn-actions">
