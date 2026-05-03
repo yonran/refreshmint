@@ -2161,7 +2161,11 @@ export function PipelineTab({
                                                                 proposal.kind ===
                                                                     'link-transfer' ||
                                                                 proposal.kind ===
-                                                                    'retire-pending');
+                                                                    'retire-pending' ||
+                                                                proposal.kind ===
+                                                                    'sync-posted' ||
+                                                                proposal.kind ===
+                                                                    'merge-gl-transfer');
                                                         return (
                                                             <tr
                                                                 key={

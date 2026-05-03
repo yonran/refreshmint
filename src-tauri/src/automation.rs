@@ -744,6 +744,31 @@ fn apply_proposal(
             }
             Ok(entry_id)
         }
+        AutomationProposalKind::SyncPosted => {
+            let Some((login_name, label, entry_id)) =
+                proposal.subject_refs.iter().find_map(parse_login_entry_ref)
+            else {
+                return Err("sync-posted proposal missing source entry ref".into());
+            };
+            crate::post::sync_gl_transaction(
+                ledger_dir,
+                &login_name,
+                &label,
+                &entry_id,
+                "automation",
+            )
+        }
+        AutomationProposalKind::MergeGlTransfer => {
+            let refs = proposal
+                .subject_refs
+                .iter()
+                .filter_map(parse_gl_txn_ref)
+                .collect::<Vec<_>>();
+            if refs.len() != 2 {
+                return Err("merge-gl-transfer proposal must contain exactly two GL refs".into());
+            }
+            crate::post::merge_gl_transfer(ledger_dir, &refs[0], &refs[1], "automation")
+        }
         _ => Err(format!(
             "proposal kind is not directly applyable: {:?}",
             proposal.kind
@@ -759,6 +784,8 @@ fn proposal_is_applyable(proposal: &AutomationProposal) -> bool {
             | AutomationProposalKind::PostSplit
             | AutomationProposalKind::LinkTransfer
             | AutomationProposalKind::RetirePending
+            | AutomationProposalKind::SyncPosted
+            | AutomationProposalKind::MergeGlTransfer
     )
 }
 
@@ -1037,6 +1064,20 @@ fn validate_resolution_input(input: &NewResolutionInput) -> io::Result<()> {
         ));
     }
     match input.kind {
+        ResolutionKind::Category
+        | ResolutionKind::PostingSplit
+        | ResolutionKind::IgnoreSource
+        | ResolutionKind::PendingRetired => {
+            if input.subject_refs.len() != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "this resolution kind requires exactly one subject ref",
+                ));
+            }
+        }
+        _ => {}
+    }
+    match input.kind {
         ResolutionKind::Category | ResolutionKind::PostingSplit => {
             if input
                 .parts
@@ -1046,6 +1087,14 @@ fn validate_resolution_input(input: &NewResolutionInput) -> io::Result<()> {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "category/posting split resolutions require at least one account part",
+                ));
+            }
+        }
+        ResolutionKind::IgnoreSource | ResolutionKind::PendingRetired => {
+            if !input.parts.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "this resolution kind must not include parts",
                 ));
             }
         }
@@ -1068,7 +1117,6 @@ fn validate_resolution_input(input: &NewResolutionInput) -> io::Result<()> {
                 ));
             }
         }
-        _ => {}
     }
     Ok(())
 }
@@ -1122,6 +1170,13 @@ fn parse_login_account_locator(locator: &str) -> Option<(String, String)> {
     let rest = locator.strip_prefix("logins/")?;
     let (login_name, rest) = rest.split_once("/accounts/")?;
     Some((login_name.to_string(), rest.to_string()))
+}
+
+fn parse_gl_txn_ref(value: &TypedRef) -> Option<String> {
+    if value.kind != TypedRefKind::GlTxn {
+        return None;
+    }
+    value.id.clone()
 }
 
 fn ref_key(value: &TypedRef) -> String {
@@ -1457,6 +1512,95 @@ mod tests {
         )?;
 
         assert!(proposals.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn generated_update_proposals_are_applyable() {
+        let sync_refs = vec![login_entry_ref("bank", "checking", "entry-1")];
+        let merge_refs = vec![gl_txn_ref("txn-1"), gl_txn_ref("txn-2")];
+        let sync = AutomationProposal {
+            id: proposal_id("sync-posted", &sync_refs, None),
+            kind: AutomationProposalKind::SyncPosted,
+            subject_refs: sync_refs,
+            proposed_result: ProposalResult {
+                suggested_account: None,
+                transfer_match: None,
+                parts: Vec::new(),
+                import_anomaly_id: None,
+                resolution_id: None,
+                notes: None,
+            },
+            reasons: Vec::new(),
+            blockers: Vec::new(),
+            policy_decision: ProposalPolicyDecision::Review,
+            reversible: ProposalReversibility::Conditional,
+        };
+        let merge = AutomationProposal {
+            id: proposal_id("merge-gl-transfer", &merge_refs, None),
+            kind: AutomationProposalKind::MergeGlTransfer,
+            subject_refs: merge_refs,
+            proposed_result: ProposalResult {
+                suggested_account: None,
+                transfer_match: None,
+                parts: Vec::new(),
+                import_anomaly_id: None,
+                resolution_id: None,
+                notes: None,
+            },
+            reasons: Vec::new(),
+            blockers: Vec::new(),
+            policy_decision: ProposalPolicyDecision::Review,
+            reversible: ProposalReversibility::Conditional,
+        };
+
+        assert!(proposal_is_applyable(&sync));
+        assert!(proposal_is_applyable(&merge));
+    }
+
+    #[test]
+    fn single_subject_resolutions_reject_extra_subjects_and_parts(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("single-subject-validation")?;
+        let result = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::IgnoreSource,
+                subject_refs: vec![
+                    login_entry_ref("bank", "checking", "entry-1"),
+                    login_entry_ref("bank", "checking", "entry-2"),
+                ],
+                parts: Vec::new(),
+                notes: None,
+            },
+        );
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => return Err("ignore-source with multiple subjects should fail".into()),
+        };
+        assert!(err.to_string().contains("exactly one subject ref"));
+
+        let result = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::PendingRetired,
+                subject_refs: vec![login_entry_ref("bank", "checking", "entry-1")],
+                parts: vec![ResolutionPart {
+                    amount: None,
+                    account: Some("Expenses:Dining".to_string()),
+                    ref_: None,
+                    notes: None,
+                }],
+                notes: None,
+            },
+        );
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => return Err("pending-retired with parts should fail".into()),
+        };
+        assert!(err.to_string().contains("must not include parts"));
 
         let _ = fs::remove_dir_all(root);
         Ok(())
