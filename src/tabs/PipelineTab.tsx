@@ -2200,6 +2200,7 @@ export function PipelineTab({
                                                     <th>Kind</th>
                                                     <th>Policy</th>
                                                     <th>Result</th>
+                                                    <th>Undo</th>
                                                     <th>Reasons</th>
                                                     <th>Actions</th>
                                                 </tr>
@@ -2270,6 +2271,11 @@ export function PipelineTab({
                                                                 </td>
                                                                 <td>
                                                                     {result}
+                                                                </td>
+                                                                <td>
+                                                                    {
+                                                                        proposal.reversible
+                                                                    }
                                                                 </td>
                                                                 <td>
                                                                     {proposal
