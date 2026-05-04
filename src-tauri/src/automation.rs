@@ -1145,10 +1145,10 @@ fn validate_resolution_input(input: &NewResolutionInput) -> io::Result<()> {
         | ResolutionKind::SameSource
         | ResolutionKind::NotSameSource
         | ResolutionKind::ReversalLink => {
-            if input.subject_refs.len() < 2 {
+            if input.subject_refs.len() != 2 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "this resolution kind requires at least two subject refs",
+                    "this resolution kind requires exactly two subject refs",
                 ));
             }
             if !input.parts.is_empty() {
@@ -1713,6 +1713,33 @@ mod tests {
             Ok(_) => return Err("reversal-link with parts should fail".into()),
         };
         assert!(err.to_string().contains("must not include parts"));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn pairwise_relationship_resolutions_require_two_subjects(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("pairwise-relationship-validation")?;
+        let result = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::TransferLink,
+                subject_refs: vec![
+                    login_entry_ref("bank", "checking", "entry-1"),
+                    login_entry_ref("bank", "checking", "entry-2"),
+                    login_entry_ref("bank", "checking", "entry-3"),
+                ],
+                parts: Vec::new(),
+                notes: None,
+            },
+        );
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => return Err("transfer-link with three subjects should fail".into()),
+        };
+        assert!(err.to_string().contains("exactly two subject refs"));
 
         let _ = fs::remove_dir_all(root);
         Ok(())
