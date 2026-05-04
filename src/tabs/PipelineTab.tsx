@@ -105,6 +105,10 @@ function refLabel(ref: TypedRef): string {
     return ref.locator ?? ref.filename ?? ref.id ?? ref.kind;
 }
 
+function resolutionSubjectLabel(resolution: Resolution): string {
+    return resolution.subjectRefs.map(refLabel).join(' <-> ');
+}
+
 function resolutionResultLabel(resolution: Resolution): string {
     if (resolution.parts.length > 0) {
         return resolution.parts
@@ -113,7 +117,7 @@ function resolutionResultLabel(resolution: Resolution): string {
             )
             .join(' + ');
     }
-    return resolution.subjectRefs.map(refLabel).join(' <-> ');
+    return resolutionSubjectLabel(resolution);
 }
 
 function filterLoginAccountResolutions(
@@ -2241,7 +2245,8 @@ export function PipelineTab({
                                                 <tr>
                                                     <th>Kind</th>
                                                     <th>Status</th>
-                                                    <th>Decision</th>
+                                                    <th>Applies to</th>
+                                                    <th>Outcome</th>
                                                     <th>Updated</th>
                                                     <th>Notes</th>
                                                     <th>Actions</th>
@@ -2260,6 +2265,11 @@ export function PipelineTab({
                                                                 {
                                                                     resolution.status
                                                                 }
+                                                            </td>
+                                                            <td>
+                                                                {resolutionSubjectLabel(
+                                                                    resolution,
+                                                                )}
                                                             </td>
                                                             <td>
                                                                 {resolutionResultLabel(
