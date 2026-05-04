@@ -2251,6 +2251,8 @@ export function PipelineTab({
                                                                 .length === 0 &&
                                                             proposal.canApply;
                                                         const canSaveDecision =
+                                                            proposal.blockers
+                                                                .length === 0 &&
                                                             resolutionInputFromProposal(
                                                                 proposal,
                                                             ) != null;
