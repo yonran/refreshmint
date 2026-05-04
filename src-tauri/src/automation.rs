@@ -1108,7 +1108,7 @@ fn validate_resolution_input(input: &NewResolutionInput) -> io::Result<()> {
         _ => {}
     }
     match input.kind {
-        ResolutionKind::Category | ResolutionKind::PostingSplit => {
+        ResolutionKind::Category => {
             if input
                 .parts
                 .iter()
@@ -1116,7 +1116,20 @@ fn validate_resolution_input(input: &NewResolutionInput) -> io::Result<()> {
             {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "category/posting split resolutions require at least one account part",
+                    "category resolutions require at least one account part",
+                ));
+            }
+        }
+        ResolutionKind::PostingSplit => {
+            let account_part_count = input
+                .parts
+                .iter()
+                .filter(|part| !part.account.as_deref().unwrap_or("").is_empty())
+                .count();
+            if account_part_count < 2 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "posting split resolutions require at least two account parts",
                 ));
             }
         }
@@ -1468,6 +1481,34 @@ mod tests {
                 && proposal.policy_decision == ProposalPolicyDecision::Auto
                 && proposal.proposed_result.parts.len() == 2
         }));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn posting_split_resolution_requires_two_account_parts(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("split-validation")?;
+        let result = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::PostingSplit,
+                subject_refs: vec![login_entry_ref("bank", "checking", "entry-1")],
+                parts: vec![ResolutionPart {
+                    amount: Some("5.00 USD".to_string()),
+                    account: Some("Expenses:Coffee".to_string()),
+                    ref_: None,
+                    notes: None,
+                }],
+                notes: None,
+            },
+        );
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => return Err("posting-split with one account part should fail".into()),
+        };
+        assert!(err.to_string().contains("at least two account parts"));
 
         let _ = fs::remove_dir_all(root);
         Ok(())
