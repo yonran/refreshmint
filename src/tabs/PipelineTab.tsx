@@ -2199,6 +2199,7 @@ export function PipelineTab({
                                                 <tr>
                                                     <th>Kind</th>
                                                     <th>Policy</th>
+                                                    <th>Applies to</th>
                                                     <th>Result</th>
                                                     <th>Undo</th>
                                                     <th>Reasons</th>
@@ -2268,6 +2269,15 @@ export function PipelineTab({
                                                                     {
                                                                         proposal.policyDecision
                                                                     }
+                                                                </td>
+                                                                <td>
+                                                                    {proposal.subjectRefs
+                                                                        .map(
+                                                                            refLabel,
+                                                                        )
+                                                                        .join(
+                                                                            ' <-> ',
+                                                                        )}
                                                                 </td>
                                                                 <td>
                                                                     {result}
