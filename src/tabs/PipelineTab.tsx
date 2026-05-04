@@ -23,6 +23,7 @@ import {
     type AutomationProposal,
     listImportAnomalies,
     listResolutions,
+    type NewResolutionInput,
     type Resolution,
     type LoginConfig,
     type LockStatusSnapshot,
@@ -118,6 +119,60 @@ function resolutionResultLabel(resolution: Resolution): string {
             .join(' + ');
     }
     return resolutionSubjectLabel(resolution);
+}
+
+function resolutionInputFromProposal(
+    proposal: AutomationProposal,
+): NewResolutionInput | null {
+    switch (proposal.kind) {
+        case 'merge-source':
+            return {
+                kind: 'same-source',
+                subjectRefs: proposal.subjectRefs,
+                parts: [],
+                notes: 'Saved from automation proposal',
+            };
+        case 'prevent-merge':
+            return {
+                kind: 'not-same-source',
+                subjectRefs: proposal.subjectRefs,
+                parts: [],
+                notes: 'Saved from automation proposal',
+            };
+        case 'retire-pending':
+            return {
+                kind: 'pending-retired',
+                subjectRefs: proposal.subjectRefs,
+                parts: [],
+                notes: 'Saved from automation proposal',
+            };
+        case 'post-category': {
+            const account = proposal.proposedResult.suggestedAccount?.trim();
+            if (account == null || account.length === 0) return null;
+            return {
+                kind: 'category',
+                subjectRefs: proposal.subjectRefs,
+                parts: [{ account, amount: null, ref: null, notes: null }],
+                notes: 'Saved from automation proposal',
+            };
+        }
+        case 'post-split':
+            return {
+                kind: 'posting-split',
+                subjectRefs: proposal.subjectRefs,
+                parts: proposal.proposedResult.parts,
+                notes: 'Saved from automation proposal',
+            };
+        case 'link-transfer':
+            return {
+                kind: 'transfer-link',
+                subjectRefs: proposal.subjectRefs,
+                parts: [],
+                notes: 'Saved from automation proposal',
+            };
+        default:
+            return null;
+    }
 }
 
 function filterLoginAccountResolutions(
@@ -1463,6 +1518,28 @@ export function PipelineTab({
         }
     }
 
+    async function handleSaveAutomationProposalDecision(
+        proposal: AutomationProposal,
+    ) {
+        const resolution = resolutionInputFromProposal(proposal);
+        if (resolution == null) {
+            setPipelineStatus(
+                `Cannot save ${proposal.kind} as a reusable decision.`,
+            );
+            return;
+        }
+        setBusyProposalId(proposal.id);
+        try {
+            await createResolution(ledgerPath, resolution);
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(`Saved ${resolution.kind} decision.`);
+        } catch (error) {
+            setPipelineStatus(`Save decision failed: ${String(error)}`);
+        } finally {
+            setBusyProposalId(null);
+        }
+    }
+
     async function handleDisableResolution(resolution: Resolution) {
         setBusyResolutionId(resolution.id);
         try {
@@ -2171,6 +2248,10 @@ export function PipelineTab({
                                                             proposal.blockers
                                                                 .length === 0 &&
                                                             proposal.canApply;
+                                                        const canSaveDecision =
+                                                            resolutionInputFromProposal(
+                                                                proposal,
+                                                            ) != null;
                                                         return (
                                                             <tr
                                                                 key={
@@ -2224,6 +2305,23 @@ export function PipelineTab({
                                                                             }}
                                                                         >
                                                                             Apply
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            disabled={
+                                                                                !canSaveDecision ||
+                                                                                busyProposalId ===
+                                                                                    proposal.id
+                                                                            }
+                                                                            onClick={() => {
+                                                                                void handleSaveAutomationProposalDecision(
+                                                                                    proposal,
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            Save
+                                                                            decision
                                                                         </button>
                                                                     </div>
                                                                 </td>
