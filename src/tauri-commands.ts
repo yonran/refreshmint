@@ -163,7 +163,6 @@ export type AutomationProposalKind =
     | 'post-category'
     | 'post-split'
     | 'link-transfer'
-    | 'split-transfer'
     | 'merge-gl-transfer'
     | 'sync-posted'
     | 'review-anomaly';

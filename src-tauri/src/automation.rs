@@ -93,7 +93,6 @@ pub enum AutomationProposalKind {
     PostCategory,
     PostSplit,
     LinkTransfer,
-    SplitTransfer,
     MergeGlTransfer,
     SyncPosted,
     ReviewAnomaly,
