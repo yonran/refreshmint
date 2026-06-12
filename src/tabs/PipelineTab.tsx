@@ -23,7 +23,6 @@ import {
     type AutomationProposal,
     listImportAnomalies,
     listResolutions,
-    type NewResolutionInput,
     type Resolution,
     type LoginConfig,
     type LockStatusSnapshot,
@@ -48,6 +47,7 @@ import {
     type UnpostedTransferResult,
     type TypedRef,
 } from '../tauri-commands.ts';
+import { resolutionInputFromProposal } from '../automation-utils.ts';
 import {
     type LoginAccountRef,
     type PipelineSubTab,
@@ -119,60 +119,6 @@ function resolutionResultLabel(resolution: Resolution): string {
             .join(' + ');
     }
     return resolutionSubjectLabel(resolution);
-}
-
-function resolutionInputFromProposal(
-    proposal: AutomationProposal,
-): NewResolutionInput | null {
-    switch (proposal.kind) {
-        case 'merge-source':
-            return {
-                kind: 'same-source',
-                subjectRefs: proposal.subjectRefs,
-                parts: [],
-                notes: 'Saved from automation proposal',
-            };
-        case 'prevent-merge':
-            return {
-                kind: 'not-same-source',
-                subjectRefs: proposal.subjectRefs,
-                parts: [],
-                notes: 'Saved from automation proposal',
-            };
-        case 'retire-pending':
-            return {
-                kind: 'pending-retired',
-                subjectRefs: proposal.subjectRefs,
-                parts: [],
-                notes: 'Saved from automation proposal',
-            };
-        case 'post-category': {
-            const account = proposal.proposedResult.suggestedAccount?.trim();
-            if (account == null || account.length === 0) return null;
-            return {
-                kind: 'category',
-                subjectRefs: proposal.subjectRefs,
-                parts: [{ account, amount: null, ref: null, notes: null }],
-                notes: 'Saved from automation proposal',
-            };
-        }
-        case 'post-split':
-            return {
-                kind: 'posting-split',
-                subjectRefs: proposal.subjectRefs,
-                parts: proposal.proposedResult.parts,
-                notes: 'Saved from automation proposal',
-            };
-        case 'link-transfer':
-            return {
-                kind: 'transfer-link',
-                subjectRefs: proposal.subjectRefs,
-                parts: [],
-                notes: 'Saved from automation proposal',
-            };
-        default:
-            return null;
-    }
 }
 
 function filterLoginAccountResolutions(
