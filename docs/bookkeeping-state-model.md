@@ -308,8 +308,9 @@ can be regenerated from current ledger state and active resolutions.
   accounts and amounts in `parts`.
 - `transfer-link`: the subject source entries should be treated as one
   transfer.
-- `transfer-split`: the subject transfer should be represented by the parts
-  in `parts`.
+- `transfer-split`: planned vocabulary for representing a transfer by the
+  parts in `parts`; proposal generation and application are not implemented
+  yet.
 - `same-source`: the subject refs represent the same external source event.
 - `not-same-source`: the subject refs must not be deduplicated or merged
   together.
