@@ -1033,6 +1033,75 @@ export async function mergeGlTransfer(
     return invoke('merge_gl_transfer', { ledger, txnId1, txnId2 });
 }
 
+/**
+ * An account entry that claims to be posted to a GL transaction that no longer
+ * exists. Mirrors `consistency::DanglingRef` in the backend.
+ */
+export interface DanglingRef {
+    loginName: string;
+    label: string;
+    entryId: string;
+    postingIndex: number | null;
+    glTxnId: string;
+}
+
+/**
+ * A refreshmint-generated GL transaction whose source entry does not reference
+ * it back. Mirrors `consistency::OrphanedGlTxn` in the backend.
+ */
+export interface OrphanedGlTxn {
+    glTxnId: string;
+    sourceLocator: string;
+    sourceEntryId: string;
+}
+
+/** Mirrors `consistency::ConsistencyReport`. */
+export interface ConsistencyReport {
+    danglingRefs: DanglingRef[];
+    orphanedGlTxns: OrphanedGlTxn[];
+}
+
+export function isConsistencyReportClean(report: ConsistencyReport): boolean {
+    return (
+        report.danglingRefs.length === 0 && report.orphanedGlTxns.length === 0
+    );
+}
+
+/**
+ * Scan the ledger for referential inconsistencies (dangling posted-refs and
+ * orphaned GL transactions) left by an interrupted operation. Read-only.
+ */
+export async function checkLedgerConsistency(
+    ledger: string,
+): Promise<ConsistencyReport> {
+    return invoke('check_ledger_consistency', { ledger });
+}
+
+/** Clear a dangling posted-ref so the entry can be re-posted. */
+export async function repairDanglingRef(
+    ledger: string,
+    loginName: string,
+    label: string,
+    entryId: string,
+    postingIndex: number | null,
+): Promise<void> {
+    await invoke('repair_dangling_ref', {
+        ledger,
+        loginName,
+        label,
+        entryId,
+        postingIndex,
+    });
+}
+
+/** Remove an orphaned GL transaction so its source entry can be re-posted. */
+export async function repairOrphanedGlTxn(
+    ledger: string,
+    glTxnId: string,
+): Promise<void> {
+    await invoke('repair_orphaned_gl_txn', { ledger, glTxnId });
+}
+
 export interface AccountConfig {
     extension?: string;
 }

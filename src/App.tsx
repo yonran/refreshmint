@@ -37,6 +37,11 @@ import {
     type AmountTotal,
     type LedgerView,
     setLoginAccount,
+    checkLedgerConsistency,
+    isConsistencyReportClean,
+    repairDanglingRef,
+    repairOrphanedGlTxn,
+    type ConsistencyReport,
 } from './tauri-commands.ts';
 import { PipelineTab } from './tabs/PipelineTab.tsx';
 import { ReportsTab } from './tabs/ReportsTab.tsx';
@@ -82,6 +87,9 @@ function App() {
     );
     const [autoEtlStatus, setAutoEtlStatus] = useState<string | null>(null);
     const [autoEtlErrors, setAutoEtlErrors] = useState<string | null>(null);
+    const [consistencyReport, setConsistencyReport] =
+        useState<ConsistencyReport | null>(null);
+    const [consistencyRepairing, setConsistencyRepairing] = useState(false);
     const [promptRequest, setPromptRequest] = useState<{
         loginName: string;
         message: string;
@@ -220,6 +228,28 @@ function App() {
     const requestLoginConfigReload = useCallback(() => {
         setLoginConfigsReloadToken((current) => current + 1);
     }, []);
+
+    // Scan the ledger for referential inconsistencies left by an interrupted
+    // operation (a hard kill mid-post). Read-only; surfaces a banner with
+    // explicit per-item repair actions. See src-tauri/src/consistency.rs.
+    const runConsistencyCheck = useCallback(async (path: string) => {
+        try {
+            const report = await checkLedgerConsistency(path);
+            setConsistencyReport(
+                isConsistencyReportClean(report) ? null : report,
+            );
+        } catch (error) {
+            // A failed check must not block the app; just log it.
+            console.error('ledger consistency check failed', error);
+        }
+    }, []);
+    useEffect(() => {
+        if (ledgerPath === null) {
+            setConsistencyReport(null);
+            return;
+        }
+        void runConsistencyCheck(ledgerPath);
+    }, [ledgerPath, runConsistencyCheck]);
     useEffect(() => {
         return () => {
             if (secretPromptResolverRef.current !== null) {
@@ -1218,6 +1248,130 @@ function App() {
                             >
                                 Dismiss
                             </button>
+                        </div>
+                    )}
+                    {consistencyReport !== null && (
+                        <div className="auto-scrape-banner auto-scrape-banner--error">
+                            <div>
+                                <strong>
+                                    Ledger consistency problems detected
+                                </strong>
+                                <div className="muted">
+                                    Likely from an interrupted operation. Each
+                                    can be repaired so the entry can be
+                                    re-posted.
+                                </div>
+                                <ul>
+                                    {consistencyReport.danglingRefs.map(
+                                        (ref) => (
+                                            <li
+                                                key={`dangling-${ref.loginName}/${ref.label}/${ref.entryId}/${String(ref.postingIndex)}`}
+                                            >
+                                                <span>
+                                                    {ref.loginName}/{ref.label}{' '}
+                                                    entry {ref.entryId} claims
+                                                    to be posted to missing GL
+                                                    txn {ref.glTxnId}
+                                                </span>{' '}
+                                                <button
+                                                    type="button"
+                                                    className="ghost-button"
+                                                    disabled={
+                                                        consistencyRepairing
+                                                    }
+                                                    onClick={() => {
+                                                        if (ledgerPath === null)
+                                                            return;
+                                                        setConsistencyRepairing(
+                                                            true,
+                                                        );
+                                                        void repairDanglingRef(
+                                                            ledgerPath,
+                                                            ref.loginName,
+                                                            ref.label,
+                                                            ref.entryId,
+                                                            ref.postingIndex,
+                                                        )
+                                                            .then(() =>
+                                                                runConsistencyCheck(
+                                                                    ledgerPath,
+                                                                ),
+                                                            )
+                                                            .catch(
+                                                                (
+                                                                    error: unknown,
+                                                                ) => {
+                                                                    setAutoEtlErrors(
+                                                                        `Repair failed: ${String(error)}`,
+                                                                    );
+                                                                },
+                                                            )
+                                                            .finally(() => {
+                                                                setConsistencyRepairing(
+                                                                    false,
+                                                                );
+                                                            });
+                                                    }}
+                                                >
+                                                    Clear ref
+                                                </button>
+                                            </li>
+                                        ),
+                                    )}
+                                    {consistencyReport.orphanedGlTxns.map(
+                                        (txn) => (
+                                            <li key={`orphan-${txn.glTxnId}`}>
+                                                <span>
+                                                    GL txn {txn.glTxnId} (from{' '}
+                                                    {txn.sourceLocator}/
+                                                    {txn.sourceEntryId}) is not
+                                                    referenced by its source
+                                                    entry
+                                                </span>{' '}
+                                                <button
+                                                    type="button"
+                                                    className="ghost-button"
+                                                    disabled={
+                                                        consistencyRepairing
+                                                    }
+                                                    onClick={() => {
+                                                        if (ledgerPath === null)
+                                                            return;
+                                                        setConsistencyRepairing(
+                                                            true,
+                                                        );
+                                                        void repairOrphanedGlTxn(
+                                                            ledgerPath,
+                                                            txn.glTxnId,
+                                                        )
+                                                            .then(() =>
+                                                                runConsistencyCheck(
+                                                                    ledgerPath,
+                                                                ),
+                                                            )
+                                                            .catch(
+                                                                (
+                                                                    error: unknown,
+                                                                ) => {
+                                                                    setAutoEtlErrors(
+                                                                        `Repair failed: ${String(error)}`,
+                                                                    );
+                                                                },
+                                                            )
+                                                            .finally(() => {
+                                                                setConsistencyRepairing(
+                                                                    false,
+                                                                );
+                                                            });
+                                                    }}
+                                                >
+                                                    Remove GL txn
+                                                </button>
+                                            </li>
+                                        ),
+                                    )}
+                                </ul>
+                            </div>
                         </div>
                     )}
 
