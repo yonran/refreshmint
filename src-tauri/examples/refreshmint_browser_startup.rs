@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for iter in 0..iterations {
         let profile_dir = temp_profile_dir(iter)?;
         eprintln!("[iter {iter}] Profile dir: {}", profile_dir.display());
-        let (mut browser_instance, handler_handle) =
+        let (mut browser_instance, handler_handle, _browser_pid_guard) =
             browser::launch_browser(&chrome_path, &profile_dir, false).await?;
         eprintln!("[iter {iter}] Browser launched");
 

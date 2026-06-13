@@ -1,9 +1,80 @@
+use std::collections::HashSet;
 use std::error::Error;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use chromiumoxide::browser::{Browser, BrowserConfig, HeadlessMode};
 use chromiumoxide::error::CdpError;
 use futures::StreamExt;
+
+/// PIDs of browser processes this app has launched and not yet cleanly closed.
+///
+/// chromiumoxide kills the child via tokio's `kill_on_drop`, but that only fires
+/// when the `Browser`/`Child` are *dropped*. On `std::process::exit` (which is
+/// how the Tauri/tao event loop terminates) the stack is not unwound, so those
+/// destructors never run and the browser is reparented to init as an orphan,
+/// keeping the profile's `SingletonLock` and breaking the next scrape. The app
+/// shutdown hook calls [`kill_active_browsers`] to SIGKILL whatever is left here.
+static ACTIVE_BROWSER_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+
+fn active_browser_pids() -> &'static Mutex<HashSet<u32>> {
+    ACTIVE_BROWSER_PIDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn register_browser_pid(pid: u32) {
+    if let Ok(mut set) = active_browser_pids().lock() {
+        set.insert(pid);
+    }
+}
+
+fn unregister_browser_pid(pid: u32) {
+    if let Ok(mut set) = active_browser_pids().lock() {
+        set.remove(&pid);
+    }
+}
+
+/// RAII guard that removes a launched browser's PID from the kill-on-exit
+/// registry when dropped.
+///
+/// Drop runs on every in-process return path — normal completion, a `?`
+/// early-return, or a panic — so a browser that is closed (or killed by
+/// `kill_on_drop`) in-process never leaves a stale PID behind that could later
+/// match a reused PID. Drop does *not* run on `std::process::exit`, which is
+/// exactly the case where we want the PID to remain registered so the shutdown
+/// hook can kill the otherwise-orphaned browser.
+#[must_use = "the guard must be held for the browser session lifetime"]
+pub struct BrowserPidGuard {
+    pid: Option<u32>,
+}
+
+impl Drop for BrowserPidGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            unregister_browser_pid(pid);
+        }
+    }
+}
+
+/// Forcibly SIGKILL every browser process still registered as active and clear
+/// the registry. Returns the number of PIDs signalled.
+///
+/// Intended for the app shutdown hook. A PID that has already exited simply
+/// yields `ESRCH`, which is ignored.
+#[allow(unsafe_code)]
+pub fn kill_active_browsers() -> usize {
+    let pids: Vec<u32> = match active_browser_pids().lock() {
+        Ok(mut set) => set.drain().collect(),
+        Err(_) => return 0,
+    };
+    for &pid in &pids {
+        // Safety: `kill(2)` only sends a signal to a PID; it has no memory
+        // effects. A dead/invalid PID returns ESRCH, which we ignore.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+    pids.len()
+}
 
 /// Find the Chrome or Edge binary on the system.
 pub fn find_chrome_binary() -> Result<PathBuf, Box<dyn Error>> {
@@ -126,7 +197,7 @@ pub async fn launch_browser(
     chrome_path: &Path,
     profile_dir: &Path,
     headless: bool,
-) -> Result<(Browser, tokio::task::JoinHandle<()>), Box<dyn Error>> {
+) -> Result<(Browser, tokio::task::JoinHandle<()>, BrowserPidGuard), Box<dyn Error>> {
     std::fs::create_dir_all(profile_dir)?;
 
     let mut builder = BrowserConfig::builder()
@@ -161,7 +232,24 @@ pub async fn launch_browser(
         .build()
         .map_err(|e| format!("failed to build browser config: {e}"))?;
 
-    let (browser, mut handler) = Browser::launch(config).await?;
+    let (mut browser, mut handler) = Browser::launch(config).await?;
+
+    // Track the child PID so the shutdown hook can kill it if we exit before a
+    // clean close (see `ACTIVE_BROWSER_PIDS`).
+    let pid = browser
+        .get_mut_child()
+        .and_then(|child| child.as_mut_inner().id());
+    let pid_guard = match pid {
+        Some(pid) => {
+            register_browser_pid(pid);
+            eprintln!("[browser] Registered browser pid {pid} for shutdown cleanup");
+            BrowserPidGuard { pid: Some(pid) }
+        }
+        None => {
+            eprintln!("[browser] Could not determine browser pid; shutdown cleanup unavailable");
+            BrowserPidGuard { pid: None }
+        }
+    };
 
     let handle = tokio::spawn(async move {
         eprintln!("[browser] Handler loop starting...");
@@ -189,7 +277,7 @@ pub async fn launch_browser(
         eprintln!("[browser] Handler loop ended.");
     });
 
-    Ok((browser, handle))
+    Ok((browser, handle, pid_guard))
 }
 
 /// Get a usable initial page handle for a newly launched browser.
@@ -236,6 +324,7 @@ pub async fn open_start_page(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -265,5 +354,37 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn pid_guard_unregisters_and_kill_terminates_registered_process() {
+        // A guard removes its PID from the registry when dropped, so an
+        // in-process close never leaves a stale PID behind.
+        let sentinel = 4_000_000_001u32;
+        register_browser_pid(sentinel);
+        assert!(active_browser_pids().lock().unwrap().contains(&sentinel));
+        drop(BrowserPidGuard {
+            pid: Some(sentinel),
+        });
+        assert!(!active_browser_pids().lock().unwrap().contains(&sentinel));
+
+        // kill_active_browsers SIGKILLs a real registered child and drains it.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        register_browser_pid(pid);
+        let killed = kill_active_browsers();
+        assert!(
+            killed >= 1,
+            "expected at least the sleep child to be killed"
+        );
+        let status = child.wait().expect("wait for killed child");
+        assert!(
+            !status.success(),
+            "killed process should not report success: {status:?}"
+        );
+        assert!(!active_browser_pids().lock().unwrap().contains(&pid));
     }
 }

@@ -345,6 +345,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
         tokio::task::JoinHandle<()>,
         Arc<Mutex<super::js_api::PageInner>>,
         Arc<Mutex<super::js_api::RefreshmintInner>>,
+        super::browser::BrowserPidGuard,
     );
 
     let _login_lock = crate::login_config::acquire_login_lock_with_metadata(
@@ -379,7 +380,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
     };
 
     let rt = tokio::runtime::Runtime::new()?;
-    let (browser_instance, handler_handle, page_inner, refreshmint_inner): DebugRuntimeState =
+    let (browser_instance, handler_handle, page_inner, refreshmint_inner, _browser_pid_guard): DebugRuntimeState =
         rt.block_on(async {
             let secret_store =
                 crate::secret::SecretStore::new(format!("login/{}", config.login_name));
@@ -419,7 +420,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
             eprintln!("Using browser: {}", chrome_path.display());
             eprintln!("Profile dir: {}", profile_dir.display());
 
-            let (browser_instance, handler) =
+            let (browser_instance, handler, browser_pid_guard) =
                 super::browser::launch_browser(&chrome_path, &profile_dir, config.headless)
                     .await
                     .map_err(|err| err.to_string())?;
@@ -455,7 +456,13 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                 ledger_dir: config.ledger_dir.clone(),
                 prompt_ui_handler: None,
             }));
-            Ok::<_, Box<dyn Error>>((browser, handler, page_inner, refreshmint_inner))
+            Ok::<_, Box<dyn Error>>((
+                browser,
+                handler,
+                page_inner,
+                refreshmint_inner,
+                browser_pid_guard,
+            ))
         })?;
 
     rt.block_on(async move {

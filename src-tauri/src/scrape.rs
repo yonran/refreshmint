@@ -569,7 +569,11 @@ pub async fn run_scrape_async(
     eprintln!("Profile dir: {}", profile_dir.display());
 
     eprintln!("Launching browser...");
-    let (browser_instance, handler_handle) =
+    // `_browser_pid_guard` keeps the browser's PID in the kill-on-exit registry
+    // for the whole session, so the app shutdown hook can SIGKILL the browser if
+    // the app exits mid-scrape. It is dropped (unregistering the PID) only when
+    // this function returns, after the clean close below.
+    let (browser_instance, handler_handle, _browser_pid_guard) =
         browser::launch_browser(&chrome_path, &profile_dir, config.headless)
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
@@ -1068,7 +1072,7 @@ mod tests {
 
             let chrome_path = browser::find_chrome_binary()
                 .unwrap_or_else(|err| panic!("failed to find browser binary: {err}"));
-            let (browser_instance, handler_handle) =
+            let (browser_instance, handler_handle, _browser_pid_guard) =
                 browser::launch_browser(&chrome_path, &profile_dir, false)
                     .await
                     .unwrap_or_else(|err| panic!("failed to launch browser: {err}"));
