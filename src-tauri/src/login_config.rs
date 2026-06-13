@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Per-login-account configuration: maps a label to a GL account.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -335,6 +336,81 @@ impl Drop for LoginLock {
     }
 }
 
+/// Counts in-flight GL write+commit critical sections (each one is bracketed by
+/// a held [`LedgerGlLock`]) so the app shutdown hook can wait for them to finish
+/// before the process exits.
+///
+/// These sections rewrite `general.journal` in place and then `git commit`; they
+/// take milliseconds. The shutdown hook drains this gate (with a timeout) so a
+/// quit can't tear a half-written journal. Note this is best-effort: it only
+/// helps on a graceful quit — a SIGKILL/crash bypasses it, which is why the
+/// writes must also be crash-safe on their own.
+pub struct WriteGate {
+    active: Mutex<usize>,
+    cond: Condvar,
+}
+
+impl WriteGate {
+    pub const fn new() -> Self {
+        WriteGate {
+            active: Mutex::new(0),
+            cond: Condvar::new(),
+        }
+    }
+
+    fn enter(&self) {
+        if let Ok(mut active) = self.active.lock() {
+            *active += 1;
+        }
+    }
+
+    fn leave(&self) {
+        if let Ok(mut active) = self.active.lock() {
+            *active = active.saturating_sub(1);
+        }
+        self.cond.notify_all();
+    }
+
+    /// Block until no critical section is in flight, or `timeout` elapses.
+    /// Returns `true` if drained, `false` on timeout (or a poisoned lock).
+    pub fn wait_to_drain(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut active = match self.active.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+        while *active > 0 {
+            let remaining = match deadline.checked_duration_since(Instant::now()) {
+                Some(remaining) if !remaining.is_zero() => remaining,
+                _ => return false,
+            };
+            let (guard, result) = match self.cond.wait_timeout(active, remaining) {
+                Ok(pair) => pair,
+                Err(_) => return false,
+            };
+            active = guard;
+            if result.timed_out() && *active > 0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Default for WriteGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static GL_WRITE_GATE: WriteGate = WriteGate::new();
+
+/// Block until all in-flight GL write+commit critical sections finish, or
+/// `timeout` elapses. Returns `true` if drained. Intended for the shutdown hook.
+pub fn wait_for_gl_writes_to_drain(timeout: Duration) -> bool {
+    GL_WRITE_GATE.wait_to_drain(timeout)
+}
+
 /// A ledger-wide GL lock guard. The lock is released when this is dropped.
 #[derive(Debug)]
 pub struct LedgerGlLock {
@@ -345,6 +421,7 @@ pub struct LedgerGlLock {
 impl Drop for LedgerGlLock {
     fn drop(&mut self) {
         let _ = cleanup_stale_metadata(&self.metadata_path);
+        GL_WRITE_GATE.leave();
     }
 }
 
@@ -456,6 +533,10 @@ pub fn acquire_gl_lock_with_metadata(
         .map_err(|_| "general journal is currently in use by another operation")?;
     cleanup_stale_metadata(&metadata_path)?;
     write_metadata_file(&metadata_path, &LockMetadata::new_gl(owner, purpose))?;
+
+    // Register this critical section so the shutdown hook waits for the
+    // write+commit to finish (paired with `leave()` in `LedgerGlLock::drop`).
+    GL_WRITE_GATE.enter();
 
     Ok(LedgerGlLock {
         _file: file,
@@ -847,6 +928,32 @@ mod tests {
         assert!(lock2.is_err());
         assert!(lock2.unwrap_err().to_string().contains("general journal"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_gate_blocks_while_active_then_drains() {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Use a fresh instance (not the global) so this is deterministic under
+        // parallel tests that may hold real GL locks.
+        let gate = Arc::new(WriteGate::new());
+
+        // Empty -> drains immediately.
+        assert!(gate.wait_to_drain(Duration::from_millis(50)));
+
+        // Active -> times out without draining.
+        gate.enter();
+        assert!(!gate.wait_to_drain(Duration::from_millis(50)));
+
+        // A leave from another thread unblocks the waiter.
+        let other = Arc::clone(&gate);
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            other.leave();
+        });
+        assert!(gate.wait_to_drain(Duration::from_secs(5)));
+        handle.join().unwrap();
     }
 
     #[test]
