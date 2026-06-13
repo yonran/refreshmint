@@ -578,6 +578,17 @@ pub fn unpost_login_account_entry(
     // Pre-load other-side journals before any mutation (fail fast).
     let other_sides = preload_other_sides(ledger_dir, gl_txn_id, &source_locator, entry_id)?;
 
+    // A reconciled, linked, or soft-closed GL transaction must not be silently
+    // removed by an unpost; mirror the guard retire_login_account_entry uses.
+    let blockers = crate::bookkeeping::gl_txn_removal_blockers(ledger_dir, gl_txn_id)?;
+    if !blockers.is_empty() {
+        return Err(format!(
+            "cannot unpost entry {entry_id}; GL transaction {gl_txn_id} is protected: {}",
+            blockers.join(", ")
+        )
+        .into());
+    }
+
     // Remove GL block (point of no return).
     let removed_gl_txn = remove_gl_transaction(ledger_dir, gl_txn_id)?;
 
@@ -2224,6 +2235,60 @@ mod tests {
         assert!(
             after2[0].posted.is_none(),
             "other side should also be unposted"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unpost_blocked_when_gl_txn_reconciled() {
+        let root = temp_dir("unpost-reconciled-guard");
+        fs::write(root.join("general.journal"), "").unwrap();
+
+        let entry = make_entry("txn-1", "2024-01-15", "Shell Oil", "-21.32");
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(&journal_path, &[entry]).unwrap();
+
+        let gl_id = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Gas",
+            None,
+            "test",
+        )
+        .unwrap();
+
+        // A finalized reconciliation session protects the GL transaction.
+        let sessions_dir =
+            crate::bookkeeping::bookkeeping_dir(&root).join("reconciliation-sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join("sess-1.json"),
+            format!(
+                r#"{{"id":"sess-1","glAccount":"Assets:Checking","statementStartDate":null,"statementEndDate":"2024-01-31","statementStartingBalance":null,"statementEndingBalance":"0.00","currency":null,"status":"finalized","reconciledTxnIds":["{gl_id}"],"notes":null,"createdAt":"2024-02-01T00:00:00Z","updatedAt":"2024-02-01T00:00:00Z"}}"#
+            ),
+        )
+        .unwrap();
+
+        let err = unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, "test")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("protected"),
+            "unpost of a reconciled GL txn must be blocked, got: {err}"
+        );
+
+        // The GL block and posted ref must survive the blocked unpost.
+        let gl_content = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            gl_content.contains(&format!("id: {gl_id}")),
+            "GL txn must remain after a blocked unpost"
+        );
+        let entries = account_journal::read_journal_at_path(&journal_path).unwrap();
+        assert!(
+            entries[0].posted.is_some(),
+            "entry must remain posted after a blocked unpost"
         );
 
         let _ = fs::remove_dir_all(&root);
