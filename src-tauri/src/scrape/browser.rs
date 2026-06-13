@@ -76,6 +76,87 @@ pub fn kill_active_browsers() -> usize {
     pids.len()
 }
 
+/// Parse the PID from a Chrome `SingletonLock` symlink target.
+///
+/// The target has the form `<hostname>-<pid>` (e.g. `my-host.local-48732`).
+/// The hostname can itself contain hyphens, so split on the last one.
+fn parse_singleton_lock_pid(target: &str) -> Option<u32> {
+    let (_, pid) = target.rsplit_once('-')?;
+    pid.parse::<u32>().ok()
+}
+
+/// Whether a PID currently exists (alive, or alive-but-not-ours).
+#[allow(unsafe_code)]
+fn process_is_alive(pid: u32) -> bool {
+    // Safety: `kill(pid, 0)` sends no signal; it only probes existence.
+    let res = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if res == 0 {
+        return true;
+    }
+    // ESRCH => no such process (dead); EPERM => exists but not signalable by us.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Whether PID `pid` is a process whose command line references `profile_dir`
+/// (i.e. a Chrome we launched with `--user-data-dir=<profile_dir>`). Used to
+/// confirm a live SingletonLock owner is really our orphaned browser before
+/// killing it.
+fn process_uses_profile(pid: u32, profile_dir: &Path) -> bool {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output();
+    match output {
+        Ok(output) => {
+            String::from_utf8_lossy(&output.stdout).contains(profile_dir.to_string_lossy().as_ref())
+        }
+        Err(_) => false,
+    }
+}
+
+/// Reclaim a browser profile whose `SingletonLock` is held by an orphan.
+///
+/// A hard kill of the app (SIGKILL/crash) runs neither `Drop` nor the shutdown
+/// hook, so a launched browser can survive as an orphan still holding the
+/// profile's `SingletonLock`; Chrome then aborts the next launch with
+/// "Failed to create a ProcessSingleton". This is the failure mode that
+/// motivated the kill-on-exit registry, for the case that registry can't cover.
+///
+/// We only reach `launch_browser` while holding the per-login file lock (see
+/// [crate::scrape::run_scrape_async] / [crate::login_config::acquire_login_lock_with_metadata]),
+/// so a *live* browser on this profile cannot belong to a concurrent scrape — it
+/// is an orphan we may kill. We still confirm via `ps` that the live PID is a
+/// process using this exact profile, to avoid signalling an unrelated reused PID.
+#[allow(unsafe_code)]
+fn reclaim_orphaned_profile_lock(profile_dir: &Path) {
+    let lock_path = profile_dir.join("SingletonLock");
+    let target = match std::fs::read_link(&lock_path) {
+        Ok(target) => target,
+        Err(_) => return, // no lock, or not a symlink — nothing to reclaim
+    };
+    let Some(pid) = parse_singleton_lock_pid(&target.to_string_lossy()) else {
+        return;
+    };
+
+    if process_is_alive(pid) {
+        if !process_uses_profile(pid, profile_dir) {
+            eprintln!(
+                "[browser] SingletonLock held by live pid {pid} that is not using this profile; leaving it"
+            );
+            return;
+        }
+        eprintln!("[browser] Reclaiming profile from orphaned browser pid {pid}");
+        // Safety: see kill_active_browsers; signalling a confirmed orphan.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        // Give the OS a moment to tear the process down and release the lock.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    } else {
+        eprintln!("[browser] Removing stale SingletonLock (owner pid {pid} is gone)");
+    }
+    let _ = std::fs::remove_file(&lock_path);
+}
+
 /// Find the Chrome or Edge binary on the system.
 pub fn find_chrome_binary() -> Result<PathBuf, Box<dyn Error>> {
     // Respect explicit overrides first so CI can force the browser installed by
@@ -199,6 +280,10 @@ pub async fn launch_browser(
     headless: bool,
 ) -> Result<(Browser, tokio::task::JoinHandle<()>, BrowserPidGuard), Box<dyn Error>> {
     std::fs::create_dir_all(profile_dir)?;
+
+    // Recover from a browser orphaned by a previous hard kill before launching,
+    // otherwise Chrome aborts with "Failed to create a ProcessSingleton".
+    reclaim_orphaned_profile_lock(profile_dir);
 
     let mut builder = BrowserConfig::builder()
         .chrome_executable(chrome_path)
@@ -354,6 +439,19 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn parse_singleton_lock_pid_handles_hyphenated_hostnames() {
+        // hostname can contain hyphens and dots; the PID is after the last '-'.
+        assert_eq!(
+            parse_singleton_lock_pid("Yonathans-MacBook-Pro-2.local-48732"),
+            Some(48732)
+        );
+        assert_eq!(parse_singleton_lock_pid("host-1"), Some(1));
+        assert_eq!(parse_singleton_lock_pid("nohyphen"), None);
+        assert_eq!(parse_singleton_lock_pid("host-notanumber"), None);
+        assert_eq!(parse_singleton_lock_pid("trailingdash-"), None);
     }
 
     #[test]
