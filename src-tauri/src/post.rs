@@ -158,6 +158,11 @@ pub fn post_login_account_entry(
         return Err(format!("entry {entry_id} has no postings to post").into());
     }
 
+    // A whole-entry post and per-leg posts are mutually exclusive; allowing
+    // both would materialize the same source amount twice.
+    if entry.posted.is_some() {
+        return Err(format!("entry {entry_id} is already posted").into());
+    }
     if let Some(posting_idx) = posting_index {
         if entry
             .posted_postings
@@ -168,8 +173,11 @@ pub fn post_login_account_entry(
                 format!("posting {posting_idx} of entry {entry_id} is already posted").into(),
             );
         }
-    } else if entry.posted.is_some() {
-        return Err(format!("entry {entry_id} is already posted").into());
+    } else if !entry.posted_postings.is_empty() {
+        return Err(format!(
+            "entry {entry_id} has posted split postings; unpost them before posting the whole entry"
+        )
+        .into());
     }
 
     let gl_txn_id = uuid::Uuid::new_v4().to_string();
@@ -261,6 +269,12 @@ pub fn post_login_account_entry_split(
     }
     if entry.posted.is_some() {
         return Err(format!("entry {entry_id} is already posted").into());
+    }
+    if !entry.posted_postings.is_empty() {
+        return Err(format!(
+            "entry {entry_id} has posted split postings; unpost them before posting a split"
+        )
+        .into());
     }
 
     let gl_txn_id = uuid::Uuid::new_v4().to_string();
@@ -1296,6 +1310,19 @@ fn extract_counterpart_from_block(block: &str) -> Option<String> {
         .map(|line| line.trim().to_string())
 }
 
+/// Count posting lines (indented, non-empty, non-comment) in a GL block. A
+/// simple posting has two (real account + counterpart); a split has more.
+fn count_posting_lines(block: &str) -> usize {
+    block
+        .lines()
+        .filter(|line| {
+            let is_indented = line.starts_with(' ') || line.starts_with('\t');
+            let trimmed = line.trim();
+            is_indented && !trimmed.is_empty() && !trimmed.starts_with(';')
+        })
+        .count()
+}
+
 /// Load account entries for each `(locator, entry_id)` pair.
 ///
 /// Returns a vec of `(locator, entry_id, AccountEntry)` triples (same shape as
@@ -1372,6 +1399,16 @@ pub fn sync_gl_transaction(
             format_transfer_gl_transaction(e1, loc1, e2, loc2, &gl_txn_id)
         }
         [(loc, _, e)] => {
+            // A split posting (one source, multiple counterpart legs) would be
+            // collapsed to a single counterpart by format_gl_transaction below,
+            // silently destroying the split and rebalancing the money. Refuse
+            // rather than clobber.
+            if count_posting_lines(&gl_block) > 2 {
+                return Err(format!(
+                    "GL transaction {gl_txn_id} is a split posting; sync would collapse it. Unpost and re-post it instead."
+                )
+                .into());
+            }
             // Single posting: extract counterpart from existing block.
             let counterpart = extract_counterpart_from_block(&gl_block)
                 .ok_or("could not extract counterpart account from GL block")?;
@@ -2235,6 +2272,121 @@ mod tests {
         assert!(
             after2[0].posted.is_none(),
             "other side should also be unposted"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn split_post_blocked_when_legs_already_posted() {
+        let root = temp_dir("split-double-materialize");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let entry = make_entry("txn-1", "2024-01-15", "Shop", "-30.00");
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(&journal_path, &[entry]).unwrap();
+
+        // Post posting 0 as a single leg.
+        post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:A",
+            Some(0),
+            "test",
+        )
+        .unwrap();
+
+        // A whole-entry split must now be refused (it would materialize the
+        // amount a second time).
+        let err = post_login_account_entry_split(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            vec![
+                SplitCounterpart {
+                    account: "Expenses:B".into(),
+                    amount: Some("10.00 USD".into()),
+                },
+                SplitCounterpart {
+                    account: "Expenses:C".into(),
+                    amount: None,
+                },
+            ],
+            "test",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("posted split postings"),
+            "split should be blocked, got: {err}"
+        );
+
+        // And a whole-entry plain post must also be refused.
+        let err2 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:D",
+            None,
+            "test",
+        )
+        .unwrap_err();
+        assert!(
+            err2.to_string().contains("posted split postings"),
+            "whole-entry post should be blocked, got: {err2}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_refuses_to_collapse_split_gl_txn() {
+        let root = temp_dir("sync-split-guard");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let entry = make_entry("txn-1", "2024-01-15", "Shop", "-30.00");
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(&journal_path, &[entry]).unwrap();
+
+        post_login_account_entry_split(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            vec![
+                SplitCounterpart {
+                    account: "Expenses:Food".into(),
+                    amount: Some("20.00 USD".into()),
+                },
+                SplitCounterpart {
+                    account: "Expenses:Travel".into(),
+                    amount: Some("10.00 USD".into()),
+                },
+            ],
+            "test",
+        )
+        .unwrap();
+
+        // Drift the source amount so sync would be invoked.
+        let mut entries = account_journal::read_journal_at_path(&journal_path).unwrap();
+        entries[0].postings[0].amount = Some(account_journal::SimpleAmount {
+            commodity: "USD".to_string(),
+            quantity: "-35.00".to_string(),
+        });
+        account_journal::write_journal_at_path(&journal_path, &entries).unwrap();
+
+        let err = sync_gl_transaction(&root, "chase", "checking", "txn-1", "test").unwrap_err();
+        assert!(
+            err.to_string().contains("split"),
+            "sync should refuse to collapse a split, got: {err}"
+        );
+
+        // Both legs must survive the refused sync.
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            gl.contains("Expenses:Food") && gl.contains("Expenses:Travel"),
+            "split legs must survive"
         );
 
         let _ = fs::remove_dir_all(&root);
