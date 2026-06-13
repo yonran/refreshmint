@@ -114,7 +114,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 pub fn run_with_context(
     context: tauri::Context<tauri::Wry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(PromptAnswerState::default())
@@ -223,8 +223,34 @@ pub fn run_with_context(
             }
             Ok(())
         })
-        .run(context)
-        .map_err(|e| e.into())
+        .build(context)?;
+
+    // On a graceful quit, the tao event loop ends by calling `std::process::exit`,
+    // which does not unwind the stack — so no `Drop` runs. We do the cleanup that
+    // would otherwise be lost here: (1) wait (bounded) for any in-flight GL
+    // write+commit to finish so a quit can't tear a half-written journal, and
+    // (2) SIGKILL any browser we launched that hasn't been cleanly closed, so it
+    // isn't orphaned holding its profile's SingletonLock.
+    app.run(|_app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            run_shutdown_cleanup();
+        }
+    });
+    Ok(())
+}
+
+/// Best-effort cleanup run from the Tauri `Exit` event. Best-effort because it
+/// only fires on a graceful quit; a SIGKILL/crash bypasses it (which is why the
+/// GL writes are also crash-safe on their own).
+fn run_shutdown_cleanup() {
+    let drained = login_config::wait_for_gl_writes_to_drain(std::time::Duration::from_secs(10));
+    if !drained {
+        eprintln!("[shutdown] timed out waiting for in-flight GL writes to finish");
+    }
+    let killed = scrape::browser::kill_active_browsers();
+    if killed > 0 {
+        eprintln!("[shutdown] killed {killed} browser process(es) to avoid orphans");
+    }
 }
 
 #[tauri::command]
