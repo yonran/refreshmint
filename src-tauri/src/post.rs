@@ -91,13 +91,13 @@ pub fn post_entry(
         entries[entry_idx].posted = Some(gl_ref);
     }
 
-    // Write updated account journal first. If this fails, nothing else was mutated.
-    account_journal::write_journal(ledger_dir, account_name, &entries)?;
-
-    // Append to general.journal; rollback account journal on failure.
+    // GL-first (see post_login_account_entry): the GL block is self-describing,
+    // so a crash before the account write leaves a recoverable orphan.
     let journal_path = ledger_dir.join("general.journal");
-    if let Err(err) = append_to_journal(&journal_path, &gl_text) {
-        let _ = account_journal::write_journal(ledger_dir, account_name, &original_entries);
+    append_to_journal(&journal_path, &gl_text)?;
+
+    if let Err(err) = account_journal::write_journal(ledger_dir, account_name, &entries) {
+        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
         return Err(err.into());
     }
 
@@ -199,11 +199,15 @@ pub fn post_login_account_entry(
         entries[entry_idx].posted = Some(gl_ref);
     }
 
-    account_journal::write_journal_at_path(&journal_path, &entries)?;
-
+    // GL-first: the GL block is self-describing (it carries a `; source:`
+    // backref), so a kill before the account journal is written leaves a
+    // recoverable orphan, not a lossy dangling ref. consistency::recover_ledger
+    // restores the account ref from the GL on next open. See [crate::consistency].
     let gl_journal_path = ledger_dir.join("general.journal");
-    if let Err(err) = append_to_journal(&gl_journal_path, &gl_text) {
-        let _ = account_journal::write_journal_at_path(&journal_path, &original_entries);
+    append_to_journal(&gl_journal_path, &gl_text)?;
+
+    if let Err(err) = account_journal::write_journal_at_path(&journal_path, &entries) {
+        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
         return Err(err.into());
     }
 
@@ -284,11 +288,13 @@ pub fn post_login_account_entry_split(
     let gl_ref = format!("general.journal:{gl_txn_id}");
     entries[entry_idx].posted = Some(gl_ref);
 
-    account_journal::write_journal_at_path(&journal_path, &entries)?;
-
+    // GL-first (see post_login_account_entry): a crash leaves a recoverable
+    // orphan rather than a lossy dangling ref.
     let gl_journal_path = ledger_dir.join("general.journal");
-    if let Err(err) = append_to_journal(&gl_journal_path, &gl_text) {
-        let _ = account_journal::write_journal_at_path(&journal_path, &original_entries);
+    append_to_journal(&gl_journal_path, &gl_text)?;
+
+    if let Err(err) = account_journal::write_journal_at_path(&journal_path, &entries) {
+        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
         return Err(err.into());
     }
 
@@ -775,6 +781,58 @@ pub fn repair_orphaned_gl_txn(
     Ok(())
 }
 
+/// Restore an account entry's whole-entry `posted:` ref from an existing GL
+/// transaction — the recovery half of GL-first posting (see the post ordering
+/// above and [crate::consistency]). After a hard kill between the GL append and
+/// the account write, the GL transaction is the source of truth and names its
+/// source entry via `; source:`; this re-links the entry so it shows as posted
+/// again (no duplicate on a subsequent post).
+///
+/// Idempotent: a no-op if the entry already references the GL txn. Refuses if
+/// the GL txn is absent (nothing to restore from) or the entry already points at
+/// a different GL txn (don't clobber).
+pub fn restore_posted_ref(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    entry_id: &str,
+    gl_txn_id: &str,
+    lock_owner: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _gl_lock =
+        login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "restore-posted-ref")?;
+    let _login_lock = login_config::acquire_login_lock_with_metadata(
+        ledger_dir,
+        login_name,
+        lock_owner,
+        "restore-posted-ref",
+    )?;
+
+    if find_gl_block(ledger_dir, gl_txn_id)?.is_none() {
+        return Err(format!("GL transaction not found: {gl_txn_id}").into());
+    }
+
+    let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
+    let mut entries = account_journal::read_journal_at_path(&journal_path)?;
+    let entry = entries
+        .iter_mut()
+        .find(|e| e.id == entry_id)
+        .ok_or_else(|| format!("entry not found: {entry_id}"))?;
+
+    let gl_ref = format!("general.journal:{gl_txn_id}");
+    if let Some(existing) = &entry.posted {
+        if existing == &gl_ref {
+            return Ok(());
+        }
+        return Err(
+            format!("entry {entry_id} is already posted to a different GL transaction").into(),
+        );
+    }
+    entry.posted = Some(gl_ref);
+    account_journal::write_journal_at_path(&journal_path, &entries)?;
+    Ok(())
+}
+
 /// Post two login-account entries as an inter-account transfer.
 ///
 /// Uses the new `logins/{login_name}/accounts/{label}` journal paths, unlike
@@ -843,18 +901,19 @@ pub fn post_login_account_transfer(
     entries1[idx1].posted = Some(gl_ref.clone());
     entries2[idx2].posted = Some(gl_ref);
 
+    // GL-first (see post_login_account_entry): a crash leaves recoverable
+    // orphans (each leg's ref is restorable from the GL `; source:` backref)
+    // rather than lossy dangling refs.
+    let journal_path = ledger_dir.join("general.journal");
+    append_to_journal(&journal_path, &gl_text)?;
+
     if let Err(err) = account_journal::write_journal_at_path(&journal_path1, &entries1) {
+        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
         return Err(err.into());
     }
     if let Err(err) = account_journal::write_journal_at_path(&journal_path2, &entries2) {
         let _ = account_journal::write_journal_at_path(&journal_path1, &original_entries1);
-        return Err(err.into());
-    }
-
-    let journal_path = ledger_dir.join("general.journal");
-    if let Err(err) = append_to_journal(&journal_path, &gl_text) {
-        let _ = account_journal::write_journal_at_path(&journal_path1, &original_entries1);
-        let _ = account_journal::write_journal_at_path(&journal_path2, &original_entries2);
+        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
         return Err(err.into());
     }
 
@@ -1046,19 +1105,17 @@ pub fn post_transfer(
     entries1[idx1].posted = Some(gl_ref.clone());
     entries2[idx2].posted = Some(gl_ref);
 
+    // GL-first (see post_login_account_entry): a crash leaves recoverable orphans.
+    let journal_path = ledger_dir.join("general.journal");
+    append_to_journal(&journal_path, &gl_text)?;
+
     if let Err(err) = account_journal::write_journal(ledger_dir, account1, &entries1) {
+        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
         return Err(err.into());
     }
     if let Err(err) = account_journal::write_journal(ledger_dir, account2, &entries2) {
         let _ = account_journal::write_journal(ledger_dir, account1, &original_entries1);
-        return Err(err.into());
-    }
-
-    // Append to general.journal
-    let journal_path = ledger_dir.join("general.journal");
-    if let Err(err) = append_to_journal(&journal_path, &gl_text) {
-        let _ = account_journal::write_journal(ledger_dir, account1, &original_entries1);
-        let _ = account_journal::write_journal(ledger_dir, account2, &original_entries2);
+        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
         return Err(err.into());
     }
 

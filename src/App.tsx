@@ -37,7 +37,7 @@ import {
     type AmountTotal,
     type LedgerView,
     setLoginAccount,
-    checkLedgerConsistency,
+    recoverLedgerConsistency,
     isConsistencyReportClean,
     repairDanglingRef,
     repairOrphanedGlTxn,
@@ -229,18 +229,19 @@ function App() {
         setLoginConfigsReloadToken((current) => current + 1);
     }, []);
 
-    // Scan the ledger for referential inconsistencies left by an interrupted
-    // operation (a hard kill mid-post). Read-only; surfaces a banner with
-    // explicit per-item repair actions. See src-tauri/src/consistency.rs.
+    // Recover from referential inconsistencies left by an interrupted operation
+    // (a hard kill mid-post): auto-complete recoverable orphans from their GL
+    // source backref, then surface any residual problems with explicit repair
+    // actions. See src-tauri/src/consistency.rs.
     const runConsistencyCheck = useCallback(async (path: string) => {
         try {
-            const report = await checkLedgerConsistency(path);
+            const report = await recoverLedgerConsistency(path);
             setConsistencyReport(
                 isConsistencyReportClean(report) ? null : report,
             );
         } catch (error) {
             // A failed check must not block the app; just log it.
-            console.error('ledger consistency check failed', error);
+            console.error('ledger consistency recovery failed', error);
         }
     }, []);
     useEffect(() => {

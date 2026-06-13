@@ -1,21 +1,24 @@
-//! Referential consistency check between account journals and `general.journal`.
+//! Referential consistency check and recovery between account journals and
+//! `general.journal`.
 //!
-//! A post writes the account journal's `posted:` ref first, then appends the GL
-//! transaction, then commits (see [crate::post]). A hard kill between those two
-//! writes — which neither `Drop` nor the shutdown hook can clean up — leaves the
-//! ledger referentially inconsistent in one of two ways:
+//! A post appends the GL transaction first, then writes the account journal's
+//! `posted:` ref, then commits (see [crate::post]). A hard kill — which neither
+//! `Drop` nor the shutdown hook can clean up — can leave two kinds of mismatch:
 //!
-//! - **Dangling ref**: an account entry claims `posted: general.journal:<id>`
-//!   but no GL transaction with that id exists. The entry drops off the
-//!   "unposted" list yet its amount never reached the GL.
 //! - **Orphaned GL txn**: a refreshmint-generated GL transaction (it has a
-//!   `; source:` line) whose source entry does not reference it back. The amount
-//!   is in the GL but the source entry still looks unposted.
+//!   `; source:` line) whose source entry does not reference it back. This is
+//!   the normal crash-window state of GL-first posting, and it is *recoverable*:
+//!   the GL block names its source entry, so [recover_ledger] re-links it.
+//! - **Dangling ref**: an account entry claims `posted: general.journal:<id>`
+//!   but no GL transaction with that id exists. GL-first ordering makes this
+//!   impossible to produce from a post; it would indicate external corruption,
+//!   and it is *not* auto-recoverable (the GL data is gone), so it is surfaced
+//!   for the user to clear.
 //!
-//! This module only *reports*; repair is applied explicitly by the user (see the
-//! repair commands in [crate::lib]). The GL block format and the `; source:` /
-//! `posted:` ref conventions are defined in [crate::post] and [crate::gl_journal];
-//! keep this aligned with them.
+//! [recover_ledger] (run on ledger open) auto-completes recoverable orphans;
+//! [analyze]/[check_ledger] only report. The GL block format and the
+//! `; source:` / `posted:` ref conventions are defined in [crate::post] and
+//! [crate::gl_journal]; keep this aligned with them.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -225,6 +228,44 @@ pub fn check_ledger(ledger_dir: &Path) -> std::io::Result<ConsistencyReport> {
     Ok(analyze(&gl_content, &accounts))
 }
 
+/// Auto-complete recoverable orphans, then return the residual report.
+///
+/// This is the redo-log replay that makes GL-first posting effectively atomic
+/// (see [crate::post]): a hard kill between the GL append and the account write
+/// leaves an orphaned GL transaction whose `; source:` names the source entry,
+/// so we restore that entry's `posted:` ref. Run on ledger open. Whole-entry
+/// orphans (simple posts, splits, transfers) are completed; anything else
+/// (dangling refs, non-login sources) is returned for the user to handle.
+pub fn recover_ledger(ledger_dir: &Path, lock_owner: &str) -> std::io::Result<ConsistencyReport> {
+    let report = check_ledger(ledger_dir)?;
+    let completable: Vec<(String, String, String, String)> = report
+        .orphaned_gl_txns
+        .iter()
+        .filter_map(|orphan| {
+            parse_login_locator(&orphan.source_locator).map(|(login, label)| {
+                (
+                    login,
+                    label,
+                    orphan.source_entry_id.clone(),
+                    orphan.gl_txn_id.clone(),
+                )
+            })
+        })
+        .collect();
+    if completable.is_empty() {
+        return Ok(report);
+    }
+    for (login, label, entry_id, gl_txn_id) in completable {
+        // Best-effort: a failure for one orphan still surfaces in the re-scan.
+        if let Err(err) = post::restore_posted_ref(
+            ledger_dir, &login, &label, &entry_id, &gl_txn_id, lock_owner,
+        ) {
+            eprintln!("[recover] could not restore {login}/{label} {entry_id}: {err}");
+        }
+    }
+    check_ledger(ledger_dir)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -315,5 +356,45 @@ mod tests {
         let gl = "2026-01-01 Manual  ; id: manual-1\n    Expenses:Misc  1 USD\n    Assets:Cash\n";
         let report = analyze(gl, &[]);
         assert!(report.is_clean(), "got {report:?}");
+    }
+
+    fn temp_ledger(prefix: &str) -> std::path::PathBuf {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("refreshmint-{prefix}-{}-{now}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn recover_ledger_completes_orphan_from_gl_source() {
+        // Simulate a GL-first crash: the GL block (with its `; source:` backref)
+        // is written, but the source entry's posted ref was never written.
+        let dir = temp_ledger("recover-orphan");
+        std::fs::write(dir.join("general.journal"), GL_WITH_TXN).unwrap();
+        let path = account_journal::login_account_journal_path(&dir, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &path,
+            std::slice::from_ref(&entry("entry-1", None)),
+        )
+        .unwrap();
+
+        // Before recovery: the GL txn is orphaned.
+        assert_eq!(check_ledger(&dir).unwrap().orphaned_gl_txns.len(), 1);
+
+        let residual = recover_ledger(&dir, "test").unwrap();
+        assert!(
+            residual.is_clean(),
+            "recovery should heal the orphan: {residual:?}"
+        );
+
+        // The entry now references the GL txn (re-linked, not re-created).
+        let entries = account_journal::read_journal_at_path(&path).unwrap();
+        assert_eq!(entries[0].posted.as_deref(), Some("general.journal:txn-1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

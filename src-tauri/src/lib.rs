@@ -214,6 +214,7 @@ pub fn run_with_context(
             run_hledger_report,
             submit_prompt_answer,
             check_ledger_consistency,
+            recover_ledger_consistency,
             repair_dangling_ref,
             repair_orphaned_gl_txn,
         ])
@@ -2177,6 +2178,16 @@ fn check_ledger_consistency(ledger: String) -> Result<consistency::ConsistencyRe
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
     consistency::check_ledger(&target_dir).map_err(|err| err.to_string())
+}
+
+/// Auto-complete recoverable inconsistencies (re-link orphaned GL txns from
+/// their `; source:` backref — the redo-log replay that makes GL-first posting
+/// atomic) and return the residual report. Run on ledger open. See [consistency].
+#[tauri::command]
+fn recover_ledger_consistency(ledger: String) -> Result<consistency::ConsistencyReport, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    consistency::recover_ledger(&target_dir, "gui").map_err(|err| err.to_string())
 }
 
 /// Clear a dangling `posted:` ref (the referenced GL txn no longer exists), so

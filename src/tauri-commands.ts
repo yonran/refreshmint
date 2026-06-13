@@ -1077,6 +1077,17 @@ export async function checkLedgerConsistency(
     return invoke('check_ledger_consistency', { ledger });
 }
 
+/**
+ * Auto-complete recoverable inconsistencies (re-link orphaned GL txns from their
+ * source backref — the redo-log replay that makes GL-first posting atomic) and
+ * return the residual report. Run on ledger open.
+ */
+export async function recoverLedgerConsistency(
+    ledger: string,
+): Promise<ConsistencyReport> {
+    return invoke('recover_ledger_consistency', { ledger });
+}
+
 /** Clear a dangling posted-ref so the entry can be re-posted. */
 export async function repairDanglingRef(
     ledger: string,
