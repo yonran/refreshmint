@@ -10,6 +10,7 @@ import {
     type NewTransactionInput,
     queryTransactions,
     recategorizeGlTransaction,
+    recategorizeGlTransactions,
     suggestGlCategories,
     type TransactionRow,
     validateTransaction,
@@ -719,8 +720,10 @@ export function TransactionsTab({
                 newAccount,
             );
             onLedgerRefresh();
-            const suggestions = await suggestGlCategories(ledgerPath);
-            setGlCategorySuggestions(suggestions);
+            // The row is now categorized, so its suggestion is moot. Drop it
+            // locally instead of retraining the categorizer over the whole
+            // ledger on every click.
+            dropGlCategorySuggestions([txnId]);
         } catch (error) {
             console.error('recategorize failed:', error);
         }
@@ -730,11 +733,22 @@ export function TransactionsTab({
         try {
             await mergeGlTransfer(ledgerPath, txnId1, txnId2);
             onLedgerRefresh();
-            const suggestions = await suggestGlCategories(ledgerPath);
-            setGlCategorySuggestions(suggestions);
+            // Both originals are consumed by the merge; the new transfer needs
+            // no Unknown suggestion.
+            dropGlCategorySuggestions([txnId1, txnId2]);
         } catch (error) {
             console.error('merge transfer failed:', error);
         }
+    }
+
+    function dropGlCategorySuggestions(txnIds: string[]) {
+        setGlCategorySuggestions((prev) => {
+            if (!txnIds.some((id) => id in prev)) return prev;
+            const drop = new Set(txnIds);
+            return Object.fromEntries(
+                Object.entries(prev).filter(([id]) => !drop.has(id)),
+            );
+        });
     }
 
     async function handleBulkRecategorize(
@@ -742,17 +756,16 @@ export function TransactionsTab({
         newAccount: string,
     ) {
         try {
-            for (const { txnId, postingIndex } of entries) {
-                await recategorizeGlTransaction(
-                    ledgerPath,
+            await recategorizeGlTransactions(
+                ledgerPath,
+                entries.map(({ txnId, postingIndex }) => ({
                     txnId,
                     postingIndex,
                     newAccount,
-                );
-            }
+                })),
+            );
             onLedgerRefresh();
-            const suggestions = await suggestGlCategories(ledgerPath);
-            setGlCategorySuggestions(suggestions);
+            dropGlCategorySuggestions(entries.map(({ txnId }) => txnId));
         } catch (error) {
             console.error('bulk recategorize failed:', error);
         }
