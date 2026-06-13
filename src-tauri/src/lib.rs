@@ -213,6 +213,9 @@ pub fn run_with_context(
             query_transactions,
             run_hledger_report,
             submit_prompt_answer,
+            check_ledger_consistency,
+            repair_dangling_ref,
+            repair_orphaned_gl_txn,
         ])
         .setup(|app| {
             binpath::init_from_app(app.handle());
@@ -2165,6 +2168,49 @@ fn merge_gl_transfer(ledger: String, txn_id_1: String, txn_id_2: String) -> Resu
     let txn_id_1 = require_non_empty_input("txn_id_1", txn_id_1)?;
     let txn_id_2 = require_non_empty_input("txn_id_2", txn_id_2)?;
     post::merge_gl_transfer(&target_dir, &txn_id_1, &txn_id_2, "gui").map_err(|err| err.to_string())
+}
+
+/// Scan the ledger for referential inconsistencies (dangling posted-refs and
+/// orphaned GL transactions) left by an interrupted operation. Read-only.
+#[tauri::command]
+fn check_ledger_consistency(ledger: String) -> Result<consistency::ConsistencyReport, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    consistency::check_ledger(&target_dir).map_err(|err| err.to_string())
+}
+
+/// Clear a dangling `posted:` ref (the referenced GL txn no longer exists), so
+/// the entry can be re-posted. See [consistency].
+#[tauri::command]
+fn repair_dangling_ref(
+    ledger: String,
+    login_name: String,
+    label: String,
+    entry_id: String,
+    posting_index: Option<usize>,
+) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let login_name = require_login_name_input(login_name)?;
+    let label = require_label_input(label)?;
+    let entry_id = require_non_empty_input("entry_id", entry_id)?;
+    post::repair_dangling_ref(
+        &target_dir,
+        &login_name,
+        &label,
+        &entry_id,
+        posting_index,
+        "gui",
+    )
+    .map_err(|err| err.to_string())
+}
+
+/// Remove an orphaned GL transaction (its source entry doesn't reference it), so
+/// the source entry can be re-posted cleanly. See [consistency].
+#[tauri::command]
+fn repair_orphaned_gl_txn(ledger: String, gl_txn_id: String) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let gl_txn_id = require_non_empty_input("gl_txn_id", gl_txn_id)?;
+    post::repair_orphaned_gl_txn(&target_dir, &gl_txn_id, "gui").map_err(|err| err.to_string())
 }
 
 fn map_account_journal_entries(

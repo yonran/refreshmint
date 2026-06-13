@@ -654,6 +654,127 @@ pub fn unpost_login_account_entry(
     Ok(())
 }
 
+/// Repair a dangling `posted:` ref: an account entry claims it is posted to a GL
+/// transaction that no longer exists (see [crate::consistency]). Clears only the
+/// account-side ref so the entry shows as unposted again and can be re-posted;
+/// there is no GL transaction to remove.
+///
+/// Guards against clobbering a valid post: refuses if the referenced GL
+/// transaction actually exists.
+pub fn repair_dangling_ref(
+    ledger_dir: &Path,
+    login_name: &str,
+    label: &str,
+    entry_id: &str,
+    posting_index: Option<usize>,
+    lock_owner: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _gl_lock =
+        login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "repair-dangling-ref")?;
+    let _login_lock = login_config::acquire_login_lock_with_metadata(
+        ledger_dir,
+        login_name,
+        lock_owner,
+        "repair-dangling-ref",
+    )?;
+
+    let journal_path = account_journal::login_account_journal_path(ledger_dir, login_name, label);
+    let mut entries = account_journal::read_journal_at_path(&journal_path)?;
+    let original_entries = entries.clone();
+    let entry_idx = entries
+        .iter()
+        .position(|e| e.id == entry_id)
+        .ok_or_else(|| format!("entry not found: {entry_id}"))?;
+
+    let target_ref = match posting_index {
+        Some(idx) => entries[entry_idx]
+            .posted_postings
+            .iter()
+            .find(|(i, _)| *i == idx)
+            .map(|(_, r)| r.clone()),
+        None => entries[entry_idx].posted.clone(),
+    }
+    .ok_or_else(|| format!("entry {entry_id} has no matching posted ref to repair"))?;
+
+    let gl_txn_id = target_ref
+        .strip_prefix("general.journal:")
+        .unwrap_or(&target_ref)
+        .to_string();
+    if find_gl_block(ledger_dir, &gl_txn_id)?.is_some() {
+        return Err(format!(
+            "refusing to clear ref for entry {entry_id}: GL transaction {gl_txn_id} exists (not dangling)"
+        )
+        .into());
+    }
+
+    match posting_index {
+        Some(idx) => entries[entry_idx]
+            .posted_postings
+            .retain(|(i, _)| *i != idx),
+        None => entries[entry_idx].posted = None,
+    }
+    account_journal::write_journal_at_path(&journal_path, &entries)?;
+
+    let op = operations::GlOperation::UndoPost {
+        account: format!("logins/{login_name}/accounts/{label}"),
+        entry_id: entry_id.to_string(),
+        posting_index,
+        timestamp: operations::now_timestamp(),
+    };
+    if let Err(err) = operations::append_gl_operation(ledger_dir, &op) {
+        let _ = account_journal::write_journal_at_path(&journal_path, &original_entries);
+        return Err(err.into());
+    }
+    Ok(())
+}
+
+/// Repair an orphaned GL transaction: a refreshmint-generated GL transaction
+/// whose source entry does not reference it back (see [crate::consistency]).
+/// Removes the GL transaction; the source entry is already unposted, so it can
+/// be re-posted cleanly.
+///
+/// Refuses if the GL transaction is protected (reconciled / linked / soft-closed),
+/// mirroring the guard in [unpost_login_account_entry].
+pub fn repair_orphaned_gl_txn(
+    ledger_dir: &Path,
+    gl_txn_id: &str,
+    lock_owner: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _gl_lock = login_config::acquire_gl_lock_with_metadata(
+        ledger_dir,
+        lock_owner,
+        "repair-orphaned-gl-txn",
+    )?;
+
+    let block = find_gl_block(ledger_dir, gl_txn_id)?
+        .ok_or_else(|| format!("GL transaction not found: {gl_txn_id}"))?;
+
+    let blockers = crate::bookkeeping::gl_txn_removal_blockers(ledger_dir, gl_txn_id)?;
+    if !blockers.is_empty() {
+        return Err(format!(
+            "cannot remove GL transaction {gl_txn_id}; it is protected: {}",
+            blockers.join(", ")
+        )
+        .into());
+    }
+
+    remove_gl_transaction(ledger_dir, gl_txn_id)?;
+
+    // Best-effort audit entry, attributed to the orphan's source if present.
+    let (account, entry_id) = parse_sources_from_block(&block)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| (String::new(), gl_txn_id.to_string()));
+    let op = operations::GlOperation::UndoPost {
+        account,
+        entry_id,
+        posting_index: None,
+        timestamp: operations::now_timestamp(),
+    };
+    let _ = operations::append_gl_operation(ledger_dir, &op);
+    Ok(())
+}
+
 /// Post two login-account entries as an inter-account transfer.
 ///
 /// Uses the new `logins/{login_name}/accounts/{label}` journal paths, unlike
@@ -1999,6 +2120,72 @@ mod tests {
         let ops = operations::read_gl_operations(&root).unwrap();
         assert_eq!(ops.len(), 2); // post + undo-post
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn repair_dangling_ref_clears_account_side_when_gl_txn_absent() {
+        let root = temp_dir("repair-dangling");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let mut entry = make_entry("entry-1", "2024-01-15", "Shell", "-21.32");
+        entry.posted = Some("general.journal:ghost".to_string());
+        let path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(&path, std::slice::from_ref(&entry)).unwrap();
+
+        repair_dangling_ref(&root, "chase", "checking", "entry-1", None, "test").unwrap();
+
+        let updated = account_journal::read_journal_at_path(&path).unwrap();
+        assert!(
+            updated[0].posted.is_none(),
+            "dangling ref should be cleared"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn repair_dangling_ref_refuses_when_gl_txn_exists() {
+        let root = temp_dir("repair-dangling-guard");
+        fs::write(
+            root.join("general.journal"),
+            "2026-01-01 X  ; id: real\n    Assets:A  1 USD\n    Income:B\n",
+        )
+        .unwrap();
+        let mut entry = make_entry("entry-1", "2024-01-15", "Shell", "-21.32");
+        entry.posted = Some("general.journal:real".to_string());
+        let path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(&path, std::slice::from_ref(&entry)).unwrap();
+
+        let result = repair_dangling_ref(&root, "chase", "checking", "entry-1", None, "test");
+        assert!(
+            result.is_err(),
+            "must refuse to clear a live (non-dangling) ref"
+        );
+        let updated = account_journal::read_journal_at_path(&path).unwrap();
+        assert_eq!(updated[0].posted.as_deref(), Some("general.journal:real"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn repair_orphaned_gl_txn_removes_block() {
+        let root = temp_dir("repair-orphan");
+        crate::bookkeeping::ensure_bookkeeping_layout(&root).unwrap();
+        fs::write(
+            root.join("general.journal"),
+            "2026-01-01 Coffee  ; id: orphan-1\n    ; source: logins/chase/accounts/checking:entry-1\n    Expenses:Unknown  5 USD\n    Assets:Chase\n",
+        )
+        .unwrap();
+        // The source entry exists but does not reference orphan-1 (unposted).
+        let entry = make_entry("entry-1", "2026-01-01", "Coffee", "-5");
+        let path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(&path, std::slice::from_ref(&entry)).unwrap();
+
+        repair_orphaned_gl_txn(&root, "orphan-1", "test").unwrap();
+
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            !gl.contains("orphan-1"),
+            "orphaned GL txn should be removed"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
