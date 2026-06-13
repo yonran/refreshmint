@@ -1,5 +1,5 @@
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -1172,15 +1172,21 @@ fn collect_unique_evidence_refs<'a>(
 }
 
 fn append_to_journal(journal_path: &Path, text: &str) -> io::Result<()> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(journal_path)?;
-    if file.metadata()?.len() > 0 {
-        file.write_all(b"\n")?;
+    // Crash-safe append: read the current contents, append the new block, and
+    // rewrite atomically. A plain O_APPEND write could leave a partial trailing
+    // block if the process is killed mid-write. The output is byte-for-byte the
+    // same as the previous append (one '\n' separator before the new block when
+    // the file is non-empty). See crate::fs_atomic.
+    let mut content = match fs::read(journal_path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => return Err(err),
+    };
+    if !content.is_empty() {
+        content.push(b'\n');
     }
-    file.write_all(text.as_bytes())?;
-    Ok(())
+    content.extend_from_slice(text.as_bytes());
+    crate::fs_atomic::write_atomic(journal_path, &content)
 }
 
 /// Parse a `logins/{login}/accounts/{label}` locator into `(login, label)`.
