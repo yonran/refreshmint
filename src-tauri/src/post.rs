@@ -341,7 +341,7 @@ fn find_gl_block(ledger_dir: &Path, gl_txn_id: &str) -> io::Result<Option<String
 ///
 /// Skips posting-indexed sources (`; source: ...:posting:<n>`).
 /// Returns vec of `(locator, entry_id)`.
-fn parse_sources_from_block(block: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_sources_from_block(block: &str) -> Vec<(String, String)> {
     let mut sources = Vec::new();
     for line in block.lines() {
         let trimmed = line.trim();

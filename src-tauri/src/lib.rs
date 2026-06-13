@@ -8,6 +8,7 @@ pub mod account_journal;
 pub mod automation;
 pub mod bookkeeping;
 pub mod categorize;
+pub mod consistency;
 pub mod dedup;
 pub mod extract;
 pub mod fs_atomic;
