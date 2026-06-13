@@ -10,6 +10,7 @@ pub mod bookkeeping;
 pub mod categorize;
 pub mod dedup;
 pub mod extract;
+pub mod fs_atomic;
 pub mod login_config;
 pub mod migration;
 pub mod operations;

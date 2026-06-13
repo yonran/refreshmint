@@ -1263,7 +1263,7 @@ fn remove_gl_transaction(
     if !final_content.is_empty() {
         final_content.push('\n');
     }
-    fs::write(&journal_path, final_content)?;
+    crate::fs_atomic::write_atomic(&journal_path, final_content.as_bytes())?;
     Ok(removed_block)
 }
 
@@ -1295,7 +1295,7 @@ fn replace_gl_block(ledger_dir: &Path, gl_txn_id: &str, new_block: &str) -> io::
     if !final_content.is_empty() {
         final_content.push('\n');
     }
-    fs::write(&journal_path, final_content)
+    crate::fs_atomic::write_atomic(&journal_path, final_content.as_bytes())
 }
 
 /// Extract the counterpart account (last indented non-comment posting line) from a GL block.
@@ -1615,7 +1615,7 @@ pub fn recategorize_gl_transactions(
     let journal_path = ledger_dir.join("general.journal");
     let content = fs::read_to_string(&journal_path)?;
     let final_content = apply_recategorizations(&content, edits)?;
-    fs::write(&journal_path, final_content)?;
+    crate::fs_atomic::write_atomic(&journal_path, final_content.as_bytes())?;
 
     let commit_msg = if edits.len() == 1 {
         format!("recategorize: {} → {}", edits[0].0, edits[0].2)
@@ -1840,7 +1840,7 @@ pub fn merge_gl_transfer(
             return Err(err.into());
         }
     }
-    if let Err(err) = fs::write(&gl_journal_path, &new_gl_content) {
+    if let Err(err) = crate::fs_atomic::write_atomic(&gl_journal_path, new_gl_content.as_bytes()) {
         let _ = account_journal::write_journal_at_path(&path1, &original_entries1);
         if !same_file {
             let _ = account_journal::write_journal_at_path(&path2, &original_entries2);
@@ -1852,7 +1852,7 @@ pub fn merge_gl_transfer(
         &[txn_id_1, txn_id_2],
         &new_uuid,
     ) {
-        let _ = fs::write(&gl_journal_path, &original_gl_content);
+        let _ = crate::fs_atomic::write_atomic(&gl_journal_path, original_gl_content.as_bytes());
         let _ = account_journal::write_journal_at_path(&path1, &original_entries1);
         if !same_file {
             let _ = account_journal::write_journal_at_path(&path2, &original_entries2);

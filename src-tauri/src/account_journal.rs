@@ -247,7 +247,8 @@ pub fn write_journal_at_path(path: &Path, entries: &[AccountEntry]) -> io::Resul
     }
 
     let content = format_journal(entries);
-    atomic_write(path, content.as_bytes())
+    // Shared crash-safe writer, same as general.journal in post.rs.
+    crate::fs_atomic::write_atomic(path, content.as_bytes())
 }
 
 /// Append a single entry to the account journal.
@@ -451,19 +452,6 @@ fn parse_tag_line(line: &str) -> Option<(String, String)> {
     }
     let value = line[colon_pos + 1..].trim();
     Some((key.to_string(), value.to_string()))
-}
-
-fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
-    let temp_path = path.with_extension("tmp");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&temp_path)?;
-    file.write_all(content)?;
-    file.flush()?;
-    fs::rename(&temp_path, path)?;
-    Ok(())
 }
 
 #[cfg(test)]
