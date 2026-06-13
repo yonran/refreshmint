@@ -1541,74 +1541,124 @@ pub fn recategorize_gl_transaction(
     new_account: &str,
     lock_owner: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    recategorize_gl_transactions(
+        ledger_dir,
+        &[(txn_id.to_string(), posting_index, new_account.to_string())],
+        lock_owner,
+    )
+}
+
+/// Recategorize one or more GL postings in a single read/write/commit.
+///
+/// `edits` is a list of `(txn_id, posting_index, new_account)`. Bulk
+/// recategorization used to loop the single-edit command, rewriting the whole
+/// `general.journal` and making one git commit per row (O(rows × ledger)). This
+/// applies every edit in one pass and commits once.
+pub fn recategorize_gl_transactions(
+    ledger_dir: &Path,
+    edits: &[(String, usize, String)],
+    lock_owner: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if edits.is_empty() {
+        return Ok(());
+    }
     let _gl_lock =
         login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "recategorize-gl")?;
     let journal_path = ledger_dir.join("general.journal");
     let content = fs::read_to_string(&journal_path)?;
-    let marker = format!("id: {txn_id}");
-    let mut found = false;
-    let mut replaced_any = false;
+    let final_content = apply_recategorizations(&content, edits)?;
+    fs::write(&journal_path, final_content)?;
 
-    let blocks: Vec<String> = crate::gl_journal::split_journal_blocks(&content)
+    let commit_msg = if edits.len() == 1 {
+        format!("recategorize: {} → {}", edits[0].0, edits[0].2)
+    } else {
+        format!("recategorize {} GL postings", edits.len())
+    };
+    if let Err(err) = crate::ledger::commit_general_journal(ledger_dir, &commit_msg) {
+        eprintln!("warning: git commit failed after recategorize: {err}");
+    }
+
+    Ok(())
+}
+
+/// Pure core shared by the single- and batch-recategorize commands: rewrite the
+/// GL journal text, applying each `(txn_id, posting_index, new_account)` edit to
+/// the first block carrying that id. Returns an error naming the first edit
+/// whose transaction or posting index could not be resolved (and leaves the
+/// caller to skip writing).
+fn apply_recategorizations(
+    content: &str,
+    edits: &[(String, usize, String)],
+) -> Result<String, String> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut by_txn: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
+    for (txn_id, posting_index, new_account) in edits {
+        by_txn
+            .entry(txn_id.as_str())
+            .or_default()
+            .push((*posting_index, new_account.as_str()));
+    }
+
+    let mut consumed: HashSet<&str> = HashSet::new();
+    let mut replaced: HashMap<&str, HashSet<usize>> = HashMap::new();
+
+    let blocks: Vec<String> = crate::gl_journal::split_journal_blocks(content)
         .into_iter()
         .map(|block| {
-            if !found && block.contains(&marker) {
-                found = true;
-                let mut current_posting_index = 0usize;
-                let mut replaced = false;
-                let new_block: String = block
-                    .lines()
-                    .map(|line| {
-                        let is_indented = line.starts_with(' ') || line.starts_with('\t');
-                        let trimmed = line.trim();
-                        let is_posting_line =
-                            is_indented && !trimmed.is_empty() && !trimmed.starts_with(';');
-                        if !is_posting_line {
-                            return line.to_string();
-                        }
-
-                        let line_result = if current_posting_index == posting_index {
-                            replaced = true;
-                            replace_posting_account(line, new_account)
-                        } else {
-                            line.to_string()
-                        };
-                        current_posting_index += 1;
-                        line_result
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if replaced {
-                    replaced_any = true;
-                    new_block.trim_end().to_string()
-                } else {
-                    block
-                }
-            } else {
-                block
-            }
+            let matched = by_txn.keys().copied().find(|txn_id| {
+                !consumed.contains(txn_id) && block.contains(&format!("id: {txn_id}"))
+            });
+            let Some(txn_id) = matched else {
+                return block;
+            };
+            consumed.insert(txn_id);
+            let edits_for = &by_txn[txn_id];
+            let replaced_for = replaced.entry(txn_id).or_default();
+            let mut current_posting_index = 0usize;
+            block
+                .lines()
+                .map(|line| {
+                    let is_indented = line.starts_with(' ') || line.starts_with('\t');
+                    let trimmed = line.trim();
+                    let is_posting_line =
+                        is_indented && !trimmed.is_empty() && !trimmed.starts_with(';');
+                    if !is_posting_line {
+                        return line.to_string();
+                    }
+                    let idx = current_posting_index;
+                    current_posting_index += 1;
+                    if let Some((_, new_account)) = edits_for.iter().find(|(i, _)| *i == idx) {
+                        replaced_for.insert(idx);
+                        replace_posting_account(line, new_account)
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim_end()
+                .to_string()
         })
         .collect();
 
-    if !found {
-        return Err(format!("GL transaction not found: {txn_id}").into());
-    }
-    if !replaced_any {
-        return Err(format!("GL posting index out of bounds: {posting_index}").into());
+    for (txn_id, posting_index, _) in edits {
+        if !consumed.contains(txn_id.as_str()) {
+            return Err(format!("GL transaction not found: {txn_id}"));
+        }
+        if !replaced
+            .get(txn_id.as_str())
+            .is_some_and(|set| set.contains(posting_index))
+        {
+            return Err(format!("GL posting index out of bounds: {posting_index}"));
+        }
     }
 
     let mut final_content = blocks.join("\n\n");
     if !final_content.is_empty() {
         final_content.push('\n');
     }
-    fs::write(&journal_path, final_content)?;
-
-    let commit_msg = format!("recategorize: {txn_id} → {new_account}");
-    if let Err(err) = crate::ledger::commit_general_journal(ledger_dir, &commit_msg) {
-        eprintln!("warning: git commit failed after recategorize: {err}");
-    }
-
-    Ok(())
+    Ok(final_content)
 }
 
 /// Merge two `Expenses:Unknown` GL transactions into a single transfer transaction.
@@ -1943,6 +1993,46 @@ mod tests {
             gl_content.contains("    Expenses:Food  3.00 USD\n"),
             "other postings should remain unchanged"
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recategorize_batch_applies_all_edits_in_one_pass() {
+        let root = temp_dir("recategorize-batch");
+        fs::write(
+            root.join("general.journal"),
+            "2024-01-15 A  ; id: txn-1\n    Assets:Checking  -10.00 USD\n    Expenses:Unknown\n\n2024-01-16 B  ; id: txn-2\n    Assets:Checking  -20.00 USD\n    Expenses:Unknown\n",
+        )
+        .unwrap();
+
+        recategorize_gl_transactions(
+            &root,
+            &[
+                ("txn-1".to_string(), 1, "Expenses:Food".to_string()),
+                ("txn-2".to_string(), 1, "Expenses:Gas".to_string()),
+            ],
+            "test",
+        )
+        .unwrap();
+
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(gl.contains("    Expenses:Food\n"), "first edit applied");
+        assert!(gl.contains("    Expenses:Gas\n"), "second edit applied");
+        assert_eq!(
+            gl.matches("Expenses:Unknown").count(),
+            0,
+            "both Unknown counterparts recategorized in one pass"
+        );
+
+        // A batch naming a missing txn errors instead of partially applying.
+        let err = recategorize_gl_transactions(
+            &root,
+            &[("txn-missing".to_string(), 1, "Expenses:Food".to_string())],
+            "test",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not found"));
 
         let _ = fs::remove_dir_all(&root);
     }

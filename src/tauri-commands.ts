@@ -1007,6 +1007,24 @@ export async function recategorizeGlTransaction(
     });
 }
 
+export interface RecategorizeEdit {
+    txnId: string;
+    postingIndex: number;
+    newAccount: string;
+}
+
+/**
+ * Recategorize multiple GL postings in a single backend read/write/commit.
+ * Preferred over looping {@link recategorizeGlTransaction}, which rewrites
+ * `general.journal` and commits once per row.
+ */
+export async function recategorizeGlTransactions(
+    ledger: string,
+    edits: RecategorizeEdit[],
+): Promise<void> {
+    await invoke('recategorize_gl_transactions', { ledger, edits });
+}
+
 export async function mergeGlTransfer(
     ledger: string,
     txnId1: string,

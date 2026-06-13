@@ -185,6 +185,7 @@ pub fn run_with_context(
             suggest_categories,
             suggest_gl_categories,
             recategorize_gl_transaction,
+            recategorize_gl_transactions,
             merge_gl_transfer,
             get_account_config,
             set_account_extension,
@@ -2105,6 +2106,29 @@ fn recategorize_gl_transaction(
     let new_account = require_non_empty_input("new_account", new_account)?;
     post::recategorize_gl_transaction(&target_dir, &txn_id, posting_index, &new_account, "gui")
         .map_err(|err| err.to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecategorizeEdit {
+    txn_id: String,
+    posting_index: usize,
+    new_account: String,
+}
+
+#[tauri::command]
+fn recategorize_gl_transactions(
+    ledger: String,
+    edits: Vec<RecategorizeEdit>,
+) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let mut prepared = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let txn_id = require_non_empty_input("txn_id", edit.txn_id)?;
+        let new_account = require_non_empty_input("new_account", edit.new_account)?;
+        prepared.push((txn_id, edit.posting_index, new_account));
+    }
+    post::recategorize_gl_transactions(&target_dir, &prepared, "gui").map_err(|err| err.to_string())
 }
 
 #[tauri::command]
