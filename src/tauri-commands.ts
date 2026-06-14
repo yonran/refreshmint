@@ -1053,6 +1053,8 @@ export interface OrphanedGlTxn {
     glTxnId: string;
     sourceLocator: string;
     sourceEntryId: string;
+    /** Posting index for a per-leg source; null for a whole-entry source. */
+    postingIndex: number | null;
 }
 
 /** Mirrors `consistency::ConsistencyReport`. */

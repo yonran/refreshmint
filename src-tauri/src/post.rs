@@ -367,6 +367,39 @@ pub(crate) fn parse_sources_from_block(block: &str) -> Vec<(String, String)> {
     sources
 }
 
+/// Like [parse_sources_from_block] but also returns the per-posting index for
+/// `; source: <locator>:<entry_id>:posting:<n>` lines (`None` for whole-entry
+/// sources). Used by [crate::consistency] so per-leg posts are checked and
+/// recovered, not silently skipped.
+pub(crate) fn parse_sources_with_posting_from_block(
+    block: &str,
+) -> Vec<(String, String, Option<usize>)> {
+    let mut sources = Vec::new();
+    for line in block.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("; source: ") else {
+            continue;
+        };
+        let (body, posting_index) = match rest.rsplit_once(":posting:") {
+            Some((body, idx)) => match idx.parse::<usize>() {
+                Ok(index) => (body, Some(index)),
+                Err(_) => continue, // malformed posting index
+            },
+            None => (rest, None),
+        };
+        // `body` is `<locator>:<entry_id>`; neither part contains a colon
+        // (logins/labels are sanitized, entry ids are uuids/hashes).
+        if let Some(colon_pos) = body.rfind(':') {
+            let locator = body[..colon_pos].to_string();
+            let entry_id = body[colon_pos + 1..].to_string();
+            if !locator.is_empty() && !entry_id.is_empty() {
+                sources.push((locator, entry_id, posting_index));
+            }
+        }
+    }
+    sources
+}
+
 /// Resolve a source locator string to its journal file path.
 fn journal_path_for_locator(ledger_dir: &Path, locator: &str) -> Option<std::path::PathBuf> {
     if let Some(rest) = locator.strip_prefix("logins/") {
@@ -796,6 +829,7 @@ pub fn restore_posted_ref(
     login_name: &str,
     label: &str,
     entry_id: &str,
+    posting_index: Option<usize>,
     gl_txn_id: &str,
     lock_owner: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -820,15 +854,31 @@ pub fn restore_posted_ref(
         .ok_or_else(|| format!("entry not found: {entry_id}"))?;
 
     let gl_ref = format!("general.journal:{gl_txn_id}");
-    if let Some(existing) = &entry.posted {
-        if existing == &gl_ref {
-            return Ok(());
+    let different = || -> Box<dyn std::error::Error + Send + Sync> {
+        format!("entry {entry_id} is already posted to a different GL transaction").into()
+    };
+    match posting_index {
+        None => {
+            if let Some(existing) = &entry.posted {
+                return if existing == &gl_ref {
+                    Ok(())
+                } else {
+                    Err(different())
+                };
+            }
+            entry.posted = Some(gl_ref);
         }
-        return Err(
-            format!("entry {entry_id} is already posted to a different GL transaction").into(),
-        );
+        Some(index) => {
+            if let Some((_, existing)) = entry.posted_postings.iter().find(|(i, _)| *i == index) {
+                return if existing == &gl_ref {
+                    Ok(())
+                } else {
+                    Err(different())
+                };
+            }
+            entry.posted_postings.push((index, gl_ref));
+        }
     }
-    entry.posted = Some(gl_ref);
     account_journal::write_journal_at_path(&journal_path, &entries)?;
     Ok(())
 }

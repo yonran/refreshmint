@@ -1321,7 +1321,9 @@ function App() {
                                     )}
                                     {consistencyReport.orphanedGlTxns.map(
                                         (txn) => (
-                                            <li key={`orphan-${txn.glTxnId}`}>
+                                            <li
+                                                key={`orphan-${txn.glTxnId}/${txn.sourceLocator}/${txn.sourceEntryId}/${String(txn.postingIndex)}`}
+                                            >
                                                 <span>
                                                     GL txn {txn.glTxnId} (from{' '}
                                                     {txn.sourceLocator}/

@@ -49,6 +49,9 @@ pub struct OrphanedGlTxn {
     pub gl_txn_id: String,
     pub source_locator: String,
     pub source_entry_id: String,
+    /// `Some(idx)` for a per-leg (posting-indexed) source; `None` for a
+    /// whole-entry source. Determines which ref recovery restores.
+    pub posting_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -77,6 +80,9 @@ fn gl_id_from_ref(posted_ref: &str) -> &str {
         .unwrap_or(posted_ref)
 }
 
+/// A GL block's `; source:` entry: `(locator, entry_id, posting_index)`.
+type GlSource = (String, String, Option<usize>);
+
 /// Pure analysis: cross-check account `posted:` refs against the GL transaction
 /// ids present in `gl_content`. Separated from IO so it is deterministically
 /// testable.
@@ -86,13 +92,13 @@ pub fn analyze(gl_content: &str, accounts: &[AccountJournal]) -> ConsistencyRepo
     // GL transaction ids actually present, and the (id, sources) of every
     // refreshmint-generated block (one that carries a `; source:` line).
     let mut gl_ids: HashSet<String> = HashSet::new();
-    let mut sourced_blocks: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    let mut sourced_blocks: Vec<(String, Vec<GlSource>)> = Vec::new();
     for block in &blocks {
         let Some(id) = gl_journal::block_transaction_id(block) else {
             continue;
         };
         gl_ids.insert(id.clone());
-        let sources = post::parse_sources_from_block(block);
+        let sources = post::parse_sources_with_posting_from_block(block);
         if !sources.is_empty() {
             sourced_blocks.push((id, sources));
         }
@@ -127,12 +133,13 @@ pub fn analyze(gl_content: &str, accounts: &[AccountJournal]) -> ConsistencyRepo
 
     // Orphaned GL txns: a sourced block whose source entry doesn't reference it.
     for (gl_id, sources) in &sourced_blocks {
-        for (locator, entry_id) in sources {
-            if !source_entry_references(accounts, locator, entry_id, gl_id) {
+        for (locator, entry_id, posting_index) in sources {
+            if !source_entry_references(accounts, locator, entry_id, *posting_index, gl_id) {
                 report.orphaned_gl_txns.push(OrphanedGlTxn {
                     gl_txn_id: gl_id.clone(),
                     source_locator: locator.clone(),
                     source_entry_id: entry_id.clone(),
+                    posting_index: *posting_index,
                 });
             }
         }
@@ -141,12 +148,15 @@ pub fn analyze(gl_content: &str, accounts: &[AccountJournal]) -> ConsistencyRepo
     report
 }
 
-/// Whether the entry named by `locator`/`entry_id` exists and references `gl_id`
-/// (via its whole-entry or any per-posting `posted:` ref).
+/// Whether the entry named by `locator`/`entry_id` references `gl_id` via the
+/// specific ref the GL source claims: the whole-entry `posted:` ref when
+/// `posting_index` is `None`, or the matching `posted_postings` slot when it is
+/// `Some`.
 fn source_entry_references(
     accounts: &[AccountJournal],
     locator: &str,
     entry_id: &str,
+    posting_index: Option<usize>,
     gl_id: &str,
 ) -> bool {
     let Some((login, label)) = parse_login_locator(locator) else {
@@ -163,17 +173,16 @@ fn source_entry_references(
     let Some(entry) = journal.entries.iter().find(|e| e.id == entry_id) else {
         return false;
     };
-    if entry
-        .posted
-        .as_deref()
-        .is_some_and(|posted| gl_id_from_ref(posted) == gl_id)
-    {
-        return true;
+    match posting_index {
+        None => entry
+            .posted
+            .as_deref()
+            .is_some_and(|posted| gl_id_from_ref(posted) == gl_id),
+        Some(index) => entry
+            .posted_postings
+            .iter()
+            .any(|(idx, posted)| *idx == index && gl_id_from_ref(posted) == gl_id),
     }
-    entry
-        .posted_postings
-        .iter()
-        .any(|(_, posted)| gl_id_from_ref(posted) == gl_id)
 }
 
 /// Parse a `logins/<login>/accounts/<label>` locator into `(login, label)`.
@@ -238,7 +247,8 @@ pub fn check_ledger(ledger_dir: &Path) -> std::io::Result<ConsistencyReport> {
 /// (dangling refs, non-login sources) is returned for the user to handle.
 pub fn recover_ledger(ledger_dir: &Path, lock_owner: &str) -> std::io::Result<ConsistencyReport> {
     let report = check_ledger(ledger_dir)?;
-    let completable: Vec<(String, String, String, String)> = report
+    #[allow(clippy::type_complexity)]
+    let completable: Vec<(String, String, String, Option<usize>, String)> = report
         .orphaned_gl_txns
         .iter()
         .filter_map(|orphan| {
@@ -247,6 +257,7 @@ pub fn recover_ledger(ledger_dir: &Path, lock_owner: &str) -> std::io::Result<Co
                     login,
                     label,
                     orphan.source_entry_id.clone(),
+                    orphan.posting_index,
                     orphan.gl_txn_id.clone(),
                 )
             })
@@ -255,10 +266,16 @@ pub fn recover_ledger(ledger_dir: &Path, lock_owner: &str) -> std::io::Result<Co
     if completable.is_empty() {
         return Ok(report);
     }
-    for (login, label, entry_id, gl_txn_id) in completable {
+    for (login, label, entry_id, posting_index, gl_txn_id) in completable {
         // Best-effort: a failure for one orphan still surfaces in the re-scan.
         if let Err(err) = post::restore_posted_ref(
-            ledger_dir, &login, &label, &entry_id, &gl_txn_id, lock_owner,
+            ledger_dir,
+            &login,
+            &label,
+            &entry_id,
+            posting_index,
+            &gl_txn_id,
+            lock_owner,
         ) {
             eprintln!("[recover] could not restore {login}/{label} {entry_id}: {err}");
         }
@@ -344,9 +361,41 @@ mod tests {
                 gl_txn_id: "txn-1".to_string(),
                 source_locator: "logins/chase/accounts/checking".to_string(),
                 source_entry_id: "entry-1".to_string(),
+                posting_index: None,
             }]
         );
         assert!(report.dangling_refs.is_empty());
+    }
+
+    /// A per-leg (posting-indexed) source whose entry's `posted_postings` slot
+    /// is missing must be detected as an orphan carrying that posting index.
+    #[test]
+    fn detects_per_leg_orphan_with_posting_index() {
+        let gl = "2026-01-01 Coffee  ; id: txn-1\n    ; source: logins/chase/accounts/checking:entry-1:posting:2\n    Expenses:Unknown  5 USD\n    Assets:Chase\n";
+        // entry-1 exists but has no posted_postings entry for posting 2.
+        let accounts = vec![journal("chase", "checking", vec![entry("entry-1", None)])];
+        let report = analyze(gl, &accounts);
+        assert_eq!(
+            report.orphaned_gl_txns,
+            vec![OrphanedGlTxn {
+                gl_txn_id: "txn-1".to_string(),
+                source_locator: "logins/chase/accounts/checking".to_string(),
+                source_entry_id: "entry-1".to_string(),
+                posting_index: Some(2),
+            }]
+        );
+    }
+
+    /// When the entry already references the per-leg source via the matching
+    /// `posted_postings` slot, it is not an orphan.
+    #[test]
+    fn per_leg_source_referenced_by_matching_posting_is_clean() {
+        let gl = "2026-01-01 Coffee  ; id: txn-1\n    ; source: logins/chase/accounts/checking:entry-1:posting:2\n    Expenses:Unknown  5 USD\n    Assets:Chase\n";
+        let mut e = entry("entry-1", None);
+        e.posted_postings
+            .push((2, "general.journal:txn-1".to_string()));
+        let accounts = vec![journal("chase", "checking", vec![e])];
+        assert!(analyze(gl, &accounts).is_clean());
     }
 
     #[test]
@@ -394,6 +443,39 @@ mod tests {
         // The entry now references the GL txn (re-linked, not re-created).
         let entries = account_journal::read_journal_at_path(&path).unwrap();
         assert_eq!(entries[0].posted.as_deref(), Some("general.journal:txn-1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_ledger_completes_per_leg_orphan_into_posted_postings() {
+        // GL-first crash for a per-leg post: the GL block carries a
+        // `:posting:1` source, but the entry's posted_postings slot is missing.
+        let dir = temp_ledger("recover-per-leg");
+        let gl = "2026-01-01 Coffee  ; id: txn-1\n    ; source: logins/chase/accounts/checking:entry-1:posting:1\n    Expenses:Unknown  5 USD\n    Assets:Chase\n";
+        std::fs::write(dir.join("general.journal"), gl).unwrap();
+        let path = account_journal::login_account_journal_path(&dir, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &path,
+            std::slice::from_ref(&entry("entry-1", None)),
+        )
+        .unwrap();
+
+        assert_eq!(check_ledger(&dir).unwrap().orphaned_gl_txns.len(), 1);
+
+        let residual = recover_ledger(&dir, "test").unwrap();
+        assert!(
+            residual.is_clean(),
+            "per-leg orphan should heal: {residual:?}"
+        );
+
+        // The ref is restored into the matching posted_postings slot.
+        let entries = account_journal::read_journal_at_path(&path).unwrap();
+        assert_eq!(
+            entries[0].posted_postings,
+            vec![(1, "general.journal:txn-1".to_string())]
+        );
+        assert!(entries[0].posted.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
