@@ -94,8 +94,30 @@ pub(crate) fn commit_transfer_changes(
     )
 }
 
+/// Commit general.journal plus arbitrary account journals (given as absolute
+/// paths) in one commit. Used by mutations that may touch several journals
+/// (e.g. unposting a transfer clears `posted` on both sides).
+pub(crate) fn commit_files(dir: &Path, abs_paths: &[&Path], message: &str) -> io::Result<()> {
+    let mut rels: Vec<PathBuf> = Vec::with_capacity(abs_paths.len());
+    for path in abs_paths {
+        let rel = path
+            .strip_prefix(dir)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        rels.push(rel.to_path_buf());
+    }
+    let refs: Vec<&Path> = rels.iter().map(PathBuf::as_path).collect();
+    commit_paths(dir, &refs, message)
+}
+
 fn commit_paths(dir: &Path, paths: &[&Path], message: &str) -> io::Result<()> {
-    let repo = git2::Repository::open(dir).map_err(|e| io::Error::other(e.to_string()))?;
+    // A non-git directory has no HEAD to diverge from (tests, edge cases), so
+    // there is nothing to commit. A real commit failure on an existing repo,
+    // however, must propagate so disk and HEAD cannot silently diverge.
+    let repo = match git2::Repository::open(dir) {
+        Ok(repo) => repo,
+        Err(e) if e.code() == git2::ErrorCode::NotFound => return Ok(()),
+        Err(e) => return Err(io::Error::other(e.to_string())),
+    };
     let mut index = repo.index().map_err(|e| io::Error::other(e.to_string()))?;
     for path in paths {
         index

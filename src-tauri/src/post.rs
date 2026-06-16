@@ -225,10 +225,7 @@ pub fn post_login_account_entry(
     }
 
     let commit_msg = format!("post: {entry_id} → {counterpart_account}");
-    if let Err(err) = crate::ledger::commit_post_changes(ledger_dir, login_name, label, &commit_msg)
-    {
-        eprintln!("warning: git commit failed after post: {err}");
-    }
+    crate::ledger::commit_post_changes(ledger_dir, login_name, label, &commit_msg)?;
 
     Ok(gl_txn_id)
 }
@@ -318,10 +315,7 @@ pub fn post_login_account_entry_split(
         .collect::<Vec<_>>()
         .join(" + ");
     let commit_msg = format!("post: {entry_id} → {counterpart_summary}");
-    if let Err(err) = crate::ledger::commit_post_changes(ledger_dir, login_name, label, &commit_msg)
-    {
-        eprintln!("warning: git commit failed after split post: {err}");
-    }
+    crate::ledger::commit_post_changes(ledger_dir, login_name, label, &commit_msg)?;
 
     Ok(gl_txn_id)
 }
@@ -690,6 +684,13 @@ pub fn unpost_login_account_entry(
         return Err(err.into());
     }
 
+    let gl_journal_path = ledger_dir.join("general.journal");
+    let mut committed: Vec<&Path> = vec![gl_journal_path.as_path(), journal_path.as_path()];
+    for side in &other_sides {
+        committed.push(side.path.as_path());
+    }
+    crate::ledger::commit_files(ledger_dir, &committed, &format!("unpost: {entry_id}"))?;
+
     Ok(())
 }
 
@@ -988,16 +989,14 @@ pub fn post_login_account_transfer(
     }
 
     let commit_msg = format!("post transfer: {entry_id1} ↔ {entry_id2}");
-    if let Err(err) = crate::ledger::commit_transfer_changes(
+    crate::ledger::commit_transfer_changes(
         ledger_dir,
         login_name1,
         label1,
         login_name2,
         label2,
         &commit_msg,
-    ) {
-        eprintln!("warning: git commit failed after transfer post: {err}");
-    }
+    )?;
 
     Ok(gl_txn_id)
 }
@@ -1687,6 +1686,8 @@ pub fn sync_gl_transaction(
     };
     let _ = operations::append_gl_operation(ledger_dir, &op);
 
+    crate::ledger::commit_general_journal(ledger_dir, &format!("sync: {gl_txn_id}"))?;
+
     Ok(gl_txn_id)
 }
 
@@ -1770,6 +1771,13 @@ pub fn retire_login_account_entry(
         }
         return Err(err.into());
     }
+
+    crate::ledger::commit_post_changes(
+        ledger_dir,
+        login_name,
+        label,
+        &format!("retire: {entry_id}"),
+    )?;
 
     Ok(())
 }
@@ -1856,9 +1864,7 @@ pub fn recategorize_gl_transactions(
     } else {
         format!("recategorize {} GL postings", edits.len())
     };
-    if let Err(err) = crate::ledger::commit_general_journal(ledger_dir, &commit_msg) {
-        eprintln!("warning: git commit failed after recategorize: {err}");
-    }
+    crate::ledger::commit_general_journal(ledger_dir, &commit_msg)?;
 
     Ok(())
 }
@@ -2096,7 +2102,7 @@ pub fn merge_gl_transfer(
 
     // 9. Commit all changed files.
     let commit_msg = format!("merge transfer: {txn_id_1} + {txn_id_2} → {new_uuid}");
-    let commit_result = match (
+    match (
         locator_to_login_label(&locator1),
         locator_to_login_label(&locator2),
     ) {
@@ -2107,10 +2113,7 @@ pub fn merge_gl_transfer(
             crate::ledger::commit_post_changes(ledger_dir, ln1, lb1, &commit_msg)
         }
         _ => crate::ledger::commit_general_journal(ledger_dir, &commit_msg),
-    };
-    if let Err(err) = commit_result {
-        eprintln!("warning: git commit failed after merge_gl_transfer: {err}");
-    }
+    }?;
 
     Ok(new_uuid)
 }
@@ -2572,6 +2575,78 @@ mod tests {
         assert!(
             after2[0].posted.is_none(),
             "other side should also be unposted"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn head_commit_count(dir: &std::path::Path) -> usize {
+        let repo = git2::Repository::open(dir).unwrap();
+        let mut walk = repo.revwalk().unwrap();
+        walk.push_head().unwrap();
+        walk.count()
+    }
+
+    #[test]
+    fn unpost_sync_retire_commit_to_git() {
+        let root = temp_dir("mutation-commits");
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+
+        // unpost commits.
+        account_journal::write_journal_at_path(
+            &journal_path,
+            &[make_entry("txn-1", "2024-01-15", "Shell", "-21.32")],
+        )
+        .unwrap();
+        post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Gas",
+            None,
+            "test",
+        )
+        .unwrap();
+        let before = head_commit_count(&root);
+        unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, "test").unwrap();
+        assert!(
+            head_commit_count(&root) > before,
+            "unpost must create a git commit"
+        );
+
+        // sync commits.
+        post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Gas",
+            None,
+            "test",
+        )
+        .unwrap();
+        let mut entries = account_journal::read_journal_at_path(&journal_path).unwrap();
+        entries[0].postings[0].amount = Some(account_journal::SimpleAmount {
+            commodity: "USD".to_string(),
+            quantity: "-25.00".to_string(),
+        });
+        account_journal::write_journal_at_path(&journal_path, &entries).unwrap();
+        let before = head_commit_count(&root);
+        sync_gl_transaction(&root, "chase", "checking", "txn-1", "test").unwrap();
+        assert!(
+            head_commit_count(&root) > before,
+            "sync must create a git commit"
+        );
+
+        // retire commits (unpost first so the entry is retirable).
+        unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, "test").unwrap();
+        let before = head_commit_count(&root);
+        retire_login_account_entry(&root, "chase", "checking", "txn-1", "test reason", "test")
+            .unwrap();
+        assert!(
+            head_commit_count(&root) > before,
+            "retire must create a git commit"
         );
 
         let _ = fs::remove_dir_all(&root);
