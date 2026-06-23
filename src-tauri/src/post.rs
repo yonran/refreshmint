@@ -91,13 +91,15 @@ pub fn post_entry(
         entries[entry_idx].posted = Some(gl_ref);
     }
 
-    // GL-first (see post_login_account_entry): the GL block is self-describing,
-    // so a crash before the account write leaves a recoverable orphan.
-    let journal_path = ledger_dir.join("general.journal");
-    append_to_journal(&journal_path, &gl_text)?;
+    // Account-first: this legacy `accounts/<name>` path is NOT covered by
+    // consistency::recover_ledger (it scans only `logins/*`), so GL-first would
+    // just leave an unrecoverable orphan. Keep the original ordering. The login
+    // post paths use GL-first + recovery; see post_login_account_entry.
+    account_journal::write_journal(ledger_dir, account_name, &entries)?;
 
-    if let Err(err) = account_journal::write_journal(ledger_dir, account_name, &entries) {
-        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
+    let journal_path = ledger_dir.join("general.journal");
+    if let Err(err) = append_to_journal(&journal_path, &gl_text) {
+        let _ = account_journal::write_journal(ledger_dir, account_name, &original_entries);
         return Err(err.into());
     }
 
@@ -1154,17 +1156,21 @@ pub fn post_transfer(
     entries1[idx1].posted = Some(gl_ref.clone());
     entries2[idx2].posted = Some(gl_ref);
 
-    // GL-first (see post_login_account_entry): a crash leaves recoverable orphans.
-    let journal_path = ledger_dir.join("general.journal");
-    append_to_journal(&journal_path, &gl_text)?;
-
+    // Account-first: this legacy `accounts/<name>` path is NOT covered by
+    // consistency::recover_ledger, so GL-first would just leave an unrecoverable
+    // orphan. Keep the original ordering (see post_entry / post_login_account_entry).
     if let Err(err) = account_journal::write_journal(ledger_dir, account1, &entries1) {
-        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
         return Err(err.into());
     }
     if let Err(err) = account_journal::write_journal(ledger_dir, account2, &entries2) {
         let _ = account_journal::write_journal(ledger_dir, account1, &original_entries1);
-        let _ = remove_gl_transaction(ledger_dir, &gl_txn_id);
+        return Err(err.into());
+    }
+
+    let journal_path = ledger_dir.join("general.journal");
+    if let Err(err) = append_to_journal(&journal_path, &gl_text) {
+        let _ = account_journal::write_journal(ledger_dir, account1, &original_entries1);
+        let _ = account_journal::write_journal(ledger_dir, account2, &original_entries2);
         return Err(err.into());
     }
 
