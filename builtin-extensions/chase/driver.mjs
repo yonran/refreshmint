@@ -381,12 +381,20 @@ async function handleMfa(context) {
         const all = findInShadow(document).filter(t => t.includes('Get a '));
         return JSON.stringify(all);
     })()`);
-    const methods = JSON.parse(/** @type {string} */ (linksJson));
+    const parsedLinks = /** @type {unknown} */ (
+        JSON.parse(/** @type {string} */ (linksJson))
+    );
+    const methods = Array.isArray(parsedLinks)
+        ? parsedLinks.map((m) => String(m))
+        : [];
 
     if (methods.length > 0) {
         refreshmint.log('Discovered MFA methods: ' + methods.join(', '));
-        const choice = await refreshmint.prompt(
-            'Select MFA method: ' + methods.join(' | '),
+        // Present the discovered delivery methods as a dropdown so the user
+        // picks an exact option instead of typing a substring to match.
+        const choice = await refreshmint.promptChoice(
+            'Select MFA method:',
+            methods,
         );
 
         const target =

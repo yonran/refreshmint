@@ -399,6 +399,9 @@ function normalizeChoice(input, fallbackValue) {
     return raw || fallbackValue;
 }
 
+/**
+ * @returns {Promise<string[]>}
+ */
 async function availableMfaMethods() {
     var methodsJson = /** @type {string} */ (
         await page.evaluate(
@@ -415,7 +418,8 @@ async function availableMfaMethods() {
     })()',
         )
     );
-    return JSON.parse(methodsJson);
+    var parsed = /** @type {unknown} */ (JSON.parse(methodsJson));
+    return Array.isArray(parsed) ? parsed.map((m) => String(m)) : [];
 }
 
 async function selectMfaMethod(methodInput) {
@@ -705,9 +709,15 @@ async function handleMfaChoice() {
     refreshmint.log('Has method selector: ' + hasMethodSelect);
 
     if (hasMethodSelect) {
-        // Step 1: choose a method and request code.
-        var methodChoice = await refreshmint.prompt(
-            'Choose MFA method (text/voice/email):',
+        // Step 1: choose a method and request code. Offer the delivery methods
+        // actually present on the page as a dropdown rather than free text.
+        var methods = await availableMfaMethods();
+        if (!methods.length) {
+            throw new Error('No MFA methods found on page');
+        }
+        var methodChoice = await refreshmint.promptChoice(
+            'Choose MFA delivery method:',
+            methods,
         );
         await selectMfaMethod(methodChoice);
         await page.click('#btnARContinue');
