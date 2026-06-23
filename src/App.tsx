@@ -93,6 +93,10 @@ function App() {
     const [promptRequest, setPromptRequest] = useState<{
         loginName: string;
         message: string;
+        // When non-empty, the prompt is rendered as a dropdown of these choices
+        // (e.g. MFA delivery method) instead of a free-text input. Kept aligned
+        // with `promptChoice`/`request_prompt_answer` on the Rust side.
+        choices: string[] | null;
     } | null>(null);
     const [scrapeLogVersion, setScrapeLogVersion] = useState(0);
     const [loginAccounts, setLoginAccounts] = useState<LoginAccountRef[]>([]);
@@ -177,6 +181,7 @@ function App() {
     const loginNamesRef = useRef<string[]>([]);
     const autoScrapeActiveRef = useRef<string | null>(autoScrapeActive);
     const promptInputRef = useRef<HTMLInputElement | null>(null);
+    const promptSelectRef = useRef<HTMLSelectElement | null>(null);
     const secretPromptResolverRef = useRef<
         ((confirmed: boolean) => void) | null
     >(null);
@@ -361,15 +366,17 @@ function App() {
     // Listen for prompt requests from the Rust scrape driver and surface them
     // as a blocking modal so the user can supply MFA codes etc.
     useEffect(() => {
-        const unlisten = listen<{ login_name: string; message: string }>(
-            'refreshmint://prompt-requested',
-            (event) => {
-                setPromptRequest({
-                    loginName: event.payload.login_name,
-                    message: event.payload.message,
-                });
-            },
-        );
+        const unlisten = listen<{
+            login_name: string;
+            message: string;
+            choices: string[] | null;
+        }>('refreshmint://prompt-requested', (event) => {
+            setPromptRequest({
+                loginName: event.payload.login_name,
+                message: event.payload.message,
+                choices: event.payload.choices ?? null,
+            });
+        });
         return () => {
             unlisten
                 .then((fn) => {
@@ -1571,28 +1578,61 @@ function App() {
                     >
                         <h3>Scraper prompt — {promptRequest.loginName}</h3>
                         <p>{promptRequest.message}</p>
-                        <input
-                            ref={promptInputRef}
-                            type="text"
-                            autoFocus
-                            onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                    const val =
-                                        promptInputRef.current?.value ?? '';
-                                    setPromptRequest(null);
-                                    void invoke('submit_prompt_answer', {
-                                        answer: val,
-                                    });
-                                }
-                            }}
-                        />
+                        {promptRequest.choices &&
+                        promptRequest.choices.length > 0 ? (
+                            // Choice prompt (e.g. MFA delivery method): render a
+                            // dropdown so the user picks a known value rather than
+                            // typing one. Submit reads the select's value.
+                            <select
+                                ref={promptSelectRef}
+                                autoFocus
+                                defaultValue={promptRequest.choices[0]}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                        const val =
+                                            promptSelectRef.current?.value ??
+                                            promptRequest.choices?.[0] ??
+                                            '';
+                                        setPromptRequest(null);
+                                        void invoke('submit_prompt_answer', {
+                                            answer: val,
+                                        });
+                                    }
+                                }}
+                            >
+                                {promptRequest.choices.map((choice) => (
+                                    <option key={choice} value={choice}>
+                                        {choice}
+                                    </option>
+                                ))}
+                            </select>
+                        ) : (
+                            <input
+                                ref={promptInputRef}
+                                type="text"
+                                autoFocus
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                        const val =
+                                            promptInputRef.current?.value ?? '';
+                                        setPromptRequest(null);
+                                        void invoke('submit_prompt_answer', {
+                                            answer: val,
+                                        });
+                                    }
+                                }}
+                            />
+                        )}
                         <div className="txn-actions">
                             <button
                                 type="button"
                                 className="primary-button"
                                 onClick={() => {
-                                    const val =
-                                        promptInputRef.current?.value ?? '';
+                                    const val = promptRequest.choices
+                                        ? (promptSelectRef.current?.value ??
+                                          promptRequest.choices[0] ??
+                                          '')
+                                        : (promptInputRef.current?.value ?? '');
                                     setPromptRequest(null);
                                     void invoke('submit_prompt_answer', {
                                         answer: val,

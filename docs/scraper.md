@@ -449,15 +449,16 @@ async function logSnapshot(tag, track = 'state-loop') {
 
 ### `refreshmint`
 
-| Method                                                                | Description                                                                  |
-| --------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `await refreshmint.saveResource(filename, data, options?)`            | Write bytes to extension output dir and stage for account-doc finalization.  |
-| `await refreshmint.saveDownloadedResource(path, filename?, options?)` | Read a completed local download file and stage it as a resource.             |
-| `await refreshmint.listAccountDocuments()`                            | Return JSON list of existing account documents (with optional sidecar info). |
-| `await refreshmint.setSessionMetadata(metadata)`                      | Set optional sidecar metadata (`dateRangeStart`, `dateRangeEnd`).            |
-| `refreshmint.reportValue(key, value)`                                 | Print key/value status line.                                                 |
-| `refreshmint.log(message)`                                            | Log message to stderr.                                                       |
-| `refreshmint.prompt(message)`                                         | Ask for a value. CLI runs require `--prompt "MESSAGE=VALUE"`.                |
+| Method                                                                | Description                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `await refreshmint.saveResource(filename, data, options?)`            | Write bytes to extension output dir and stage for account-doc finalization.                                                                                                                                                               |
+| `await refreshmint.saveDownloadedResource(path, filename?, options?)` | Read a completed local download file and stage it as a resource.                                                                                                                                                                          |
+| `await refreshmint.listAccountDocuments()`                            | Return JSON list of existing account documents (with optional sidecar info).                                                                                                                                                              |
+| `await refreshmint.setSessionMetadata(metadata)`                      | Set optional sidecar metadata (`dateRangeStart`, `dateRangeEnd`).                                                                                                                                                                         |
+| `refreshmint.reportValue(key, value)`                                 | Print key/value status line.                                                                                                                                                                                                              |
+| `refreshmint.log(message)`                                            | Log message to stderr.                                                                                                                                                                                                                    |
+| `refreshmint.prompt(message)`                                         | Ask for a free-text value. CLI runs require `--prompt "MESSAGE=VALUE"`.                                                                                                                                                                   |
+| `await refreshmint.promptChoice(message, choices)`                    | Ask the user to pick one of `choices` (string array). The GUI renders a dropdown; use for MFA delivery-method selection (e.g. `['text', 'voice']`). Resolves to the selected choice. CLI runs honor `--prompt "MESSAGE=VALUE"` overrides. |
 
 For `saveResource`, `data` should be bytes (`number[]` is supported). `options` may include `coverageEndDate`, `originalUrl`, and `mimeType`.
 

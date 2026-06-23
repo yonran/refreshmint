@@ -656,8 +656,8 @@ async fn run_scrape_for_login(
         let prompt_ui_handler = {
             let app_handle = app_handle.clone();
             let login_name = login_name.clone();
-            std::sync::Arc::new(move |message: String| {
-                request_prompt_answer(&app_handle, login_name.clone(), message)
+            std::sync::Arc::new(move |message: String, choices: Option<Vec<String>>| {
+                request_prompt_answer(&app_handle, login_name.clone(), message, choices)
             })
         };
 
@@ -2275,6 +2275,10 @@ fn request_prompt_answer(
     app_handle: &tauri::AppHandle,
     login_name: String,
     message: String,
+    // When `Some`, the frontend renders a dropdown of these choices instead of a
+    // free-text input. Keep this aligned with `promptChoice` in `scrape/js_api.rs`
+    // and the listener payload in `src/App.tsx`.
+    choices: Option<Vec<String>>,
 ) -> Result<Option<String>, String> {
     let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
     {
@@ -2287,6 +2291,7 @@ fn request_prompt_answer(
     struct PromptRequestedPayload {
         login_name: String,
         message: String,
+        choices: Option<Vec<String>>,
     }
 
     app_handle
@@ -2295,6 +2300,7 @@ fn request_prompt_answer(
             PromptRequestedPayload {
                 login_name,
                 message,
+                choices,
             },
         )
         .map_err(|e| format!("prompt emit failed: {e}"))?;

@@ -7284,8 +7284,13 @@ pub struct StagedResource {
 }
 
 /// Shared state backing the `refreshmint` JS namespace.
-pub type PromptUiHandler =
-    Arc<dyn Fn(String) -> Result<Option<String>, String> + Send + Sync + 'static>;
+///
+/// The handler receives the prompt message and, for `promptChoice`, the list of
+/// selectable choices (`None` for free-text `prompt`). It returns `Some(answer)`
+/// when the user submits and `None` when the user cancels.
+pub type PromptUiHandler = Arc<
+    dyn Fn(String, Option<Vec<String>>) -> Result<Option<String>, String> + Send + Sync + 'static,
+>;
 
 pub struct RefreshmintInner {
     pub output_dir: PathBuf,
@@ -7329,6 +7334,63 @@ unsafe impl<'js> JsLifetime<'js> for RefreshmintApi {
 impl RefreshmintApi {
     pub fn new(inner: Arc<Mutex<RefreshmintInner>>) -> Self {
         Self { inner }
+    }
+
+    /// Shared backend for `prompt` (free-text, `choices == None`) and
+    /// `promptChoice` (`choices == Some(..)`). Not annotated with
+    /// `#[rquickjs::methods]` so it is not exposed to the JS sandbox.
+    fn prompt_with_choices(
+        &self,
+        message: String,
+        choices: Option<Vec<String>>,
+    ) -> JsResult<String> {
+        let (override_value, require_override, prompt_ui_handler) = {
+            let inner = self
+                .inner
+                .try_lock()
+                .map_err(|_| js_err("prompt unavailable: prompt state is busy".to_string()))?;
+            (
+                inner.prompt_overrides.get(&message).cloned().or_else(|| {
+                    let trimmed = message.trim();
+                    if trimmed == message {
+                        None
+                    } else {
+                        inner.prompt_overrides.get(trimmed).cloned()
+                    }
+                }),
+                inner.prompt_requires_override,
+                inner.prompt_ui_handler.clone(),
+            )
+        };
+
+        if let Some(value) = override_value {
+            return Ok(value);
+        }
+
+        if require_override {
+            return Err(js_err(missing_prompt_override_error(&message)));
+        }
+
+        // UI context: ask the host app to collect a response. `prompt()`
+        // runs on a spawn_blocking thread so a blocking callback is safe.
+        if let Some(prompt_ui_handler) = prompt_ui_handler {
+            let response = prompt_ui_handler(message, choices).map_err(js_err)?;
+            return resolve_prompt_response(response);
+        }
+
+        // CLI context: read from stdin. List the choices so the operator knows
+        // the valid answers for a choice prompt.
+        if let Some(choices) = &choices {
+            eprintln!("{message}");
+            eprint!("  choices: {}\n> ", choices.join(", "));
+        } else {
+            eprint!("{message} ");
+        }
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| js_err(format!("prompt read failed: {e}")))?;
+        Ok(line.trim_end().to_string())
     }
 }
 
@@ -7932,53 +7994,30 @@ impl RefreshmintApi {
         Ok(())
     }
 
-    /// Prompt the user: use CLI-provided override when available.
+    /// Prompt the user for a free-text value: use CLI-provided override when
+    /// available.
     ///
     /// In the Tauri UI context (`prompt_ui_handler` is set), asks the host app
     /// for a response and blocks until it returns one. In CLI context, reads
     /// from stdin as before.
     pub fn prompt(&self, message: String) -> JsResult<String> {
-        let (override_value, require_override, prompt_ui_handler) = {
-            let inner = self
-                .inner
-                .try_lock()
-                .map_err(|_| js_err("prompt unavailable: prompt state is busy".to_string()))?;
-            (
-                inner.prompt_overrides.get(&message).cloned().or_else(|| {
-                    let trimmed = message.trim();
-                    if trimmed == message {
-                        None
-                    } else {
-                        inner.prompt_overrides.get(trimmed).cloned()
-                    }
-                }),
-                inner.prompt_requires_override,
-                inner.prompt_ui_handler.clone(),
-            )
-        };
+        self.prompt_with_choices(message, None)
+    }
 
-        if let Some(value) = override_value {
-            return Ok(value);
+    /// Prompt the user to pick one of `choices` (rendered as a dropdown in the
+    /// Tauri UI). Use this for MFA delivery-method selection (e.g. text/voice)
+    /// instead of a free-text `prompt`.
+    ///
+    /// Resolution order matches `prompt`: a CLI `--prompt` override wins, then
+    /// the UI handler, then stdin. The returned value is the selected choice.
+    #[qjs(rename = "promptChoice")]
+    pub fn prompt_choice(&self, message: String, choices: Vec<String>) -> JsResult<String> {
+        if choices.is_empty() {
+            return Err(js_err(
+                "refreshmint.promptChoice requires a non-empty choices array".to_string(),
+            ));
         }
-
-        if require_override {
-            return Err(js_err(missing_prompt_override_error(&message)));
-        }
-
-        // UI context: ask the host app to collect a response. `prompt()`
-        // runs on a spawn_blocking thread so a blocking callback is safe.
-        if let Some(prompt_ui_handler) = prompt_ui_handler {
-            let response = prompt_ui_handler(message).map_err(js_err)?;
-            return resolve_prompt_response(response);
-        }
-
-        // CLI context: read from stdin.
-        eprint!("{message} ");
-        let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .map_err(|e| js_err(format!("prompt read failed: {e}")))?;
-        Ok(line.trim_end().to_string())
+        self.prompt_with_choices(message, Some(choices))
     }
 
     /// Return CLI `--option` key/value pairs as a native JS object.
@@ -8973,6 +9012,70 @@ mod tests {
             .prompt("Enter the texted MFA code: ".to_string())
             .unwrap_or_else(|err| panic!("prompt unexpectedly failed: {err}"));
         assert_eq!(value, "245221");
+    }
+
+    #[test]
+    fn prompt_choice_returns_override_when_present() {
+        let mut overrides = PromptOverrides::new();
+        overrides.insert(
+            "Choose MFA delivery method:".to_string(),
+            "voice".to_string(),
+        );
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(test_refreshmint_inner(overrides))));
+
+        let value = api
+            .prompt_choice(
+                "Choose MFA delivery method:".to_string(),
+                vec!["text".to_string(), "voice".to_string()],
+            )
+            .unwrap_or_else(|err| panic!("promptChoice unexpectedly failed: {err}"));
+        assert_eq!(value, "voice");
+    }
+
+    #[test]
+    fn prompt_choice_rejects_empty_choices() {
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(test_refreshmint_inner(
+            PromptOverrides::new(),
+        ))));
+
+        let err = match api.prompt_choice("Pick one:".to_string(), Vec::new()) {
+            Ok(value) => panic!("expected empty-choices error, got value: {value}"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("non-empty choices"));
+    }
+
+    #[test]
+    fn prompt_choice_forwards_choices_to_ui_handler() {
+        // The handler stands in for the Tauri frontend: it records the choices
+        // it was asked to render and echoes the first one as the selection.
+        let captured: Arc<std::sync::Mutex<Option<Vec<String>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let captured_for_handler = Arc::clone(&captured);
+        let handler: PromptUiHandler = Arc::new(move |_message, choices| {
+            *captured_for_handler
+                .lock()
+                .unwrap_or_else(|err| panic!("capture lock poisoned: {err}")) = choices.clone();
+            Ok(choices.and_then(|c| c.into_iter().next()))
+        });
+        let mut inner = test_refreshmint_inner(PromptOverrides::new());
+        inner.prompt_requires_override = false;
+        inner.prompt_ui_handler = Some(handler);
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(inner)));
+
+        let value = api
+            .prompt_choice(
+                "Choose MFA delivery method:".to_string(),
+                vec!["text".to_string(), "voice".to_string()],
+            )
+            .unwrap_or_else(|err| panic!("promptChoice unexpectedly failed: {err}"));
+        assert_eq!(value, "text");
+
+        let seen = captured
+            .lock()
+            .unwrap_or_else(|err| panic!("capture lock poisoned: {err}"))
+            .clone();
+        assert_eq!(seen, Some(vec!["text".to_string(), "voice".to_string()]));
     }
 
     #[test]

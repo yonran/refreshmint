@@ -314,6 +314,13 @@ interface RefreshmintApi {
     reportValue(key: string, value: string): void;
     log(message: string): void;
     prompt(message: string): Promise<string>;
+    /**
+     * Prompt the user to pick one of `choices`, rendered as a dropdown in the
+     * Tauri UI (use for MFA delivery-method selection, e.g. ['text', 'voice']).
+     * Resolves to the selected choice. CLI `--prompt "message=value"` overrides
+     * still apply.
+     */
+    promptChoice(message: string, choices: string[]): Promise<string>;
     /** Returns CLI --option key/value pairs as a JS object. Returns {} when no options are supplied. */
     getOptions(): Record<string, unknown>;
 }
