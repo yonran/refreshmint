@@ -698,6 +698,16 @@ async fn run_scrape_for_login(
         eprintln!("warning: failed to write scrape log: {e}");
     }
 
+    // Mirror scrape failures into the central app log (refreshmint.log) for the
+    // same visibility reason as the extract path above; otherwise a crashing
+    // scraper is only recorded in the per-login scrape-log.jsonl.
+    if let Err(err) = &result {
+        log::error!(
+            "scrape failed for login '{login_name}' (source: {}): {err}",
+            entry.source
+        );
+    }
+
     result
 }
 
@@ -1011,6 +1021,14 @@ fn run_login_account_extraction(
 
         Ok(())
     })();
+
+    // Mirror failures into the central app log (refreshmint.log) so they are
+    // visible alongside other logs, not just in the per-account extract-log.jsonl.
+    // Without this, a recurring ETL failure (e.g. a label with no glAccount whose
+    // extractor emits implicit tpostings) is invisible to anyone reading the log.
+    if let Err(err) = &outcome {
+        log::error!("auto-ETL extract failed for {login_name}/{label}: {err}");
+    }
 
     // Write extract log regardless of success/failure so console logs and errors
     // are always persisted for later review.
