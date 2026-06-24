@@ -794,7 +794,21 @@ fn read_attachment_data_url(ledger: String, filename: String) -> Result<String, 
 }
 
 #[tauri::command]
-fn run_extraction(
+async fn run_extraction(
+    ledger: String,
+    account_name: String,
+    document_names: Vec<String>,
+) -> Result<usize, String> {
+    // Same main-thread/UI-freeze concern as run_login_account_extraction: run the
+    // CPU-heavy extraction on a blocking worker so the webview stays responsive.
+    tokio::task::spawn_blocking(move || {
+        run_extraction_blocking(ledger, account_name, document_names)
+    })
+    .await
+    .map_err(|err| format!("extraction task panicked: {err}"))?
+}
+
+fn run_extraction_blocking(
     ledger: String,
     account_name: String,
     document_names: Vec<String>,
@@ -875,7 +889,25 @@ struct ExtractionCommandResult {
 }
 
 #[tauri::command]
-fn run_login_account_extraction(
+async fn run_login_account_extraction(
+    ledger: String,
+    login_name: String,
+    label: String,
+    document_names: Vec<String>,
+) -> Result<ExtractionCommandResult, String> {
+    // Extraction is CPU-heavy (PDF text extraction + dedup). A synchronous
+    // #[tauri::command] runs on the main thread in Tauri, so the whole auto-ETL
+    // pass froze the UI (beachball) and the per-label progress status never got a
+    // chance to render. Run the work on a blocking worker thread (as run_scrape
+    // already does) so the webview stays responsive and progress can paint.
+    tokio::task::spawn_blocking(move || {
+        run_login_account_extraction_blocking(ledger, login_name, label, document_names)
+    })
+    .await
+    .map_err(|err| format!("extraction task panicked: {err}"))?
+}
+
+fn run_login_account_extraction_blocking(
     ledger: String,
     login_name: String,
     label: String,
