@@ -1,3 +1,4 @@
+use crate::scrape::diag::diag_eprintln;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -30,7 +31,7 @@ impl Default for SandboxRunOptions {
 
 fn maybe_diag(options: SandboxRunOptions, message: &str) {
     if options.emit_diagnostics {
-        eprintln!("{message}");
+        diag_eprintln!("{message}");
     }
 }
 
@@ -237,7 +238,7 @@ async fn run_module_path_internal(
                         Ok(()) => "unknown JavaScript exception".to_string(),
                     };
                     if options.emit_diagnostics {
-                        eprintln!("[sandbox] Promise rejected: {msg}");
+                        diag_eprintln!("[sandbox] Promise rejected: {msg}");
                     }
                     Err(msg)
                 }
@@ -362,7 +363,7 @@ async fn run_script_source_internal(
                         Ok(()) => "unknown JavaScript exception".to_string(),
                     };
                     if options.emit_diagnostics {
-                        eprintln!("[sandbox] Promise rejected: {msg}");
+                        diag_eprintln!("[sandbox] Promise rejected: {msg}");
                     }
                     Err(msg)
                 }
@@ -396,9 +397,9 @@ async fn drive_runtime(runtime: &AsyncRuntime, options: &SandboxRunOptions) {
                             if let Some(exc) =
                                 err.clone().into_object().and_then(Exception::from_object)
                             {
-                                eprintln!("[sandbox] error executing job: {exc}");
+                                diag_eprintln!("[sandbox] error executing job: {exc}");
                             } else {
-                                eprintln!("[sandbox] error executing job: {err:?}");
+                                diag_eprintln!("[sandbox] error executing job: {err:?}");
                             }
                         })
                         .await;

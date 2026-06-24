@@ -1,5 +1,6 @@
 pub mod browser;
 pub mod debug;
+pub mod diag;
 pub mod js_api;
 pub mod locator;
 pub mod profile;

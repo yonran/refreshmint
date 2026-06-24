@@ -1,3 +1,4 @@
+use crate::scrape::diag::diag_eprintln;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -1133,7 +1134,7 @@ impl Locator {
                     if err.contains("Strict mode violation") {
                         return Err(js_err(format!("wait_for({state}) failed: {err}")));
                     }
-                    eprintln!("ensure_element_state error: {err}");
+                    diag_eprintln!("ensure_element_state error: {err}");
                 }
             }
 

@@ -1,3 +1,4 @@
+use crate::scrape::diag::{diag_eprint, diag_eprintln, diag_println};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -4302,7 +4303,7 @@ impl PageApi {
                         &err_text,
                     )));
                 }
-                eprintln!(
+                diag_eprintln!(
                     "tab sync failed to fetch targets: {err}; falling back to current page handle"
                 );
                 return Ok(vec![OpenTab {
@@ -4315,7 +4316,7 @@ impl PageApi {
                 }]);
             }
             Err(_) => {
-                eprintln!(
+                diag_eprintln!(
                     "tab sync timed out fetching targets after {}ms; falling back to current page handle",
                     TAB_QUERY_TIMEOUT_MS
                 );
@@ -4349,7 +4350,7 @@ impl PageApi {
                         &err_text,
                     )));
                 }
-                eprintln!(
+                diag_eprintln!(
                     "tab sync failed to list pages: {err}; falling back to current page handle"
                 );
                 return Ok(vec![OpenTab {
@@ -4362,7 +4363,7 @@ impl PageApi {
                 }]);
             }
             Err(_) => {
-                eprintln!(
+                diag_eprintln!(
                     "tab sync timed out listing pages after {}ms; falling back to current page handle",
                     TAB_QUERY_TIMEOUT_MS
                 );
@@ -7381,10 +7382,10 @@ impl RefreshmintApi {
         // CLI context: read from stdin. List the choices so the operator knows
         // the valid answers for a choice prompt.
         if let Some(choices) = &choices {
-            eprintln!("{message}");
-            eprint!("  choices: {}\n> ", choices.join(", "));
+            diag_eprintln!("{message}");
+            diag_eprint!("  choices: {}\n> ", choices.join(", "));
         } else {
-            eprint!("{message} ");
+            diag_eprint!("{message} ");
         }
         let mut line = String::new();
         std::io::stdin()
@@ -7981,7 +7982,7 @@ impl RefreshmintApi {
     pub fn js_report_value(&self, key: String, value: String) -> JsResult<()> {
         let message = format!("{key}: {value}");
         if !self.emit_debug_output(DebugOutputStream::Stdout, message.clone()) {
-            println!("{message}");
+            diag_println!("{message}");
         }
         Ok(())
     }
@@ -7989,7 +7990,7 @@ impl RefreshmintApi {
     /// Log a message to stderr.
     pub fn log(&self, message: String) -> JsResult<()> {
         if !self.emit_debug_output(DebugOutputStream::Stderr, message.clone()) {
-            eprintln!("{message}");
+            diag_eprintln!("{message}");
         }
         Ok(())
     }

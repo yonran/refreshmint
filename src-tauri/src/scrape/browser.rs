@@ -1,3 +1,4 @@
+use crate::scrape::diag::diag_eprintln;
 use std::collections::HashSet;
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -139,12 +140,12 @@ fn reclaim_orphaned_profile_lock(profile_dir: &Path) {
 
     if process_is_alive(pid) {
         if !process_uses_profile(pid, profile_dir) {
-            eprintln!(
+            diag_eprintln!(
                 "[browser] SingletonLock held by live pid {pid} that is not using this profile; leaving it"
             );
             return;
         }
-        eprintln!("[browser] Reclaiming profile from orphaned browser pid {pid}");
+        diag_eprintln!("[browser] Reclaiming profile from orphaned browser pid {pid}");
         // Safety: see kill_active_browsers; signalling a confirmed orphan.
         unsafe {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
@@ -152,7 +153,7 @@ fn reclaim_orphaned_profile_lock(profile_dir: &Path) {
         // Give the OS a moment to tear the process down and release the lock.
         std::thread::sleep(std::time::Duration::from_millis(200));
     } else {
-        eprintln!("[browser] Removing stale SingletonLock (owner pid {pid} is gone)");
+        diag_eprintln!("[browser] Removing stale SingletonLock (owner pid {pid} is gone)");
     }
     let _ = std::fs::remove_file(&lock_path);
 }
@@ -166,13 +167,13 @@ pub fn find_chrome_binary() -> Result<PathBuf, Box<dyn Error>> {
         if let Some(path) = std::env::var_os(env_name) {
             let candidate = PathBuf::from(path);
             if candidate.exists() {
-                eprintln!(
+                diag_eprintln!(
                     "[browser] Using browser from ${env_name}: {}",
                     candidate.display()
                 );
                 return Ok(candidate);
             }
-            eprintln!(
+            diag_eprintln!(
                 "[browser] Ignoring browser path from ${env_name} because it does not exist: {}",
                 candidate.display()
             );
@@ -181,42 +182,42 @@ pub fn find_chrome_binary() -> Result<PathBuf, Box<dyn Error>> {
 
     // Prefer PATH before hard-coded locations so workflow-provided shims win.
     if let Ok(path) = which::which("google-chrome") {
-        eprintln!(
+        diag_eprintln!(
             "[browser] Using browser from PATH lookup google-chrome: {}",
             path.display()
         );
         return Ok(path);
     }
     if let Ok(path) = which::which("google-chrome-stable") {
-        eprintln!(
+        diag_eprintln!(
             "[browser] Using browser from PATH lookup google-chrome-stable: {}",
             path.display()
         );
         return Ok(path);
     }
     if let Ok(path) = which::which("google-chrome-beta") {
-        eprintln!(
+        diag_eprintln!(
             "[browser] Using browser from PATH lookup google-chrome-beta: {}",
             path.display()
         );
         return Ok(path);
     }
     if let Ok(path) = which::which("chromium") {
-        eprintln!(
+        diag_eprintln!(
             "[browser] Using browser from PATH lookup chromium: {}",
             path.display()
         );
         return Ok(path);
     }
     if let Ok(path) = which::which("chromium-browser") {
-        eprintln!(
+        diag_eprintln!(
             "[browser] Using browser from PATH lookup chromium-browser: {}",
             path.display()
         );
         return Ok(path);
     }
     if let Ok(path) = which::which("microsoft-edge") {
-        eprintln!(
+        diag_eprintln!(
             "[browser] Using browser from PATH lookup microsoft-edge: {}",
             path.display()
         );
@@ -226,7 +227,7 @@ pub fn find_chrome_binary() -> Result<PathBuf, Box<dyn Error>> {
     // Fallback to well-known installation paths.
     for candidate in chrome_candidates() {
         if candidate.exists() {
-            eprintln!(
+            diag_eprintln!(
                 "[browser] Using browser from well-known path: {}",
                 candidate.display()
             );
@@ -296,20 +297,20 @@ pub async fn launch_browser(
     let force_headless = headless || std::env::var_os("REFRESHMINT_BROWSER_HEADLESS").is_some();
     let is_linux_ci = cfg!(target_os = "linux") && std::env::var_os("CI").is_some();
     let use_headless = force_headless || is_linux_ci;
-    eprintln!(
+    diag_eprintln!(
         "[browser] Launch config: chrome={}, profile={}, linux_ci={is_linux_ci}, force_headless={force_headless}",
         chrome_path.display(),
         profile_dir.display()
     );
     if use_headless {
-        eprintln!("[browser] Launch mode: headless=old");
+        diag_eprintln!("[browser] Launch mode: headless=old");
         builder = builder.headless_mode(HeadlessMode::True);
         if cfg!(target_os = "linux") {
-            eprintln!("[browser] Launch flags: --no-sandbox --disable-dev-shm-usage");
+            diag_eprintln!("[browser] Launch flags: --no-sandbox --disable-dev-shm-usage");
             builder = builder.no_sandbox().arg("--disable-dev-shm-usage");
         }
     } else {
-        eprintln!("[browser] Launch mode: headed");
+        diag_eprintln!("[browser] Launch mode: headed");
         builder = builder.with_head();
     }
 
@@ -327,17 +328,19 @@ pub async fn launch_browser(
     let pid_guard = match pid {
         Some(pid) => {
             register_browser_pid(pid);
-            eprintln!("[browser] Registered browser pid {pid} for shutdown cleanup");
+            diag_eprintln!("[browser] Registered browser pid {pid} for shutdown cleanup");
             BrowserPidGuard { pid: Some(pid) }
         }
         None => {
-            eprintln!("[browser] Could not determine browser pid; shutdown cleanup unavailable");
+            diag_eprintln!(
+                "[browser] Could not determine browser pid; shutdown cleanup unavailable"
+            );
             BrowserPidGuard { pid: None }
         }
     };
 
     let handle = tokio::spawn(async move {
-        eprintln!("[browser] Handler loop starting...");
+        diag_eprintln!("[browser] Handler loop starting...");
         while let Some(result) = handler.next().await {
             if let Err(err) = result {
                 match &err {
@@ -348,18 +351,18 @@ pub async fn launch_browser(
                     | CdpError::LaunchExit(_, _)
                     | CdpError::LaunchTimeout(_)
                     | CdpError::LaunchIo(_, _) => {
-                        eprintln!("[browser] Fatal handler error: {err}");
+                        diag_eprintln!("[browser] Fatal handler error: {err}");
                         return;
                     }
                     // Non-fatal: a single malformed/unexpected CDP message.
                     // Log and keep processing so the session stays alive.
                     _ => {
-                        eprintln!("[browser] Non-fatal handler error (continuing): {err}");
+                        diag_eprintln!("[browser] Non-fatal handler error (continuing): {err}");
                     }
                 }
             }
         }
-        eprintln!("[browser] Handler loop ended.");
+        diag_eprintln!("[browser] Handler loop ended.");
     });
 
     Ok((browser, handle, pid_guard))
@@ -374,14 +377,14 @@ pub async fn open_start_page(
 ) -> Result<chromiumoxide::Page, Box<dyn Error + Send + Sync>> {
     let create_timeout = std::time::Duration::from_secs(30);
     for attempt in 1..=2 {
-        eprintln!("[browser] Creating initial about:blank page (attempt {attempt}/2)");
+        diag_eprintln!("[browser] Creating initial about:blank page (attempt {attempt}/2)");
         match tokio::time::timeout(create_timeout, browser.new_page("about:blank")).await {
             Ok(Ok(page)) => {
-                eprintln!("[browser] Created initial about:blank page on attempt {attempt}");
+                diag_eprintln!("[browser] Created initial about:blank page on attempt {attempt}");
                 return Ok(page);
             }
             Ok(Err(err)) => {
-                eprintln!(
+                diag_eprintln!(
                     "[browser] Failed to create initial about:blank page on attempt {attempt}: {err}"
                 );
                 if attempt == 2 {
@@ -389,7 +392,7 @@ pub async fn open_start_page(
                 }
             }
             Err(_) => {
-                eprintln!(
+                diag_eprintln!(
                     "[browser] Timed out creating about:blank after {}s on attempt {attempt}",
                     create_timeout.as_secs()
                 );
