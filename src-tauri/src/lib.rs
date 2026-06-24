@@ -224,6 +224,13 @@ pub fn run_with_context(
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
+                        // lopdf emits a multi-line `warn!` for every font whose
+                        // /Encoding is an indirect reference (which it cannot parse
+                        // and harmlessly falls back to standard encoding for). Parsing
+                        // a single bank-statement PDF can spew dozens of these, burying
+                        // real app logs. Keep lopdf errors but drop its warn/info noise.
+                        // See lopdf 0.35 src/object.rs `get_font_encoding`.
+                        .level_for("lopdf", log::LevelFilter::Error)
                         .build(),
                 )?;
             }
