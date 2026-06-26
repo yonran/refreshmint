@@ -2018,6 +2018,26 @@ async function handleAccountActivity(context) {
         `  Attachment summary (${label}): candidates=${activityStats.attachmentCandidates}, attempted=${activityStats.attachmentAttempted}, downloaded=${activityStats.attachmentDownloaded}, existing=${activityStats.attachmentSkippedExisting}, failed=${activityStats.attachmentFailed}, monthsChecked=${activityStats.attachmentMonthsChecked}, monthsSkippedCheckpoint=${activityStats.attachmentMonthsSkippedCheckpoint}`,
     );
 
+    // Surface a real capture failure instead of swallowing it. The per-range
+    // try/catch above only increments counters, so before this an account could
+    // fail every download/date-range switch yet the scrape still returned
+    // success — silently capturing nothing for weeks (the root cause of the
+    // provident gap after 2026-05-10). Fail only when we captured *nothing*
+    // because of genuine errors; legitimate "already exists"/"no rows" skips and
+    // partial success (one overlapping range downloaded) are fine. See
+    // docs/scraper.md "Fail Fast".
+    if (
+        activityStats.downloaded === 0 &&
+        (activityStats.downloadFailed > 0 || activityStats.setRangeFailed > 0)
+    ) {
+        throw new Error(
+            `activity capture failed for ${label}: captured 0 ranges with ` +
+                `downloadFailed=${activityStats.downloadFailed}, ` +
+                `setRangeFailed=${activityStats.setRangeFailed}, ` +
+                `attempted=${activityStats.attempted}`,
+        );
+    }
+
     context.completedAccounts.add(context.pendingAccounts.shift() ?? '');
     refreshmint.log('Navigating back to Account Summary...');
     await page.goto(SUMMARY_URL);
