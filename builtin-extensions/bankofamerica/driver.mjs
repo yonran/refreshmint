@@ -148,6 +148,14 @@ async function handleHomepage() {
         );
     }
 
+    // The homepage is often still settling when we arrive (the preceding
+    // waitForURL frequently times out mid-redirect). `page.evaluate` has NO
+    // internal timeout, so if it races a navigation/context swap it HANGS
+    // forever — the cause of this scraper silently stalling on the homepage
+    // (stale since 2026-02-07). Wait (bounded, best-effort) for the DOM to be
+    // ready before evaluating so the evaluate runs against a stable context.
+    await page.waitForLoadState('domcontentloaded', 15000).catch(() => {});
+
     // Dismiss cookie banner if present
     try {
         await page.evaluate(
