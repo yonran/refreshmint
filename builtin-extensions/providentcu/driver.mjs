@@ -2659,4 +2659,8 @@ async function run() {
     }
 }
 
-run().catch(() => {});
+// Fail loud: `run()` logs the error + a failure snapshot and re-throws, so
+// awaiting it (instead of swallowing with `.catch(() => {})`) lets the rejection
+// reach the sandbox and records the scrape as failed. Without this, every error
+// — including the activity-capture throw above — was silently reported as success.
+await run();

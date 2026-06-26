@@ -1400,9 +1400,7 @@ async function main() {
     }
 }
 
-main().catch((err) => {
-    refreshmint.log(`Fatal error: ${err.message}`);
-    if (err.stack) {
-        refreshmint.log(err.stack);
-    }
-});
+// Fail loud: await main() so any thrown error rejects the top-level promise and
+// the scrape is recorded as failed. A top-level `.catch` that only logs resolves
+// the promise, making every scrape report success even when nothing was captured.
+await main();

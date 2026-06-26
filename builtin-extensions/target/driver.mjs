@@ -2,8 +2,6 @@
  * target scraper for Refreshmint.
  */
 
-import { inspect } from 'refreshmint:util';
-
 const TARGET_ORIGIN = 'https://www.target.com/';
 const TARGET_LOGIN_URL =
     'https://www.target.com/login?client_id=ecom-web-1.0.0&ui_namespace=ui-default&back_button_action=browser&keep_me_signed_in=true&kmsi_default=false&actions=create_session_request_username&signin_amr=true';
@@ -957,10 +955,7 @@ async function main() {
     }
 }
 
-main().catch((err) => {
-    refreshmint.log(`Fatal error: ${err.message}`);
-    refreshmint.log(inspect(err));
-    if (err.stack) {
-        refreshmint.log(err.stack);
-    }
-});
+// Fail loud: await main() so any thrown error rejects the top-level promise and
+// the scrape is recorded as failed. A top-level `.catch` that only logs resolves
+// the promise, making every scrape report success even when nothing was captured.
+await main();

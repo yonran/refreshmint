@@ -876,6 +876,7 @@ async function handleAccountActivity() {
 
     var csvDownloaded = 0;
     var csvSkipped = 0;
+    var csvFailed = 0;
 
     for (var i = 0; i < periods.length; i++) {
         if (i > 0) {
@@ -957,6 +958,7 @@ async function handleAccountActivity() {
         var bytes = JSON.parse(bytesJson);
         if (!bytes || bytes.length < 10) {
             refreshmint.log('WARNING: Empty response for ' + period.text);
+            csvFailed += 1;
             continue;
         }
         // Decode first 200 chars for logging (ASCII-safe)
@@ -999,6 +1001,20 @@ async function handleAccountActivity() {
 
     refreshmint.reportValue('csv_downloaded', '' + csvDownloaded);
     refreshmint.reportValue('csv_skipped', '' + csvSkipped);
+
+    // Fail loud when the primary transaction CSVs all came back empty/short (a
+    // BofA anti-bot / token-expiry symptom): we captured nothing because of
+    // failures, not because there was nothing new. Previously this still reported
+    // status=ok with csv_downloaded=0 — silent data loss (BofA stopped gaining
+    // transactions after 2026-02-07 while scrapes kept 'succeeding').
+    if (csvDownloaded === 0 && csvFailed > 0) {
+        throw new Error(
+            'BofA activity capture failed: 0 CSVs downloaded, ' +
+                String(csvFailed) +
+                ' period(s) returned empty/short responses',
+        );
+    }
+
     await downloadStatementsSinceLastScrape(adx, existing, false);
 
     refreshmint.reportValue('status', 'ok');
