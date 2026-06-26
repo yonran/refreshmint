@@ -2568,6 +2568,13 @@ try {
         refreshmint.log(
             '=== State iteration ' + step + '/' + maxIterations + ' ===',
         );
+        // Let any in-flight navigation settle before reading the page or
+        // dispatching a handler. page.evaluate has NO internal timeout and either
+        // errors ("Inspected target navigated or closed") or hangs if it races a
+        // navigation — e.g. right after submitting the login form, which was
+        // failing the scrape on every login. Bounded + best-effort so it can
+        // never itself stall the run.
+        await page.waitForLoadState('domcontentloaded', 15000).catch(() => {});
         var beforeUrl = await page.url();
         var beforeSignature = stateSignatureFromUrl(beforeUrl);
         var progressReasons = [];
