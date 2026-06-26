@@ -117,7 +117,10 @@ async function main() {
     }
 }
 
-main().catch((err) => {
-    refreshmint.log(`Fatal error: ${err.message}`);
-    if (err.stack) refreshmint.log(err.stack);
-});
+// Fail loud: `await main()` so any thrown error rejects the top-level promise
+// and the scrape is recorded as FAILED. Do NOT end with a top-level
+// `main().catch((err) => refreshmint.log(err))`: that resolves the promise, so
+// the scrape reports success even when it captured nothing — silent data loss.
+// Per docs/scraper.md "Fail Fast". If you want a failure snapshot, give `main`'s
+// own handlers a try/catch that logs and re-throws (see providentcu's `run`).
+await main();
