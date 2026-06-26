@@ -309,6 +309,7 @@ enum AccountCommand {
     Journal(AccountJournalArgs),
     Unposted(AccountUnpostedArgs),
     Post(AccountPostArgs),
+    PostAll(AccountPostAllArgs),
     Unpost(AccountUnpostArgs),
     Transfer(AccountTransferArgs),
 }
@@ -372,6 +373,21 @@ struct AccountPostArgs {
     counterpart_account: String,
     #[arg(long, value_name = "INDEX")]
     posting_index: Option<usize>,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+}
+
+/// Post ALL currently-unposted entries for a login (the ETL "post" phase),
+/// mirroring the GUI auto-ETL: each entry posts as a transfer when a unique
+/// transfer match exists, otherwise to `Expenses:Unknown` when the account has a
+/// GL account configured. Entries with neither are left unposted.
+#[derive(Args)]
+struct AccountPostAllArgs {
+    #[arg(long, alias = "account")]
+    login: String,
+    /// Restrict to one account label. Omit to post every label for the login.
+    #[arg(long)]
+    label: Option<String>,
     #[arg(long)]
     ledger: Option<PathBuf>,
 }
@@ -1063,6 +1079,7 @@ fn run_account(
         AccountCommand::Journal(journal_args) => run_account_journal(journal_args, context),
         AccountCommand::Unposted(unposted_args) => run_account_unposted(unposted_args, context),
         AccountCommand::Post(post_args) => run_account_post(post_args, context),
+        AccountCommand::PostAll(post_all_args) => run_account_post_all(post_all_args, context),
         AccountCommand::Unpost(unpost_args) => run_account_unpost(unpost_args, context),
         AccountCommand::Transfer(transfer_args) => run_account_transfer(transfer_args, context),
     }
@@ -1297,6 +1314,128 @@ fn run_account_post(
     )
     .map_err(|err| std::io::Error::other(err.to_string()))?;
     println!("{gl_txn_id}");
+    Ok(())
+}
+
+/// The ETL "post" phase as a CLI: post every unposted entry for the login
+/// (optionally one label), choosing a transfer post when a unique transfer match
+/// exists and otherwise defaulting to `Expenses:Unknown`. Mirrors the GUI
+/// auto-ETL post phase (see `src/App.tsx`). Per-entry failures are collected and
+/// reported, and the command exits non-zero if any entry failed to post (so a
+/// silent partial failure can't masquerade as success).
+fn run_account_post_all(
+    args: AccountPostAllArgs,
+    context: tauri::Context<tauri::Wry>,
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    crate::ledger::require_refreshmint_extension(&ledger_dir)?;
+    let login_name = require_cli_login_name("login", &args.login)?;
+
+    // Either the one requested label, or every account label for this login.
+    let labels: Vec<String> = match &args.label {
+        Some(label) => vec![require_cli_label(label)?],
+        None => crate::login_config::read_login_config(&ledger_dir, &login_name)
+            .accounts
+            .into_keys()
+            .collect(),
+    };
+
+    let mut posted = 0usize;
+    let mut transfers = 0usize;
+    let mut skipped = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    for label in &labels {
+        // The configured GL account decides whether an unmatched entry
+        // default-posts to Expenses:Unknown (mirrors the GUI). A conflicting GL
+        // account makes this error; record it and skip the label.
+        let gl_account = match resolve_login_account_gl_account_cli(&ledger_dir, &login_name, label)
+        {
+            Ok(gl) => gl,
+            Err(err) => {
+                errors.push(format!("{login_name}/{label}: {err}"));
+                continue;
+            }
+        };
+
+        let unposted = crate::post::get_unposted_login_account(&ledger_dir, &login_name, label)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        if unposted.is_empty() {
+            continue;
+        }
+        // Transfer matches across other login accounts, same data the GUI uses.
+        let suggestions = crate::categorize::suggest_categories(&ledger_dir, &login_name, label)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+
+        for entry in unposted {
+            let transfer = suggestions
+                .get(&entry.id)
+                .and_then(|s| s.transfer_match.as_ref());
+            let outcome: Result<&str, String> = if let Some(tm) = transfer {
+                // account_locator is "logins/<login>/accounts/<label>".
+                let parts: Vec<&str> = tm.account_locator.split('/').collect();
+                match (parts.get(1), parts.get(3)) {
+                    (Some(other_login), Some(other_label)) => {
+                        crate::post::post_login_account_transfer(
+                            &ledger_dir,
+                            &login_name,
+                            label,
+                            &entry.id,
+                            other_login,
+                            other_label,
+                            &tm.entry_id,
+                            "cli",
+                        )
+                        .map(|_| "transfer")
+                        .map_err(|err| err.to_string())
+                    }
+                    _ => Err(format!(
+                        "malformed transfer locator: {}",
+                        tm.account_locator
+                    )),
+                }
+            } else if !gl_account.is_empty() {
+                crate::post::post_login_account_entry(
+                    &ledger_dir,
+                    &login_name,
+                    label,
+                    &entry.id,
+                    "Expenses:Unknown",
+                    None,
+                    "cli",
+                )
+                .map(|_| "default")
+                .map_err(|err| err.to_string())
+            } else {
+                Ok("skipped")
+            };
+
+            match outcome {
+                Ok("transfer") => {
+                    transfers += 1;
+                    posted += 1;
+                }
+                Ok("skipped") => skipped += 1,
+                Ok(_) => posted += 1,
+                Err(err) => errors.push(format!("{login_name}/{label}/{}: {err}", entry.id)),
+            }
+        }
+    }
+
+    println!(
+        "Posted {posted} entries ({transfers} as transfers); left {skipped} unposted (no GL account and no transfer match)."
+    );
+    if !errors.is_empty() {
+        for err in &errors {
+            eprintln!("post error: {err}");
+        }
+        return Err(std::io::Error::other(format!(
+            "{} entr{} failed to post",
+            errors.len(),
+            if errors.len() == 1 { "y" } else { "ies" }
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -1726,6 +1865,51 @@ mod tests {
                     assert_eq!(post_args.posting_index, Some(1));
                 }
                 _ => panic!("expected account post command"),
+            },
+            _ => panic!("expected account command"),
+        }
+    }
+
+    #[test]
+    fn account_post_all_subcommand_parses_optional_label() {
+        // Explicit label.
+        let cli = Cli::try_parse_from([
+            "refreshmint",
+            "account",
+            "post-all",
+            "--login",
+            "provident-yonran",
+            "--label",
+            "signature_cash_back_4569",
+        ])
+        .unwrap_or_else(|err| panic!("Cli parsing failed: {err}"));
+        match cli.command {
+            Some(Commands::Account(args)) => match args.command {
+                AccountCommand::PostAll(post_all) => {
+                    assert_eq!(post_all.login, "provident-yonran");
+                    assert_eq!(post_all.label.as_deref(), Some("signature_cash_back_4569"));
+                }
+                _ => panic!("expected account post-all command"),
+            },
+            _ => panic!("expected account command"),
+        }
+
+        // No label => post every label for the login.
+        let cli = Cli::try_parse_from([
+            "refreshmint",
+            "account",
+            "post-all",
+            "--login",
+            "provident-yonran",
+        ])
+        .unwrap_or_else(|err| panic!("Cli parsing failed: {err}"));
+        match cli.command {
+            Some(Commands::Account(args)) => match args.command {
+                AccountCommand::PostAll(post_all) => {
+                    assert_eq!(post_all.login, "provident-yonran");
+                    assert_eq!(post_all.label, None);
+                }
+                _ => panic!("expected account post-all command"),
             },
             _ => panic!("expected account command"),
         }
