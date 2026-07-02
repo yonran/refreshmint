@@ -148,40 +148,53 @@ Compared to apps like YNAB, Monarch Money, Copilot, Mint, Empower, and Firefly I
 From a multi-agent review of soundness, transfers, categorization, reporting,
 scraping UX, and the GUI. Ranked within each subsection.
 
-### Correctness (do first)
+### Correctness (do first) — DONE 2026-07-02
 
-- Extraction's read-modify-write of `account.journal` takes no login lock
-  (`lib.rs` `run_login_account_extraction_blocking`, CLI extract path). A
-  concurrent post/unpost (GUI or `account post-all` in another process) can be
-  silently reverted, leaving a dangling `posted:` ref that
-  `consistency::recover_ledger` cannot auto-repair. Violates the documented
-  `fs_atomic` contract ("callers must serialize writes to the same path").
-- `merge_gl_transfer` guardrails: reject multi-source blocks (currently takes
-  only the first `; source:` tag, corrupting the other entry's `posted:` ref),
-  reject split txns, check `gl_txn_removal_blockers`, require opposite signs.
-  It also performs no amount validation, so fee-differing pairs merge with the
-  fee silently vanishing (leg 2 is forced to exact negation).
-- Blocker checks on `recategorize_gl_transactions` and `sync_gl_transaction`:
-  both can rewrite reconciled/soft-closed txns; recategorize can rewrite any
-  posting index including the bank-account leg.
-- Per-leg (`posted_postings`) posts are outside the drift/sync safety net:
-  dedup can mutate their amount, drift detection only checks `entry.posted`,
-  and sync errors on posting-indexed sources — GL goes permanently stale with
-  no signal.
-- Remove or guard the legacy ScrapeTab post paths (`post_entry`,
-  `unpost_entry`, `post_transfer`): no locks, no git commit, and legacy
-  `unpost_entry` has no blocker check.
-- One-liners: finalize staged scrape downloads on failure (a run that fails on
-  statement 12 of 12 currently discards the other 11; `debug exec` already
-  finalizes on failure); skip `Expenses:Unknown` in
-  `build_training_examples` (the login-level classifier currently learns
-  "Unknown" as a category); block the glued `-fPATH` form in `report.rs` arg
-  validation; raise an anomaly when coverage info is missing instead of
-  silently disabling the disappearance safety net.
-- Still-open architectural items from the June review: recategorize/merge log
-  no operation (ops log remains write-only; `docs/operation-log-redesign.md`
-  unimplemented), no undo/redo, positional `file:row:col` evidence refs go
-  stale on row reorder, `Expenses:Unknown` doubles as account and sentinel.
+The whole "do first" batch shipped as one commit per fix (branch: `main`):
+
+- ✅ Extraction now holds the per-login lock across its read→dedup→write in
+  both the GUI (`run_login_account_extraction_blocking`) and CLI
+  (`run_account_extract`) paths (`4a22da5`). Note: `migration.rs` still writes
+  `account.journal` unlocked — deliberately deferred (one-shot maintenance
+  path; see below).
+- ✅ `merge_gl_transfer` guardrails: rejects multi-source blocks, split txns,
+  blocker-protected txns, and non-cancelling amount pairs (`335f0e5`). The
+  amount guard uses the existing f64 + 0.005-epsilon convention (kept
+  deliberately; a decimal refactor is a separate cross-cutting item).
+- ✅ Blocker check added to `sync_gl_transaction` (`d298665`); bank-leg
+  (Assets:/Liabilities:) guard added to `apply_recategorizations`, mirroring
+  the frontend rule with reciprocal cross-links (`307cddd`). Per the audit
+  decision recategorize is a leg-guard only — counterpart edits on reconciled
+  txns stay legal (no blocker check there).
+- ✅ Per-leg (`posted_postings`) amount drift is now surfaced as a new
+  `PostedLegAmountDrift` import anomaly in the dedup update arms (`474db42`).
+  The amount is still updated (bank data is truth) and sync still cannot
+  process posting-indexed sources — but the staleness is now visible instead of
+  silent. A deeper fix (teach sync/drift about posting-indexed sources) is
+  still open.
+- ✅ Legacy mutation paths deleted: `post_entry`/`unpost_entry` and their
+  wrappers/handlers/TS stubs are gone; `post_transfer` kept for the CLI but its
+  Tauri command + the ScrapeTab "Transfer posting" form removed (`2b71f8e`).
+- ✅ One-liners: finalize staged scrape downloads unconditionally, sharing
+  `combine_run_and_finalize` with `debug exec` (`0b0ed7d`); skip
+  `Expenses:Unknown` in `build_training_examples` (`26ea961`); block glued
+  `-f`/`-o` short-flag forms in `report.rs` validation (`a1738e3`); raise a
+  `CoverageInfoMissing` anomaly when a document has no coverage info
+  (`2c3c523`).
+
+Stability fixes surfaced by the batch (also `main`):
+
+- ✅ `login_config::acquire_lock_file` retries briefly on spurious EWOULDBLOCK
+  from `flock` under heavy parallel load (`f371e07`); `secret::test_login`
+  disambiguated with an atomic counter (`2b7c8f0`).
+
+Still-open architectural items from the June review (NOT in this batch):
+recategorize/merge log no operation (ops log remains write-only;
+`docs/operation-log-redesign.md` unimplemented), no undo/redo, positional
+`file:row:col` evidence refs go stale on row reorder, `Expenses:Unknown`
+doubles as account and sentinel. Plus follow-ups spun off from this batch:
+`migration.rs` unlocked `account.journal` writes; sync/drift ignorance of
+posting-indexed sources; f64→decimal for money comparisons.
 
 ### Automation actually running (the labor multiplier)
 
