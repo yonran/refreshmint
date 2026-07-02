@@ -532,13 +532,22 @@ mod tests {
     use super::*;
 
     fn test_login() -> String {
+        // These tests share the process-global system keyring, so each test must
+        // get a unique login namespace. A timestamp alone can collide when two
+        // parallel tests read the clock in the same tick (the resolution is
+        // coarser than a nanosecond on some platforms), which pollutes a
+        // sibling test's shared index and fails it intermittently. A
+        // per-process atomic counter guarantees uniqueness.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         format!(
-            "test-{}-{}",
+            "test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            seq
         )
     }
 
