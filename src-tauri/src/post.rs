@@ -1982,6 +1982,48 @@ pub fn merge_gl_transfer(
         .ok_or_else(|| format!("GL transaction not found: {txn_id_1}"))?;
     let block2 = find_gl_block(ledger_dir, txn_id_2)?
         .ok_or_else(|| format!("GL transaction not found: {txn_id_2}"))?;
+
+    // Guard: refuse to merge a block that already has more than one source
+    // (i.e. is itself a transfer). The merge below keeps only the first source
+    // of each block (:1999-2008), so merging a transfer would silently drop the
+    // other leg's `posted:` ref and leave it dangling. Reject instead.
+    for (txn_id, block) in [(txn_id_1, &block1), (txn_id_2, &block2)] {
+        let source_count = parse_sources_from_block(block).len();
+        if source_count != 1 {
+            return Err(format!(
+                "GL transaction {txn_id} has {source_count} sources (already a transfer); cannot merge"
+            )
+            .into());
+        }
+    }
+
+    // Guard: refuse to merge a split posting. format_transfer_gl_transaction
+    // rebuilds each side as a single real-account + counterpart pair, so merging
+    // a split (>2 posting lines) would collapse and rebalance it. Mirror sync's
+    // split refusal (:1645-1649).
+    for (txn_id, block) in [(txn_id_1, &block1), (txn_id_2, &block2)] {
+        if count_posting_lines(block) > 2 {
+            return Err(format!(
+                "GL transaction {txn_id} is a split posting; merge would collapse it. Unpost and re-post it instead."
+            )
+            .into());
+        }
+    }
+
+    // Guard: a reconciled/linked/soft-closed GL transaction must not be removed
+    // by a merge (it rewrites both blocks into one). Mirror unpost's guard
+    // (:632-639).
+    for txn_id in [txn_id_1, txn_id_2] {
+        let blockers = crate::bookkeeping::gl_txn_removal_blockers(ledger_dir, txn_id)?;
+        if !blockers.is_empty() {
+            return Err(format!(
+                "cannot merge; GL transaction {txn_id} is protected: {}",
+                blockers.join(", ")
+            )
+            .into());
+        }
+    }
+
     let source_logins = source_login_names_from_sources(&[
         parse_sources_from_block(&block1)
             .into_iter()
@@ -2044,6 +2086,25 @@ pub fn merge_gl_transfer(
 
     // 4. Generate new UUID.
     let new_uuid = uuid::Uuid::new_v4().to_string();
+
+    // Guard: the two legs must cancel. format_transfer_gl_transaction stores only
+    // entry1's amount and forces leg 2 to its exact negation (:1383-1384), so a
+    // pair whose amounts don't sum to ~0 would be silently misstated in the GL.
+    let amount1: Option<f64> = entries1[idx1]
+        .postings
+        .first()
+        .and_then(|p| p.amount.as_ref())
+        .and_then(|a| a.quantity.parse().ok());
+    let amount2: Option<f64> = entries2[idx2]
+        .postings
+        .first()
+        .and_then(|p| p.amount.as_ref())
+        .and_then(|a| a.quantity.parse().ok());
+    if let (Some(a), Some(b)) = (amount1, amount2) {
+        if (a + b).abs() >= 0.005 {
+            return Err(format!("amounts do not cancel ({a} + {b})").into());
+        }
+    }
 
     // 5. Build merged transfer GL text using the two account entries.
     let gl_text = format_transfer_gl_transaction(
@@ -2824,6 +2885,230 @@ mod tests {
             "entry must remain posted after a blocked unpost"
         );
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_refuses_multi_source_block() {
+        // Merging a block that is already a transfer would drop one leg's posted:
+        // ref (merge keeps only the first source of each block).
+        let root = temp_dir("merge-multi-source");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &journal_path,
+            &[
+                make_entry("txn-1", "2024-01-15", "Transfer out", "-100.00"),
+                make_entry("txn-2", "2024-01-15", "Transfer in", "100.00"),
+                make_entry("txn-3", "2024-01-16", "Other", "-100.00"),
+            ],
+        )
+        .unwrap();
+        let gl1 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+        let gl2 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-2",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+        let merged = merge_gl_transfer(&root, &gl1, &gl2, "test").unwrap();
+        let gl3 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-3",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+
+        let err = merge_gl_transfer(&root, &merged, &gl3, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("sources") && err.to_string().contains("cannot merge"),
+            "expected multi-source refusal, got: {err}"
+        );
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            gl.contains(&format!("id: {merged}")),
+            "merged transfer must survive the refused merge"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_refuses_split_txn() {
+        // Merging a split posting would collapse it to a single counterpart.
+        let root = temp_dir("merge-split-guard");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &journal_path,
+            &[
+                make_entry("txn-1", "2024-01-15", "Shop", "-30.00"),
+                make_entry("txn-2", "2024-01-15", "Transfer in", "30.00"),
+            ],
+        )
+        .unwrap();
+        let gl1 = post_login_account_entry_split(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            vec![
+                SplitCounterpart {
+                    account: "Expenses:Food".into(),
+                    amount: Some("20.00 USD".into()),
+                },
+                SplitCounterpart {
+                    account: "Expenses:Travel".into(),
+                    amount: None,
+                },
+            ],
+            "test",
+        )
+        .unwrap();
+        let gl2 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-2",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+
+        let err = merge_gl_transfer(&root, &gl1, &gl2, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("split"),
+            "expected split refusal, got: {err}"
+        );
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            gl.contains("Expenses:Food") && gl.contains("Expenses:Travel"),
+            "split legs must survive the refused merge"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_blocked_when_reconciled() {
+        // A finalized reconciliation session must protect both txns from a merge.
+        let root = temp_dir("merge-reconciled-guard");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &journal_path,
+            &[
+                make_entry("txn-1", "2024-01-15", "Transfer out", "-100.00"),
+                make_entry("txn-2", "2024-01-15", "Transfer in", "100.00"),
+            ],
+        )
+        .unwrap();
+        let gl1 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+        let gl2 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-2",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+
+        let sessions_dir =
+            crate::bookkeeping::bookkeeping_dir(&root).join("reconciliation-sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join("sess-1.json"),
+            format!(
+                r#"{{"id":"sess-1","glAccount":"Assets:Checking","statementStartDate":null,"statementEndDate":"2024-01-31","statementStartingBalance":null,"statementEndingBalance":"0.00","currency":null,"status":"finalized","reconciledTxnIds":["{gl1}"],"notes":null,"createdAt":"2024-02-01T00:00:00Z","updatedAt":"2024-02-01T00:00:00Z"}}"#
+            ),
+        )
+        .unwrap();
+
+        let err = merge_gl_transfer(&root, &gl1, &gl2, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("protected"),
+            "merge of a reconciled txn must be blocked, got: {err}"
+        );
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            gl.contains(&format!("id: {gl1}")) && gl.contains(&format!("id: {gl2}")),
+            "both GL txns must survive the blocked merge"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_refuses_non_opposite_amounts() {
+        // Unequal legs would be silently misstated (leg 2 is forced to -leg1).
+        let root = temp_dir("merge-non-opposite");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &journal_path,
+            &[
+                make_entry("txn-1", "2024-01-15", "Transfer out", "-100.00"),
+                make_entry("txn-2", "2024-01-15", "Transfer in", "50.00"),
+            ],
+        )
+        .unwrap();
+        let gl1 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+        let gl2 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-2",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+
+        let err = merge_gl_transfer(&root, &gl1, &gl2, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("do not cancel"),
+            "expected opposite-amount refusal, got: {err}"
+        );
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            gl.contains(&format!("id: {gl1}")) && gl.contains(&format!("id: {gl2}")),
+            "both GL txns must survive the refused merge"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
