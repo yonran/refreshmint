@@ -64,6 +64,17 @@ When an operation needs both GL and login locks:
 
 This avoids deadlocks for transfer/sync/unpost flows that span multiple login journals.
 
+## Acquisition Semantics
+
+Lock acquisition is try-only (non-blocking `flock`), with one narrow exception:
+`acquire_lock_file` retries a handful of times over ~50ms before reporting
+contention. This absorbs a spurious failure mode, not real contention: `flock`
+locks live on the open file description, and `fork`/`posix_spawn` duplicate
+every open fd into the child until its `exec` closes them, so a subprocess
+spawned by any thread (hledger runs constantly) can briefly keep a
+just-released lock alive. A genuine holder keeps its lock for the whole
+operation (milliseconds to minutes), so contention is still reported promptly.
+
 ## Operator Expectations
 
 - If the GUI or CLI says a login or the general journal is “currently in use,” another operation is holding the authoritative lock.
