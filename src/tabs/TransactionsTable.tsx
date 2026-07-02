@@ -891,6 +891,9 @@ export function TransactionsTable({
                                                             const isUnknown =
                                                                 p.account ===
                                                                 UNCATEGORIZED_GL_ACCOUNT;
+                                                            // Only counterpart legs are recategorizable;
+                                                            // the backend enforces the same rule in
+                                                            // apply_recategorizations (src-tauri/src/post.rs).
                                                             const isNonBalanceSheet =
                                                                 !p.account.startsWith(
                                                                     'Assets:',

@@ -144,6 +144,9 @@ function getRecategorizePostingOptions(
     txn: TransactionRow,
 ): RecategorizePostingOption[] {
     return txn.postings.map((posting, postingIndex) => {
+        // Only counterpart (non-balance-sheet) legs are recategorizable. The
+        // backend enforces the same rule in apply_recategorizations
+        // (src-tauri/src/post.rs); keep the two in sync.
         const isBalanceSheet =
             posting.account.startsWith('Assets:') ||
             posting.account.startsWith('Liabilities:');

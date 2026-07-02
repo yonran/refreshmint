@@ -1800,7 +1800,10 @@ pub fn retire_login_account_entry(
     Ok(())
 }
 
-fn replace_posting_account(line: &str, new_account: &str) -> String {
+/// Byte offsets `(indent_end, account_end)` of a GL posting line's account name:
+/// the account is `line[indent_end..account_end]`. `account_end` is the start of
+/// the amount separator (a tab, two spaces, or " ;"), or the line end.
+fn posting_account_span(line: &str) -> (usize, usize) {
     let indent_end = line
         .char_indices()
         .find(|(_, ch)| !ch.is_whitespace())
@@ -1830,11 +1833,22 @@ fn replace_posting_account(line: &str, new_account: &str) -> String {
         prev_was_space = false;
     }
 
+    (indent_end, indent_end + suffix_start)
+}
+
+/// The account name of a GL posting line (trimmed).
+fn posting_line_account(line: &str) -> &str {
+    let (indent_end, account_end) = posting_account_span(line);
+    line[indent_end..account_end].trim()
+}
+
+fn replace_posting_account(line: &str, new_account: &str) -> String {
+    let (indent_end, account_end) = posting_account_span(line);
     format!(
         "{}{}{}",
         &line[..indent_end],
         new_account,
-        &rest[suffix_start..]
+        &line[account_end..]
     )
 }
 
@@ -1908,6 +1922,13 @@ fn apply_recategorizations(
 
     let mut consumed: HashSet<&str> = HashSet::new();
     let mut replaced: HashMap<&str, HashSet<usize>> = HashMap::new();
+    // Recategorize must only ever rewrite the counterpart (income/expense) leg,
+    // never the bank/balance-sheet leg — rewriting the real account would move
+    // money off the reconciled account. Mirrors the frontend rule: `isBalanceSheet`
+    // in src/tabs/TransactionsTab.tsx and the `isNonBalanceSheet` guard in
+    // src/tabs/TransactionsTable.tsx. (Counterpart edits on reconciled txns stay
+    // legal, so this is a leg guard only, not a blocker check.)
+    let mut guard_error: Option<String> = None;
 
     let blocks: Vec<String> = crate::gl_journal::split_journal_blocks(content)
         .into_iter()
@@ -1935,6 +1956,17 @@ fn apply_recategorizations(
                     let idx = current_posting_index;
                     current_posting_index += 1;
                     if let Some((_, new_account)) = edits_for.iter().find(|(i, _)| *i == idx) {
+                        let current_account = posting_line_account(line);
+                        if current_account.starts_with("Assets:")
+                            || current_account.starts_with("Liabilities:")
+                        {
+                            guard_error.get_or_insert_with(|| {
+                                format!(
+                                    "cannot recategorize balance-sheet posting {idx} ({current_account}) of {txn_id}"
+                                )
+                            });
+                            return line.to_string();
+                        }
                         replaced_for.insert(idx);
                         replace_posting_account(line, new_account)
                     } else {
@@ -1947,6 +1979,13 @@ fn apply_recategorizations(
                 .to_string()
         })
         .collect();
+
+    // Reject before the index-validation loop: a refused balance-sheet edit
+    // leaves its posting unreplaced, which would otherwise surface as a spurious
+    // "out of bounds" error.
+    if let Some(err) = guard_error {
+        return Err(err);
+    }
 
     for (txn_id, posting_index, _) in edits {
         if !consumed.contains(txn_id.as_str()) {
@@ -2898,6 +2937,43 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    const RECAT_GL_BLOCK: &str = "2024-01-15  * Shell Oil  ; id: abc-123\n    ; generated-by: refreshmint-post\n    ; source: logins/chase/accounts/checking:txn-1\n    Assets:Checking  -21.32 USD\n    Expenses:Unknown\n";
+
+    #[test]
+    fn recategorize_rejects_balance_sheet_leg() {
+        // Posting index 0 is the Assets bank leg; rewriting it would move money
+        // off the reconciled account.
+        let err = apply_recategorizations(
+            RECAT_GL_BLOCK,
+            &[("abc-123".to_string(), 0, "Expenses:Gas".to_string())],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("balance-sheet") && err.contains("Assets:Checking"),
+            "expected balance-sheet refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn recategorize_allows_counterpart_leg() {
+        // Posting index 1 is the counterpart (Expenses:Unknown); recategorizing it
+        // is the intended operation and must succeed with the bank leg untouched.
+        let out = apply_recategorizations(
+            RECAT_GL_BLOCK,
+            &[("abc-123".to_string(), 1, "Expenses:Gas".to_string())],
+        )
+        .unwrap();
+        assert!(
+            out.contains("Expenses:Gas"),
+            "counterpart must be rewritten"
+        );
+        assert!(!out.contains("Expenses:Unknown"), "old counterpart gone");
+        assert!(
+            out.contains("Assets:Checking  -21.32 USD"),
+            "bank leg must be preserved verbatim"
+        );
     }
 
     #[test]
