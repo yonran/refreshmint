@@ -251,7 +251,7 @@ fn build_gl_training_examples(gl_txns: &[crate::hledger::Transaction]) -> Vec<Tr
             None => continue,
         };
 
-        // Skip uncategorized or empty.
+        // Skip uncategorized or empty. Mirrors build_training_examples.
         if counterpart == "Expenses:Unknown" || counterpart.is_empty() {
             continue;
         }
@@ -437,7 +437,11 @@ fn build_training_examples(
             continue;
         };
         let counterpart_account = counterpart_posting.paccount.clone();
-        if counterpart_account.is_empty() {
+        // Skip uncategorized or empty so the classifier never learns to predict
+        // Expenses:Unknown as a class. Mirrors build_gl_training_examples.
+        // Skip uncategorized or empty so the classifier never learns to predict
+        // Expenses:Unknown as a class. Mirrors build_gl_training_examples.
+        if counterpart_account.is_empty() || counterpart_account == "Expenses:Unknown" {
             continue;
         }
 
@@ -1094,5 +1098,111 @@ mod tests {
         let result = suggest_category(&entry, Some(&model), None, 0);
         // Should abstain when confidence is low.
         assert!(result.is_none(), "expected None, got {result:?}");
+    }
+
+    fn categorize_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "refreshmint-cat-{prefix}-{}-{now}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_gl_posting(account: &str) -> hledger::Posting {
+        hledger::Posting {
+            pdate: None,
+            pdate2: None,
+            pstatus: hledger::Status::Cleared,
+            paccount: account.to_string(),
+            pamount: vec![],
+            pcomment: String::new(),
+            ptype: hledger::PostingType::RegularPosting,
+            ptags: vec![],
+            pbalanceassertion: None,
+            ptransaction_index: None,
+            poriginal: None,
+        }
+    }
+
+    fn make_generated_gl_txn(source: &str, counterpart: &str, desc: &str) -> hledger::Transaction {
+        let pos = hledger::SourcePos {
+            source_name: String::new(),
+            source_line: 1,
+            source_column: 1,
+        };
+        hledger::Transaction {
+            tindex: 1,
+            tprecedingcomment: String::new(),
+            tsourcepos: hledger::SourceSpan(pos.clone(), pos),
+            tdate: "2024-01-15".to_string(),
+            tdate2: None,
+            tstatus: hledger::Status::Cleared,
+            tcode: String::new(),
+            tdescription: desc.to_string(),
+            tcomment: String::new(),
+            ttags: vec![
+                ("generated-by".to_string(), "refreshmint-post".to_string()),
+                ("source".to_string(), source.to_string()),
+            ],
+            tpostings: vec![
+                make_gl_posting("Assets:Checking"),
+                make_gl_posting(counterpart),
+            ],
+        }
+    }
+
+    #[test]
+    fn build_training_examples_skips_expenses_unknown_counterpart() {
+        let dir = categorize_temp_dir("training-skip-unknown");
+
+        // A login with one account and one posted entry.
+        let mut cfg = login_config::LoginConfig::default();
+        cfg.accounts.insert(
+            "checking".to_string(),
+            login_config::LoginAccountConfig {
+                gl_account: Some("Assets:Checking".to_string()),
+            },
+        );
+        login_config::write_login_config(&dir, "chase", &cfg).unwrap();
+
+        let jpath = account_journal::login_account_journal_path(&dir, "chase", "checking");
+        let unknown_entry = make_entry("e-unknown", "MYSTERY MERCHANT", vec![]);
+        let known_entry = make_entry("e-known", "SHELL OIL", vec![]);
+        account_journal::write_journal_at_path(&jpath, &[unknown_entry, known_entry]).unwrap();
+
+        let locator = "logins/chase/accounts/checking";
+        let gl_txns = vec![
+            make_generated_gl_txn(
+                &format!("{locator}:e-unknown"),
+                "Expenses:Unknown",
+                "MYSTERY MERCHANT",
+            ),
+            make_generated_gl_txn(&format!("{locator}:e-known"), "Expenses:Gas", "SHELL OIL"),
+        ];
+
+        let (global, account_specific) = build_training_examples(&dir, &gl_txns, locator).unwrap();
+
+        // The classifier must never learn Expenses:Unknown as a class.
+        assert!(
+            !global.iter().any(|(_, class)| class == "Expenses:Unknown"),
+            "Expenses:Unknown must not become a training example"
+        );
+        assert!(!account_specific
+            .iter()
+            .any(|(_, class)| class == "Expenses:Unknown"),);
+        // But a genuinely categorized entry still contributes.
+        assert!(
+            account_specific
+                .iter()
+                .any(|(_, class)| class == "Expenses:Gas"),
+            "a real counterpart should still be trained on"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
