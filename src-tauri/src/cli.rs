@@ -1118,6 +1118,10 @@ fn run_account_extract_with_dir(
 
     let login_name = require_cli_login_name("login", login)?;
     let label = require_cli_label(label)?;
+    // Validate before locking: acquiring the lock does create_dir_all, so a
+    // typo'd --login would otherwise leave a phantom logins/<name>/ dir that
+    // list_logins includes.
+    crate::require_existing_login(&ledger_dir, &login_name).map_err(std::io::Error::other)?;
 
     // Extraction does an unlocked read→dedup→write of account.journal. Hold the
     // per-login lock for the whole function so this is atomic w.r.t. other lock
@@ -2040,6 +2044,12 @@ mod tests {
         let base_dir = create_temp_dir();
         let ledger_dir = base_dir.join("ledger.refreshmint");
         fs::create_dir_all(&ledger_dir).unwrap_or_else(|err| panic!("mkdir failed: {err}"));
+        crate::login_config::write_login_config(
+            &ledger_dir,
+            "chase",
+            &crate::login_config::LoginConfig::default(),
+        )
+        .unwrap_or_else(|err| panic!("failed to write login config: {err}"));
         let _lock = crate::login_config::acquire_login_lock_with_metadata(
             &ledger_dir,
             "chase",
@@ -2060,6 +2070,28 @@ mod tests {
                 "unexpected error: {err}"
             ),
         }
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn account_extract_rejects_missing_login_without_creating_dir() {
+        // Mirrors the GUI test: validation must run before the lock so a typo'd
+        // --login doesn't leave a phantom logins/<typo>/ dir behind.
+        let base_dir = create_temp_dir();
+        let ledger_dir = base_dir.join("ledger.refreshmint");
+        fs::create_dir_all(&ledger_dir).unwrap_or_else(|err| panic!("mkdir failed: {err}"));
+        let result = run_account_extract_with_dir(&ledger_dir, "typo", "checking", &[]);
+        match result {
+            Ok(()) => panic!("expected extraction to fail for a missing login"),
+            Err(err) => assert!(
+                err.to_string().contains("does not exist"),
+                "unexpected error: {err}"
+            ),
+        }
+        assert!(
+            !ledger_dir.join("logins").join("typo").exists(),
+            "a rejected login must not leave a phantom logins/ dir behind"
+        );
         let _ = fs::remove_dir_all(&base_dir);
     }
 

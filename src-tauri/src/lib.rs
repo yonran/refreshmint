@@ -913,6 +913,10 @@ fn run_login_account_extraction_blocking(
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name = require_login_name_input(login_name)?;
     let label = require_label_input(label)?;
+    // Validate before locking: acquiring the lock does create_dir_all, so a
+    // typo'd login would otherwise leave a phantom logins/<name>/ dir that
+    // list_logins includes.
+    require_existing_login(&target_dir, &login_name)?;
 
     // Extraction does an unlocked read→dedup→write of account.journal. Hold the
     // per-login lock for the whole function so this is atomic w.r.t. other lock
@@ -2447,6 +2451,12 @@ mod tests {
         // Mirrors login_config::acquire_login_lock_fails_when_held: extraction must
         // fail fast (not corrupt the journal) when another operation holds the lock.
         let dir = create_temp_dir("extraction-lock-held");
+        crate::login_config::write_login_config(
+            &dir,
+            "chase",
+            &crate::login_config::LoginConfig::default(),
+        )
+        .unwrap_or_else(|err| panic!("failed to write login config: {err}"));
         let _lock =
             crate::login_config::acquire_login_lock_with_metadata(&dir, "chase", "test", "hold")
                 .unwrap_or_else(|err| panic!("failed to acquire login lock: {err}"));
@@ -2460,6 +2470,29 @@ mod tests {
             Ok(_) => panic!("expected extraction to fail while login lock held"),
             Err(err) => assert!(err.contains("currently in use"), "unexpected error: {err}"),
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extraction_rejects_missing_login_without_creating_dir() {
+        // Validation must run before the lock: acquiring the lock does
+        // create_dir_all, so a typo'd login would otherwise leave a phantom
+        // logins/<typo>/ dir that list_logins then includes.
+        let dir = create_temp_dir("extraction-missing-login");
+        let result = run_login_account_extraction_blocking(
+            dir.to_string_lossy().to_string(),
+            "typo".to_string(),
+            "checking".to_string(),
+            vec![],
+        );
+        match result {
+            Ok(_) => panic!("expected extraction to fail for a missing login"),
+            Err(err) => assert!(err.contains("does not exist"), "unexpected error: {err}"),
+        }
+        assert!(
+            !dir.join("logins").join("typo").exists(),
+            "a rejected login must not leave a phantom logins/ dir behind"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
