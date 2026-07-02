@@ -143,6 +143,10 @@ Compared to apps like YNAB, Monarch Money, Copilot, Mint, Empower, and Firefly I
 - Annual tax summary report grouping tagged transactions
 - Capital gains tracking for investment accounts (long-term vs. short-term)
 
+## Provident CU
+
+Should go to Payment Center (https://accountmanager.providentcu.org/ProvidentOnlineBanking/billpay/Payment-Center.aspx?#/), look through Payment Activity, click each row's Search icon, scrape each field including Check Number, Send Date, Estimated Delivery Date, Payee.
+
 ## Major Version Cleanups
 
 ### Remove legacy secret fallback
