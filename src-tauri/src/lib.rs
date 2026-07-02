@@ -174,13 +174,10 @@ pub fn run_with_context(
             list_import_anomalies,
             review_import_anomaly,
             link_import_anomaly_reversal,
-            post_entry,
             post_login_account_entry,
             post_login_account_entry_split,
-            unpost_entry,
             unpost_login_account_entry,
             retire_login_account_entry,
-            post_transfer,
             post_login_account_transfer,
             get_unposted_entries_for_transfer,
             sync_gl_transaction,
@@ -1935,29 +1932,6 @@ fn apply_automation_policy(
 }
 
 #[tauri::command]
-fn post_entry(
-    ledger: String,
-    account_name: String,
-    entry_id: String,
-    counterpart_account: String,
-    posting_index: Option<usize>,
-) -> Result<String, String> {
-    let target_dir = std::path::PathBuf::from(ledger);
-    let account_name = require_non_empty_input("account_name", account_name)?;
-    let entry_id = require_non_empty_input("entry_id", entry_id)?;
-    let counterpart_account = require_non_empty_input("counterpart_account", counterpart_account)?;
-
-    post::post_entry(
-        &target_dir,
-        &account_name,
-        &entry_id,
-        &counterpart_account,
-        posting_index,
-    )
-    .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
 fn post_login_account_entry(
     ledger: String,
     login_name: String,
@@ -2015,21 +1989,6 @@ fn post_login_account_entry_split(
 }
 
 #[tauri::command]
-fn unpost_entry(
-    ledger: String,
-    account_name: String,
-    entry_id: String,
-    posting_index: Option<usize>,
-) -> Result<(), String> {
-    let target_dir = std::path::PathBuf::from(ledger);
-    let account_name = require_non_empty_input("account_name", account_name)?;
-    let entry_id = require_non_empty_input("entry_id", entry_id)?;
-
-    post::unpost_entry(&target_dir, &account_name, &entry_id, posting_index)
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
 fn unpost_login_account_entry(
     ledger: String,
     login_name: String,
@@ -2068,24 +2027,6 @@ fn retire_login_account_entry(
     let entry_id = require_non_empty_input("entryId", entry_id)?;
     let reason = require_non_empty_input("reason", reason)?;
     post::retire_login_account_entry(&target_dir, &login_name, &label, &entry_id, &reason, "ui")
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-fn post_transfer(
-    ledger: String,
-    account1: String,
-    entry_id1: String,
-    account2: String,
-    entry_id2: String,
-) -> Result<String, String> {
-    let target_dir = std::path::PathBuf::from(ledger);
-    let account1 = require_non_empty_input("account1", account1)?;
-    let entry_id1 = require_non_empty_input("entry_id1", entry_id1)?;
-    let account2 = require_non_empty_input("account2", account2)?;
-    let entry_id2 = require_non_empty_input("entry_id2", entry_id2)?;
-
-    post::post_transfer(&target_dir, &account1, &entry_id1, &account2, &entry_id2)
         .map_err(|err| err.to_string())
 }
 

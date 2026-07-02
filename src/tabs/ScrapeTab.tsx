@@ -26,7 +26,6 @@ import {
     migrateLedger,
     migrateLoginSecrets,
     postLoginAccountEntry,
-    postTransfer,
     removeLoginDomain,
     repairLoginAccountLabels,
     runLoginAccountExtraction,
@@ -46,7 +45,6 @@ import {
     type LoginAccountMapping,
     type PostDraft,
     type SecretPromptState,
-    type TransferDraft,
     normalizeLoginConfig,
 } from '../types.ts';
 import { type ScrapeLogEntry } from '../scrapeLog.ts';
@@ -186,13 +184,6 @@ export function ScrapeTab({
     const [unpostEntryId, setUnpostEntryId] = useState('');
     const [unpostPostingIndex, setUnpostPostingIndex] = useState('');
     const [isUnpostingEntry, setIsUnpostingEntry] = useState(false);
-    const [transferDraft, setTransferDraft] = useState<TransferDraft>({
-        account1: '',
-        entryId1: '',
-        account2: '',
-        entryId2: '',
-    });
-    const [isPostingTransfer, setIsPostingTransfer] = useState(false);
 
     const secretDomainRef = useRef('');
     const ledgerPath = ledger?.path ?? null;
@@ -232,15 +223,6 @@ export function ScrapeTab({
     const hasResolvedLoginMapping =
         selectedPipelineLabel !== null &&
         selectedLoginMappedLabels.includes(selectedPipelineLabel);
-    // The GL account for the pipeline-selected label (used by transfer form and
-    // post-scrape refresh).
-    const selectedPipelineGlAccount =
-        selectedPipelineLabel !== null
-            ? (selectedLoginAccounts
-                  .find(([l]) => l === selectedPipelineLabel)?.[1]
-                  ?.glAccount?.trim() ?? '')
-            : '';
-
     const selectedLoginConflictCount = selectedLoginAccounts.reduce(
         (count, [, config]) => {
             const glAccount = config.glAccount?.trim() ?? '';
@@ -307,13 +289,6 @@ export function ScrapeTab({
         setUnpostEntryId('');
         setUnpostPostingIndex('');
         setIsUnpostingEntry(false);
-        setTransferDraft({
-            account1: '',
-            entryId1: '',
-            account2: '',
-            entryId2: '',
-        });
-        setIsPostingTransfer(false);
         setScrapeLogEntries([]);
     }, [ledgerPath]);
 
@@ -683,10 +658,6 @@ export function ScrapeTab({
             return;
         }
 
-        const glAccount =
-            selectedLoginAccounts
-                .find(([l]) => l === label)?.[1]
-                ?.glAccount?.trim() ?? '';
         let cancelled = false;
         const timer = window.setTimeout(() => {
             setIsLoadingDocuments(true);
@@ -719,13 +690,6 @@ export function ScrapeTab({
                             }
                             return next;
                         });
-                        setTransferDraft((current) => ({
-                            ...current,
-                            account1:
-                                current.account1.trim().length > 0
-                                    ? current.account1
-                                    : glAccount,
-                        }));
                     },
                 )
                 .catch((error: unknown) => {
@@ -1350,7 +1314,6 @@ export function ScrapeTab({
     async function refreshAccountPipelineData(
         loginName: string,
         label: string,
-        glAccount = '',
     ) {
         if (!ledger) return;
 
@@ -1381,13 +1344,6 @@ export function ScrapeTab({
                 }
                 return next;
             });
-            setTransferDraft((current) => ({
-                ...current,
-                account1:
-                    current.account1.trim().length > 0
-                        ? current.account1
-                        : glAccount,
-            }));
         } finally {
             setIsLoadingDocuments(false);
             setIsLoadingAccountJournal(false);
@@ -1403,11 +1359,7 @@ export function ScrapeTab({
             return;
         }
         try {
-            await refreshAccountPipelineData(
-                loginName,
-                label,
-                selectedPipelineGlAccount,
-            );
+            await refreshAccountPipelineData(loginName, label);
             setPipelineStatus(
                 `Loaded documents and journals for ${loginName}/${label}.`,
             );
@@ -1457,11 +1409,7 @@ export function ScrapeTab({
                 label,
                 documentNames,
             );
-            await refreshAccountPipelineData(
-                loginName,
-                label,
-                selectedPipelineGlAccount,
-            );
+            await refreshAccountPipelineData(loginName, label);
             const newCount = result.newEntryCount;
             setPipelineStatus(
                 `Extraction complete. Added ${newCount} new transaction(s).`,
@@ -1520,11 +1468,7 @@ export function ScrapeTab({
                 counterpartAccount,
                 postingIndex.value,
             );
-            await refreshAccountPipelineData(
-                loginName,
-                label,
-                selectedPipelineGlAccount,
-            );
+            await refreshAccountPipelineData(loginName, label);
             setUnpostEntryId(entryId);
             setPipelineStatus(`Posted ${entryId} to ${glId}.`);
             onLedgerRefresh();
@@ -1564,62 +1508,13 @@ export function ScrapeTab({
                 entryId,
                 postingIndex.value,
             );
-            await refreshAccountPipelineData(
-                loginName,
-                label,
-                selectedPipelineGlAccount,
-            );
+            await refreshAccountPipelineData(loginName, label);
             setPipelineStatus(`Unposted ${entryId}.`);
             onLedgerRefresh();
         } catch (error) {
             setPipelineStatus(`Unpost failed: ${String(error)}`);
         } finally {
             setIsUnpostingEntry(false);
-        }
-    }
-
-    async function handlePostTransferPair() {
-        if (!ledger) return;
-        const account1 = transferDraft.account1.trim();
-        const entryId1 = transferDraft.entryId1.trim();
-        const account2 = transferDraft.account2.trim();
-        const entryId2 = transferDraft.entryId2.trim();
-        if (account1.length === 0 || entryId1.length === 0) {
-            setPipelineStatus('Transfer account1 and entryId1 are required.');
-            return;
-        }
-        if (account2.length === 0 || entryId2.length === 0) {
-            setPipelineStatus('Transfer account2 and entryId2 are required.');
-            return;
-        }
-
-        setIsPostingTransfer(true);
-        try {
-            const glId = await postTransfer(
-                ledger.path,
-                account1,
-                entryId1,
-                account2,
-                entryId2,
-            );
-            if (
-                selectedLoginName.trim().length > 0 &&
-                selectedPipelineLabel !== null
-            ) {
-                await refreshAccountPipelineData(
-                    selectedLoginName.trim(),
-                    selectedPipelineLabel,
-                    selectedPipelineGlAccount,
-                );
-            }
-            setPipelineStatus(
-                `Transfer posting complete: ${entryId1} ↔ ${entryId2} (${glId}).`,
-            );
-            onLedgerRefresh();
-        } catch (error) {
-            setPipelineStatus(`Transfer post failed: ${String(error)}`);
-        } finally {
-            setIsPostingTransfer(false);
         }
     }
 
@@ -1668,7 +1563,6 @@ export function ScrapeTab({
                     await refreshAccountPipelineData(
                         loginName,
                         selectedPipelineLabel,
-                        selectedPipelineGlAccount,
                     );
                 }
             } catch {
@@ -2746,8 +2640,7 @@ export function ScrapeTab({
                                     isLoadingUnposted ||
                                     isRunningExtraction ||
                                     busyPostEntryId !== null ||
-                                    isUnpostingEntry ||
-                                    isPostingTransfer
+                                    isUnpostingEntry
                                 }
                             >
                                 {isLoadingDocuments ||
@@ -2964,57 +2857,12 @@ export function ScrapeTab({
                                                             }}
                                                             disabled={
                                                                 isBusy ||
-                                                                isUnpostingEntry ||
-                                                                isPostingTransfer
+                                                                isUnpostingEntry
                                                             }
                                                         >
                                                             {isBusy
                                                                 ? 'Posting...'
                                                                 : 'Post'}
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            className="ghost-button"
-                                                            onClick={() => {
-                                                                setTransferDraft(
-                                                                    (
-                                                                        current,
-                                                                    ) => ({
-                                                                        ...current,
-                                                                        account1:
-                                                                            selectedPipelineGlAccount,
-                                                                        entryId1:
-                                                                            entry.id,
-                                                                    }),
-                                                                );
-                                                                setPipelineStatus(
-                                                                    null,
-                                                                );
-                                                            }}
-                                                        >
-                                                            Use as A
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            className="ghost-button"
-                                                            onClick={() => {
-                                                                setTransferDraft(
-                                                                    (
-                                                                        current,
-                                                                    ) => ({
-                                                                        ...current,
-                                                                        account2:
-                                                                            selectedPipelineGlAccount,
-                                                                        entryId2:
-                                                                            entry.id,
-                                                                    }),
-                                                                );
-                                                                setPipelineStatus(
-                                                                    null,
-                                                                );
-                                                            }}
-                                                        >
-                                                            Use as B
                                                         </button>
                                                     </div>
                                                 </td>
@@ -3061,90 +2909,6 @@ export function ScrapeTab({
                             disabled={isUnpostingEntry}
                         >
                             {isUnpostingEntry ? 'Unposting...' : 'Unpost entry'}
-                        </button>
-                    </div>
-                    <div className="txn-form-header">
-                        <div>
-                            <h3>Transfer posting</h3>
-                            <p>
-                                Match two entries across accounts as a transfer.
-                            </p>
-                        </div>
-                    </div>
-                    <div className="txn-grid">
-                        <label className="field">
-                            <span>Account 1</span>
-                            <input
-                                type="text"
-                                value={transferDraft.account1}
-                                placeholder="account1"
-                                onChange={(event) => {
-                                    setTransferDraft((current) => ({
-                                        ...current,
-                                        account1: event.target.value,
-                                    }));
-                                    setPipelineStatus(null);
-                                }}
-                            />
-                        </label>
-                        <label className="field">
-                            <span>Entry ID 1</span>
-                            <input
-                                type="text"
-                                value={transferDraft.entryId1}
-                                placeholder="entry id"
-                                onChange={(event) => {
-                                    setTransferDraft((current) => ({
-                                        ...current,
-                                        entryId1: event.target.value,
-                                    }));
-                                    setPipelineStatus(null);
-                                }}
-                            />
-                        </label>
-                        <label className="field">
-                            <span>Account 2</span>
-                            <input
-                                type="text"
-                                value={transferDraft.account2}
-                                placeholder="account2"
-                                onChange={(event) => {
-                                    setTransferDraft((current) => ({
-                                        ...current,
-                                        account2: event.target.value,
-                                    }));
-                                    setPipelineStatus(null);
-                                }}
-                            />
-                        </label>
-                        <label className="field">
-                            <span>Entry ID 2</span>
-                            <input
-                                type="text"
-                                value={transferDraft.entryId2}
-                                placeholder="entry id"
-                                onChange={(event) => {
-                                    setTransferDraft((current) => ({
-                                        ...current,
-                                        entryId2: event.target.value,
-                                    }));
-                                    setPipelineStatus(null);
-                                }}
-                            />
-                        </label>
-                    </div>
-                    <div className="pipeline-actions">
-                        <button
-                            type="button"
-                            className="ghost-button"
-                            onClick={() => {
-                                void handlePostTransferPair();
-                            }}
-                            disabled={isPostingTransfer}
-                        >
-                            {isPostingTransfer
-                                ? 'Posting transfer...'
-                                : 'Post transfer'}
                         </button>
                     </div>
                 </section>

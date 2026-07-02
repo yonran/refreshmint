@@ -31,13 +31,6 @@ export type PostDraft = {
     postingIndex: string;
 };
 
-export type TransferDraft = {
-    account1: string;
-    entryId1: string;
-    account2: string;
-    entryId2: string;
-};
-
 export type SecretPromptState = {
     title: string;
     message: string;

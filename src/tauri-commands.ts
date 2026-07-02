@@ -728,22 +728,6 @@ export async function getLoginAccountUnposted(
     });
 }
 
-export async function postEntry(
-    ledger: string,
-    accountName: string,
-    entryId: string,
-    counterpartAccount: string,
-    postingIndex: number | null,
-): Promise<string> {
-    return invoke('post_entry', {
-        ledger,
-        accountName,
-        entryId,
-        counterpartAccount,
-        postingIndex,
-    });
-}
-
 export async function postLoginAccountEntry(
     ledger: string,
     loginName: string,
@@ -780,20 +764,6 @@ export async function postLoginAccountEntrySplit(
         label,
         entryId,
         counterparts,
-    });
-}
-
-export async function unpostEntry(
-    ledger: string,
-    accountName: string,
-    entryId: string,
-    postingIndex: number | null,
-): Promise<void> {
-    await invoke('unpost_entry', {
-        ledger,
-        accountName,
-        entryId,
-        postingIndex,
     });
 }
 
