@@ -226,6 +226,31 @@ fn default_document_label() -> String {
 
 /// Finalize staged resources: move them to `logins/<login>/accounts/<label>/documents/`
 /// with date-prefixed filenames and write `-info.json` sidecars.
+/// Combine a driver-run outcome with a (separately, unconditionally computed)
+/// staged-resource finalize outcome into a single result. Used by both the full
+/// scrape (`run_scrape`) and `debug exec` (scrape/debug.rs) so they report the
+/// two failures consistently: a run error takes precedence but a finalize error
+/// is appended, and a finalize-only error is surfaced on an otherwise-ok run.
+pub(crate) fn combine_run_and_finalize<R, F, E1, E2>(
+    run: Result<R, E1>,
+    finalize: Result<F, E2>,
+) -> Result<(), String>
+where
+    E1: std::fmt::Display,
+    E2: std::fmt::Display,
+{
+    match (run, finalize) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Ok(_), Err(finalize_err)) => Err(format!(
+            "failed to finalize staged resources: {finalize_err}"
+        )),
+        (Err(run_err), Ok(_)) => Err(run_err.to_string()),
+        (Err(run_err), Err(finalize_err)) => Err(format!(
+            "{run_err}; additionally failed to finalize staged resources: {finalize_err}"
+        )),
+    }
+}
+
 pub fn finalize_staged_resources(
     inner: &js_api::RefreshmintInner,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
@@ -642,26 +667,33 @@ pub async fn run_scrape_async(
     .await;
     eprintln!("Driver finished: {result:?}");
 
-    // 9. Finalize staged resources (move to accounts/<name>/documents/)
-    if result.is_ok() {
+    // 9. Finalize staged resources (move to accounts/<name>/documents/).
+    // Do this UNCONDITIONALLY: even a failed/aborted run may have downloaded
+    // documents worth keeping, and dropping them silently loses data. Safe
+    // against double-import -- the staged output dir is wiped at run start
+    // (clear_staged_output_dir above) and finalize collision-suffixes rather
+    // than overwrites; entry-level dedup happens later at extraction. The
+    // outcome-combining mirrors debug exec (see combine_run_and_finalize, which
+    // scrape/debug.rs also uses).
+    let finalize_result = {
         let inner = refreshmint_inner.lock().await;
-        if !inner.staged_resources.is_empty() {
+        if inner.staged_resources.is_empty() {
+            Ok(Vec::new())
+        } else {
             eprintln!(
                 "Finalizing {} staged resources...",
                 inner.staged_resources.len()
             );
-            match finalize_staged_resources(&inner) {
-                Ok(names) => {
-                    for name in &names {
-                        eprintln!("  -> {name}");
-                    }
-                }
-                Err(e) => {
-                    result = Err(format!("failed to finalize staged resources: {e}").into());
+            let finalized = finalize_staged_resources(&inner);
+            if let Ok(names) = &finalized {
+                for name in names {
+                    eprintln!("  -> {name}");
                 }
             }
+            finalized
         }
-    }
+    };
+    result = combine_run_and_finalize(result, finalize_result).map_err(Into::into);
 
     // 10. Auto-save extension in login config if not already set
     if result.is_ok() {
@@ -707,9 +739,9 @@ pub fn run_scrape(config: ScrapeConfig) -> Result<(), Box<dyn std::error::Error>
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_staged_output_dir, finalize_staged_resources, list_runnable_extensions,
-        load_manifest, load_manifest_secret_declarations, normalize_manifest_domain,
-        resolve_driver_script_path,
+        clear_staged_output_dir, combine_run_and_finalize, finalize_staged_resources,
+        list_runnable_extensions, load_manifest, load_manifest_secret_declarations,
+        normalize_manifest_domain, resolve_driver_script_path,
     };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
@@ -1047,6 +1079,51 @@ mod tests {
         assert!(message.contains("bad/label"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn combine_run_and_finalize_covers_all_four_cases() {
+        fn expect_err(result: Result<(), String>, context: &str) -> String {
+            match result {
+                Ok(()) => panic!("expected error for {context}"),
+                Err(err) => err,
+            }
+        }
+
+        let ok: Result<(), String> = Ok(());
+        let run_err: Result<(), String> = Err("run boom".to_string());
+        let fin_ok: Result<Vec<String>, String> = Ok(vec!["jan.pdf".to_string()]);
+        let fin_err: Result<Vec<String>, String> = Err("finalize boom".to_string());
+
+        // (Ok, Ok) -> Ok
+        assert!(combine_run_and_finalize(ok.clone(), fin_ok.clone()).is_ok());
+
+        // (Ok, FinalizeErr) -> finalize error surfaced
+        assert_eq!(
+            expect_err(
+                combine_run_and_finalize(ok.clone(), fin_err.clone()),
+                "ok+finalize-err"
+            ),
+            "failed to finalize staged resources: finalize boom"
+        );
+
+        // (RunErr, Ok) -> the run error, verbatim
+        assert_eq!(
+            expect_err(
+                combine_run_and_finalize(run_err.clone(), fin_ok.clone()),
+                "run-err+ok"
+            ),
+            "run boom"
+        );
+
+        // (RunErr, FinalizeErr) -> both, run error first
+        assert_eq!(
+            expect_err(
+                combine_run_and_finalize(run_err, fin_err),
+                "run-err+finalize-err"
+            ),
+            "run boom; additionally failed to finalize staged resources: finalize boom"
+        );
     }
 
     #[test]

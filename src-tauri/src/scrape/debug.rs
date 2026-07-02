@@ -645,15 +645,9 @@ async fn handle_exec_request_async(
             finalize_debug_exec_resources(&mut refreshmint)
         };
 
-        let result = match (run_result, finalize_result) {
-            (Ok(()), Ok(_names)) => Ok(()),
-            (Ok(()), Err(err)) => Err(format!("failed to finalize staged resources: {err}")),
-            (Err(run_err), Ok(_names)) => Err(run_err.to_string()),
-            (Err(run_err), Err(finalize_err)) => Err(format!(
-                "{}; additionally failed to finalize staged resources: {}",
-                run_err, finalize_err
-            )),
-        };
+        // Same run+finalize combining as the full scrape (see
+        // super::combine_run_and_finalize).
+        let result = super::combine_run_and_finalize(run_result, finalize_result);
 
         {
             let mut refreshmint = refreshmint_inner_for_task.lock().await;
