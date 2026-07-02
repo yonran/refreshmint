@@ -193,8 +193,9 @@ recategorize/merge log no operation (ops log remains write-only;
 `docs/operation-log-redesign.md` unimplemented), no undo/redo, positional
 `file:row:col` evidence refs go stale on row reorder, `Expenses:Unknown`
 doubles as account and sentinel. Plus follow-ups spun off from this batch:
-`migration.rs` unlocked `account.journal` writes; sync/drift ignorance of
-posting-indexed sources; f64→decimal for money comparisons.
+✅ `migration.rs` now locks the ledger for the whole `migrate_ledger`
+(`ad86372`); still open: sync/drift ignorance of posting-indexed sources;
+f64→decimal for money comparisons.
 
 ### Automation actually running (the labor multiplier)
 
