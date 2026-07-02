@@ -367,6 +367,7 @@ pub fn apply_dedup_actions(
     extracted_by: Option<&str>,
 ) -> Result<Vec<AccountEntry>, Box<dyn std::error::Error + Send + Sync>> {
     let attachment_index = build_attachment_index_for_account(ledger_dir, account_name);
+    // Legacy accounts/<name> path files no anomalies (no login/label context).
     apply_dedup_actions_with_logger(
         entries,
         actions,
@@ -374,6 +375,7 @@ pub fn apply_dedup_actions(
         staging_account,
         extracted_by,
         Some(&attachment_index),
+        None,
         |op| operations::append_account_operation(ledger_dir, account_name, op),
     )
 }
@@ -391,6 +393,11 @@ pub fn apply_dedup_actions_for_login_account(
     let (login_name, label) = login_account;
     let attachment_index = build_attachment_index_for_login_account(ledger_dir, login_name, label);
     create_ambiguous_dedup_anomalies(ledger_dir, login_name, label, &entries, actions)?;
+    let anomaly_ctx = AnomalyContext {
+        ledger_dir,
+        login_name,
+        label,
+    };
     apply_dedup_actions_with_logger(
         entries,
         actions,
@@ -398,6 +405,7 @@ pub fn apply_dedup_actions_for_login_account(
         staging_account,
         extracted_by,
         Some(&attachment_index),
+        Some(&anomaly_ctx),
         |op| operations::append_login_account_operation(ledger_dir, login_name, label, op),
     )
 }
@@ -532,6 +540,7 @@ fn create_ambiguous_dedup_anomalies(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_dedup_actions_with_logger<F>(
     mut entries: Vec<AccountEntry>,
     actions: &[DedupAction],
@@ -539,6 +548,7 @@ fn apply_dedup_actions_with_logger<F>(
     staging_account: &str,
     extracted_by: Option<&str>,
     attachment_index: Option<&AttachmentIndex>,
+    anomaly_ctx: Option<&AnomalyContext<'_>>,
     mut log_operation: F,
 ) -> Result<Vec<AccountEntry>, Box<dyn std::error::Error + Send + Sync>>
 where
@@ -551,7 +561,14 @@ where
                 updated,
             } => {
                 if *updated {
+                    let old_amount = entry_primary_amount(&entries[*existing_index]);
                     update_entry_from_proposed(&mut entries[*existing_index], &action.proposed);
+                    maybe_record_posted_leg_amount_drift(
+                        anomaly_ctx,
+                        &entries[*existing_index],
+                        action,
+                        &old_amount,
+                    )?;
                 }
                 for ev in action.proposed.evidence_refs() {
                     entries[*existing_index].add_evidence(ev);
@@ -589,15 +606,29 @@ where
                     &entry_primary_amount(&entries[*existing_index]),
                     &txn_primary_amount(&action.proposed),
                 ) {
+                    let old_amount = entry_primary_amount(&entries[*existing_index]);
                     update_entry_amount_from_proposed(
                         &mut entries[*existing_index],
                         &action.proposed,
                     );
+                    maybe_record_posted_leg_amount_drift(
+                        anomaly_ctx,
+                        &entries[*existing_index],
+                        action,
+                        &old_amount,
+                    )?;
                 }
             }
             DedupResult::PendingToFinalized { existing_index } => {
                 entries[*existing_index].status = EntryStatus::Cleared;
+                let old_amount = entry_primary_amount(&entries[*existing_index]);
                 update_entry_from_proposed(&mut entries[*existing_index], &action.proposed);
+                maybe_record_posted_leg_amount_drift(
+                    anomaly_ctx,
+                    &entries[*existing_index],
+                    action,
+                    &old_amount,
+                )?;
                 for ev in action.proposed.evidence_refs() {
                     entries[*existing_index].add_evidence(ev);
                 }
@@ -885,6 +916,62 @@ fn create_missing_import_anomaly(
             coverage_document: anomaly.document_name.to_string(),
             safe_to_retire: anomaly.safe_to_retire,
             safety_reasons: anomaly.safety_reasons,
+            notes: None,
+        },
+    )?;
+    Ok(())
+}
+
+/// Login-account context needed to file import anomalies. Only the
+/// `apply_dedup_actions_for_login_account` path supplies it; the legacy
+/// `apply_dedup_actions` path passes `None`.
+struct AnomalyContext<'a> {
+    ledger_dir: &'a Path,
+    login_name: &'a str,
+    label: &'a str,
+}
+
+/// If a dedup update changed the amount of an entry that already has per-leg
+/// posted postings, record a PostedLegAmountDrift anomaly. The bank amount is
+/// still updated (bank data is truth), but the GL cannot be auto-synced for
+/// posting-indexed sources, so the drift must be surfaced rather than swallowed.
+fn maybe_record_posted_leg_amount_drift(
+    ctx: Option<&AnomalyContext<'_>>,
+    entry: &AccountEntry,
+    action: &DedupAction,
+    old_amount: &Option<f64>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(ctx) = ctx else {
+        return Ok(());
+    };
+    if entry.posted_postings.is_empty() {
+        return Ok(());
+    }
+    if amounts_equal(old_amount, &entry_primary_amount(entry)) {
+        return Ok(());
+    }
+    crate::bookkeeping::create_import_anomaly(
+        ctx.ledger_dir,
+        crate::bookkeeping::NewImportAnomalyInput {
+            kind: crate::bookkeeping::ImportAnomalyKind::PostedLegAmountDrift,
+            login_name: ctx.login_name.to_string(),
+            label: ctx.label.to_string(),
+            source_entry_id: entry.id.clone(),
+            gl_txn_id: entry
+                .posted_postings
+                .first()
+                .map(|(_, gl_ref)| gl_ref_txn_id(gl_ref)),
+            date: action.proposed.tdate.clone(),
+            amount: txn_primary_simple_amount(&action.proposed)
+                .map(|amount| format!("{} {}", amount.quantity, amount.commodity)),
+            description: action.proposed.tdescription.clone(),
+            evidence: action.proposed.evidence_refs(),
+            coverage_document: action.source_document.clone(),
+            safe_to_retire: false,
+            safety_reasons: vec![
+                "amount changed on a per-leg-posted entry; GL not auto-synced — unpost and re-post the split to update"
+                    .to_string(),
+            ],
             notes: None,
         },
     )?;
@@ -1588,6 +1675,114 @@ mod tests {
             crate::bookkeeping::ImportAnomalyKind::FinalizedMissingFromCoveredExport
         ));
         assert_eq!(anomalies[0].source_entry_id, "cleared-1");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn reimport_txn(date: &str, desc: &str, evidence: &str, amount: &str) -> ExtractedTransaction {
+        ExtractedTransaction {
+            tdate: date.to_string(),
+            tstatus: "Cleared".to_string(),
+            tdescription: desc.to_string(),
+            tcomment: String::new(),
+            ttags: vec![
+                ("evidence".to_string(), evidence.to_string()),
+                ("amount".to_string(), amount.to_string()),
+            ],
+            tpostings: None,
+        }
+    }
+
+    #[test]
+    fn dedup_records_posted_leg_amount_drift_anomaly() {
+        let root = temp_dir("posted-leg-drift");
+        let mut existing_entry = make_entry(
+            "e1",
+            "2024-03-01",
+            "Grocery",
+            EntryStatus::Cleared,
+            "-25.00",
+            &["activity.csv:2:1"],
+        );
+        existing_entry.posted_postings = vec![(0, "general.journal:gl-x".to_string())];
+        let existing = vec![existing_entry];
+
+        // Re-import the same row (same evidence) with a changed amount.
+        let proposed = vec![reimport_txn(
+            "2024-03-01",
+            "Grocery",
+            "activity.csv:2:1",
+            "-30.00 USD",
+        )];
+        let actions = run_dedup(
+            &existing,
+            &proposed,
+            "activity.csv",
+            &DedupConfig::default(),
+        );
+        let updated = apply_dedup_actions_for_login_account(
+            &root,
+            ("chase", "checking"),
+            existing,
+            &actions,
+            "Assets:Checking",
+            "Equity:Staging:Checking",
+            Some("providentcu:latest"),
+        )
+        .expect("apply login dedup actions");
+
+        // Bank data is truth: the amount is updated.
+        assert_eq!(
+            updated[0]
+                .postings
+                .first()
+                .and_then(|p| p.amount.as_ref())
+                .map(|a| a.quantity.as_str()),
+            Some("-30.00"),
+        );
+        // ...but the drift on a per-leg-posted entry is surfaced as an anomaly.
+        let anomalies = crate::bookkeeping::list_import_anomalies(&root).expect("anomalies");
+        assert_eq!(anomalies.len(), 1);
+        assert!(matches!(
+            anomalies[0].kind,
+            crate::bookkeeping::ImportAnomalyKind::PostedLegAmountDrift
+        ));
+        assert_eq!(anomalies[0].source_entry_id, "e1");
+
+        // A further drift from the same document dedups (kind, login, label,
+        // source_entry_id, coverage_document) rather than piling up.
+        let proposed2 = vec![reimport_txn(
+            "2024-03-01",
+            "Grocery",
+            "activity.csv:2:1",
+            "-35.00 USD",
+        )];
+        let actions2 = run_dedup(
+            &updated,
+            &proposed2,
+            "activity.csv",
+            &DedupConfig::default(),
+        );
+        let updated2 = apply_dedup_actions_for_login_account(
+            &root,
+            ("chase", "checking"),
+            updated,
+            &actions2,
+            "Assets:Checking",
+            "Equity:Staging:Checking",
+            Some("providentcu:latest"),
+        )
+        .expect("apply login dedup actions again");
+        assert_eq!(
+            updated2[0]
+                .postings
+                .first()
+                .and_then(|p| p.amount.as_ref())
+                .map(|a| a.quantity.as_str()),
+            Some("-35.00"),
+        );
+        let anomalies2 = crate::bookkeeping::list_import_anomalies(&root).expect("anomalies");
+        assert_eq!(anomalies2.len(), 1, "drift anomaly must not duplicate");
 
         let _ = fs::remove_dir_all(&root);
     }

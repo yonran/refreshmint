@@ -194,6 +194,11 @@ pub enum ImportAnomalyKind {
     FinalizedMissingFromCoveredExport,
     UnsafePendingRetirement,
     DuplicateImportRepairSkipped,
+    /// A re-import changed the amount of an entry that already has per-leg posted
+    /// postings. Dedup keeps the new (bank) amount, but the GL is not
+    /// auto-synced (sync cannot process posting-indexed sources), so the GL is
+    /// now stale until the split is unposted and re-posted.
+    PostedLegAmountDrift,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
