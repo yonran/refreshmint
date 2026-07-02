@@ -439,8 +439,6 @@ fn build_training_examples(
         let counterpart_account = counterpart_posting.paccount.clone();
         // Skip uncategorized or empty so the classifier never learns to predict
         // Expenses:Unknown as a class. Mirrors build_gl_training_examples.
-        // Skip uncategorized or empty so the classifier never learns to predict
-        // Expenses:Unknown as a class. Mirrors build_gl_training_examples.
         if counterpart_account.is_empty() || counterpart_account == "Expenses:Unknown" {
             continue;
         }

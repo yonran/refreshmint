@@ -224,8 +224,6 @@ fn default_document_label() -> String {
     "_default".to_string()
 }
 
-/// Finalize staged resources: move them to `logins/<login>/accounts/<label>/documents/`
-/// with date-prefixed filenames and write `-info.json` sidecars.
 /// Combine a driver-run outcome with a (separately, unconditionally computed)
 /// staged-resource finalize outcome into a single result. Used by both the full
 /// scrape (`run_scrape`) and `debug exec` (scrape/debug.rs) so they report the
@@ -251,6 +249,8 @@ where
     }
 }
 
+/// Finalize staged resources: move them to `logins/<login>/accounts/<label>/documents/`
+/// with date-prefixed filenames and write `-info.json` sidecars.
 pub fn finalize_staged_resources(
     inner: &js_api::RefreshmintInner,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {

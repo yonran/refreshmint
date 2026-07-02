@@ -462,6 +462,14 @@ async function logSnapshot(tag, track = 'state-loop') {
 
 For `saveResource`, `data` should be bytes (`number[]` is supported). `options` may include `coverageEndDate`, `originalUrl`, and `mimeType`.
 
+**`setSessionMetadata` ordering constraint:** staged resources are finalized
+even when the run fails (so a late failure doesn't discard earlier downloads).
+Sidecar coverage (`dateRangeStart`/`dateRangeEnd`) is what lets import mark
+entries missing from a covered window as disappeared — and it can retire
+unposted pending entries. So only call `setSessionMetadata` with `dateRangeEnd`
+AFTER every download covering that range has completed; setting it up front
+means a mid-run failure finalizes documents whose sidecars overstate coverage.
+
 ## Secrets and `page.fill`
 
 `page.fill(selector, value)` performs secret substitution:
