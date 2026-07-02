@@ -783,22 +783,6 @@ export async function unpostLoginAccountEntry(
     });
 }
 
-export async function postTransfer(
-    ledger: string,
-    account1: string,
-    entryId1: string,
-    account2: string,
-    entryId2: string,
-): Promise<string> {
-    return invoke('post_transfer', {
-        ledger,
-        account1,
-        entryId1,
-        account2,
-        entryId2,
-    });
-}
-
 export interface UnpostedTransferResult {
     loginName: string;
     label: string;
