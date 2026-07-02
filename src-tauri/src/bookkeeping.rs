@@ -199,6 +199,10 @@ pub enum ImportAnomalyKind {
     /// auto-synced (sync cannot process posting-indexed sources), so the GL is
     /// now stale until the split is unposted and re-posted.
     PostedLegAmountDrift,
+    /// An imported document has no coverage info sidecar, so the disappeared-entry
+    /// lifecycle (which retires source entries absent from a covered export)
+    /// cannot run for it. Surfaced so the silent skip is visible.
+    CoverageInfoMissing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

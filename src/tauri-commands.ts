@@ -852,7 +852,8 @@ export type ImportAnomalyKind =
     | 'finalized-missing-from-covered-export'
     | 'unsafe-pending-retirement'
     | 'duplicate-import-repair-skipped'
-    | 'posted-leg-amount-drift';
+    | 'posted-leg-amount-drift'
+    | 'coverage-info-missing';
 
 export type ImportAnomalyStatus = 'open' | 'reviewed';
 

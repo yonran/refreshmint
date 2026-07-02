@@ -421,6 +421,33 @@ pub fn apply_coverage_lifecycle_for_login_account(
     let Some((coverage_start, coverage_end)) =
         document_coverage_for_login_account(ledger_dir, login_name, label, document_name)?
     else {
+        // No coverage info sidecar: the disappeared-entry lifecycle can't run for
+        // this document. Keep the entries unchanged, but file an anomaly so the
+        // silent self-disabling is visible instead of vanishing. Dedup key is
+        // (kind, login, label, source_entry_id, coverage_document); with a fixed
+        // source_entry_id sentinel it dedups per document across repeated imports.
+        crate::bookkeeping::create_import_anomaly(
+            ledger_dir,
+            crate::bookkeeping::NewImportAnomalyInput {
+                kind: crate::bookkeeping::ImportAnomalyKind::CoverageInfoMissing,
+                login_name: login_name.to_string(),
+                label: label.to_string(),
+                source_entry_id: "(coverage-info)".to_string(),
+                gl_txn_id: None,
+                date: chrono::Local::now().format("%Y-%m-%d").to_string(),
+                amount: None,
+                description: format!(
+                    "document '{document_name}' has no coverage info; disappeared-entry detection skipped"
+                ),
+                evidence: Vec::new(),
+                coverage_document: document_name.to_string(),
+                safe_to_retire: false,
+                safety_reasons: vec![
+                    "no coverage window is known for this document".to_string(),
+                ],
+                notes: None,
+            },
+        )?;
         return Ok(entries);
     };
 
@@ -1783,6 +1810,59 @@ mod tests {
         );
         let anomalies2 = crate::bookkeeping::list_import_anomalies(&root).expect("anomalies");
         assert_eq!(anomalies2.len(), 1, "drift anomaly must not duplicate");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn coverage_lifecycle_records_anomaly_when_info_missing() {
+        let root = temp_dir("coverage-info-missing");
+        // No document info sidecar exists, so disappeared-entry detection
+        // self-disables; that skip must be surfaced as an anomaly.
+        let entries = vec![make_entry(
+            "e1",
+            "2024-01-05",
+            "Grocery",
+            EntryStatus::Cleared,
+            "-10.00",
+            &["statement.pdf:1:1"],
+        )];
+        let out = apply_coverage_lifecycle_for_login_account(
+            &root,
+            "chase",
+            "checking",
+            "statement.pdf",
+            &[],
+            entries,
+        )
+        .expect("apply lifecycle");
+        assert_eq!(out.len(), 1, "entries must be unchanged");
+
+        let anomalies = crate::bookkeeping::list_import_anomalies(&root).expect("anomalies");
+        assert_eq!(anomalies.len(), 1);
+        assert!(matches!(
+            anomalies[0].kind,
+            crate::bookkeeping::ImportAnomalyKind::CoverageInfoMissing
+        ));
+        assert_eq!(anomalies[0].coverage_document, "statement.pdf");
+
+        // A second import of the same document dedups rather than piling up.
+        let out2 = apply_coverage_lifecycle_for_login_account(
+            &root,
+            "chase",
+            "checking",
+            "statement.pdf",
+            &[],
+            out,
+        )
+        .expect("apply lifecycle again");
+        assert_eq!(out2.len(), 1);
+        let anomalies2 = crate::bookkeeping::list_import_anomalies(&root).expect("anomalies");
+        assert_eq!(
+            anomalies2.len(),
+            1,
+            "coverage-info anomaly must not duplicate"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
