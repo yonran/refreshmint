@@ -1627,6 +1627,18 @@ pub fn sync_gl_transaction(
         "sync-gl-transaction",
     )?;
 
+    // A reconciled/linked/soft-closed GL transaction must not be resynced: sync
+    // rewrites the amount/status of the GL block, which would invalidate a
+    // finalized reconciliation. Mirror unpost's guard (:632-639).
+    let blockers = crate::bookkeeping::gl_txn_removal_blockers(ledger_dir, &gl_txn_id)?;
+    if !blockers.is_empty() {
+        return Err(format!(
+            "cannot sync entry {entry_id}; GL transaction {gl_txn_id} is protected: {}",
+            blockers.join(", ")
+        )
+        .into());
+    }
+
     // 3. Parse sources and load their current entries (fail fast before any writes).
     let raw_sources = parse_sources_from_block(&gl_block);
     let loaded = load_source_entries(ledger_dir, &raw_sources)?;
@@ -2885,6 +2897,63 @@ mod tests {
             "entry must remain posted after a blocked unpost"
         );
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_blocked_when_gl_txn_reconciled() {
+        // sync rewrites the GL block's amount/status; a finalized reconciliation
+        // must protect it. Mirror unpost_blocked_when_gl_txn_reconciled.
+        let root = temp_dir("sync-reconciled-guard");
+        fs::write(root.join("general.journal"), "").unwrap();
+
+        let entry = make_entry("txn-1", "2024-01-15", "Shell Oil", "-21.32");
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(&journal_path, &[entry]).unwrap();
+
+        let gl_id = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Gas",
+            None,
+            "test",
+        )
+        .unwrap();
+
+        // Drift the source amount so sync would rewrite the block.
+        let mut entries = account_journal::read_journal_at_path(&journal_path).unwrap();
+        entries[0].postings[0].amount = Some(account_journal::SimpleAmount {
+            commodity: "USD".to_string(),
+            quantity: "-25.00".to_string(),
+        });
+        account_journal::write_journal_at_path(&journal_path, &entries).unwrap();
+
+        // A finalized reconciliation session protects the GL transaction.
+        let sessions_dir =
+            crate::bookkeeping::bookkeeping_dir(&root).join("reconciliation-sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join("sess-1.json"),
+            format!(
+                r#"{{"id":"sess-1","glAccount":"Assets:Checking","statementStartDate":null,"statementEndDate":"2024-01-31","statementStartingBalance":null,"statementEndingBalance":"0.00","currency":null,"status":"finalized","reconciledTxnIds":["{gl_id}"],"notes":null,"createdAt":"2024-02-01T00:00:00Z","updatedAt":"2024-02-01T00:00:00Z"}}"#
+            ),
+        )
+        .unwrap();
+
+        let err = sync_gl_transaction(&root, "chase", "checking", "txn-1", "test").unwrap_err();
+        assert!(
+            err.to_string().contains("protected"),
+            "sync of a reconciled GL txn must be blocked, got: {err}"
+        );
+
+        // The GL block must still carry the original -21.32 amount.
+        let gl_content = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            gl_content.contains("-21.32") && !gl_content.contains("-25.00"),
+            "GL block must be unchanged after a blocked sync"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
