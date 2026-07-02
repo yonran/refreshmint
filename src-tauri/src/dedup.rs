@@ -588,13 +588,13 @@ where
                 updated,
             } => {
                 if *updated {
-                    let old_amount = entry_primary_amount(&entries[*existing_index]);
+                    let old_amounts = entry_posting_amounts(&entries[*existing_index]);
                     update_entry_from_proposed(&mut entries[*existing_index], &action.proposed);
                     maybe_record_posted_leg_amount_drift(
                         anomaly_ctx,
                         &entries[*existing_index],
                         action,
-                        &old_amount,
+                        &old_amounts,
                     )?;
                 }
                 for ev in action.proposed.evidence_refs() {
@@ -633,7 +633,7 @@ where
                     &entry_primary_amount(&entries[*existing_index]),
                     &txn_primary_amount(&action.proposed),
                 ) {
-                    let old_amount = entry_primary_amount(&entries[*existing_index]);
+                    let old_amounts = entry_posting_amounts(&entries[*existing_index]);
                     update_entry_amount_from_proposed(
                         &mut entries[*existing_index],
                         &action.proposed,
@@ -642,19 +642,19 @@ where
                         anomaly_ctx,
                         &entries[*existing_index],
                         action,
-                        &old_amount,
+                        &old_amounts,
                     )?;
                 }
             }
             DedupResult::PendingToFinalized { existing_index } => {
                 entries[*existing_index].status = EntryStatus::Cleared;
-                let old_amount = entry_primary_amount(&entries[*existing_index]);
+                let old_amounts = entry_posting_amounts(&entries[*existing_index]);
                 update_entry_from_proposed(&mut entries[*existing_index], &action.proposed);
                 maybe_record_posted_leg_amount_drift(
                     anomaly_ctx,
                     &entries[*existing_index],
                     action,
-                    &old_amount,
+                    &old_amounts,
                 )?;
                 for ev in action.proposed.evidence_refs() {
                     entries[*existing_index].add_evidence(ev);
@@ -958,15 +958,17 @@ struct AnomalyContext<'a> {
     label: &'a str,
 }
 
-/// If a dedup update changed the amount of an entry that already has per-leg
-/// posted postings, record a PostedLegAmountDrift anomaly. The bank amount is
-/// still updated (bank data is truth), but the GL cannot be auto-synced for
-/// posting-indexed sources, so the drift must be surfaced rather than swallowed.
+/// If a dedup update changed any leg's amount on an entry that already has
+/// per-leg posted postings, record a PostedLegAmountDrift anomaly. The bank
+/// amounts are still updated (bank data is truth), but the GL cannot be
+/// auto-synced for posting-indexed sources, so the drift must be surfaced
+/// rather than swallowed. Per-leg-posted entries are by definition multi-leg
+/// splits, so every leg is compared — not just the primary.
 fn maybe_record_posted_leg_amount_drift(
     ctx: Option<&AnomalyContext<'_>>,
     entry: &AccountEntry,
     action: &DedupAction,
-    old_amount: &Option<f64>,
+    old_amounts: &[Option<f64>],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let Some(ctx) = ctx else {
         return Ok(());
@@ -974,7 +976,13 @@ fn maybe_record_posted_leg_amount_drift(
     if entry.posted_postings.is_empty() {
         return Ok(());
     }
-    if amounts_equal(old_amount, &entry_primary_amount(entry)) {
+    let new_amounts = entry_posting_amounts(entry);
+    let any_leg_changed = old_amounts.len() != new_amounts.len()
+        || old_amounts
+            .iter()
+            .zip(new_amounts.iter())
+            .any(|(old, new)| !amounts_equal(old, new));
+    if !any_leg_changed {
         return Ok(());
     }
     crate::bookkeeping::create_import_anomaly(
@@ -1152,6 +1160,15 @@ fn entry_primary_amount(entry: &AccountEntry) -> Option<f64> {
         .first()
         .and_then(|p| p.amount.as_ref())
         .and_then(|a| a.quantity.parse().ok())
+}
+
+/// Every leg's parsed amount, in posting order (None for amountless legs).
+fn entry_posting_amounts(entry: &AccountEntry) -> Vec<Option<f64>> {
+    entry
+        .postings
+        .iter()
+        .map(|p| p.amount.as_ref().and_then(|a| a.quantity.parse().ok()))
+        .collect()
 }
 
 fn amounts_equal(a: &Option<f64>, b: &Option<f64>) -> bool {
@@ -1810,6 +1827,138 @@ mod tests {
         );
         let anomalies2 = crate::bookkeeping::list_import_anomalies(&root).expect("anomalies");
         assert_eq!(anomalies2.len(), 1, "drift anomaly must not duplicate");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dedup_records_drift_when_only_non_primary_leg_changes() {
+        // Per-leg-posted entries are by definition multi-leg splits, so drift
+        // detection must compare every leg, not just the primary. The
+        // pending→cleared transition updates all legs from tpostings.
+        let root = temp_dir("posted-leg-drift-nonprimary");
+        let mut existing_entry = make_entry(
+            "e1",
+            "2024-03-01",
+            "Paycheck",
+            EntryStatus::Pending,
+            "-50.00",
+            &["activity.csv:2:1"],
+        );
+        existing_entry.postings[1].amount = Some(SimpleAmount {
+            commodity: "USD".to_string(),
+            quantity: "30.00".to_string(),
+        });
+        existing_entry.posted_postings = vec![(1, "general.journal:gl-x".to_string())];
+        let existing = vec![existing_entry];
+
+        // Same evidence, finalized status, primary leg unchanged, leg 2 drifted.
+        let mut proposed_txn =
+            reimport_txn("2024-03-01", "Paycheck", "activity.csv:2:1", "-50.00 USD");
+        proposed_txn.tpostings = Some(vec![
+            crate::extract::ExtractedPosting {
+                paccount: "Assets:Checking".to_string(),
+                pamount: Some(vec![crate::extract::ExtractedAmount {
+                    acommodity: "USD".to_string(),
+                    aquantity: "-50.00".to_string(),
+                }]),
+            },
+            crate::extract::ExtractedPosting {
+                paccount: "Equity:Staging".to_string(),
+                pamount: Some(vec![crate::extract::ExtractedAmount {
+                    acommodity: "USD".to_string(),
+                    aquantity: "35.00".to_string(),
+                }]),
+            },
+        ]);
+        let actions = run_dedup(
+            &existing,
+            &[proposed_txn],
+            "activity.csv",
+            &DedupConfig::default(),
+        );
+        let updated = apply_dedup_actions_for_login_account(
+            &root,
+            ("chase", "checking"),
+            existing,
+            &actions,
+            "Assets:Checking",
+            "Equity:Staging",
+            Some("providentcu:latest"),
+        )
+        .expect("apply login dedup actions");
+
+        assert_eq!(
+            updated[0].postings[1]
+                .amount
+                .as_ref()
+                .map(|a| a.quantity.as_str()),
+            Some("35.00"),
+            "bank data is truth; leg 2 must be updated"
+        );
+        let anomalies = crate::bookkeeping::list_import_anomalies(&root).expect("anomalies");
+        assert_eq!(
+            anomalies.len(),
+            1,
+            "a non-primary-leg drift on a per-leg-posted entry must be surfaced"
+        );
+        assert!(matches!(
+            anomalies[0].kind,
+            crate::bookkeeping::ImportAnomalyKind::PostedLegAmountDrift
+        ));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dedup_records_no_drift_anomaly_for_unposted_entry() {
+        // Amount changes on entries without per-leg posts stay on the existing
+        // whole-entry drift/sync path; no anomaly is filed.
+        let root = temp_dir("unposted-no-drift-anomaly");
+        let existing = vec![make_entry(
+            "e1",
+            "2024-03-01",
+            "Grocery",
+            EntryStatus::Cleared,
+            "-25.00",
+            &["activity.csv:2:1"],
+        )];
+        let proposed = vec![reimport_txn(
+            "2024-03-01",
+            "Grocery",
+            "activity.csv:2:1",
+            "-30.00 USD",
+        )];
+        let actions = run_dedup(
+            &existing,
+            &proposed,
+            "activity.csv",
+            &DedupConfig::default(),
+        );
+        let updated = apply_dedup_actions_for_login_account(
+            &root,
+            ("chase", "checking"),
+            existing,
+            &actions,
+            "Assets:Checking",
+            "Equity:Staging",
+            Some("providentcu:latest"),
+        )
+        .expect("apply login dedup actions");
+
+        assert_eq!(
+            updated[0]
+                .postings
+                .first()
+                .and_then(|p| p.amount.as_ref())
+                .map(|a| a.quantity.as_str()),
+            Some("-30.00"),
+        );
+        let anomalies = crate::bookkeeping::list_import_anomalies(&root).expect("anomalies");
+        assert!(
+            anomalies.is_empty(),
+            "no drift anomaly for entries without per-leg posts"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
