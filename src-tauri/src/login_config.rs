@@ -483,6 +483,23 @@ fn acquire_lock_file(
         .truncate(false)
         .open(lock_path)?;
 
+    // try_lock_exclusive (flock LOCK_EX|LOCK_NB) can spuriously report
+    // EWOULDBLOCK under heavy parallel fd churn (observed on macOS) even when the
+    // previous holder in this process has already dropped its guard — the
+    // close()'s lock release can lag the next open+lock. Retry briefly on
+    // WouldBlock so a transient release-lag isn't reported as real contention. A
+    // genuine concurrent holder keeps the lock for its whole operation (a GL
+    // write + git commit takes many ms), so this still fails fast against real
+    // contention; any non-WouldBlock error propagates immediately.
+    for _ in 0..5 {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
     file.try_lock_exclusive()?;
 
     Ok(file)
