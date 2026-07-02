@@ -1945,23 +1945,39 @@ pub fn merge_gl_transfer(
     // 4. Generate new UUID.
     let new_uuid = uuid::Uuid::new_v4().to_string();
 
-    // Guard: the two legs must cancel. format_transfer_gl_transaction stores only
-    // entry1's amount and forces leg 2 to its exact negation (:1383-1384), so a
-    // pair whose amounts don't sum to ~0 would be silently misstated in the GL.
-    let amount1: Option<f64> = entries1[idx1]
+    // Guard: the two legs must cancel in the same commodity.
+    // format_transfer_gl_transaction stores only entry1's amount+commodity and
+    // forces leg 2 to its exact negation (:1383-1384), so a pair whose amounts
+    // don't sum to ~0 — or that live in different commodities — would be
+    // silently misstated in the GL. An absent/unparseable amount refuses the
+    // merge outright rather than skipping the check.
+    let simple1 = entries1[idx1]
         .postings
         .first()
         .and_then(|p| p.amount.as_ref())
-        .and_then(|a| a.quantity.parse().ok());
-    let amount2: Option<f64> = entries2[idx2]
+        .ok_or_else(|| format!("cannot merge; entry {entry_id1} has no amount"))?;
+    let simple2 = entries2[idx2]
         .postings
         .first()
         .and_then(|p| p.amount.as_ref())
-        .and_then(|a| a.quantity.parse().ok());
-    if let (Some(a), Some(b)) = (amount1, amount2) {
-        if (a + b).abs() >= 0.005 {
-            return Err(format!("amounts do not cancel ({a} + {b})").into());
-        }
+        .ok_or_else(|| format!("cannot merge; entry {entry_id2} has no amount"))?;
+    if simple1.commodity != simple2.commodity {
+        return Err(format!(
+            "cannot merge; commodities differ ({} vs {})",
+            simple1.commodity, simple2.commodity
+        )
+        .into());
+    }
+    let a: f64 = simple1
+        .quantity
+        .parse()
+        .map_err(|_| format!("cannot merge; entry {entry_id1} has no amount"))?;
+    let b: f64 = simple2
+        .quantity
+        .parse()
+        .map_err(|_| format!("cannot merge; entry {entry_id2} has no amount"))?;
+    if (a + b).abs() >= 0.005 {
+        return Err(format!("amounts do not cancel ({a} + {b})").into());
     }
 
     // 5. Build merged transfer GL text using the two account entries.
@@ -2996,6 +3012,116 @@ mod tests {
         assert!(
             err.to_string().contains("do not cancel"),
             "expected opposite-amount refusal, got: {err}"
+        );
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            gl.contains(&format!("id: {gl1}")) && gl.contains(&format!("id: {gl2}")),
+            "both GL txns must survive the refused merge"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_refuses_different_commodities() {
+        // Quantities that cancel numerically are still wrong across commodities:
+        // the merged block stores only leg 1's amount+commodity and forces leg 2
+        // to its negation, so -100 EUR / +100 USD would misstate the USD account.
+        let root = temp_dir("merge-diff-commodity");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        let mut eur_entry = make_entry("txn-1", "2024-01-15", "Wire out", "-100.00");
+        eur_entry.postings[0].amount.as_mut().unwrap().commodity = "EUR".to_string();
+        account_journal::write_journal_at_path(
+            &journal_path,
+            &[
+                eur_entry,
+                make_entry("txn-2", "2024-01-15", "Wire in", "100.00"),
+            ],
+        )
+        .unwrap();
+        let gl1 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+        let gl2 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-2",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+
+        let err = merge_gl_transfer(&root, &gl1, &gl2, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("commodities differ"),
+            "expected commodity refusal, got: {err}"
+        );
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            gl.contains(&format!("id: {gl1}")) && gl.contains(&format!("id: {gl2}")),
+            "both GL txns must survive the refused merge"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_refuses_missing_amount() {
+        // An entry whose amount is absent (or unparseable) must refuse the merge
+        // rather than silently skipping the cancellation check.
+        let root = temp_dir("merge-missing-amount");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &journal_path,
+            &[
+                make_entry("txn-1", "2024-01-15", "Transfer out", "-100.00"),
+                make_entry("txn-2", "2024-01-15", "Transfer in", "100.00"),
+            ],
+        )
+        .unwrap();
+        let gl1 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+        let gl2 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-2",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+        // Drop txn-2's amount after posting; merge re-reads the journal.
+        let mut entries = account_journal::read_journal_at_path(&journal_path).unwrap();
+        entries
+            .iter_mut()
+            .find(|e| e.id == "txn-2")
+            .unwrap()
+            .postings[0]
+            .amount = None;
+        account_journal::write_journal_at_path(&journal_path, &entries).unwrap();
+
+        let err = merge_gl_transfer(&root, &gl1, &gl2, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("no amount"),
+            "expected missing-amount refusal, got: {err}"
         );
         let gl = fs::read_to_string(root.join("general.journal")).unwrap();
         assert!(
