@@ -1104,15 +1104,38 @@ fn run_account_extract(
     context: tauri::Context<tauri::Wry>,
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
+    run_account_extract_with_dir(&ledger_dir, &args.login, &args.label, &args.document)
+}
+
+fn run_account_extract_with_dir(
+    ledger_dir: &Path,
+    login: &str,
+    label: &str,
+    documents: &[String],
+) -> Result<(), Box<dyn Error>> {
+    let ledger_dir = ledger_dir.to_path_buf();
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
 
-    let login_name = require_cli_login_name("login", &args.login)?;
-    let label = require_cli_label(&args.label)?;
+    let login_name = require_cli_login_name("login", login)?;
+    let label = require_cli_label(label)?;
+
+    // Extraction does an unlocked read→dedup→write of account.journal. Hold the
+    // per-login lock for the whole function so this is atomic w.r.t. other lock
+    // holders. Keep the owner/purpose convention in sync with lib.rs
+    // run_login_account_extraction_blocking.
+    let _login_lock = crate::login_config::acquire_login_lock_with_metadata(
+        &ledger_dir,
+        &login_name,
+        "cli",
+        "extraction",
+    )
+    .map_err(|err| std::io::Error::other(err.to_string()))?;
+
     let extension_name = crate::login_config::resolve_login_extension(&ledger_dir, &login_name)
         .map_err(std::io::Error::other)?;
     let gl_account = resolve_login_account_gl_account_cli(&ledger_dir, &login_name, &label)?;
 
-    let listed_documents = if args.document.is_empty() {
+    let listed_documents = if documents.is_empty() {
         crate::extract::list_documents_for_login_account(&ledger_dir, &login_name, &label)?
             .into_iter()
             .map(|d| d.filename)
@@ -1120,7 +1143,7 @@ fn run_account_extract(
     } else {
         Vec::new()
     };
-    let document_names = resolve_extraction_document_names(&args.document, listed_documents)?;
+    let document_names = resolve_extraction_document_names(documents, listed_documents)?;
 
     if document_names.is_empty() {
         println!("No documents found for login '{login_name}' label '{label}'.");
@@ -1700,9 +1723,10 @@ mod tests {
     use super::{
         evidence_ref_matches_document, parse_prompt_overrides, require_cli_existing_login,
         require_cli_label, require_cli_login_name, resolve_extraction_document_names,
-        run_extension_load_with_dir, run_gl_add_with_dir, run_new_with_ledger_path, run_secret,
-        AccountCommand, AddArgs, Cli, Commands, ExtensionLoadArgs, LoginCommand, SecretAddArgs,
-        SecretArgs, SecretCommand, SecretListArgs, SecretRemoveArgs,
+        run_account_extract_with_dir, run_extension_load_with_dir, run_gl_add_with_dir,
+        run_new_with_ledger_path, run_secret, AccountCommand, AddArgs, Cli, Commands,
+        ExtensionLoadArgs, LoginCommand, SecretAddArgs, SecretArgs, SecretCommand, SecretListArgs,
+        SecretRemoveArgs,
     };
     use crate::ledger::ensure_refreshmint_extension;
     use clap::Parser;
@@ -2007,6 +2031,36 @@ mod tests {
             }
             _ => panic!("expected scrape command"),
         }
+    }
+
+    #[test]
+    fn account_extract_fails_when_login_lock_held() {
+        // Mirrors the GUI extraction lock test: the CLI extract path must fail fast
+        // when another operation holds the per-login lock, not corrupt the journal.
+        let base_dir = create_temp_dir();
+        let ledger_dir = base_dir.join("ledger.refreshmint");
+        fs::create_dir_all(&ledger_dir).unwrap_or_else(|err| panic!("mkdir failed: {err}"));
+        let _lock = crate::login_config::acquire_login_lock_with_metadata(
+            &ledger_dir,
+            "chase",
+            "test",
+            "hold",
+        )
+        .unwrap_or_else(|err| panic!("failed to acquire login lock: {err}"));
+        let result = run_account_extract_with_dir(
+            &ledger_dir,
+            "chase",
+            "checking",
+            &["2024-01.pdf".to_string()],
+        );
+        match result {
+            Ok(()) => panic!("expected extraction to fail while login lock held"),
+            Err(err) => assert!(
+                err.to_string().contains("currently in use"),
+                "unexpected error: {err}"
+            ),
+        }
+        let _ = fs::remove_dir_all(&base_dir);
     }
 
     #[test]

@@ -917,6 +917,21 @@ fn run_login_account_extraction_blocking(
     let login_name = require_login_name_input(login_name)?;
     let label = require_label_input(label)?;
 
+    // Extraction does an unlocked read→dedup→write of account.journal. Hold the
+    // per-login lock for the whole function so this is atomic w.r.t. other lock
+    // holders (posting, transfers, a concurrent extraction of the same login).
+    // Try-only/non-reentrant like the post::* fns; no extraction caller holds the
+    // login lock (scrape releases it before auto-ETL), so this cannot deadlock —
+    // worst case is a clean fail-fast when a debug session holds the login.
+    // Keep the owner/purpose convention in sync with cli.rs run_account_extract.
+    let _login_lock = login_config::acquire_login_lock_with_metadata(
+        &target_dir,
+        &login_name,
+        "gui",
+        "extraction",
+    )
+    .map_err(|err| err.to_string())?;
+
     let extension_name = login_config::resolve_login_extension(&target_dir, &login_name)
         .map_err(|err| err.to_string())?;
     // gl_account is optional for extraction: extensions that supply explicit
@@ -2381,7 +2396,8 @@ mod tests {
     use super::{
         delete_login_account, evidence_ref_matches_document, inspect_login_extraction_support,
         require_existing_login, require_label_input, require_login_name_input,
-        require_non_empty_input, send_prompt_answer, PromptAnswerState,
+        require_non_empty_input, run_login_account_extraction_blocking, send_prompt_answer,
+        PromptAnswerState,
     };
     use std::collections::BTreeMap;
     use std::fs;
@@ -2483,6 +2499,27 @@ mod tests {
             Ok(_) => panic!("expected validation error for invalid label"),
             Err(err) => assert!(err.contains("invalid label")),
         }
+    }
+
+    #[test]
+    fn extraction_fails_when_login_lock_held() {
+        // Mirrors login_config::acquire_login_lock_fails_when_held: extraction must
+        // fail fast (not corrupt the journal) when another operation holds the lock.
+        let dir = create_temp_dir("extraction-lock-held");
+        let _lock =
+            crate::login_config::acquire_login_lock_with_metadata(&dir, "chase", "test", "hold")
+                .unwrap_or_else(|err| panic!("failed to acquire login lock: {err}"));
+        let result = run_login_account_extraction_blocking(
+            dir.to_string_lossy().to_string(),
+            "chase".to_string(),
+            "checking".to_string(),
+            vec!["2024-01.pdf".to_string()],
+        );
+        match result {
+            Ok(_) => panic!("expected extraction to fail while login lock held"),
+            Err(err) => assert!(err.contains("currently in use"), "unexpected error: {err}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
