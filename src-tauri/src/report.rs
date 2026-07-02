@@ -37,9 +37,16 @@ fn validate_args(command: &str, args: &[String]) -> io::Result<()> {
     }
     for arg in args {
         for prefix in BLOCKED_FLAG_PREFIXES {
+            // hledger accepts short flag values glued to the flag (e.g.
+            // `-f/path.journal`, `-oout.csv`), so for single-dash short flags a
+            // bare starts_with is enough. Long flags (`--file`, `--output-file`)
+            // require `=` or a space separator, so keep those checks exact to
+            // avoid rejecting unrelated `--foo` args.
+            let is_short_flag = prefix.len() == 2 && !prefix.starts_with("--");
             if arg == prefix
                 || arg.starts_with(&format!("{prefix}="))
                 || arg.starts_with(&format!("{prefix} "))
+                || (is_short_flag && arg.starts_with(*prefix))
             {
                 return Err(io::Error::other(format!("Disallowed flag: {arg}")));
             }
@@ -177,6 +184,19 @@ mod tests {
     #[test]
     fn blocked_flag_dash_o() {
         let err = validate_args("balance", &args(&["-o"])).unwrap_err();
+        assert!(err.to_string().contains("Disallowed flag"));
+    }
+
+    #[test]
+    fn blocked_flag_glued_dash_f_value() {
+        // hledger accepts `-f/path.journal` glued; it must be rejected.
+        let err = validate_args("balance", &args(&["-f/tmp/x.journal"])).unwrap_err();
+        assert!(err.to_string().contains("Disallowed flag"));
+    }
+
+    #[test]
+    fn blocked_flag_glued_dash_o_value() {
+        let err = validate_args("balance", &args(&["-oout.csv"])).unwrap_err();
         assert!(err.to_string().contains("Disallowed flag"));
     }
 
