@@ -28,6 +28,22 @@ pub fn migrate_ledger(
         dry_run,
         ..MigrationOutcome::default()
     };
+
+    // Migration rewrites general.journal and every existing login's
+    // account.journal from several helpers (staging rename, duplicate-import
+    // repair, per-login account moves), so take the ledger-wide GL lock and each
+    // existing login's lock up front and hold them for the whole function. This
+    // makes the migration atomic w.r.t. posting/extraction and fails fast if any
+    // login is currently in use, rather than corrupting a journal mid-write.
+    // Skipped in dry-run (which writes nothing). GL-before-login ordering matches
+    // post::*. Logins newly derived below are brand new and unreferenced, so they
+    // need no lock.
+    let _migration_locks = if dry_run {
+        None
+    } else {
+        Some(acquire_migration_locks(ledger_dir)?)
+    };
+
     migrate_staging_account_names(ledger_dir, dry_run, &mut outcome)?;
     repair_duplicate_imports(ledger_dir, dry_run, &mut outcome)?;
 
@@ -116,12 +132,9 @@ pub fn migrate_ledger(
             continue;
         }
 
-        let _lock = crate::login_config::acquire_login_lock_with_metadata(
-            ledger_dir,
-            &login_name,
-            "migration",
-            "migrate-ledger",
-        )?;
+        // The login lock is already held by acquire_migration_locks (for existing
+        // logins) or unnecessary (for a brand-new derived login); the GL lock is
+        // held for the whole migration.
         crate::login_config::write_login_config(ledger_dir, &login_name, &config)?;
 
         if let Some((source_account, _)) = plans.first() {
@@ -141,6 +154,36 @@ pub fn migrate_ledger(
         remove_dir_if_empty(&accounts_dir)?;
     }
     Ok(outcome)
+}
+
+/// The ledger-wide GL lock plus one lock per existing login, held for the whole
+/// migration. See [`migrate_ledger`] for why the entire migration is serialized.
+struct MigrationLocks {
+    _gl: crate::login_config::LedgerGlLock,
+    _logins: Vec<crate::login_config::LoginLock>,
+}
+
+fn acquire_migration_locks(
+    ledger_dir: &Path,
+) -> Result<MigrationLocks, Box<dyn std::error::Error + Send + Sync>> {
+    let gl = crate::login_config::acquire_gl_lock_with_metadata(
+        ledger_dir,
+        "migration",
+        "migrate-ledger",
+    )?;
+    let mut logins = Vec::new();
+    for login_name in crate::login_config::list_logins(ledger_dir)? {
+        logins.push(crate::login_config::acquire_login_lock_with_metadata(
+            ledger_dir,
+            &login_name,
+            "migration",
+            "migrate-ledger",
+        )?);
+    }
+    Ok(MigrationLocks {
+        _gl: gl,
+        _logins: logins,
+    })
 }
 
 fn repair_duplicate_imports(
@@ -971,6 +1014,52 @@ mod tests {
     fn derive_label_uses_last_account_segment() {
         assert_eq!(derive_label("Assets:Chase:Checking"), "checking");
         assert_eq!(derive_label("Liabilities:Joint:CC"), "cc");
+    }
+
+    #[test]
+    fn migrate_ledger_fails_when_gl_lock_held() {
+        // Migration rewrites general.journal; it must fail fast, not corrupt it,
+        // when another operation holds the ledger-wide GL lock.
+        let ledger_dir = temp_dir("gl-lock-held");
+        let _gl = crate::login_config::acquire_gl_lock_with_metadata(&ledger_dir, "test", "hold")
+            .unwrap();
+        let err = migrate_ledger(&ledger_dir, false).unwrap_err();
+        assert!(
+            err.to_string().contains("in use"),
+            "migration should fail while the GL lock is held, got: {err}"
+        );
+        let _ = fs::remove_dir_all(&ledger_dir);
+    }
+
+    #[test]
+    fn migrate_ledger_fails_when_a_login_lock_held() {
+        // Migration rewrites every existing login's account.journal, so it must
+        // fail fast when any login is currently in use.
+        let ledger_dir = temp_dir("login-lock-held");
+        fs::create_dir_all(ledger_dir.join("logins").join("chase")).unwrap();
+        let _login = crate::login_config::acquire_login_lock_with_metadata(
+            &ledger_dir,
+            "chase",
+            "test",
+            "hold",
+        )
+        .unwrap();
+        let err = migrate_ledger(&ledger_dir, false).unwrap_err();
+        assert!(
+            err.to_string().contains("in use"),
+            "migration should fail while a login is in use, got: {err}"
+        );
+        let _ = fs::remove_dir_all(&ledger_dir);
+    }
+
+    #[test]
+    fn migrate_ledger_dry_run_succeeds_while_locks_held() {
+        // Dry-run writes nothing, so it must not be blocked by held locks.
+        let ledger_dir = temp_dir("dry-run-locks");
+        let _gl = crate::login_config::acquire_gl_lock_with_metadata(&ledger_dir, "test", "hold")
+            .unwrap();
+        assert!(migrate_ledger(&ledger_dir, true).is_ok());
+        let _ = fs::remove_dir_all(&ledger_dir);
     }
 
     #[test]
