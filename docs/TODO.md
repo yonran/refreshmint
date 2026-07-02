@@ -184,9 +184,22 @@ The whole "do first" batch shipped as one commit per fix (branch: `main`):
 
 Stability fixes surfaced by the batch (also `main`):
 
-- ✅ `login_config::acquire_lock_file` retries briefly on spurious EWOULDBLOCK
-  from `flock` under heavy parallel load (`f371e07`); `secret::test_login`
-  disambiguated with an atomic counter (`2b7c8f0`).
+- ✅ `login_config::acquire_lock_file` retries briefly on transient EWOULDBLOCK
+  (`f371e07`, reverted and reinstated with the real root cause in `642e35b`:
+  fork/posix_spawn duplicate open lock fds into children until exec, so a
+  subprocess spawned by any thread briefly keeps a just-released flock alive —
+  verified experimentally; see docs/locking.md "Acquisition Semantics");
+  `secret::test_login` disambiguated with an atomic counter (`2b7c8f0`).
+
+Review follow-ups (2026-07-02 four-agent review of the batch; all on `main`):
+
+- ✅ Orphaned `postTransfer` TS stub deleted (`f3f37ca`); merge now also
+  requires same-commodity, parseable amounts (`f464f5d`); per-leg drift
+  anomaly compares every leg, not just the primary (`50558cb`); extraction
+  validates the login exists before locking, so a typo'd login no longer
+  creates a phantom `logins/<name>/` dir (`206b9c4`); doc/comment debris and
+  the `setSessionMetadata` coverage-ordering constraint documented
+  (`eb7bdb6`).
 
 Still-open architectural items from the June review (NOT in this batch):
 recategorize/merge log no operation (ops log remains write-only;
