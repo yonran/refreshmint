@@ -184,6 +184,7 @@ pub fn run_with_context(
             sync_gl_transaction,
             suggest_categories,
             suggest_gl_categories,
+            normalize_payee,
             recategorize_gl_transaction,
             recategorize_gl_transactions,
             merge_gl_transfer,
@@ -2142,6 +2143,14 @@ fn suggest_gl_categories(
 ) -> Result<std::collections::HashMap<String, categorize::GlCategoryResult>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     categorize::suggest_gl_categories(&target_dir).map_err(|err| err.to_string())
+}
+
+/// Normalize a raw transaction description to a stable merchant key so the UI can
+/// preview and store a CategoryRule's `normalizedPayee` predicate. Pure; mirrors
+/// the server-side matcher (automation::matching_rule_account).
+#[tauri::command]
+fn normalize_payee(description: String) -> String {
+    crate::payee_normalize::normalize_payee(&description)
 }
 
 #[tauri::command]

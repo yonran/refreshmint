@@ -6,8 +6,10 @@ import {
     type AmountTotal,
     type GlCategoryResult,
     type LedgerView,
+    createResolution,
     mergeGlTransfer,
     type NewTransactionInput,
+    normalizePayee,
     queryTransactions,
     recategorizeGlTransaction,
     recategorizeGlTransactions,
@@ -16,6 +18,7 @@ import {
     validateTransaction,
     validateTransactionText,
 } from '../tauri-commands.ts';
+import { categoryRulesFromBulkRows } from '../automation-utils.ts';
 import {
     getCurrentToken,
     getSearchSuggestions,
@@ -755,8 +758,9 @@ export function TransactionsTab({
     }
 
     async function handleBulkRecategorize(
-        entries: RecategorizeSelectionEntry[],
+        entries: Array<RecategorizeSelectionEntry & { description?: string }>,
         newAccount: string,
+        createRule = false,
     ) {
         try {
             await recategorizeGlTransactions(
@@ -767,6 +771,22 @@ export function TransactionsTab({
                     newAccount,
                 })),
             );
+            // Optionally persist a standing CategoryRule per distinct payee so
+            // future matches post here automatically. Repeated saves are
+            // idempotent (backend dedups by fingerprint).
+            if (createRule) {
+                const rows = await Promise.all(
+                    entries.map(async ({ description }) => ({
+                        normalizedPayee: await normalizePayee(
+                            description ?? '',
+                        ),
+                        account: newAccount,
+                    })),
+                );
+                for (const rule of categoryRulesFromBulkRows(rows)) {
+                    await createResolution(ledgerPath, rule);
+                }
+            }
             onLedgerRefresh();
             dropGlCategorySuggestions(entries.map(({ txnId }) => txnId));
         } catch (error) {
@@ -2074,8 +2094,12 @@ export function TransactionsTab({
                     setGlTransferModalSearch('');
                     setGlTransferModalTxnId(txnId);
                 }}
-                onBulkRecategorize={(entries, newAccount) => {
-                    void handleBulkRecategorize(entries, newAccount);
+                onBulkRecategorize={(entries, newAccount, createRule) => {
+                    void handleBulkRecategorize(
+                        entries,
+                        newAccount,
+                        createRule,
+                    );
                 }}
                 onOpenSimilarRecategorize={handleOpenSimilarRecategorize}
                 hideObviousAmounts={hideObviousAmounts}

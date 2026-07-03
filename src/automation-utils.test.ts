@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { resolutionInputFromProposal } from './automation-utils.ts';
+import {
+    categoryRulesFromBulkRows,
+    resolutionInputFromProposal,
+} from './automation-utils.ts';
 import type {
     AutomationProposal,
     AutomationProposalKind,
@@ -75,5 +78,47 @@ describe('resolutionInputFromProposal', () => {
         expect(
             resolutionInputFromProposal(makeProposal('sync-posted')),
         ).toBeNull();
+    });
+});
+
+describe('categoryRulesFromBulkRows', () => {
+    it('produces one global rule per distinct payee/account pair', () => {
+        const rules = categoryRulesFromBulkRows([
+            { normalizedPayee: 'SAFEWAY', account: 'Expenses:Groceries' },
+            { normalizedPayee: 'STARBUCKS', account: 'Expenses:Dining' },
+        ]);
+        expect(rules).toHaveLength(2);
+        expect(rules[0]).toMatchObject({
+            kind: 'category-rule',
+            subjectRefs: [],
+            parts: [{ account: 'Expenses:Groceries' }],
+            predicate: { normalizedPayee: 'SAFEWAY' },
+        });
+    });
+
+    it('dedups repeated payee/account pairs', () => {
+        const rules = categoryRulesFromBulkRows([
+            { normalizedPayee: 'SAFEWAY', account: 'Expenses:Groceries' },
+            { normalizedPayee: 'SAFEWAY', account: 'Expenses:Groceries' },
+        ]);
+        expect(rules).toHaveLength(1);
+    });
+
+    it('keeps distinct accounts for the same payee as separate rules', () => {
+        const rules = categoryRulesFromBulkRows([
+            { normalizedPayee: 'AMAZON', account: 'Expenses:Shopping' },
+            { normalizedPayee: 'AMAZON', account: 'Expenses:Office' },
+        ]);
+        expect(rules).toHaveLength(2);
+    });
+
+    it('skips rows with an empty payee or account', () => {
+        const rules = categoryRulesFromBulkRows([
+            { normalizedPayee: '', account: 'Expenses:Groceries' },
+            { normalizedPayee: 'SAFEWAY', account: '  ' },
+            { normalizedPayee: 'COSTCO', account: 'Expenses:Groceries' },
+        ]);
+        expect(rules).toHaveLength(1);
+        expect(rules[0]?.predicate?.normalizedPayee).toBe('COSTCO');
     });
 });

@@ -22,6 +22,7 @@ import {
     applyAutomationPolicy,
     type AutomationScope,
     listAutomationProposals,
+    normalizePayee,
     type AutomationProposal,
     listImportAnomalies,
     listResolutions,
@@ -88,6 +89,17 @@ function loginEntryRef(
         kind: 'login-entry',
         locator: `logins/${loginName}/accounts/${label}`,
         entryId,
+        loginName,
+        label,
+    };
+}
+
+// Login-account scope ref for a CategoryRule (no entryId — matches the Rust
+// automation::is_login_scope_ref check). Restricts a rule to one bank account.
+function loginScopeRef(loginName: string, label: string): TypedRef {
+    return {
+        kind: 'login-entry',
+        locator: `logins/${loginName}/accounts/${label}`,
         loginName,
         label,
     };
@@ -1051,6 +1063,10 @@ export function PipelineTab({
         }
     }
 
+    // "Always <account>": create a standing CategoryRule keyed on the entry's
+    // normalized payee (scoped to this login/account), superseding the old
+    // entry-bound Category resolution. Rules fire repeatedly and post future
+    // matches directly (see the direct-post + policy-loop paths).
     async function handleCreateCategoryResolution(
         entry: AccountJournalEntry,
         account: string,
@@ -1061,9 +1077,10 @@ export function PipelineTab({
         const { loginName, label } = selectedLoginAccount;
         setBusyPostEntryId(entry.id);
         try {
+            const normalizedPayee = await normalizePayee(entry.description);
             await createResolution(ledgerPath, {
-                kind: 'category',
-                subjectRefs: [loginEntryRef(loginName, label, entry.id)],
+                kind: 'category-rule',
+                subjectRefs: [loginScopeRef(loginName, label)],
                 parts: [
                     {
                         account: trimmed,
@@ -1072,14 +1089,20 @@ export function PipelineTab({
                         notes: null,
                     },
                 ],
-                notes: 'Created from Pipeline category suggestion',
+                notes: 'Created from Pipeline "Always" action',
+                predicate: {
+                    descriptionRegex: null,
+                    normalizedPayee,
+                    amountMin: null,
+                    amountMax: null,
+                },
             });
             await refreshPipelineLoginAccountData();
-            setPipelineStatus(`Saved category resolution for ${entry.id}.`);
-        } catch (error) {
             setPipelineStatus(
-                `Save category resolution failed: ${String(error)}`,
+                `Always posting "${normalizedPayee}" to ${trimmed}.`,
             );
+        } catch (error) {
+            setPipelineStatus(`Save rule failed: ${String(error)}`);
         } finally {
             setBusyPostEntryId(null);
         }
@@ -2643,6 +2666,14 @@ export function PipelineTab({
                                                         pipelineCategorySuggestions[
                                                             entry.id
                                                         ];
+                                                    // Local const so the narrowed
+                                                    // (non-null) type survives into
+                                                    // the "Always" onClick closure.
+                                                    const suggestedAccount:
+                                                        | string
+                                                        | null =
+                                                        suggestion?.suggested ??
+                                                        null;
                                                     const amountChanged =
                                                         suggestion?.amountChanged ??
                                                         false;
@@ -2810,7 +2841,7 @@ export function PipelineTab({
                                                                             >
                                                                                 Split
                                                                             </button>
-                                                                            {suggestion?.suggested !=
+                                                                            {suggestedAccount !=
                                                                                 null && (
                                                                                 <button
                                                                                     type="button"
@@ -2818,16 +2849,18 @@ export function PipelineTab({
                                                                                     disabled={
                                                                                         isBusy
                                                                                     }
+                                                                                    title={`Always post payees like "${entry.description}" to ${suggestedAccount}`}
                                                                                     onClick={() => {
                                                                                         void handleCreateCategoryResolution(
                                                                                             entry,
-                                                                                            suggestion.suggested ??
-                                                                                                '',
+                                                                                            suggestedAccount,
                                                                                         );
                                                                                     }}
                                                                                 >
-                                                                                    Remember
-                                                                                    category
+                                                                                    Always:{' '}
+                                                                                    {
+                                                                                        suggestedAccount
+                                                                                    }
                                                                                 </button>
                                                                             )}
                                                                             {(entry.isTransfer ||

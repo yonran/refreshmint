@@ -401,8 +401,11 @@ export function TransactionsTable({
             txnId: string;
             postingIndex: number;
             oldAccount: string;
+            // Raw bank description, used to build CategoryRules when createRule is set.
+            description: string;
         }>,
         newAccount: string,
+        createRule: boolean,
     ) => void;
     onOpenSimilarRecategorize?: (seed: SimilarRecategorizeSeed) => void;
     hideObviousAmounts?: boolean;
@@ -423,13 +426,17 @@ export function TransactionsTable({
         ReadonlySet<string>
     >(new Set());
     const [bulkDraft, setBulkDraft] = useState('');
+    // When set, also create a standing CategoryRule per selected payee on apply.
+    const [bulkCreateRule, setBulkCreateRule] = useState(false);
     const [bulkConfirm, setBulkConfirm] = useState<{
         entries: Array<{
             txnId: string;
             postingIndex: number;
             oldAccount: string;
+            description: string;
         }>;
         newAccount: string;
+        createRule: boolean;
     } | null>(null);
 
     const similarGroupIds = useMemo(() => {
@@ -569,17 +576,19 @@ export function TransactionsTable({
             txnId: string;
             postingIndex: number;
             oldAccount: string;
+            description: string;
         }>,
         newAccount: string,
     ) {
         if (onBulkRecategorize === undefined) return;
         const accounts = new Set(entries.map((e) => e.oldAccount));
         if (accounts.size <= 1) {
-            onBulkRecategorize(entries, newAccount);
+            onBulkRecategorize(entries, newAccount, bulkCreateRule);
             updateSelectedIds(() => new Set());
             setBulkDraft('');
+            setBulkCreateRule(false);
         } else {
-            setBulkConfirm({ entries, newAccount });
+            setBulkConfirm({ entries, newAccount, createRule: bulkCreateRule });
         }
     }
 
@@ -600,6 +609,7 @@ export function TransactionsTable({
                       txnId: id,
                       postingIndex: match.postingIndex,
                       oldAccount: match.posting.account,
+                      description: txn.descriptionRaw || txn.description,
                   },
               ]
             : [];
@@ -667,12 +677,26 @@ export function TransactionsTable({
                     >
                         Set Category
                     </button>
+                    <label
+                        className="count-label"
+                        title="Also create a standing rule for each selected payee, so future matches post here automatically."
+                    >
+                        <input
+                            type="checkbox"
+                            checked={bulkCreateRule}
+                            onChange={(e) => {
+                                setBulkCreateRule(e.target.checked);
+                            }}
+                        />{' '}
+                        Create rule
+                    </label>
                     <button
                         type="button"
                         className="ghost-button"
                         onClick={() => {
                             updateSelectedIds(() => new Set());
                             setBulkDraft('');
+                            setBulkCreateRule(false);
                         }}
                     >
                         Clear
@@ -1521,9 +1545,11 @@ export function TransactionsTable({
                                     onBulkRecategorize?.(
                                         bulkConfirm.entries,
                                         bulkConfirm.newAccount,
+                                        bulkConfirm.createRule,
                                     );
                                     updateSelectedIds(() => new Set());
                                     setBulkDraft('');
+                                    setBulkCreateRule(false);
                                     setBulkConfirm(null);
                                 }}
                             >

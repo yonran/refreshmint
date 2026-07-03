@@ -975,6 +975,16 @@ export async function suggestGlCategories(
     return invoke('suggest_gl_categories', { ledger });
 }
 
+/**
+ * Normalize a raw transaction description to a stable merchant key (uppercased,
+ * boilerplate/processor prefixes and trailing store/phone/location noise
+ * stripped). Used to preview + store a CategoryRule's normalizedPayee predicate.
+ * Mirrors Rust payee_normalize::normalize_payee.
+ */
+export async function normalizePayee(description: string): Promise<string> {
+    return invoke('normalize_payee', { description });
+}
+
 export async function recategorizeGlTransaction(
     ledger: string,
     txnId: string,
