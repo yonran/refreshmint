@@ -110,10 +110,16 @@ fn strip_processor_prefix(s: &str) -> String {
 fn strip_boilerplate_prefix(s: &str) -> String {
     for p in BOILERPLATE_PREFIXES {
         if let Some(rest) = s.strip_prefix(p) {
-            // Only strip when followed by a word boundary (space or end), so
-            // `POS DEBIT` matches but a merchant literally starting with those
-            // letters glued to more text does not.
-            let rest = rest.strip_prefix(' ').unwrap_or(rest);
+            // Only strip when the prefix ends on a word boundary: either it is the
+            // whole string, or a space follows. Otherwise `CHECKCARD` would bite
+            // into `CHECKCARDIO GYM` -> `IO GYM`; keep trying later prefixes.
+            let rest = if rest.is_empty() {
+                rest
+            } else if let Some(after_space) = rest.strip_prefix(' ') {
+                after_space
+            } else {
+                continue;
+            };
             // Consume an immediately-following date (e.g. `... ON 06/12`).
             let rest = prefix_date_re().replace(rest, "");
             return rest.trim_start().to_string();
@@ -200,6 +206,16 @@ mod tests {
     #[test]
     fn strips_recurring_payment_prefix() {
         assert_eq!(normalize_payee("RECURRING PAYMENT NETFLIX"), "NETFLIX");
+    }
+
+    #[test]
+    fn does_not_strip_boilerplate_prefix_glued_to_merchant() {
+        // Boilerplate prefixes only strip on a word boundary (space or end of
+        // string). A merchant whose name merely starts with those letters must
+        // survive intact — `CHECKCARD` must not bite into `CHECKCARDIO GYM`, and
+        // `POS DEBIT` must not bite into `POS DEBITX`.
+        assert_eq!(normalize_payee("CHECKCARDIO GYM"), "CHECKCARDIO GYM");
+        assert_eq!(normalize_payee("POS DEBITX"), "POS DEBITX");
     }
 
     #[test]

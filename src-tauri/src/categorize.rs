@@ -240,12 +240,21 @@ pub fn suggest_gl_categories(
         // Category rule match (independent of ML `suggested`). Scope by the txn's
         // `source` tag when present, else global-only.
         let rules: &[crate::automation::Resolution] = match txn_source_login_label(txn) {
-            Some((login, label)) => scoped_rules_cache
-                .entry((login.clone(), label.clone()))
-                .or_insert_with(|| {
-                    crate::automation::active_category_rules(ledger_dir, Some(&login), Some(&label))
-                        .unwrap_or_default()
-                }),
+            Some((login, label)) => {
+                // Propagate load errors instead of `unwrap_or_default()`, which
+                // would silently drop ALL scoped rules for the account on an I/O
+                // error (matching how the global load above propagates).
+                let key = (login, label);
+                if !scoped_rules_cache.contains_key(&key) {
+                    let loaded = crate::automation::active_category_rules(
+                        ledger_dir,
+                        Some(&key.0),
+                        Some(&key.1),
+                    )?;
+                    scoped_rules_cache.insert(key.clone(), loaded);
+                }
+                &scoped_rules_cache[&key]
+            }
             None => &global_rules,
         };
         let rule_account =

@@ -1438,6 +1438,29 @@ fn validate_category_rule_input(input: &NewResolutionInput) -> io::Result<()> {
         compile_rule_regex(pattern)
             .map_err(|err| invalid(&format!("category rule descriptionRegex is invalid: {err}")))?;
     }
+    // Amount bounds must parse as numbers and be ordered — reject non-numeric or
+    // inverted min/max at creation (like the regex above), not silently at match
+    // time (see `predicate_matches`, which treats an unparsable bound as no match).
+    let parse_amount_bound = |field: &str, raw: &Option<String>| -> io::Result<Option<f64>> {
+        match raw {
+            None => Ok(None),
+            Some(value) => value.trim().parse::<f64>().map(Some).map_err(|_| {
+                invalid(&format!(
+                    "category rule predicate {field} must be a number, got {value:?}"
+                ))
+            }),
+        }
+    };
+    let amount_min = parse_amount_bound("amountMin", &predicate.amount_min)?;
+    let amount_max = parse_amount_bound("amountMax", &predicate.amount_max)?;
+    match (amount_min, amount_max) {
+        (Some(min), Some(max)) if min > max => {
+            return Err(invalid(
+                "category rule predicate amountMin must not exceed amountMax",
+            ));
+        }
+        _ => {}
+    }
     let account_part_count = input
         .parts
         .iter()
@@ -2219,6 +2242,38 @@ mod tests {
             category_rule(
                 vec![login_entry_ref("bank", "checking", "entry-1")],
                 payee_predicate("X"),
+                "Expenses:X",
+            ),
+        )
+        .is_err());
+
+        // Non-numeric amount bound (parses like the regex is validated).
+        assert!(create_resolution(
+            &root,
+            category_rule(
+                vec![],
+                CategoryRulePredicate {
+                    description_regex: None,
+                    normalized_payee: Some("X".to_string()),
+                    amount_min: Some("abc".to_string()),
+                    amount_max: None,
+                },
+                "Expenses:X",
+            ),
+        )
+        .is_err());
+
+        // Inverted amount bounds (min > max).
+        assert!(create_resolution(
+            &root,
+            category_rule(
+                vec![],
+                CategoryRulePredicate {
+                    description_regex: None,
+                    normalized_payee: Some("X".to_string()),
+                    amount_min: Some("50".to_string()),
+                    amount_max: Some("10".to_string()),
+                },
                 "Expenses:X",
             ),
         )
