@@ -204,6 +204,32 @@ Review follow-ups (2026-07-02 four-agent review of the batch; all on `main`):
   the `setSessionMetadata` coverage-ordering constraint documented
   (`eb7bdb6`).
 
+Review follow-ups (2026-07-03 four-agent review of the automation-multiplier
+batch; all on `main`):
+
+- ✅ HIGH: `RecategorizeGl` now targets the posting that IS `Expenses:Unknown`
+  rather than blindly the last posting, fixing an empirically reproduced
+  policy-loop infinite loop + split corruption on manual txns with Unknown in a
+  non-last position (`24f2dd1`).
+- ✅ CLI `post-all`'s policy pass now drains entry-bound Auto proposals
+  (`PostCategory`/`LinkTransfer`) by scoping per `(login, label)` plus a GL pass,
+  instead of the dead `{login: Some, label: None}` scope (`9f6f549`).
+- ✅ `automation-utils.ts` dedup key no longer embeds a raw NUL byte, so git
+  treats the file as text again (`0151787`).
+- ✅ Bulk recategorize refreshes + prunes even when standing-rule creation fails
+  (was silently stale); rule-creation failures now surface in a banner
+  (`3e8b433`).
+- ✅ Hardening: payee boilerplate-prefix stripping honors a word boundary
+  (`CHECKCARDIO GYM` no longer becomes `IO GYM`); GL scoped-rule load errors
+  propagate instead of silently dropping all rules; `amountMin`/`amountMax`
+  validated (numeric, ordered) at rule creation (`0c33cfd`).
+- ✅ Frontend polish: batch "Accept N suggestions" has an in-flight guard +
+  error surface; Pipeline one-click "Always" confirms against the NORMALIZED
+  payee before saving the standing rule (`495c713`).
+- ✅ Rule proposals for a possible transfer leg (asymmetric transfer-uniqueness)
+  are downgraded from Auto to Review so a human decides, preventing an
+  auto-expense that would strand the other side's `MergeGlTransfer` (`cb4d8a8`).
+
 Still-open architectural items from the June review (NOT in this batch):
 recategorize/merge log no operation (ops log remains write-only;
 `docs/operation-log-redesign.md` unimplemented), no undo/redo, positional
