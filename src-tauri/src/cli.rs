@@ -1356,7 +1356,7 @@ fn run_account_post_all(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    run_account_post_all_with_dir(&ledger_dir, &args.login, &args.label)
+    run_account_post_all_with_dir(&ledger_dir, &args.login, &args.label).map(|_| ())
 }
 
 // login is the raw --login value; label is the optional --label (None = all).
@@ -1376,7 +1376,7 @@ fn run_account_post_all_with_dir(
     ledger_dir: &Path,
     login: &str,
     label: &Option<String>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<usize, Box<dyn Error>> {
     let login_name = require_cli_login_name("login", login)?;
 
     // Either the one requested label, or every account label for this login.
@@ -1504,7 +1504,7 @@ fn run_account_post_all_with_dir(
         ))
         .into());
     }
-    Ok(())
+    Ok(policy_applied.len())
 }
 
 fn run_account_unpost(
@@ -2206,7 +2206,9 @@ mod tests {
         )
         .unwrap();
 
-        run_account_post_all_with_dir(&ledger_dir, "chase", &Some("checking".to_string())).unwrap();
+        let policy_applied =
+            run_account_post_all_with_dir(&ledger_dir, "chase", &Some("checking".to_string()))
+                .unwrap();
 
         let gl = fs::read_to_string(ledger_dir.join("general.journal")).unwrap();
         assert!(
@@ -2216,6 +2218,14 @@ mod tests {
         assert!(
             !gl.contains("Expenses:Unknown"),
             "entry should not fall back to Expenses:Unknown, got: {gl}"
+        );
+        // Direct-post (not the policy loop) must be what routed the entry to the
+        // rule account: with the entry already posted correctly, the policy pass
+        // has nothing to recategorize. (Guards against the policy loop masking a
+        // direct-post regression — both would otherwise yield the same final GL.)
+        assert_eq!(
+            policy_applied, 0,
+            "entry should post directly to the rule account, not via the policy loop"
         );
 
         let _ = fs::remove_dir_all(&base_dir);
@@ -2273,7 +2283,7 @@ mod tests {
         )
         .unwrap();
 
-        run_account_post_all_with_dir(&ledger_dir, "chase", &None).unwrap();
+        let policy_applied = run_account_post_all_with_dir(&ledger_dir, "chase", &None).unwrap();
 
         let gl = fs::read_to_string(ledger_dir.join("general.journal")).unwrap();
         assert!(
@@ -2283,6 +2293,12 @@ mod tests {
         assert!(
             !gl.contains("Expenses:Unknown"),
             "Unknown row should be gone, got: {gl}"
+        );
+        // The pre-existing row was fixed by the policy loop (there were no unposted
+        // entries to direct-post), so at least one proposal must have applied.
+        assert!(
+            policy_applied >= 1,
+            "policy loop should have recategorized the pre-existing Unknown row"
         );
 
         let _ = fs::remove_dir_all(&base_dir);
