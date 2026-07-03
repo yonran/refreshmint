@@ -1663,6 +1663,25 @@ fn replace_posting_account(line: &str, new_account: &str) -> String {
 ///
 /// Finds the block by `txn_id`, rewrites only the indexed posting account while
 /// preserving the rest of the posting line, writes the updated file, and commits.
+/// Index of the counterpart (last) posting of a generated GL transaction, used by
+/// the RecategorizeGl automation proposal to target the `Expenses:Unknown`
+/// posting. Mirrors categorize.rs "Counterpart is the last posting in our
+/// generated GL format". Returns `None` if no transaction with `txn_id` exists.
+pub fn gl_txn_counterpart_posting_index(
+    ledger_dir: &Path,
+    txn_id: &str,
+) -> Result<Option<usize>, Box<dyn std::error::Error + Send + Sync>> {
+    let gl_journal_path = ledger_dir.join("general.journal");
+    if !gl_journal_path.exists() {
+        return Ok(None);
+    }
+    let txns = crate::ledger_open::run_hledger_print(&gl_journal_path).unwrap_or_default();
+    Ok(txns
+        .iter()
+        .find(|txn| txn.ttags.iter().any(|(k, v)| k == "id" && v == txn_id))
+        .and_then(|txn| txn.tpostings.len().checked_sub(1)))
+}
+
 pub fn recategorize_gl_transaction(
     ledger_dir: &Path,
     txn_id: &str,

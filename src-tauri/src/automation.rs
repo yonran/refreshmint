@@ -130,6 +130,9 @@ pub enum AutomationProposalKind {
     PostSplit,
     LinkTransfer,
     MergeGlTransfer,
+    /// Replace an existing `Expenses:Unknown` GL posting with a real account.
+    /// Emitted by `gl_proposals`: rule match → Auto, ML suggestion → Review.
+    RecategorizeGl,
     SyncPosted,
     ReviewAnomaly,
 }
@@ -713,6 +716,9 @@ fn gl_proposals(
     let suggestions = crate::categorize::suggest_gl_categories(ledger_dir)?;
     let mut proposals = Vec::new();
     for (txn_id, suggestion) in suggestions {
+        // A transfer match means the Unknown txn is actually a transfer; it takes
+        // priority over rule/ML recategorization (mirrors the post paths, which
+        // check transferMatch before ruleAccount).
         if let Some(transfer) = suggestion.transfer_match {
             let refs = vec![gl_txn_ref(&txn_id), gl_txn_ref(&transfer.txn_id)];
             proposals.push(AutomationProposal {
@@ -738,9 +744,66 @@ fn gl_proposals(
                 policy_decision: ProposalPolicyDecision::Review,
                 reversible: ProposalReversibility::Conditional,
             });
+            continue;
+        }
+        // A category rule gives a deterministic Auto recategorization; otherwise
+        // the ML suggestion (previously dropped on the floor) becomes a Review
+        // proposal, surfaced as a chip / bulk-accept in the Transactions tab.
+        if let Some(account) = suggestion.rule_account {
+            proposals.push(recategorize_gl_proposal(
+                &txn_id,
+                &account,
+                ProposalReasonResult::DerivedFromResolution,
+                ProposalReasonWeight::Exact,
+                ProposalPolicyDecision::Auto,
+            ));
+        } else if let Some(account) = suggestion.suggested {
+            proposals.push(recategorize_gl_proposal(
+                &txn_id,
+                &account,
+                ProposalReasonResult::ModelSuggested,
+                ProposalReasonWeight::Weak,
+                ProposalPolicyDecision::Review,
+            ));
         }
     }
     Ok(proposals)
+}
+
+/// Build a `RecategorizeGl` proposal replacing a txn's `Expenses:Unknown` posting
+/// with `account`. The counterpart posting index is resolved at apply time (last
+/// posting of the generated GL format — see `apply_proposal`).
+fn recategorize_gl_proposal(
+    txn_id: &str,
+    account: &str,
+    result: ProposalReasonResult,
+    weight: ProposalReasonWeight,
+    policy_decision: ProposalPolicyDecision,
+) -> AutomationProposal {
+    let refs = vec![gl_txn_ref(txn_id)];
+    AutomationProposal {
+        id: proposal_id("recategorize-gl", &refs, None),
+        kind: AutomationProposalKind::RecategorizeGl,
+        subject_refs: refs,
+        proposed_result: ProposalResult {
+            suggested_account: Some(account.to_string()),
+            transfer_match: None,
+            parts: Vec::new(),
+            import_anomaly_id: None,
+            resolution_id: None,
+            notes: None,
+        },
+        reasons: vec![ProposalReason {
+            field: "category".to_string(),
+            result,
+            detail: account.to_string(),
+            weight: Some(weight),
+        }],
+        blockers: Vec::new(),
+        can_apply: proposal_kind_is_applyable(&AutomationProposalKind::RecategorizeGl),
+        policy_decision,
+        reversible: ProposalReversibility::Conditional,
+    }
 }
 
 fn import_anomaly_proposals(
@@ -946,6 +1009,26 @@ fn apply_proposal(
             }
             crate::post::merge_gl_transfer(ledger_dir, &refs[0], &refs[1], "automation")
         }
+        AutomationProposalKind::RecategorizeGl => {
+            let Some(txn_id) = proposal.subject_refs.iter().find_map(parse_gl_txn_ref) else {
+                return Err("recategorize-gl proposal missing GL txn ref".into());
+            };
+            let Some(account) = proposal.proposed_result.suggested_account else {
+                return Err("recategorize-gl proposal missing suggested account".into());
+            };
+            // The Expenses:Unknown counterpart is the last posting of the generated
+            // GL format (mirrors categorize.rs "Counterpart is the last posting").
+            let posting_index = crate::post::gl_txn_counterpart_posting_index(ledger_dir, &txn_id)?
+                .ok_or_else(|| format!("recategorize-gl: transaction not found: {txn_id}"))?;
+            crate::post::recategorize_gl_transaction(
+                ledger_dir,
+                &txn_id,
+                posting_index,
+                &account,
+                "automation",
+            )?;
+            Ok(txn_id)
+        }
         _ => Err(format!(
             "proposal kind is not directly applyable: {:?}",
             proposal.kind
@@ -967,6 +1050,7 @@ fn proposal_kind_is_applyable(kind: &AutomationProposalKind) -> bool {
             | AutomationProposalKind::RetirePending
             | AutomationProposalKind::SyncPosted
             | AutomationProposalKind::MergeGlTransfer
+            | AutomationProposalKind::RecategorizeGl
     )
 }
 
@@ -2300,5 +2384,123 @@ mod tests {
         assert!(!predicate_matches(&bounded, "GYM", Some(25.0)));
         // Bound set but no amount available -> no match.
         assert!(!predicate_matches(&bounded, "GYM", None));
+    }
+
+    /// One generated-GL transaction block (Expenses:Unknown as the last posting).
+    fn gl_block(id: &str, desc: &str, source_entry: &str, counterpart: &str) -> String {
+        format!(
+            "2026-01-01 {desc}  ; id: {id}\n    ; generated-by: refreshmint-post\n    \
+             ; source: logins/chase/accounts/checking:{source_entry}\n    \
+             Assets:Chase  -10.00 USD\n    {counterpart}\n\n"
+        )
+    }
+
+    #[test]
+    fn gl_rule_match_generates_auto_recategorize_proposal(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("gl-rule-auto")?;
+        fs::write(
+            root.join("general.journal"),
+            gl_block("txn-1", "SAFEWAY #123", "e1", "Expenses:Unknown"),
+        )?;
+        create_resolution(
+            &root,
+            category_rule(vec![], payee_predicate("SAFEWAY"), "Expenses:Groceries"),
+        )?;
+
+        let proposals = list_automation_proposals(
+            &root,
+            AutomationScope {
+                login_name: None,
+                label: None,
+                include_gl: Some(true),
+            },
+        )?;
+        assert!(proposals.iter().any(|proposal| {
+            proposal.kind == AutomationProposalKind::RecategorizeGl
+                && proposal.policy_decision == ProposalPolicyDecision::Auto
+                && proposal.proposed_result.suggested_account.as_deref()
+                    == Some("Expenses:Groceries")
+        }));
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn gl_ml_suggestion_generates_review_recategorize_proposal(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("gl-ml-review")?;
+        let mut journal = String::new();
+        // Dense training so the classifier is confident (prob >= 0.5).
+        for i in 0..20 {
+            journal.push_str(&gl_block(
+                &format!("real-{i}"),
+                "SHELL OIL",
+                &format!("r{i}"),
+                "Expenses:Gas",
+            ));
+        }
+        journal.push_str(&gl_block(
+            "txn-unknown",
+            "SHELL OIL",
+            "u1",
+            "Expenses:Unknown",
+        ));
+        fs::write(root.join("general.journal"), journal)?;
+        // No rule -> the ML suggestion (previously dropped) becomes a Review proposal.
+
+        let proposals = list_automation_proposals(
+            &root,
+            AutomationScope {
+                login_name: None,
+                label: None,
+                include_gl: Some(true),
+            },
+        )?;
+        assert!(proposals.iter().any(|proposal| {
+            proposal.kind == AutomationProposalKind::RecategorizeGl
+                && proposal.policy_decision == ProposalPolicyDecision::Review
+                && proposal.proposed_result.suggested_account.is_some()
+        }));
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_automation_policy_drains_auto_recategorize(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("gl-policy")?;
+        let mut journal = String::new();
+        journal.push_str(&gl_block("txn-1", "SAFEWAY #1", "e1", "Expenses:Unknown"));
+        journal.push_str(&gl_block("txn-2", "SAFEWAY #2", "e2", "Expenses:Unknown"));
+        journal.push_str(&gl_block(
+            "txn-3",
+            "ZZUNKNOWNMERCHANT",
+            "e3",
+            "Expenses:Unknown",
+        ));
+        fs::write(root.join("general.journal"), journal)?;
+        create_resolution(
+            &root,
+            category_rule(vec![], payee_predicate("SAFEWAY"), "Expenses:Groceries"),
+        )?;
+
+        let applied = apply_automation_policy(
+            &root,
+            AutomationScope {
+                login_name: None,
+                label: None,
+                include_gl: Some(true),
+            },
+        )?;
+        // Both SAFEWAY rows drain; the mystery row has no Auto proposal.
+        assert_eq!(applied.len(), 2);
+
+        let gl = fs::read_to_string(root.join("general.journal"))?;
+        assert_eq!(gl.matches("Expenses:Groceries").count(), 2);
+        // Policy only applies Auto proposals, so the unmatched merchant stays Unknown.
+        assert!(gl.contains("Expenses:Unknown"));
+        let _ = fs::remove_dir_all(root);
+        Ok(())
     }
 }

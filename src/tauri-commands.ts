@@ -178,6 +178,7 @@ export type AutomationProposalKind =
     | 'post-split'
     | 'link-transfer'
     | 'merge-gl-transfer'
+    | 'recategorize-gl'
     | 'sync-posted'
     | 'review-anomaly';
 
