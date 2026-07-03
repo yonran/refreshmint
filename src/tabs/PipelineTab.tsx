@@ -19,6 +19,8 @@ import {
     createResolution,
     disableResolution,
     enableResolution,
+    applyAutomationPolicy,
+    type AutomationScope,
     listAutomationProposals,
     type AutomationProposal,
     listImportAnomalies,
@@ -1119,6 +1121,27 @@ export function PipelineTab({
         }
     }
 
+    // Run the automation policy loop once after a batch post (NOT inside the
+    // per-entry loop). Applies rule-backed recategorizations of pre-existing
+    // Unknown GL rows + safe anomaly retires; ML suggestions stay Review. Returns
+    // the number of applied proposals. Mirrors App.tsx auto-ETL phase 3.
+    async function runPipelineAutomationPolicy(
+        scope: AutomationScope,
+    ): Promise<number> {
+        try {
+            const applied = await applyAutomationPolicy(ledgerPath, scope);
+            if (applied.length > 0) {
+                setPipelineStatus(
+                    `Automation applied ${applied.length} proposal(s).`,
+                );
+            }
+            return applied.length;
+        } catch (error) {
+            setPipelineStatus(`Automation policy failed: ${String(error)}`);
+            return 0;
+        }
+    }
+
     async function handlePipelinePostAll() {
         if (!selectedLoginAccount) return;
         setIsPipelinePosting(true);
@@ -1136,6 +1159,12 @@ export function PipelineTab({
                     setBusyPostEntryId(null);
                 }
             }
+            const applied = await runPipelineAutomationPolicy({
+                loginName: selectedLoginAccount.loginName,
+                label: selectedLoginAccount.label,
+                includeGl: true,
+            });
+            if (applied > 0) await refreshPipelineLoginAccountData();
         } finally {
             setIsPipelinePosting(false);
             void refreshPipelineBulkStats();
@@ -1160,6 +1189,12 @@ export function PipelineTab({
                     setBusyPostEntryId(null);
                 }
             }
+            const applied = await runPipelineAutomationPolicy({
+                loginName: selectedLoginAccount.loginName,
+                label: selectedLoginAccount.label,
+                includeGl: true,
+            });
+            if (applied > 0) await refreshPipelineLoginAccountData();
         } finally {
             setIsPipelinePosting(false);
             setPipelineSelectedEntryIds(new Set());
@@ -1317,6 +1352,15 @@ export function PipelineTab({
                         failed += 1;
                     }
                 }
+            }
+
+            // Ledger-wide policy pass once after all accounts are posted.
+            const appliedPolicy = await runPipelineAutomationPolicy({
+                includeGl: true,
+            });
+            if (appliedPolicy > 0) {
+                reloadLedgerAfter = true;
+                refreshSelected = true;
             }
 
             if (reloadLedgerAfter) {

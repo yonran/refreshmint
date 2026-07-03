@@ -1473,8 +1473,25 @@ fn run_account_post_all_with_dir(
         }
     }
 
+    // After posting, run the automation policy loop once (rule-backed
+    // recategorizations of pre-existing Unknown GL rows + safe anomaly retires).
+    // Mirrors App.tsx auto-ETL phase 3 / PipelineTab post-all.
+    let policy_applied = crate::automation::apply_automation_policy(
+        ledger_dir,
+        crate::automation::AutomationScope {
+            login_name: Some(login_name.clone()),
+            label: None,
+            include_gl: Some(true),
+        },
+    )
+    .map_err(|err| std::io::Error::other(err.to_string()))?;
+    for line in &policy_applied {
+        println!("automation: applied {line}");
+    }
+
     println!(
-        "Posted {posted} entries ({transfers} as transfers); left {skipped} unposted (no GL account and no transfer match)."
+        "Posted {posted} entries ({transfers} as transfers); left {skipped} unposted (no GL account and no transfer match). Automation applied {} proposal(s).",
+        policy_applied.len()
     );
     if !errors.is_empty() {
         for err in &errors {
@@ -2199,6 +2216,73 @@ mod tests {
         assert!(
             !gl.contains("Expenses:Unknown"),
             "entry should not fall back to Expenses:Unknown, got: {gl}"
+        );
+
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn run_account_post_all_policy_recategorizes_unknown_gl() {
+        // Post-all's policy pass recategorizes a pre-existing Unknown GL row that
+        // matches a rule, even when there are no unposted account entries.
+        let base_dir = create_temp_dir();
+        let ledger_dir = base_dir.join("ledger.refreshmint");
+        fs::create_dir_all(&ledger_dir).unwrap();
+
+        let mut cfg = crate::login_config::LoginConfig::default();
+        cfg.accounts.insert(
+            "checking".to_string(),
+            crate::login_config::LoginAccountConfig {
+                gl_account: Some("Assets:Checking".to_string()),
+            },
+        );
+        crate::login_config::write_login_config(&ledger_dir, "chase", &cfg).unwrap();
+        // Empty account journal (no unposted entries).
+        let jpath =
+            crate::account_journal::login_account_journal_path(&ledger_dir, "chase", "checking");
+        fs::create_dir_all(jpath.parent().unwrap()).unwrap();
+        crate::account_journal::write_journal_at_path(&jpath, &[]).unwrap();
+        // A pre-existing Unknown GL row.
+        fs::write(
+            ledger_dir.join("general.journal"),
+            "2026-01-01 SAFEWAY #7  ; id: txn-1\n    ; generated-by: refreshmint-post\n    \
+             ; source: logins/chase/accounts/checking:e1\n    \
+             Assets:Checking  -10.00 USD\n    Expenses:Unknown\n",
+        )
+        .unwrap();
+
+        crate::automation::create_resolution(
+            &ledger_dir,
+            crate::automation::NewResolutionInput {
+                kind: crate::automation::ResolutionKind::CategoryRule,
+                subject_refs: vec![],
+                parts: vec![crate::automation::ResolutionPart {
+                    amount: None,
+                    account: Some("Expenses:Groceries".to_string()),
+                    ref_: None,
+                    notes: None,
+                }],
+                notes: None,
+                predicate: Some(crate::automation::CategoryRulePredicate {
+                    description_regex: None,
+                    normalized_payee: Some("SAFEWAY".to_string()),
+                    amount_min: None,
+                    amount_max: None,
+                }),
+            },
+        )
+        .unwrap();
+
+        run_account_post_all_with_dir(&ledger_dir, "chase", &None).unwrap();
+
+        let gl = fs::read_to_string(ledger_dir.join("general.journal")).unwrap();
+        assert!(
+            gl.contains("Expenses:Groceries"),
+            "policy pass should recategorize the Unknown row, got: {gl}"
+        );
+        assert!(
+            !gl.contains("Expenses:Unknown"),
+            "Unknown row should be gone, got: {gl}"
         );
 
         let _ = fs::remove_dir_all(&base_dir);

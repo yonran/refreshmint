@@ -29,6 +29,7 @@ import {
     suggestCategories,
     postLoginAccountEntry,
     postLoginAccountTransfer,
+    applyAutomationPolicy,
     type CategoryResult,
     openLedger,
     runScrapeForLogin,
@@ -502,6 +503,24 @@ function App() {
                     );
                     postErrors.push(`${loginName}/${label}: ${String(err)}`);
                 }
+            }
+
+            // Phase 3: run the automation policy loop once (rule-backed
+            // recategorizations of pre-existing Unknown GL rows + safe anomaly
+            // retires). ML suggestions stay Review (chips / bulk-accept only).
+            try {
+                const applied = await applyAutomationPolicy(ledgerPath, {
+                    includeGl: true,
+                });
+                if (applied.length > 0) {
+                    posted = true;
+                    setAutoEtlStatus(
+                        `ETL automation applied ${applied.length} proposal(s)`,
+                    );
+                }
+            } catch (err) {
+                console.error('Auto-ETL automation policy failed:', err);
+                postErrors.push(`automation policy: ${String(err)}`);
             }
 
             if (posted) {
