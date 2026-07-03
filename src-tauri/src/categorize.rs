@@ -34,6 +34,12 @@ pub struct CategoryResult {
     /// Auto-detected transfer match (only set when a unique opposite-amount
     /// unposted entry exists within ±3 days across other login accounts).
     pub transfer_match: Option<TransferMatch>,
+    /// Counterpart account of the first matching active `CategoryRule` (see
+    /// `automation::matching_rule_account`). Independent of `suggested`: rules are
+    /// deterministic and get policy `Auto`, ML `suggested` stays `Review`. The
+    /// three post paths use this before `Expenses:Unknown`; keep in sync with
+    /// `GlCategoryResult::rule_account`.
+    pub rule_account: Option<String>,
 }
 
 /// A uniquely matched transfer entry from another login account.
@@ -55,6 +61,10 @@ pub struct GlCategoryResult {
     /// Auto-detected transfer counterpart among other `Expenses:Unknown` GL
     /// transactions with opposite amount within ±3 days.
     pub transfer_match: Option<GlTransferMatch>,
+    /// Counterpart account of the first matching active `CategoryRule` (see
+    /// `automation::matching_rule_account`). Independent of `suggested`; keep in
+    /// sync with `CategoryResult::rule_account`.
+    pub rule_account: Option<String>,
 }
 
 /// A matching `Expenses:Unknown` GL transaction that forms a transfer pair.
@@ -125,6 +135,11 @@ pub fn suggest_categories(
     // Collect unposted transfer candidates from other login accounts.
     let transfer_candidates = collect_transfer_candidates(ledger_dir, login_name, label)?;
 
+    // Active category rules that apply to this login/account (global + scoped),
+    // in newest-first match order. See automation::matching_rule_account.
+    let rules =
+        crate::automation::active_category_rules(ledger_dir, Some(login_name), Some(label))?;
+
     // Process each entry.
     let mut results = HashMap::new();
     for entry in &entries {
@@ -136,6 +151,7 @@ pub fn suggest_categories(
             account_model.as_ref(),
             account_sample_count,
             &transfer_candidates,
+            &rules,
         );
         results.insert(entry.id.clone(), result);
     }
@@ -177,6 +193,14 @@ pub fn suggest_gl_categories(
     // Build transfer candidates from the Expenses:Unknown set.
     let transfer_candidates = build_gl_transfer_candidates(&unknown_txns);
 
+    // Global category rules apply to GL txns; per-txn scoping is refined below
+    // from the txn's `source` tag when present. See automation::matching_rule_account
+    // and CategoryResult::rule_account (kept in sync).
+    let global_rules = crate::automation::active_category_rules(ledger_dir, None, None)?;
+    // Scoped rules loaded once per distinct source account (global + that scope).
+    let mut scoped_rules_cache: HashMap<(String, String), Vec<crate::automation::Resolution>> =
+        HashMap::new();
+
     let mut results = HashMap::new();
     for txn in &unknown_txns {
         let txn_id = match txn.ttags.iter().find(|(k, _)| k == "id") {
@@ -211,16 +235,56 @@ pub fn suggest_gl_categories(
             None
         };
 
+        // Category rule match (independent of ML `suggested`). Scope by the txn's
+        // `source` tag when present, else global-only.
+        let rules: &[crate::automation::Resolution] = match txn_source_login_label(txn) {
+            Some((login, label)) => scoped_rules_cache
+                .entry((login.clone(), label.clone()))
+                .or_insert_with(|| {
+                    crate::automation::active_category_rules(ledger_dir, Some(&login), Some(&label))
+                        .unwrap_or_default()
+                }),
+            None => &global_rules,
+        };
+        let rule_account =
+            crate::automation::matching_rule_account(rules, &txn.tdescription, gl_txn_amount(txn));
+
         results.insert(
             txn_id,
             GlCategoryResult {
                 suggested,
                 transfer_match,
+                rule_account,
             },
         );
     }
 
     Ok(results)
+}
+
+/// Parse a generated GL txn's `source` tag
+/// (`logins/{login}/accounts/{label}:{entry_id}`) into (login, label) for
+/// CategoryRule scoping. Mirrors the GL format documented in post.rs.
+fn txn_source_login_label(txn: &hledger::Transaction) -> Option<(String, String)> {
+    let source = txn
+        .ttags
+        .iter()
+        .find(|(k, _)| k == "source")
+        .map(|(_, v)| v)?;
+    let rest = source.strip_prefix("logins/")?;
+    let (login, rest) = rest.split_once("/accounts/")?;
+    let label = rest.rsplit_once(':').map_or(rest, |(label, _)| label);
+    Some((login.to_string(), label.to_string()))
+}
+
+/// The signed amount of the first non-`Expenses:Unknown` posting of a generated GL
+/// txn, for CategoryRule amount-bound matching. Mirrors `entry_signed_amount`.
+fn gl_txn_amount(txn: &hledger::Transaction) -> Option<f64> {
+    txn.tpostings
+        .iter()
+        .find(|posting| posting.paccount != "Expenses:Unknown")
+        .and_then(|posting| posting.pamount.first())
+        .map(|amount| amount.aquantity.floating_point)
 }
 
 /// Build training examples from GL transactions that have real (non-Unknown) categories.
@@ -646,6 +710,7 @@ fn gl_status_str(status: &hledger::Status) -> &'static str {
 // Per-entry processing
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn process_entry(
     entry: &account_journal::AccountEntry,
     gl_by_id: &HashMap<String, &hledger::Transaction>,
@@ -654,6 +719,7 @@ fn process_entry(
     account_model: Option<&MnbModel>,
     account_sample_count: usize,
     transfer_candidates: &[TransferCandidate],
+    rules: &[crate::automation::Resolution],
 ) -> CategoryResult {
     // --- Amount / status drift (posted entries only) ---
     let (amount_changed, status_changed) = if let Some(gl_ref) = &entry.posted {
@@ -719,12 +785,31 @@ fn process_entry(
         (None, None)
     };
 
+    // Category rule match (independent of ML `suggested` and posted status).
+    // Uses the raw description and the entry's signed posting amount.
+    let rule_account = crate::automation::matching_rule_account(
+        rules,
+        &entry.description,
+        entry_signed_amount(entry),
+    );
+
     CategoryResult {
         suggested,
         amount_changed,
         status_changed,
         transfer_match,
+        rule_account,
     }
+}
+
+/// The entry's signed posting amount as f64 (first posting), for CategoryRule
+/// amount-bound matching. `None` when unparseable or absent.
+fn entry_signed_amount(entry: &account_journal::AccountEntry) -> Option<f64> {
+    entry
+        .postings
+        .first()
+        .and_then(|posting| posting.amount.as_ref())
+        .and_then(|amount| amount.quantity.trim().parse::<f64>().ok())
 }
 
 fn suggest_category(
@@ -1199,6 +1284,95 @@ mod tests {
                 .iter()
                 .any(|(_, class)| class == "Expenses:Gas"),
             "a real counterpart should still be trained on"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn payee_rule_input(
+        normalized_payee: &str,
+        account: &str,
+    ) -> crate::automation::NewResolutionInput {
+        crate::automation::NewResolutionInput {
+            kind: crate::automation::ResolutionKind::CategoryRule,
+            subject_refs: vec![],
+            parts: vec![crate::automation::ResolutionPart {
+                amount: None,
+                account: Some(account.to_string()),
+                ref_: None,
+                notes: None,
+            }],
+            notes: None,
+            predicate: Some(crate::automation::CategoryRulePredicate {
+                description_regex: None,
+                normalized_payee: Some(normalized_payee.to_string()),
+                amount_min: None,
+                amount_max: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn suggest_categories_reports_rule_account() {
+        let dir = categorize_temp_dir("rule-account-entry");
+        let mut cfg = login_config::LoginConfig::default();
+        cfg.accounts.insert(
+            "checking".to_string(),
+            login_config::LoginAccountConfig {
+                gl_account: Some("Assets:Checking".to_string()),
+            },
+        );
+        login_config::write_login_config(&dir, "chase", &cfg).unwrap();
+        let jpath = account_journal::login_account_journal_path(&dir, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &jpath,
+            &[
+                make_entry("e-match", "SAFEWAY #123", vec![]),
+                make_entry("e-other", "COSTCO WHSE", vec![]),
+            ],
+        )
+        .unwrap();
+
+        // Global rule: normalize_payee("SAFEWAY #123") == "SAFEWAY".
+        crate::automation::create_resolution(
+            &dir,
+            payee_rule_input("SAFEWAY", "Expenses:Groceries"),
+        )
+        .unwrap();
+
+        let results = suggest_categories(&dir, "chase", "checking").unwrap();
+        assert_eq!(
+            results
+                .get("e-match")
+                .and_then(|r| r.rule_account.as_deref()),
+            Some("Expenses:Groceries")
+        );
+        assert!(results["e-other"].rule_account.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suggest_gl_categories_reports_rule_account() {
+        let dir = categorize_temp_dir("rule-account-gl");
+        std::fs::write(
+            dir.join("general.journal"),
+            "2026-01-01 SAFEWAY #123  ; id: txn-1\n    \
+             ; source: logins/chase/accounts/checking:entry-1\n    \
+             Assets:Chase  -21.32 USD\n    Expenses:Unknown\n",
+        )
+        .unwrap();
+
+        crate::automation::create_resolution(
+            &dir,
+            payee_rule_input("SAFEWAY", "Expenses:Groceries"),
+        )
+        .unwrap();
+
+        let results = suggest_gl_categories(&dir).unwrap();
+        assert_eq!(
+            results.get("txn-1").and_then(|r| r.rule_account.as_deref()),
+            Some("Expenses:Groceries")
         );
 
         let _ = std::fs::remove_dir_all(&dir);

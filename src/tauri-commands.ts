@@ -932,6 +932,12 @@ export interface CategoryResult {
     statusChanged: boolean;
     /** Auto-detected transfer match, or null if none / ambiguous. */
     transferMatch: TransferMatch | null;
+    /**
+     * Counterpart account of the first matching active CategoryRule, or null.
+     * Independent of `suggested`; post paths prefer it over 'Expenses:Unknown'.
+     * Mirrors Rust categorize::CategoryResult::rule_account.
+     */
+    ruleAccount: string | null;
 }
 
 export async function suggestCategories(
@@ -955,6 +961,11 @@ export interface GlCategoryResult {
     suggested: string | null;
     /** Auto-detected transfer pair among other Expenses:Unknown GL txns. */
     transferMatch: GlTransferMatch | null;
+    /**
+     * Counterpart account of the first matching active CategoryRule, or null.
+     * Mirrors Rust categorize::GlCategoryResult::rule_account.
+     */
+    ruleAccount: string | null;
 }
 
 export async function suggestGlCategories(
