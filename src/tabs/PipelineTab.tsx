@@ -7,6 +7,7 @@ import {
     useState,
 } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import {
     type AccountJournalEntry,
     type CategoryResult,
@@ -1077,7 +1078,22 @@ export function PipelineTab({
         const { loginName, label } = selectedLoginAccount;
         setBusyPostEntryId(entry.id);
         try {
+            // Confirm against the NORMALIZED payee (what the rule actually keys
+            // on), not the raw description, so the user sees exactly which future
+            // transactions this standing rule will match.
             const normalizedPayee = await normalizePayee(entry.description);
+            const shouldCreate = await confirmDialog(
+                `Always post payees like "${normalizedPayee}" to ${trimmed}?`,
+                {
+                    title: 'Create standing rule?',
+                    kind: 'info',
+                    okLabel: 'Always',
+                    cancelLabel: 'Cancel',
+                },
+            );
+            if (!shouldCreate) {
+                return;
+            }
             await createResolution(ledgerPath, {
                 kind: 'category-rule',
                 subjectRefs: [loginScopeRef(loginName, label)],

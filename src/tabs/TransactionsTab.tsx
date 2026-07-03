@@ -358,6 +358,9 @@ export function TransactionsTab({
     const [bulkRecategorizeError, setBulkRecategorizeError] = useState<
         string | null
     >(null);
+    // In-flight guard for the batch "Accept N suggestions" action, so a slow
+    // recategorize can't be double-submitted by re-clicking.
+    const [isAcceptingSuggestions, setIsAcceptingSuggestions] = useState(false);
 
     const searchInputRef = useRef<HTMLInputElement>(null);
     const similarSearchInputRef = useRef<HTMLInputElement>(null);
@@ -819,7 +822,9 @@ export function TransactionsTab({
 
     // Accept every visible ML suggestion in one batch (per-row target account).
     async function handleAcceptSuggestions(edits: AcceptAllEdit[]) {
-        if (edits.length === 0) return;
+        if (edits.length === 0 || isAcceptingSuggestions) return;
+        setBulkRecategorizeError(null);
+        setIsAcceptingSuggestions(true);
         try {
             await recategorizeGlTransactions(
                 ledgerPath,
@@ -833,6 +838,11 @@ export function TransactionsTab({
             dropGlCategorySuggestions(edits.map(({ txnId }) => txnId));
         } catch (error) {
             console.error('accept suggestions failed:', error);
+            setBulkRecategorizeError(
+                `Accept suggestions failed: ${String(error)}`,
+            );
+        } finally {
+            setIsAcceptingSuggestions(false);
         }
     }
 
@@ -2160,6 +2170,7 @@ export function TransactionsTab({
                 onAcceptSuggestions={(edits) => {
                     void handleAcceptSuggestions(edits);
                 }}
+                acceptSuggestionsBusy={isAcceptingSuggestions}
                 onOpenSimilarRecategorize={handleOpenSimilarRecategorize}
                 hideObviousAmounts={hideObviousAmounts}
                 onAddSearchTerm={appendSearchTerm}

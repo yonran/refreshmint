@@ -382,6 +382,7 @@ export function TransactionsTable({
     onOpenLinkTransfer,
     onBulkRecategorize,
     onAcceptSuggestions,
+    acceptSuggestionsBusy = false,
     onOpenSimilarRecategorize,
     hideObviousAmounts = true,
     onAddSearchTerm,
@@ -414,6 +415,8 @@ export function TransactionsTable({
     ) => void;
     // Apply every visible ML suggestion (per-row target account) in one batch.
     onAcceptSuggestions?: (edits: AcceptAllEdit[]) => void;
+    // True while a batch accept is running, to disable the trigger buttons.
+    acceptSuggestionsBusy?: boolean;
     onOpenSimilarRecategorize?: (seed: SimilarRecategorizeSeed) => void;
     hideObviousAmounts?: boolean;
     onAddSearchTerm?: (term: string) => void;
@@ -668,12 +671,16 @@ export function TransactionsTable({
                     <button
                         type="button"
                         className="ghost-button"
+                        disabled={acceptSuggestionsBusy}
                         onClick={() => {
                             setAcceptAllConfirm(acceptAllEdits);
                         }}
                     >
-                        Accept {acceptAllEdits.length} suggestion
-                        {acceptAllEdits.length === 1 ? '' : 's'}
+                        {acceptSuggestionsBusy
+                            ? 'Accepting…'
+                            : `Accept ${acceptAllEdits.length} suggestion${
+                                  acceptAllEdits.length === 1 ? '' : 's'
+                              }`}
                     </button>
                 </div>
             )}
@@ -1664,6 +1671,7 @@ export function TransactionsTable({
                             <button
                                 type="button"
                                 className="ghost-button"
+                                disabled={acceptSuggestionsBusy}
                                 onClick={() => {
                                     onAcceptSuggestions?.(acceptAllConfirm);
                                     setAcceptAllConfirm(null);
