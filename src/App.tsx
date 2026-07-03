@@ -469,12 +469,17 @@ function App() {
                                     posted = true;
                                 }
                             } else if (glAccount) {
+                                // A matching CategoryRule posts directly to its
+                                // account (one GL write); else Expenses:Unknown.
+                                // Mirrors PipelineTab / cli.rs post_all_counterpart
+                                // (categorize CategoryResult.ruleAccount).
                                 await postLoginAccountEntry(
                                     ledgerPath,
                                     loginName,
                                     label,
                                     entry.id,
-                                    'Expenses:Unknown',
+                                    suggestion?.ruleAccount ??
+                                        'Expenses:Unknown',
                                     null,
                                 );
                                 posted = true;

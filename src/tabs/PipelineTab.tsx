@@ -969,12 +969,15 @@ export function PipelineTab({
             return `Transfer posted: ${entryId} ↔ ${suggestion.transferMatch.entryId} (${glId})`;
         }
 
+        // A matching CategoryRule posts directly to its account (one GL write);
+        // else Expenses:Unknown. Mirrors App.tsx auto-ETL / cli.rs
+        // post_all_counterpart (categorize CategoryResult.ruleAccount).
         const glId = await postLoginAccountEntry(
             ledgerPath,
             loginName,
             label,
             entryId,
-            'Expenses:Unknown',
+            suggestion?.ruleAccount ?? 'Expenses:Unknown',
             null,
         );
         return `Posted ${entryId} to ${glId}`;

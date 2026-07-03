@@ -1356,12 +1356,33 @@ fn run_account_post_all(
 ) -> Result<(), Box<dyn Error>> {
     let ledger_dir = resolve_cli_ledger_dir(args.ledger, context)?;
     crate::ledger::require_refreshmint_extension(&ledger_dir)?;
-    let login_name = require_cli_login_name("login", &args.login)?;
+    run_account_post_all_with_dir(&ledger_dir, &args.login, &args.label)
+}
+
+// login is the raw --login value; label is the optional --label (None = all).
+
+/// Counterpart account for a default (non-transfer) post-all posting: the matching
+/// active CategoryRule's account when one exists, else `Expenses:Unknown`. Mirrors
+/// the GUI direct-post paths (App.tsx auto-ETL, PipelineTab) which use
+/// `suggestion.ruleAccount ?? 'Expenses:Unknown'`; both read
+/// categorize::CategoryResult::rule_account.
+fn post_all_counterpart(suggestion: Option<&crate::categorize::CategoryResult>) -> &str {
+    suggestion
+        .and_then(|s| s.rule_account.as_deref())
+        .unwrap_or("Expenses:Unknown")
+}
+
+fn run_account_post_all_with_dir(
+    ledger_dir: &Path,
+    login: &str,
+    label: &Option<String>,
+) -> Result<(), Box<dyn Error>> {
+    let login_name = require_cli_login_name("login", login)?;
 
     // Either the one requested label, or every account label for this login.
-    let labels: Vec<String> = match &args.label {
+    let labels: Vec<String> = match label {
         Some(label) => vec![require_cli_label(label)?],
-        None => crate::login_config::read_login_config(&ledger_dir, &login_name)
+        None => crate::login_config::read_login_config(ledger_dir, &login_name)
             .accounts
             .into_keys()
             .collect(),
@@ -1376,7 +1397,7 @@ fn run_account_post_all(
         // The configured GL account decides whether an unmatched entry
         // default-posts to Expenses:Unknown (mirrors the GUI). A conflicting GL
         // account makes this error; record it and skip the label.
-        let gl_account = match resolve_login_account_gl_account_cli(&ledger_dir, &login_name, label)
+        let gl_account = match resolve_login_account_gl_account_cli(ledger_dir, &login_name, label)
         {
             Ok(gl) => gl,
             Err(err) => {
@@ -1385,13 +1406,13 @@ fn run_account_post_all(
             }
         };
 
-        let unposted = crate::post::get_unposted_login_account(&ledger_dir, &login_name, label)
+        let unposted = crate::post::get_unposted_login_account(ledger_dir, &login_name, label)
             .map_err(|err| std::io::Error::other(err.to_string()))?;
         if unposted.is_empty() {
             continue;
         }
-        // Transfer matches across other login accounts, same data the GUI uses.
-        let suggestions = crate::categorize::suggest_categories(&ledger_dir, &login_name, label)
+        // Transfer matches + category-rule matches, same data the GUI uses.
+        let suggestions = crate::categorize::suggest_categories(ledger_dir, &login_name, label)
             .map_err(|err| std::io::Error::other(err.to_string()))?;
 
         for entry in unposted {
@@ -1404,7 +1425,7 @@ fn run_account_post_all(
                 match (parts.get(1), parts.get(3)) {
                     (Some(other_login), Some(other_label)) => {
                         crate::post::post_login_account_transfer(
-                            &ledger_dir,
+                            ledger_dir,
                             &login_name,
                             label,
                             &entry.id,
@@ -1422,12 +1443,15 @@ fn run_account_post_all(
                     )),
                 }
             } else if !gl_account.is_empty() {
+                // A matching CategoryRule posts directly to its account (one GL
+                // write) instead of Expenses:Unknown.
+                let counterpart = post_all_counterpart(suggestions.get(&entry.id));
                 crate::post::post_login_account_entry(
-                    &ledger_dir,
+                    ledger_dir,
                     &login_name,
                     label,
                     &entry.id,
-                    "Expenses:Unknown",
+                    counterpart,
                     None,
                     "cli",
                 )
@@ -1723,11 +1747,13 @@ fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Bo
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        evidence_ref_matches_document, parse_prompt_overrides, require_cli_existing_login,
-        require_cli_label, require_cli_login_name, resolve_extraction_document_names,
-        run_account_extract_with_dir, run_extension_load_with_dir, run_gl_add_with_dir,
+        evidence_ref_matches_document, parse_prompt_overrides, post_all_counterpart,
+        require_cli_existing_login, require_cli_label, require_cli_login_name,
+        resolve_extraction_document_names, run_account_extract_with_dir,
+        run_account_post_all_with_dir, run_extension_load_with_dir, run_gl_add_with_dir,
         run_new_with_ledger_path, run_secret, AccountCommand, AddArgs, Cli, Commands,
         ExtensionLoadArgs, LoginCommand, SecretAddArgs, SecretArgs, SecretCommand, SecretListArgs,
         SecretRemoveArgs,
@@ -2070,6 +2096,111 @@ mod tests {
                 "unexpected error: {err}"
             ),
         }
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn post_all_counterpart_prefers_rule_account() {
+        let with_rule = crate::categorize::CategoryResult {
+            suggested: None,
+            amount_changed: false,
+            status_changed: false,
+            transfer_match: None,
+            rule_account: Some("Expenses:Groceries".to_string()),
+        };
+        assert_eq!(post_all_counterpart(Some(&with_rule)), "Expenses:Groceries");
+        let without_rule = crate::categorize::CategoryResult {
+            suggested: None,
+            amount_changed: false,
+            status_changed: false,
+            transfer_match: None,
+            rule_account: None,
+        };
+        assert_eq!(
+            post_all_counterpart(Some(&without_rule)),
+            "Expenses:Unknown"
+        );
+        assert_eq!(post_all_counterpart(None), "Expenses:Unknown");
+    }
+
+    #[test]
+    fn run_account_post_all_posts_to_rule_account() {
+        // A CategoryRule matching an entry makes post-all post directly to the
+        // rule's account (one GL write) instead of Expenses:Unknown.
+        let base_dir = create_temp_dir();
+        let ledger_dir = base_dir.join("ledger.refreshmint");
+        fs::create_dir_all(&ledger_dir).unwrap();
+
+        let mut cfg = crate::login_config::LoginConfig::default();
+        cfg.accounts.insert(
+            "checking".to_string(),
+            crate::login_config::LoginAccountConfig {
+                gl_account: Some("Assets:Checking".to_string()),
+            },
+        );
+        crate::login_config::write_login_config(&ledger_dir, "chase", &cfg).unwrap();
+
+        let jpath =
+            crate::account_journal::login_account_journal_path(&ledger_dir, "chase", "checking");
+        fs::create_dir_all(jpath.parent().unwrap()).unwrap();
+        crate::account_journal::write_journal_at_path(
+            &jpath,
+            &[crate::account_journal::AccountEntry {
+                id: "entry-1".to_string(),
+                date: "2026-01-01".to_string(),
+                status: crate::account_journal::EntryStatus::Cleared,
+                description: "SAFEWAY #123".to_string(),
+                comment: String::new(),
+                evidence: vec![],
+                postings: vec![crate::account_journal::EntryPosting {
+                    account: "Assets:Checking".to_string(),
+                    amount: Some(crate::account_journal::SimpleAmount {
+                        quantity: "-21.32".to_string(),
+                        commodity: "USD".to_string(),
+                    }),
+                }],
+                tags: vec![],
+                extracted_by: None,
+                posted: None,
+                posted_postings: vec![],
+            }],
+        )
+        .unwrap();
+
+        crate::automation::create_resolution(
+            &ledger_dir,
+            crate::automation::NewResolutionInput {
+                kind: crate::automation::ResolutionKind::CategoryRule,
+                subject_refs: vec![],
+                parts: vec![crate::automation::ResolutionPart {
+                    amount: None,
+                    account: Some("Expenses:Groceries".to_string()),
+                    ref_: None,
+                    notes: None,
+                }],
+                notes: None,
+                predicate: Some(crate::automation::CategoryRulePredicate {
+                    description_regex: None,
+                    normalized_payee: Some("SAFEWAY".to_string()),
+                    amount_min: None,
+                    amount_max: None,
+                }),
+            },
+        )
+        .unwrap();
+
+        run_account_post_all_with_dir(&ledger_dir, "chase", &Some("checking".to_string())).unwrap();
+
+        let gl = fs::read_to_string(ledger_dir.join("general.journal")).unwrap();
+        assert!(
+            gl.contains("Expenses:Groceries"),
+            "expected rule account in GL, got: {gl}"
+        );
+        assert!(
+            !gl.contains("Expenses:Unknown"),
+            "entry should not fall back to Expenses:Unknown, got: {gl}"
+        );
+
         let _ = fs::remove_dir_all(&base_dir);
     }
 
