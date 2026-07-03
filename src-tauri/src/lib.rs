@@ -15,6 +15,7 @@ pub mod fs_atomic;
 pub mod login_config;
 pub mod migration;
 pub mod operations;
+pub mod payee_normalize;
 pub mod post;
 pub mod report;
 pub mod staging;
