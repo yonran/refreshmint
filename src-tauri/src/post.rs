@@ -1663,11 +1663,21 @@ fn replace_posting_account(line: &str, new_account: &str) -> String {
 ///
 /// Finds the block by `txn_id`, rewrites only the indexed posting account while
 /// preserving the rest of the posting line, writes the updated file, and commits.
-/// Index of the counterpart (last) posting of a generated GL transaction, used by
-/// the RecategorizeGl automation proposal to target the `Expenses:Unknown`
-/// posting. Mirrors categorize.rs "Counterpart is the last posting in our
-/// generated GL format". Returns `None` if no transaction with `txn_id` exists.
-pub fn gl_txn_counterpart_posting_index(
+/// Index of the single `Expenses:Unknown` posting of a GL transaction, used by
+/// the RecategorizeGl automation proposal to target the leg it must rewrite.
+///
+/// `suggest_gl_categories` (categorize.rs) lists ANY txn containing an
+/// `Expenses:Unknown` posting, including *manual* txns where Unknown is not the
+/// last posting. Resolving the actual Unknown posting here (rather than blindly
+/// assuming the last posting) keeps the rewrite targeted at the Unknown leg. It
+/// is also called at apply time, so it re-checks that the leg is still Unknown,
+/// closing the staleness window where the policy could clobber a category the
+/// user just set manually.
+///
+/// Returns `Ok(None)` if no transaction with `txn_id` exists. Returns an error
+/// if the transaction has zero or more than one `Expenses:Unknown` posting
+/// (nothing safe / no unambiguous target to rewrite).
+pub fn gl_txn_unknown_posting_index(
     ledger_dir: &Path,
     txn_id: &str,
 ) -> Result<Option<usize>, Box<dyn std::error::Error + Send + Sync>> {
@@ -1675,11 +1685,36 @@ pub fn gl_txn_counterpart_posting_index(
     if !gl_journal_path.exists() {
         return Ok(None);
     }
-    let txns = crate::ledger_open::run_hledger_print(&gl_journal_path).unwrap_or_default();
-    Ok(txns
+    // Propagate parse failures rather than swallowing them: `unwrap_or_default()`
+    // would turn a broken journal into an empty txn list and a misleading
+    // "transaction not found" at the call site.
+    let txns = crate::ledger_open::run_hledger_print(&gl_journal_path)?;
+    let Some(txn) = txns
         .iter()
         .find(|txn| txn.ttags.iter().any(|(k, v)| k == "id" && v == txn_id))
-        .and_then(|txn| txn.tpostings.len().checked_sub(1)))
+    else {
+        return Ok(None);
+    };
+    let unknown_indices: Vec<usize> = txn
+        .tpostings
+        .iter()
+        .enumerate()
+        .filter(|(_, posting)| posting.paccount == "Expenses:Unknown")
+        .map(|(index, _)| index)
+        .collect();
+    match unknown_indices.as_slice() {
+        [index] => Ok(Some(*index)),
+        [] => Err(format!(
+            "recategorize-gl: transaction {txn_id} has no Expenses:Unknown posting to recategorize"
+        )
+        .into()),
+        _ => Err(format!(
+            "recategorize-gl: transaction {txn_id} has {} Expenses:Unknown postings; \
+             ambiguous recategorization target",
+            unknown_indices.len()
+        )
+        .into()),
+    }
 }
 
 pub fn recategorize_gl_transaction(
@@ -3222,6 +3257,45 @@ mod tests {
         assert_eq!(ops.len(), 2);
         matches!(&ops[1], operations::GlOperation::SyncTransaction { .. });
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gl_txn_unknown_posting_index_finds_middle_unknown() {
+        let root = temp_dir("unknown-idx-mid");
+        // Manual txn: Unknown is the MIDDLE posting (index 1), not the last.
+        fs::write(
+            root.join("general.journal"),
+            "2026-01-01 SAFEWAY  ; id: txn-mid\n    Assets:Chase  -10.00 USD\n    \
+             Expenses:Unknown  4.00 USD\n    Expenses:Dining\n",
+        )
+        .unwrap();
+        let index = gl_txn_unknown_posting_index(&root, "txn-mid").unwrap();
+        assert_eq!(index, Some(1), "must target the Unknown leg, not the last");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gl_txn_unknown_posting_index_errors_on_zero_and_multiple() {
+        let root = temp_dir("unknown-idx-amb");
+        fs::write(
+            root.join("general.journal"),
+            // txn-zero: no Unknown posting at all.
+            "2026-01-01 A  ; id: txn-zero\n    Assets:Chase  -10.00 USD\n    Expenses:Dining\n\n\
+             2026-01-02 B  ; id: txn-two\n    Assets:Chase  -10.00 USD\n    \
+             Expenses:Unknown  4.00 USD\n    Expenses:Unknown  6.00 USD\n",
+        )
+        .unwrap();
+        assert!(
+            gl_txn_unknown_posting_index(&root, "txn-zero").is_err(),
+            "zero Unknown postings must error, not silently pick a leg"
+        );
+        assert!(
+            gl_txn_unknown_posting_index(&root, "txn-two").is_err(),
+            "multiple Unknown postings are an ambiguous target and must error"
+        );
+        // A missing txn is a distinct, non-error case (Ok(None)).
+        assert_eq!(gl_txn_unknown_posting_index(&root, "nope").unwrap(), None);
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -771,8 +771,9 @@ fn gl_proposals(
 }
 
 /// Build a `RecategorizeGl` proposal replacing a txn's `Expenses:Unknown` posting
-/// with `account`. The counterpart posting index is resolved at apply time (last
-/// posting of the generated GL format — see `apply_proposal`).
+/// with `account`. The target posting index is resolved at apply time from the
+/// txn's actual `Expenses:Unknown` posting (see `apply_proposal` and
+/// `post::gl_txn_unknown_posting_index`).
 fn recategorize_gl_proposal(
     txn_id: &str,
     account: &str,
@@ -1016,9 +1017,11 @@ fn apply_proposal(
             let Some(account) = proposal.proposed_result.suggested_account else {
                 return Err("recategorize-gl proposal missing suggested account".into());
             };
-            // The Expenses:Unknown counterpart is the last posting of the generated
-            // GL format (mirrors categorize.rs "Counterpart is the last posting").
-            let posting_index = crate::post::gl_txn_counterpart_posting_index(ledger_dir, &txn_id)?
+            // Target the posting that IS `Expenses:Unknown`, resolved fresh at
+            // apply time. Manual txns can carry Unknown in a non-last position, and
+            // re-resolving here also guards against a category the user set between
+            // proposal generation and apply (post::gl_txn_unknown_posting_index).
+            let posting_index = crate::post::gl_txn_unknown_posting_index(ledger_dir, &txn_id)?
                 .ok_or_else(|| format!("recategorize-gl: transaction not found: {txn_id}"))?;
             crate::post::recategorize_gl_transaction(
                 ledger_dir,
@@ -2500,6 +2503,73 @@ mod tests {
         assert_eq!(gl.matches("Expenses:Groceries").count(), 2);
         // Policy only applies Auto proposals, so the unmatched merchant stays Unknown.
         assert!(gl.contains("Expenses:Unknown"));
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_automation_policy_targets_middle_unknown_posting(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Regression: a manual GL txn whose `Expenses:Unknown` posting is NOT the
+        // last one. `suggest_gl_categories` matches ANY txn containing an Unknown
+        // posting (categorize.rs), so a rule match still produces an Auto
+        // RecategorizeGl. The old last-posting heuristic rewrote the wrong leg
+        // (Expenses:Dining, corrupting user data), the Unknown posting survived,
+        // and `apply_automation_policy` re-listed the same proposal forever
+        // (empirically reproduced infinite loop, one git commit per iteration).
+        let root = temp_dir("gl-middle-unknown")?;
+        // Postings: [Assets:Chase -10.00, Expenses:Unknown 4.00, Expenses:Dining].
+        let journal = "2026-01-01 SAFEWAY #9  ; id: txn-mid\n    \
+             Assets:Chase  -10.00 USD\n    Expenses:Unknown  4.00 USD\n    \
+             Expenses:Dining\n\n";
+        fs::write(root.join("general.journal"), journal)?;
+        create_resolution(
+            &root,
+            category_rule(vec![], payee_predicate("SAFEWAY"), "Expenses:Groceries"),
+        )?;
+
+        // Bound the policy loop so the pre-fix infinite loop surfaces as a test
+        // failure, not a CI hang. The cap lives only here in the test harness;
+        // `apply_automation_policy` itself has no cap — it relies on the Auto
+        // proposal disappearing once the Unknown posting is rewritten.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread_root = root.clone();
+        std::thread::spawn(move || {
+            let result = apply_automation_policy(
+                &thread_root,
+                AutomationScope {
+                    login_name: None,
+                    label: None,
+                    include_gl: Some(true),
+                },
+            );
+            let _ = tx.send(result);
+        });
+        let applied = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(result) => result?,
+            Err(_) => {
+                let _ = fs::remove_dir_all(&root);
+                panic!("apply_automation_policy did not terminate (regressed infinite loop)");
+            }
+        };
+
+        assert_eq!(
+            applied.len(),
+            1,
+            "exactly one Auto RecategorizeGl should apply and then drain"
+        );
+        let gl = fs::read_to_string(root.join("general.journal"))?;
+        // The Unknown leg (and only it) was rewritten to the rule account.
+        assert!(gl.contains("Expenses:Groceries"), "got: {gl}");
+        assert!(
+            !gl.contains("Expenses:Unknown"),
+            "Unknown leg should be gone, got: {gl}"
+        );
+        // The user's manual Expenses:Dining leg must be left untouched.
+        assert!(
+            gl.contains("Expenses:Dining"),
+            "manual Dining leg must be preserved, got: {gl}"
+        );
         let _ = fs::remove_dir_all(root);
         Ok(())
     }
