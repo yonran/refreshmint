@@ -19,6 +19,7 @@ import {
     validateTransactionText,
 } from '../tauri-commands.ts';
 import { categoryRulesFromBulkRows } from '../automation-utils.ts';
+import type { AcceptAllEdit } from '../categorize-utils.ts';
 import {
     getCurrentToken,
     getSearchSuggestions,
@@ -791,6 +792,25 @@ export function TransactionsTab({
             dropGlCategorySuggestions(entries.map(({ txnId }) => txnId));
         } catch (error) {
             console.error('bulk recategorize failed:', error);
+        }
+    }
+
+    // Accept every visible ML suggestion in one batch (per-row target account).
+    async function handleAcceptSuggestions(edits: AcceptAllEdit[]) {
+        if (edits.length === 0) return;
+        try {
+            await recategorizeGlTransactions(
+                ledgerPath,
+                edits.map(({ txnId, postingIndex, newAccount }) => ({
+                    txnId,
+                    postingIndex,
+                    newAccount,
+                })),
+            );
+            onLedgerRefresh();
+            dropGlCategorySuggestions(edits.map(({ txnId }) => txnId));
+        } catch (error) {
+            console.error('accept suggestions failed:', error);
         }
     }
 
@@ -2100,6 +2120,9 @@ export function TransactionsTab({
                         newAccount,
                         createRule,
                     );
+                }}
+                onAcceptSuggestions={(edits) => {
+                    void handleAcceptSuggestions(edits);
                 }}
                 onOpenSimilarRecategorize={handleOpenSimilarRecategorize}
                 hideObviousAmounts={hideObviousAmounts}
