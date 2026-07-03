@@ -214,7 +214,9 @@ pub fn suggest_gl_categories(
         let suggested = if transfer_match.is_some() {
             None
         } else if let Some(model) = &global_model {
-            let tokens = tokenize_text(&txn.tdescription);
+            // GL inference — MUST match GL training (build_gl_training_examples)
+            // via the shared tokenize_description normalization.
+            let tokens = tokenize_description(&txn.tdescription);
             let proba = model.predict_proba(&tokens);
             let total: f64 = proba.iter().map(|(p, _)| p).sum();
             if total > 0.0 {
@@ -320,7 +322,9 @@ fn build_gl_training_examples(gl_txns: &[crate::hledger::Transaction]) -> Vec<Tr
             continue;
         }
 
-        let tokens = tokenize_text(&txn.tdescription);
+        // GL training — MUST match GL inference (suggest_gl_categories) via the
+        // shared tokenize_description normalization.
+        let tokens = tokenize_description(&txn.tdescription);
         examples.push((tokens, counterpart.clone()));
     }
 
@@ -566,9 +570,10 @@ fn seed_examples() -> Vec<(Vec<String>, String)> {
 // ---------------------------------------------------------------------------
 
 /// Tokenise an account journal entry into uppercase alphabetic words plus
-/// `"key:value"` strings for each entry tag.
+/// `"key:value"` strings for each entry tag. The description is payee-normalized
+/// (see `tokenize_description`); tag tokens are left as-is.
 pub(crate) fn tokenize_entry(entry: &account_journal::AccountEntry) -> Vec<String> {
-    let mut tokens = tokenize_text(&entry.description);
+    let mut tokens = tokenize_description(&entry.description);
     for (k, v) in &entry.tags {
         if v.is_empty() {
             tokens.push(k.clone());
@@ -577,6 +582,18 @@ pub(crate) fn tokenize_entry(entry: &account_journal::AccountEntry) -> Vec<Strin
         }
     }
     tokens
+}
+
+/// Payee-normalize a merchant description (payee_normalize::normalize_payee) and
+/// then tokenize it, so noisy variants of one merchant ("SQ *BLUE BOTTLE #12",
+/// "BLUE BOTTLE") train and infer as the same tokens.
+///
+/// This is the single normalization point shared by ALL description tokenization —
+/// account training/inference (tokenize_entry), GL training
+/// (build_gl_training_examples), and GL inference (suggest_gl_categories). Routing
+/// every site through here guarantees training and inference can never diverge.
+fn tokenize_description(text: &str) -> Vec<String> {
+    tokenize_text(&crate::payee_normalize::normalize_payee(text))
 }
 
 /// Split free text into uppercase alphabetic tokens (length ≥ 2).
@@ -1022,6 +1039,22 @@ mod tests {
         let tokens = tokenize_entry(&entry);
         assert!(tokens.contains(&"GROCERY".to_string()));
         assert!(tokens.contains(&"category:Groceries".to_string()));
+    }
+
+    #[test]
+    fn tokenize_description_normalizes_payee() {
+        // Processor prefix + store number stripped by normalize_payee, so noisy
+        // variants of one merchant collapse to the same tokens.
+        assert_eq!(
+            tokenize_description("SQ *BLUE BOTTLE #12"),
+            vec!["BLUE".to_string(), "BOTTLE".to_string()]
+        );
+        assert_eq!(
+            tokenize_description("SQ *BLUE BOTTLE #12"),
+            tokenize_description("BLUE BOTTLE")
+        );
+        // The raw tokenizer, by contrast, keeps the "SQ" processor token.
+        assert!(tokenize_text("SQ *BLUE BOTTLE #12").contains(&"SQ".to_string()));
     }
 
     // --- MNB model ---

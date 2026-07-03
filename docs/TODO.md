@@ -91,9 +91,12 @@ Compared to apps like YNAB, Monarch Money, Copilot, Mint, Empower, and Firefly I
 
 ### Auto-Categorization Rules
 
-- User-defined rules (regex on description/payee → account mapping)
-- Rules applied automatically during pipeline review before ML suggestions
-- Rule management UI (create, edit, prioritize, delete rules)
+- ✅ User-defined rules (regex on description/payee → account mapping) —
+  `ResolutionKind::CategoryRule` (see "Automation actually running" below).
+- ✅ Rules applied automatically during pipeline review before ML suggestions —
+  rules post directly / get policy `Auto`; ML stays `Review`.
+- Rule management UI beyond the existing Saved-decisions enable/disable table
+  (dedicated create/edit/prioritize/delete screen) — not yet built.
 - This complements the existing ML suggestions which require manual confirmation
 
 ### Net Worth Dashboard
@@ -212,20 +215,25 @@ f64→decimal for money comparisons.
 
 ### Automation actually running (the labor multiplier)
 
-- Wire `apply_automation_policy` into the posting paths (auto-ETL, both Post
-  All buttons, CLI `post-all`). It is exposed as a Tauri command but called
-  from no UI component — every proposal requires a manual per-row Apply click.
-- Make category resolutions predicate-based (merchant/amount rules) instead of
-  entry-id-bound single-use; offer one-click "always do this for <payee>" when
-  the user recategorizes. (See "Auto-Categorization Rules" above — this is the
-  same item; the resolution storage/fingerprint machinery in `automation.rs`
-  can host it.)
-- Emit recategorize proposals from ML suggestions in `gl_proposals` (currently
-  `suggestion.suggested` is dropped; only `transfer_match` is consumed).
-- "Accept all N suggestions" bulk action in Transactions (per-row suggestions
-  and bulk-bar tallies are already computed).
-- Payee normalization (strip store numbers, city suffixes, "PURCHASE
-  AUTHORIZED" boilerplate) shared by the tokenizer and the rules layer.
+Shipped in the automation-multiplier batch (2026-07-02):
+
+- ✅ Wire `apply_automation_policy` into the posting paths (auto-ETL, both Post
+  All buttons, CLI `post-all`). It ran nowhere before; now every batch-post runs
+  the policy loop once and drains Auto proposals. (`cef99c3`)
+- ✅ Make category resolutions predicate-based (merchant/amount rules) instead of
+  entry-id-bound single-use — new `ResolutionKind::CategoryRule` with a
+  regex/normalized-payee/amount predicate (`a12f076`), surfaced through
+  suggestions (`0a1c8f9`) and direct-posted at post time (`bc4ddb6`); one-click
+  "Always: <account>" and a bulk "Create rule" checkbox (`12b491c`).
+- ✅ Emit recategorize proposals from ML suggestions in `gl_proposals` — a rule
+  match is Auto, the ML `suggested` (previously dropped) is Review. (`147cb25`)
+- ✅ "Accept all N suggestions" bulk action in Transactions. (`b83e82c`)
+- ✅ Payee normalization (strip store numbers, city suffixes, "PURCHASE
+  AUTHORIZED" boilerplate) shared by the tokenizer and the rules layer —
+  `payee_normalize` module (`2bf30e2`), tokenizer normalization (this commit).
+
+Still open:
+
 - Decay or drop the compiled-in seed examples once real history exists
   (`COSTCO → Expenses:Shopping` is hardcoded and never decays); confidence
   tiering with an auto-apply threshold instead of the flat 0.5 abstain.
