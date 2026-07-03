@@ -714,6 +714,17 @@ fn gl_proposals(
     ledger_dir: &Path,
 ) -> Result<Vec<AutomationProposal>, Box<dyn std::error::Error + Send + Sync>> {
     let suggestions = crate::categorize::suggest_gl_categories(ledger_dir)?;
+    // A txn that some OTHER txn uniquely points at as its transfer counterpart is
+    // a possible transfer leg. Transfer uniqueness is asymmetric (T may have two
+    // same-amount candidates and get transfer_match: None while another txn
+    // uniquely matches T), so without this a rule could Auto-expense one leg of a
+    // real transfer and strand the other side's MergeGlTransfer. Downgrade such
+    // rule proposals to Review so a human decides.
+    let transfer_counterpart_ids: std::collections::HashSet<String> = suggestions
+        .values()
+        .filter_map(|suggestion| suggestion.transfer_match.as_ref())
+        .map(|transfer| transfer.txn_id.clone())
+        .collect();
     let mut proposals = Vec::new();
     for (txn_id, suggestion) in suggestions {
         // A transfer match means the Unknown txn is actually a transfer; it takes
@@ -750,12 +761,19 @@ fn gl_proposals(
         // the ML suggestion (previously dropped on the floor) becomes a Review
         // proposal, surfaced as a chip / bulk-accept in the Transactions tab.
         if let Some(account) = suggestion.rule_account {
+            // A possible transfer leg is only proposed for human Review, never
+            // Auto (see transfer_counterpart_ids above).
+            let policy_decision = if transfer_counterpart_ids.contains(&txn_id) {
+                ProposalPolicyDecision::Review
+            } else {
+                ProposalPolicyDecision::Auto
+            };
             proposals.push(recategorize_gl_proposal(
                 &txn_id,
                 &account,
                 ProposalReasonResult::DerivedFromResolution,
                 ProposalReasonWeight::Exact,
-                ProposalPolicyDecision::Auto,
+                policy_decision,
             ));
         } else if let Some(account) = suggestion.suggested {
             proposals.push(recategorize_gl_proposal(
@@ -2453,6 +2471,22 @@ mod tests {
         )
     }
 
+    // Like gl_block but with a caller-chosen signed amount and source label, for
+    // constructing transfer-detection scenarios. Counterpart is Expenses:Unknown.
+    fn gl_amount_block(
+        id: &str,
+        desc: &str,
+        source_entry: &str,
+        label: &str,
+        amount: &str,
+    ) -> String {
+        format!(
+            "2026-01-01 {desc}  ; id: {id}\n    ; generated-by: refreshmint-post\n    \
+             ; source: logins/chase/accounts/{label}:{source_entry}\n    \
+             Assets:Chase  {amount} USD\n    Expenses:Unknown\n\n"
+        )
+    }
+
     #[test]
     fn gl_rule_match_generates_auto_recategorize_proposal(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -2624,6 +2658,71 @@ mod tests {
         assert!(
             gl.contains("Expenses:Dining"),
             "manual Dining leg must be preserved, got: {gl}"
+        );
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn gl_rule_proposal_for_possible_transfer_leg_is_review_not_auto(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Transfer uniqueness is asymmetric. A (+10) uniquely matches B (-10) and
+        // C (+10) also uniquely matches B, but B has two +10 candidates (A and C),
+        // so B.transfer_match is None and B falls to the rule branch. A rule
+        // matching B must NOT Auto-expense it: that would strand A's/C's
+        // MergeGlTransfer. B's rule proposal must be Review, requiring a human.
+        let root = temp_dir("gl-transfer-leg")?;
+        let mut journal = String::new();
+        journal.push_str(&gl_amount_block(
+            "txn-a",
+            "AAA COFFEE",
+            "ea",
+            "checking",
+            "10.00",
+        ));
+        journal.push_str(&gl_amount_block(
+            "txn-b",
+            "ACME PAYROLL",
+            "eb",
+            "savings",
+            "-10.00",
+        ));
+        journal.push_str(&gl_amount_block(
+            "txn-c",
+            "CCC GAS",
+            "ec",
+            "brokerage",
+            "10.00",
+        ));
+        fs::write(root.join("general.journal"), journal)?;
+        create_resolution(
+            &root,
+            category_rule(vec![], payee_predicate("ACME PAYROLL"), "Expenses:Payroll"),
+        )?;
+
+        let proposals = list_automation_proposals(
+            &root,
+            AutomationScope {
+                login_name: None,
+                label: None,
+                include_gl: Some(true),
+            },
+        )?;
+        let b_recat = proposals
+            .iter()
+            .find(|proposal| {
+                proposal.kind == AutomationProposalKind::RecategorizeGl
+                    && proposal
+                        .subject_refs
+                        .iter()
+                        .filter_map(parse_gl_txn_ref)
+                        .any(|id| id == "txn-b")
+            })
+            .ok_or("B should have a rule-derived RecategorizeGl proposal")?;
+        assert_eq!(
+            b_recat.policy_decision,
+            ProposalPolicyDecision::Review,
+            "a possible transfer leg must not be Auto-expensed"
         );
         let _ = fs::remove_dir_all(root);
         Ok(())
