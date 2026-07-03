@@ -352,6 +352,12 @@ export function TransactionsTab({
         entries: RecategorizeSelectionEntry[];
         newAccount: string;
     } | null>(null);
+    // Rule-creation failures during a bulk recategorize: the GL edit already
+    // landed and the table was refreshed, but the standing CategoryRule(s) could
+    // not be saved. Surfaced so the user knows future matches won't auto-post.
+    const [bulkRecategorizeError, setBulkRecategorizeError] = useState<
+        string | null
+    >(null);
 
     const searchInputRef = useRef<HTMLInputElement>(null);
     const similarSearchInputRef = useRef<HTMLInputElement>(null);
@@ -763,6 +769,7 @@ export function TransactionsTab({
         newAccount: string,
         createRule = false,
     ) {
+        setBulkRecategorizeError(null);
         try {
             await recategorizeGlTransactions(
                 ledgerPath,
@@ -772,10 +779,24 @@ export function TransactionsTab({
                     newAccount,
                 })),
             );
-            // Optionally persist a standing CategoryRule per distinct payee so
-            // future matches post here automatically. Repeated saves are
-            // idempotent (backend dedups by fingerprint).
-            if (createRule) {
+        } catch (error) {
+            // The GL was not mutated; leave the table as-is and report.
+            console.error('bulk recategorize failed:', error);
+            setBulkRecategorizeError(
+                `Bulk recategorize failed: ${String(error)}`,
+            );
+            return;
+        }
+        // The GL edit landed. Refresh + prune now, before the best-effort rule
+        // creation, so a createResolution failure can't leave the table stale.
+        onLedgerRefresh();
+        dropGlCategorySuggestions(entries.map(({ txnId }) => txnId));
+        // Optionally persist a standing CategoryRule per distinct payee so future
+        // matches post here automatically. Repeated saves are idempotent (backend
+        // dedups by fingerprint). Kept after the recategorize (never create a rule
+        // for an edit that failed); failures here are surfaced but non-fatal.
+        if (createRule) {
+            try {
                 const rows = await Promise.all(
                     entries.map(async ({ description }) => ({
                         normalizedPayee: await normalizePayee(
@@ -787,11 +808,12 @@ export function TransactionsTab({
                 for (const rule of categoryRulesFromBulkRows(rows)) {
                     await createResolution(ledgerPath, rule);
                 }
+            } catch (error) {
+                console.error('bulk recategorize rule creation failed:', error);
+                setBulkRecategorizeError(
+                    `Recategorized rows, but saving the standing rule failed: ${String(error)}`,
+                );
             }
-            onLedgerRefresh();
-            dropGlCategorySuggestions(entries.map(({ txnId }) => txnId));
-        } catch (error) {
-            console.error('bulk recategorize failed:', error);
         }
     }
 
@@ -1679,6 +1701,20 @@ export function TransactionsTab({
             </div>
             {queryError !== null && (
                 <div className="query-error">{queryError}</div>
+            )}
+            {bulkRecategorizeError !== null && (
+                <div className="query-error">
+                    {bulkRecategorizeError}{' '}
+                    <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={() => {
+                            setBulkRecategorizeError(null);
+                        }}
+                    >
+                        Dismiss
+                    </button>
+                </div>
             )}
             <section className="txn-form">
                 <button
