@@ -1473,18 +1473,42 @@ fn run_account_post_all_with_dir(
         }
     }
 
-    // After posting, run the automation policy loop once (rule-backed
-    // recategorizations of pre-existing Unknown GL rows + safe anomaly retires).
+    // After posting, run the automation policy loop (rule-backed
+    // recategorizations of pre-existing Unknown GL rows + safe anomaly retires,
+    // plus entry-bound Auto resolutions like PostCategory / LinkTransfer).
     // Mirrors App.tsx auto-ETL phase 3 / PipelineTab post-all.
-    let policy_applied = crate::automation::apply_automation_policy(
-        ledger_dir,
-        crate::automation::AutomationScope {
-            login_name: Some(login_name.clone()),
-            label: None,
-            include_gl: Some(true),
-        },
-    )
-    .map_err(|err| std::io::Error::other(err.to_string()))?;
+    //
+    // list_automation_proposals only runs login_account_proposals when BOTH
+    // login and label are set (see automation::list_automation_proposals), so a
+    // {login: Some, label: None} scope drains no entry-bound proposals. Drive
+    // the policy once per resolved (login, label), then once more for GL.
+    let mut policy_applied: Vec<String> = Vec::new();
+    for label in &labels {
+        policy_applied.extend(
+            crate::automation::apply_automation_policy(
+                ledger_dir,
+                crate::automation::AutomationScope {
+                    login_name: Some(login_name.clone()),
+                    label: Some(label.clone()),
+                    include_gl: Some(false),
+                },
+            )
+            .map_err(|err| std::io::Error::other(err.to_string()))?,
+        );
+    }
+    // A final GL pass (no login scope) drains rule-backed RecategorizeGl on
+    // pre-existing Unknown rows plus any remaining global Auto proposals.
+    policy_applied.extend(
+        crate::automation::apply_automation_policy(
+            ledger_dir,
+            crate::automation::AutomationScope {
+                login_name: None,
+                label: None,
+                include_gl: Some(true),
+            },
+        )
+        .map_err(|err| std::io::Error::other(err.to_string()))?,
+    );
     for line in &policy_applied {
         println!("automation: applied {line}");
     }
@@ -2226,6 +2250,102 @@ mod tests {
         assert_eq!(
             policy_applied, 0,
             "entry should post directly to the rule account, not via the policy loop"
+        );
+
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn run_account_post_all_policy_posts_entry_bound_category_resolution() {
+        // Post-all's policy pass must drain entry-bound Auto proposals
+        // (PostCategory) for this login's accounts. The scope used to be
+        // {login: Some, label: None} — a dead combination that
+        // list_automation_proposals never runs login_account_proposals for — so
+        // entry-bound resolutions were silently never applied by CLI post-all.
+        let base_dir = create_temp_dir();
+        let ledger_dir = base_dir.join("ledger.refreshmint");
+        fs::create_dir_all(&ledger_dir).unwrap();
+
+        // The account has NO gl_account, so phase-1 direct-posting skips the
+        // entry and leaves it unposted for the policy phase to handle.
+        let mut cfg = crate::login_config::LoginConfig::default();
+        cfg.accounts.insert(
+            "checking".to_string(),
+            crate::login_config::LoginAccountConfig { gl_account: None },
+        );
+        crate::login_config::write_login_config(&ledger_dir, "chase", &cfg).unwrap();
+
+        let jpath =
+            crate::account_journal::login_account_journal_path(&ledger_dir, "chase", "checking");
+        fs::create_dir_all(jpath.parent().unwrap()).unwrap();
+        crate::account_journal::write_journal_at_path(
+            &jpath,
+            &[crate::account_journal::AccountEntry {
+                id: "entry-1".to_string(),
+                date: "2026-01-01".to_string(),
+                status: crate::account_journal::EntryStatus::Cleared,
+                description: "BLUE BOTTLE".to_string(),
+                comment: String::new(),
+                evidence: vec![],
+                postings: vec![crate::account_journal::EntryPosting {
+                    account: "Assets:Checking".to_string(),
+                    amount: Some(crate::account_journal::SimpleAmount {
+                        quantity: "-4.50".to_string(),
+                        commodity: "USD".to_string(),
+                    }),
+                }],
+                tags: vec![],
+                extracted_by: None,
+                posted: None,
+                posted_postings: vec![],
+            }],
+        )
+        .unwrap();
+        fs::write(ledger_dir.join("general.journal"), "").unwrap();
+
+        // Entry-bound "always post this entry to Expenses:Coffee" resolution.
+        crate::automation::create_resolution(
+            &ledger_dir,
+            crate::automation::NewResolutionInput {
+                kind: crate::automation::ResolutionKind::Category,
+                subject_refs: vec![crate::bookkeeping::TypedRef {
+                    kind: crate::bookkeeping::TypedRefKind::LoginEntry,
+                    id: None,
+                    locator: Some("logins/chase/accounts/checking".to_string()),
+                    entry_id: Some("entry-1".to_string()),
+                    login_name: Some("chase".to_string()),
+                    label: Some("checking".to_string()),
+                    filename: None,
+                }],
+                parts: vec![crate::automation::ResolutionPart {
+                    amount: None,
+                    account: Some("Expenses:Coffee".to_string()),
+                    ref_: None,
+                    notes: None,
+                }],
+                notes: None,
+                predicate: None,
+            },
+        )
+        .unwrap();
+
+        let policy_applied =
+            run_account_post_all_with_dir(&ledger_dir, "chase", &Some("checking".to_string()))
+                .unwrap();
+
+        let gl = fs::read_to_string(ledger_dir.join("general.journal")).unwrap();
+        assert!(
+            gl.contains("Expenses:Coffee"),
+            "policy pass should post the entry to the resolution's account, got: {gl}"
+        );
+        let entries = crate::account_journal::read_journal_at_path(&jpath).unwrap();
+        assert!(
+            entries[0].posted.is_some(),
+            "entry should be marked posted after the policy pass"
+        );
+        assert!(
+            policy_applied >= 1,
+            "policy loop should have applied the entry-bound PostCategory proposal"
         );
 
         let _ = fs::remove_dir_all(&base_dir);
