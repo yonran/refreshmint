@@ -1407,6 +1407,7 @@ mod tests {
                 ],
                 parts: Vec::new(),
                 notes: None,
+                predicate: None,
             },
         )
         .expect("create resolution");

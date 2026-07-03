@@ -116,6 +116,7 @@ export type ResolutionKind =
     | 'same-source'
     | 'not-same-source'
     | 'category'
+    | 'category-rule'
     | 'posting-split'
     | 'transfer-link'
     | 'transfer-split'
@@ -132,6 +133,17 @@ export interface ResolutionPart {
     notes?: string | null;
 }
 
+// Predicate for a 'category-rule' Resolution. Mirrors the Rust
+// automation::CategoryRulePredicate (src-tauri/src/automation.rs). A rule matches
+// when every set field matches; at least one of descriptionRegex/normalizedPayee
+// is required.
+export interface CategoryRulePredicate {
+    descriptionRegex?: string | null;
+    normalizedPayee?: string | null;
+    amountMin?: string | null;
+    amountMax?: string | null;
+}
+
 export interface Resolution {
     id: string;
     kind: ResolutionKind;
@@ -139,6 +151,7 @@ export interface Resolution {
     subjectRefs: TypedRef[];
     parts: ResolutionPart[];
     notes?: string | null;
+    predicate?: CategoryRulePredicate | null;
     createdAt: string;
     updatedAt: string;
 }
@@ -148,6 +161,7 @@ export interface NewResolutionInput {
     subjectRefs: TypedRef[];
     parts: ResolutionPart[];
     notes?: string | null;
+    predicate?: CategoryRulePredicate | null;
 }
 
 export interface AutomationScope {

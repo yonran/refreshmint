@@ -9,6 +9,9 @@ use crate::bookkeeping::{self, TypedRef, TypedRefKind};
 
 const RESOLUTIONS_DIR: &str = "resolutions";
 
+/// Cent-rounding tolerance for CategoryRule amount-bound comparisons.
+const AMOUNT_EPSILON: f64 = 0.005;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Resolution {
@@ -18,6 +21,12 @@ pub struct Resolution {
     pub subject_refs: Vec<TypedRef>,
     pub parts: Vec<ResolutionPart>,
     pub notes: Option<String>,
+    /// Predicate for `CategoryRule` resolutions. Additive/optional: pre-existing
+    /// resolution JSON files (which never had this field) still parse, and the
+    /// fingerprint only serializes it when `Some` so their ids stay byte-stable
+    /// (see `resolution_fingerprint`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<CategoryRulePredicate>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -28,12 +37,37 @@ pub enum ResolutionKind {
     SameSource,
     NotSameSource,
     Category,
+    /// Standing predicate rule: when a scraped entry (or Unknown GL txn) matches
+    /// the `Resolution.predicate`, post/recategorize directly to the rule's
+    /// account. Unlike `Category`, it is not bound to a specific entry id and can
+    /// fire repeatedly. See `matching_rule_account` / `active_category_rules`.
+    CategoryRule,
     PostingSplit,
     TransferLink,
     TransferSplit,
     IgnoreSource,
     PendingRetired,
     ReversalLink,
+}
+
+/// Predicate for a [`ResolutionKind::CategoryRule`]. A rule matches an entry when
+/// every set field matches (logical AND). Validation requires at least one of
+/// `description_regex` / `normalized_payee` (see `validate_resolution_input`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryRulePredicate {
+    /// Case-insensitive regex tested against the RAW (un-normalized) description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_regex: Option<String>,
+    /// Exact match against `payee_normalize::normalize_payee(description)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalized_payee: Option<String>,
+    /// Inclusive lower bound on the signed posting amount (parsed f64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_min: Option<String>,
+    /// Inclusive upper bound on the signed posting amount (parsed f64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_max: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +94,8 @@ pub struct NewResolutionInput {
     pub subject_refs: Vec<TypedRef>,
     pub parts: Vec<ResolutionPart>,
     pub notes: Option<String>,
+    #[serde(default)]
+    pub predicate: Option<CategoryRulePredicate>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -199,7 +235,12 @@ pub fn list_resolutions(ledger_dir: &Path) -> io::Result<Vec<Resolution>> {
 pub fn create_resolution(ledger_dir: &Path, input: NewResolutionInput) -> io::Result<Resolution> {
     ensure_automation_layout(ledger_dir)?;
     validate_resolution_input(&input)?;
-    let fingerprint = resolution_fingerprint(&input.kind, &input.subject_refs, &input.parts)?;
+    let fingerprint = resolution_fingerprint(
+        &input.kind,
+        &input.subject_refs,
+        &input.parts,
+        &input.predicate,
+    )?;
     for existing in list_resolutions(ledger_dir)? {
         if resolution_matches_fingerprint(&existing, &fingerprint)? {
             if existing.status == ResolutionStatus::Active {
@@ -217,6 +258,7 @@ pub fn create_resolution(ledger_dir: &Path, input: NewResolutionInput) -> io::Re
         subject_refs: input.subject_refs,
         parts: input.parts,
         notes: normalize_optional(input.notes),
+        predicate: input.predicate,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -239,6 +281,7 @@ fn reactivate_resolution(
         subject_refs: input.subject_refs,
         parts: input.parts,
         notes: normalize_optional(input.notes),
+        predicate: input.predicate,
         created_at: existing.created_at,
         updated_at: crate::operations::now_timestamp(),
     };
@@ -254,6 +297,7 @@ fn resolution_matches_fingerprint(resolution: &Resolution, fingerprint: &str) ->
         &resolution.kind,
         &resolution.subject_refs,
         &resolution.parts,
+        &resolution.predicate,
     )? == fingerprint)
 }
 
@@ -261,9 +305,17 @@ fn resolution_fingerprint(
     kind: &ResolutionKind,
     subject_refs: &[TypedRef],
     parts: &[ResolutionPart],
+    predicate: &Option<CategoryRulePredicate>,
 ) -> io::Result<String> {
-    serde_json::to_string(&(kind, canonical_subject_refs(kind, subject_refs), parts))
-        .map_err(json_error)
+    let canonical = canonical_subject_refs(kind, subject_refs);
+    // Serialize the predicate only when present so that pre-CategoryRule kinds
+    // (predicate == None) produce a byte-identical fingerprint to the historical
+    // 3-tuple, keeping their stable ids unchanged.
+    match predicate {
+        None => serde_json::to_string(&(kind, canonical, parts)),
+        Some(predicate) => serde_json::to_string(&(kind, canonical, parts, predicate)),
+    }
+    .map_err(json_error)
 }
 
 fn canonical_subject_refs(kind: &ResolutionKind, refs: &[TypedRef]) -> Vec<TypedRef> {
@@ -313,6 +365,113 @@ fn update_resolution_status(
         serde_json::to_string_pretty(&resolution).map_err(json_error)?,
     )?;
     Ok(resolution)
+}
+
+/// Compile a CategoryRule `description_regex` (case-insensitive). Shared by
+/// validation (`validate_category_rule_input`) and matching (`predicate_matches`)
+/// so both agree on the regex flavor.
+fn compile_rule_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    regex::RegexBuilder::new(pattern)
+        .case_insensitive(true)
+        .build()
+}
+
+/// Load active [`ResolutionKind::CategoryRule`] resolutions that apply to the given
+/// scope, in match order (updated_at desc, then id asc — the order
+/// `list_resolutions` returns). A rule applies when it is global (empty
+/// subject_refs) or its single scope ref names `login_name`/`label`. Pass
+/// `None`/`None` to get only global rules (used for GL txns that lack a reliable
+/// login/account context). Paired with [`matching_rule_account`].
+pub fn active_category_rules(
+    ledger_dir: &Path,
+    login_name: Option<&str>,
+    label: Option<&str>,
+) -> io::Result<Vec<Resolution>> {
+    Ok(list_resolutions(ledger_dir)?
+        .into_iter()
+        .filter(|rule| {
+            rule.kind == ResolutionKind::CategoryRule && rule.status == ResolutionStatus::Active
+        })
+        .filter(|rule| category_rule_matches_scope(rule, login_name, label))
+        .collect())
+}
+
+/// Whether a CategoryRule applies to the given login/label scope. Global rules
+/// (no subject_refs) always apply; scoped rules apply only to their login/account.
+fn category_rule_matches_scope(
+    rule: &Resolution,
+    login_name: Option<&str>,
+    label: Option<&str>,
+) -> bool {
+    match rule.subject_refs.as_slice() {
+        [] => true,
+        [scope] => match (login_name, label) {
+            (Some(login), Some(label)) => scope
+                .locator
+                .as_deref()
+                .and_then(parse_login_account_locator)
+                .is_some_and(|(scope_login, scope_label)| {
+                    scope_login == login && scope_label == label
+                }),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// First active CategoryRule whose predicate matches, returning its account. Rules
+/// must already be scope-filtered (see [`active_category_rules`]) and are tried in
+/// order — first match wins. Consumed by categorize.rs `suggest_categories` /
+/// `suggest_gl_categories` to fill `rule_account`.
+pub fn matching_rule_account(
+    rules: &[Resolution],
+    description: &str,
+    amount: Option<f64>,
+) -> Option<String> {
+    for rule in rules {
+        let Some(predicate) = &rule.predicate else {
+            continue;
+        };
+        if predicate_matches(predicate, description, amount) {
+            if let Some(account) = rule.parts.iter().find_map(|part| part.account.clone()) {
+                return Some(account);
+            }
+        }
+    }
+    None
+}
+
+/// Whether every set field of `predicate` matches the entry (logical AND). Amount
+/// bounds compare the signed posting amount with a cent-rounding tolerance.
+fn predicate_matches(
+    predicate: &CategoryRulePredicate,
+    description: &str,
+    amount: Option<f64>,
+) -> bool {
+    if let Some(pattern) = &predicate.description_regex {
+        match compile_rule_regex(pattern) {
+            Ok(regex) if regex.is_match(description) => {}
+            _ => return false,
+        }
+    }
+    if let Some(expected) = &predicate.normalized_payee {
+        if &crate::payee_normalize::normalize_payee(description) != expected {
+            return false;
+        }
+    }
+    if let Some(min) = &predicate.amount_min {
+        match (amount, min.parse::<f64>()) {
+            (Some(amount), Ok(min)) if amount >= min - AMOUNT_EPSILON => {}
+            _ => return false,
+        }
+    }
+    if let Some(max) = &predicate.amount_max {
+        match (amount, max.parse::<f64>()) {
+            (Some(amount), Ok(max)) if amount <= max + AMOUNT_EPSILON => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 pub fn list_automation_proposals(
@@ -1086,7 +1245,9 @@ impl<'a> ActiveResolutions<'a> {
 }
 
 fn validate_resolution_input(input: &NewResolutionInput) -> io::Result<()> {
-    if input.subject_refs.is_empty() {
+    // CategoryRule is the only kind allowed to be global (empty subject_refs); all
+    // others act on specific entries and require a subject.
+    if input.subject_refs.is_empty() && input.kind != ResolutionKind::CategoryRule {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "subjectRefs is required",
@@ -1165,8 +1326,63 @@ fn validate_resolution_input(input: &NewResolutionInput) -> io::Result<()> {
                 ));
             }
         }
+        ResolutionKind::CategoryRule => validate_category_rule_input(input)?,
     }
     Ok(())
+}
+
+/// Validate the CategoryRule-specific shape (see the batch plan): a predicate with
+/// at least one of description_regex/normalized_payee, a compilable case-insensitive
+/// regex if present, exactly one non-empty account part, and subject_refs that are
+/// EITHER empty (global) or a single login-scope ref (LoginEntry with a
+/// `logins/<login>/accounts/<label>` locator and no entry_id).
+fn validate_category_rule_input(input: &NewResolutionInput) -> io::Result<()> {
+    let invalid = |msg: &str| io::Error::new(io::ErrorKind::InvalidInput, msg.to_string());
+
+    let Some(predicate) = &input.predicate else {
+        return Err(invalid("category rule resolutions require a predicate"));
+    };
+    if predicate.description_regex.is_none() && predicate.normalized_payee.is_none() {
+        return Err(invalid(
+            "category rule predicate requires descriptionRegex or normalizedPayee",
+        ));
+    }
+    if let Some(pattern) = &predicate.description_regex {
+        compile_rule_regex(pattern)
+            .map_err(|err| invalid(&format!("category rule descriptionRegex is invalid: {err}")))?;
+    }
+    let account_part_count = input
+        .parts
+        .iter()
+        .filter(|part| !part.account.as_deref().unwrap_or("").is_empty())
+        .count();
+    if account_part_count != 1 {
+        return Err(invalid(
+            "category rule resolutions require exactly one account part",
+        ));
+    }
+    match input.subject_refs.as_slice() {
+        [] => {}
+        [scope] if is_login_scope_ref(scope) => {}
+        _ => {
+            return Err(invalid(
+                "category rule subjectRefs must be empty (global) or a single login-scope ref",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A login-account scope ref: LoginEntry with a `logins/<login>/accounts/<label>`
+/// locator and NO entry_id (distinguishing it from an entry-bound ref).
+fn is_login_scope_ref(value: &TypedRef) -> bool {
+    value.kind == TypedRefKind::LoginEntry
+        && value.entry_id.is_none()
+        && value
+            .locator
+            .as_deref()
+            .and_then(parse_login_account_locator)
+            .is_some()
 }
 
 fn resolutions_dir(ledger_dir: &Path) -> PathBuf {
@@ -1350,6 +1566,7 @@ mod tests {
                     notes: None,
                 }],
                 notes: Some("merchant rule".to_string()),
+                predicate: None,
             },
         )?;
         assert_eq!(list_resolutions(&root)?.len(), 1);
@@ -1374,6 +1591,7 @@ mod tests {
                 subject_refs: vec![left.clone(), right.clone()],
                 parts: Vec::new(),
                 notes: Some("first".to_string()),
+                predicate: None,
             },
         )?;
         let second = create_resolution(
@@ -1383,6 +1601,7 @@ mod tests {
                 subject_refs: vec![right, left],
                 parts: Vec::new(),
                 notes: Some("second".to_string()),
+                predicate: None,
             },
         )?;
         let resolutions = list_resolutions(&root)?;
@@ -1414,6 +1633,7 @@ mod tests {
                     notes: None,
                 }],
                 notes: None,
+                predicate: None,
             },
         )?;
 
@@ -1463,6 +1683,7 @@ mod tests {
                     },
                 ],
                 notes: None,
+                predicate: None,
             },
         )?;
 
@@ -1501,6 +1722,7 @@ mod tests {
                     notes: None,
                 }],
                 notes: None,
+                predicate: None,
             },
         );
         let err = match result {
@@ -1527,6 +1749,7 @@ mod tests {
                 subject_refs: vec![login_entry_ref(login_name, label, "entry-1")],
                 parts: Vec::new(),
                 notes: None,
+                predicate: None,
             },
         )?;
 
@@ -1568,6 +1791,7 @@ mod tests {
                     notes: None,
                 }],
                 notes: None,
+                predicate: None,
             },
         )?;
         create_resolution(
@@ -1577,6 +1801,7 @@ mod tests {
                 subject_refs: vec![login_entry_ref(login_name, label, "entry-1")],
                 parts: Vec::new(),
                 notes: None,
+                predicate: None,
             },
         )?;
 
@@ -1654,6 +1879,7 @@ mod tests {
                 ],
                 parts: Vec::new(),
                 notes: None,
+                predicate: None,
             },
         );
         let err = match result {
@@ -1674,6 +1900,7 @@ mod tests {
                     notes: None,
                 }],
                 notes: None,
+                predicate: None,
             },
         );
         let err = match result {
@@ -1705,6 +1932,7 @@ mod tests {
                     notes: None,
                 }],
                 notes: None,
+                predicate: None,
             },
         );
         let err = match result {
@@ -1732,6 +1960,7 @@ mod tests {
                 ],
                 parts: Vec::new(),
                 notes: None,
+                predicate: None,
             },
         );
         let err = match result {
@@ -1761,6 +1990,7 @@ mod tests {
                 subject_refs: vec![entry_1, entry_2],
                 parts: Vec::new(),
                 notes: None,
+                predicate: None,
             },
         )?;
 
@@ -1779,5 +2009,296 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
         Ok(())
+    }
+
+    fn account_part(account: &str) -> ResolutionPart {
+        ResolutionPart {
+            amount: None,
+            account: Some(account.to_string()),
+            ref_: None,
+            notes: None,
+        }
+    }
+
+    fn payee_predicate(normalized_payee: &str) -> CategoryRulePredicate {
+        CategoryRulePredicate {
+            description_regex: None,
+            normalized_payee: Some(normalized_payee.to_string()),
+            amount_min: None,
+            amount_max: None,
+        }
+    }
+
+    fn login_scope_ref(login_name: &str, label: &str) -> TypedRef {
+        TypedRef {
+            kind: TypedRefKind::LoginEntry,
+            id: None,
+            locator: Some(format!("logins/{login_name}/accounts/{label}")),
+            entry_id: None,
+            login_name: Some(login_name.to_string()),
+            label: Some(label.to_string()),
+            filename: None,
+        }
+    }
+
+    fn category_rule(
+        subject_refs: Vec<TypedRef>,
+        predicate: CategoryRulePredicate,
+        account: &str,
+    ) -> NewResolutionInput {
+        NewResolutionInput {
+            kind: ResolutionKind::CategoryRule,
+            subject_refs,
+            parts: vec![account_part(account)],
+            notes: None,
+            predicate: Some(predicate),
+        }
+    }
+
+    #[test]
+    fn category_rule_validation() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("rule-validation")?;
+
+        // Happy path: global rule with a payee predicate + one account.
+        create_resolution(
+            &root,
+            category_rule(vec![], payee_predicate("STARBUCKS"), "Expenses:Coffee"),
+        )?;
+
+        // Missing predicate.
+        let mut input = category_rule(vec![], payee_predicate("X"), "Expenses:X");
+        input.predicate = None;
+        assert!(create_resolution(&root, input).is_err());
+
+        // Predicate with no descriptionRegex/normalizedPayee.
+        assert!(create_resolution(
+            &root,
+            category_rule(
+                vec![],
+                CategoryRulePredicate {
+                    description_regex: None,
+                    normalized_payee: None,
+                    amount_min: Some("1".to_string()),
+                    amount_max: None,
+                },
+                "Expenses:X",
+            ),
+        )
+        .is_err());
+
+        // Uncompilable regex.
+        assert!(create_resolution(
+            &root,
+            category_rule(
+                vec![],
+                CategoryRulePredicate {
+                    description_regex: Some("(".to_string()),
+                    normalized_payee: None,
+                    amount_min: None,
+                    amount_max: None,
+                },
+                "Expenses:X",
+            ),
+        )
+        .is_err());
+
+        // No account part.
+        let mut no_account = category_rule(vec![], payee_predicate("X"), "Expenses:X");
+        no_account.parts = Vec::new();
+        assert!(create_resolution(&root, no_account).is_err());
+
+        // Two account parts.
+        let mut two_accounts = category_rule(vec![], payee_predicate("X"), "Expenses:X");
+        two_accounts.parts.push(account_part("Expenses:Y"));
+        assert!(create_resolution(&root, two_accounts).is_err());
+
+        // Two subject refs (must be empty or exactly one scope ref).
+        assert!(create_resolution(
+            &root,
+            category_rule(
+                vec![
+                    login_scope_ref("bank", "checking"),
+                    login_scope_ref("bank", "savings")
+                ],
+                payee_predicate("X"),
+                "Expenses:X",
+            ),
+        )
+        .is_err());
+
+        // Entry-bound ref (has entry_id) is not a valid scope ref.
+        assert!(create_resolution(
+            &root,
+            category_rule(
+                vec![login_entry_ref("bank", "checking", "entry-1")],
+                payee_predicate("X"),
+                "Expenses:X",
+            ),
+        )
+        .is_err());
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn category_rule_fingerprint_includes_predicate(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("rule-fingerprint")?;
+        // Same kind + parts + (global) subject, differing only in predicate.
+        let first = create_resolution(
+            &root,
+            category_rule(vec![], payee_predicate("STARBUCKS"), "Expenses:Coffee"),
+        )?;
+        let second = create_resolution(
+            &root,
+            category_rule(vec![], payee_predicate("SAFEWAY"), "Expenses:Coffee"),
+        )?;
+        assert_ne!(first.id, second.id);
+        assert_eq!(list_resolutions(&root)?.len(), 2);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn old_category_resolution_id_is_stable() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let root = temp_dir("id-stability")?;
+        let refs = vec![login_entry_ref("bank", "checking", "entry-1")];
+        let parts = vec![account_part("Expenses:Food")];
+        let created = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::Category,
+                subject_refs: refs.clone(),
+                parts: parts.clone(),
+                notes: None,
+                predicate: None,
+            },
+        )?;
+        // A predicate-less resolution must hash exactly the historical 3-tuple, so
+        // adding the CategoryRule predicate field left existing ids untouched.
+        let expected_fp = serde_json::to_string(&(
+            &ResolutionKind::Category,
+            canonical_subject_refs(&ResolutionKind::Category, &refs),
+            &parts,
+        ))?;
+        assert_eq!(created.id, stable_id(&expected_fp));
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn matching_rule_account_first_match_wins() {
+        let make = |id: &str, account: &str| Resolution {
+            id: id.to_string(),
+            kind: ResolutionKind::CategoryRule,
+            status: ResolutionStatus::Active,
+            subject_refs: Vec::new(),
+            parts: vec![account_part(account)],
+            notes: None,
+            predicate: Some(payee_predicate("STARBUCKS")),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let rules = vec![make("a", "Expenses:First"), make("b", "Expenses:Second")];
+        assert_eq!(
+            matching_rule_account(&rules, "STARBUCKS", None).as_deref(),
+            Some("Expenses:First")
+        );
+        assert_eq!(matching_rule_account(&rules, "PEETS", None), None);
+    }
+
+    #[test]
+    fn active_category_rules_sorted_newest_first(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("rule-ordering")?;
+        ensure_automation_layout(&root)?;
+        // Write two matching global rules directly with controlled updated_at.
+        for (id, ts, account) in [
+            ("id-older", "2026-01-01T00:00:00Z", "Expenses:Old"),
+            ("id-newer", "2026-06-01T00:00:00Z", "Expenses:New"),
+        ] {
+            let rule = Resolution {
+                id: id.to_string(),
+                kind: ResolutionKind::CategoryRule,
+                status: ResolutionStatus::Active,
+                subject_refs: Vec::new(),
+                parts: vec![account_part(account)],
+                notes: None,
+                predicate: Some(payee_predicate("STARBUCKS")),
+                created_at: ts.to_string(),
+                updated_at: ts.to_string(),
+            };
+            fs::write(
+                resolution_path(&root, id),
+                serde_json::to_string_pretty(&rule)?,
+            )?;
+        }
+        let rules = active_category_rules(&root, None, None)?;
+        assert_eq!(
+            matching_rule_account(&rules, "STARBUCKS", None).as_deref(),
+            Some("Expenses:New")
+        );
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn category_rules_scoped_vs_global() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("rule-scope")?;
+        create_resolution(
+            &root,
+            category_rule(vec![], payee_predicate("SAFEWAY"), "Expenses:Global"),
+        )?;
+        create_resolution(
+            &root,
+            category_rule(
+                vec![login_scope_ref("bank", "checking")],
+                payee_predicate("SAFEWAY"),
+                "Expenses:Scoped",
+            ),
+        )?;
+
+        // Matching scope sees both rules.
+        let in_scope = active_category_rules(&root, Some("bank"), Some("checking"))?;
+        assert_eq!(in_scope.len(), 2);
+
+        // A different scope sees only the global rule.
+        let out_of_scope = active_category_rules(&root, Some("other"), Some("acct"))?;
+        assert_eq!(out_of_scope.len(), 1);
+        assert_eq!(
+            matching_rule_account(&out_of_scope, "SAFEWAY", None).as_deref(),
+            Some("Expenses:Global")
+        );
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn predicate_matches_regex_payee_and_amount() {
+        let regex = CategoryRulePredicate {
+            description_regex: Some("star.*bucks".to_string()),
+            normalized_payee: None,
+            amount_min: None,
+            amount_max: None,
+        };
+        assert!(predicate_matches(&regex, "STARBUCKS #123", None));
+        assert!(!predicate_matches(&regex, "PEETS COFFEE", None));
+
+        let payee = payee_predicate("COSTCO WHSE");
+        assert!(predicate_matches(&payee, "COSTCO WHSE #0123", None));
+        assert!(!predicate_matches(&payee, "TARGET #55", None));
+
+        let bounded = CategoryRulePredicate {
+            description_regex: None,
+            normalized_payee: Some("GYM".to_string()),
+            amount_min: Some("10".to_string()),
+            amount_max: Some("20".to_string()),
+        };
+        assert!(predicate_matches(&bounded, "GYM", Some(15.0)));
+        assert!(!predicate_matches(&bounded, "GYM", Some(25.0)));
+        // Bound set but no amount available -> no match.
+        assert!(!predicate_matches(&bounded, "GYM", None));
     }
 }
