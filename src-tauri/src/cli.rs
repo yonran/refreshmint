@@ -2352,6 +2352,197 @@ mod tests {
     }
 
     #[test]
+    fn unpost_transfer_records_negative_memory_and_kills_repost_loop() {
+        // Regression: the unpost -> re-post loop. Unposting a merged transfer must
+        // record a NotTransferLink (negative memory) and disable the TransferLink
+        // twin so neither the heuristic nor the resolution re-posts it. See
+        // post::unpost_login_account_entry and automation::TransferPolicy.
+        let base_dir = create_temp_dir();
+        let ledger_dir = base_dir.join("ledger.refreshmint");
+        crate::ledger::new_ledger_at_dir(&ledger_dir).unwrap();
+
+        // Two accounts under different logins, NO gl_account so post-all skips
+        // non-transfer entries (leaving them unposted).
+        let mut chase_cfg = crate::login_config::LoginConfig::default();
+        chase_cfg.accounts.insert(
+            "checking".to_string(),
+            crate::login_config::LoginAccountConfig { gl_account: None },
+        );
+        crate::login_config::write_login_config(&ledger_dir, "chase", &chase_cfg).unwrap();
+        let mut boa_cfg = crate::login_config::LoginConfig::default();
+        boa_cfg.accounts.insert(
+            "savings".to_string(),
+            crate::login_config::LoginAccountConfig { gl_account: None },
+        );
+        crate::login_config::write_login_config(&ledger_dir, "boa", &boa_cfg).unwrap();
+
+        let make = |account: &str, amount: &str, desc: &str, id: &str| {
+            crate::account_journal::AccountEntry {
+                id: id.to_string(),
+                date: "2026-01-01".to_string(),
+                status: crate::account_journal::EntryStatus::Cleared,
+                description: desc.to_string(),
+                comment: String::new(),
+                evidence: vec![],
+                postings: vec![
+                    crate::account_journal::EntryPosting {
+                        account: account.to_string(),
+                        amount: Some(crate::account_journal::SimpleAmount {
+                            quantity: amount.to_string(),
+                            commodity: "USD".to_string(),
+                        }),
+                    },
+                    crate::account_journal::EntryPosting {
+                        account: "Equity:Staging".to_string(),
+                        amount: None,
+                    },
+                ],
+                tags: vec![("isTransfer".to_string(), "true".to_string())],
+                extracted_by: None,
+                posted: None,
+                posted_postings: vec![],
+            }
+        };
+
+        let chase_j =
+            crate::account_journal::login_account_journal_path(&ledger_dir, "chase", "checking");
+        crate::account_journal::write_journal_at_path(
+            &chase_j,
+            &[make(
+                "Assets:Checking",
+                "-100.00",
+                "Transfer to savings",
+                "out-1",
+            )],
+        )
+        .unwrap();
+        let boa_j =
+            crate::account_journal::login_account_journal_path(&ledger_dir, "boa", "savings");
+        crate::account_journal::write_journal_at_path(
+            &boa_j,
+            &[make(
+                "Assets:Savings",
+                "100.00",
+                "Transfer from checking",
+                "in-1",
+            )],
+        )
+        .unwrap();
+
+        // A TypedRef shaped exactly like automation::login_entry_ref, so the
+        // NotTransferLink twin (recorded by unpost) matches this fingerprint.
+        let login_ref = |login: &str, label: &str, entry: &str| crate::bookkeeping::TypedRef {
+            kind: crate::bookkeeping::TypedRefKind::LoginEntry,
+            id: None,
+            locator: Some(format!("logins/{login}/accounts/{label}")),
+            entry_id: Some(entry.to_string()),
+            login_name: Some(login.to_string()),
+            label: Some(label.to_string()),
+            filename: None,
+        };
+
+        // Recorded when the transfer was first linked.
+        let transfer_link = crate::automation::create_resolution(
+            &ledger_dir,
+            crate::automation::NewResolutionInput {
+                kind: crate::automation::ResolutionKind::TransferLink,
+                subject_refs: vec![
+                    login_ref("chase", "checking", "out-1"),
+                    login_ref("boa", "savings", "in-1"),
+                ],
+                parts: vec![],
+                notes: None,
+                predicate: None,
+            },
+        )
+        .unwrap();
+
+        // Sanity: the pair is detected as a transfer before any negative memory.
+        let pre = crate::categorize::suggest_categories(&ledger_dir, "chase", "checking").unwrap();
+        assert!(
+            pre.get("out-1")
+                .and_then(|s| s.transfer_match.as_ref())
+                .is_some(),
+            "pair should match as a transfer before unpost"
+        );
+
+        // Post as a transfer, then unpost one side.
+        crate::post::post_login_account_transfer(
+            &ledger_dir,
+            "chase",
+            "checking",
+            "out-1",
+            "boa",
+            "savings",
+            "in-1",
+            "test",
+        )
+        .unwrap();
+        crate::post::unpost_login_account_entry(
+            &ledger_dir,
+            "chase",
+            "checking",
+            "out-1",
+            None,
+            "test",
+        )
+        .unwrap();
+
+        // Negative memory recorded; TransferLink twin disabled.
+        let resolutions = crate::automation::list_resolutions(&ledger_dir).unwrap();
+        let ntl = resolutions
+            .iter()
+            .find(|r| r.kind == crate::automation::ResolutionKind::NotTransferLink);
+        assert!(
+            ntl.is_some_and(|r| r.status == crate::automation::ResolutionStatus::Active),
+            "unpost should record an Active NotTransferLink"
+        );
+        let tl = resolutions
+            .iter()
+            .find(|r| r.id == transfer_link.id)
+            .unwrap();
+        assert_eq!(
+            tl.status,
+            crate::automation::ResolutionStatus::Disabled,
+            "the TransferLink twin should be disabled"
+        );
+
+        // suggest_categories no longer reports a transfer_match for either side.
+        let chase =
+            crate::categorize::suggest_categories(&ledger_dir, "chase", "checking").unwrap();
+        assert!(chase
+            .get("out-1")
+            .and_then(|s| s.transfer_match.as_ref())
+            .is_none());
+        let boa = crate::categorize::suggest_categories(&ledger_dir, "boa", "savings").unwrap();
+        assert!(boa
+            .get("in-1")
+            .and_then(|s| s.transfer_match.as_ref())
+            .is_none());
+
+        // post-all leaves both entries unposted — the loop is dead.
+        run_account_post_all_with_dir(&ledger_dir, "chase", &Some("checking".to_string())).unwrap();
+        run_account_post_all_with_dir(&ledger_dir, "boa", &Some("savings".to_string())).unwrap();
+        let chase_entries = crate::account_journal::read_journal_at_path(&chase_j).unwrap();
+        assert!(
+            chase_entries[0].posted.is_none(),
+            "out-1 must stay unposted after post-all"
+        );
+        let boa_entries = crate::account_journal::read_journal_at_path(&boa_j).unwrap();
+        assert!(
+            boa_entries[0].posted.is_none(),
+            "in-1 must stay unposted after post-all"
+        );
+        let gl = fs::read_to_string(ledger_dir.join("general.journal")).unwrap();
+        assert!(
+            !gl.contains("source: logins/chase"),
+            "no transfer should be re-posted, got GL: {gl}"
+        );
+
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
     fn run_account_post_all_policy_recategorizes_unknown_gl() {
         // Post-all's policy pass recategorizes a pre-existing Unknown GL row that
         // matches a rule, even when there are no unposted account entries.

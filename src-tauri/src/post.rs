@@ -499,6 +499,35 @@ pub fn unpost_login_account_entry(
     }
     crate::ledger::commit_files(ledger_dir, &committed, &format!("unpost: {entry_id}"))?;
 
+    // Auto-record negative transfer memory. Unposting a merged transfer (a GL
+    // block with exactly two `; source:` legs) records a NotTransferLink for the
+    // pair so it does not silently re-post; mutual exclusion also disables the
+    // TransferLink twin. Consulted by automation::TransferPolicy (loaded into
+    // categorize::find_transfer_match / find_gl_transfer_match, and the auto-post
+    // paths). Best-effort AFTER the committed unpost: a failure here must NOT roll
+    // it back (log + proceed).
+    let sources = parse_sources_from_block(&gl_block);
+    if sources.len() == 2 {
+        let triples: Vec<(String, String, String)> = sources
+            .iter()
+            .filter_map(|(locator, entry_id)| {
+                locator_to_login_label(locator)
+                    .map(|(login, label)| (login.to_string(), label.to_string(), entry_id.clone()))
+            })
+            .collect();
+        if let [a, b] = triples.as_slice() {
+            if let Err(err) = crate::automation::create_not_transfer_link(
+                ledger_dir,
+                (&a.0, &a.1, &a.2),
+                (&b.0, &b.1, &b.2),
+            ) {
+                eprintln!(
+                    "unpost {entry_id}: failed to record not-transfer-link resolution: {err}"
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
