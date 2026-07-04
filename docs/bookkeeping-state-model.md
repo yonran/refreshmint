@@ -304,6 +304,16 @@ can be regenerated from current ledger state and active resolutions.
 
 - `category`: the subject source entry should post to the account or parts in
   `parts`.
+- `category-rule`: a predicate-based standing rule (no subject entry). The
+  `predicate` field matches entries by `descriptionRegex` (case-insensitive,
+  against the raw description), `normalizedPayee` (exact match against
+  `payee_normalize::normalize_payee(description)`), and optional
+  `amountMin`/`amountMax` bounds; every set field must match. `subjectRefs` is
+  either empty (global) or one `login-entry` scope ref without an `entryId`
+  (restricts the rule to one bank account). Matching unposted entries post
+  directly to the single account part; matching `Expenses:Unknown` GL rows get
+  Auto `recategorize-gl` proposals. Newest `updatedAt` wins when several rules
+  match. See `automation::matching_rule_account`.
 - `posting-split`: the subject source entry should be split across the
   accounts and amounts in `parts`.
 - `transfer-link`: the subject source entries should be treated as one

@@ -256,7 +256,7 @@ Shipped in the automation-multiplier batch (2026-07-02):
 - ✅ "Accept all N suggestions" bulk action in Transactions. (`b83e82c`)
 - ✅ Payee normalization (strip store numbers, city suffixes, "PURCHASE
   AUTHORIZED" boilerplate) shared by the tokenizer and the rules layer —
-  `payee_normalize` module (`2bf30e2`), tokenizer normalization (this commit).
+  `payee_normalize` module (`2bf30e2`), tokenizer normalization (`5ac28cd`).
 
 Still open:
 
