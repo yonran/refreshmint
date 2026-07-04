@@ -44,6 +44,14 @@ pub enum ResolutionKind {
     CategoryRule,
     PostingSplit,
     TransferLink,
+    /// Negative transfer memory: the two `login-entry` subjects are NOT a transfer
+    /// of each other. Created automatically on unpost of a merged transfer and via
+    /// an explicit "Not a transfer" action. Consulted by [`TransferPolicy`] (loaded
+    /// into the two matchers `categorize::find_transfer_match` /
+    /// `find_gl_transfer_match`) and by the TransferLink/MergeGlTransfer proposal
+    /// arms. Mutually exclusive with `TransferLink` for the same pair (see
+    /// `create_resolution`). Deliberately NOT part of `entry_is_resolved`.
+    NotTransferLink,
     TransferSplit,
     IgnoreSource,
     PendingRetired,
@@ -238,6 +246,20 @@ pub fn list_resolutions(ledger_dir: &Path) -> io::Result<Vec<Resolution>> {
 pub fn create_resolution(ledger_dir: &Path, input: NewResolutionInput) -> io::Result<Resolution> {
     ensure_automation_layout(ledger_dir)?;
     validate_resolution_input(&input)?;
+    // Mutual exclusion: TransferLink and NotTransferLink for the same source-entry
+    // pair encode contradictory decisions, so creating one retires any Active twin
+    // (they share subject_refs+parts and differ only by kind, so the twin's
+    // fingerprint is the same computation with the opposite kind). Consulted
+    // alongside TransferPolicy (see the matchers) and the proposal arms.
+    if let Some(twin_kind) = transfer_twin_kind(&input.kind) {
+        disable_transfer_twin(
+            ledger_dir,
+            &twin_kind,
+            &input.subject_refs,
+            &input.parts,
+            &input.predicate,
+        )?;
+    }
     let fingerprint = resolution_fingerprint(
         &input.kind,
         &input.subject_refs,
@@ -270,6 +292,36 @@ pub fn create_resolution(ledger_dir: &Path, input: NewResolutionInput) -> io::Re
         serde_json::to_string_pretty(&resolution).map_err(json_error)?,
     )?;
     Ok(resolution)
+}
+
+/// The contradictory twin kind for transfer resolutions, or `None` for kinds with
+/// no twin. See the mutual-exclusion logic in `create_resolution`.
+fn transfer_twin_kind(kind: &ResolutionKind) -> Option<ResolutionKind> {
+    match kind {
+        ResolutionKind::TransferLink => Some(ResolutionKind::NotTransferLink),
+        ResolutionKind::NotTransferLink => Some(ResolutionKind::TransferLink),
+        _ => None,
+    }
+}
+
+/// Disable any Active resolution whose fingerprint matches the twin kind for the
+/// same subject pair (see `create_resolution`).
+fn disable_transfer_twin(
+    ledger_dir: &Path,
+    twin_kind: &ResolutionKind,
+    subject_refs: &[TypedRef],
+    parts: &[ResolutionPart],
+    predicate: &Option<CategoryRulePredicate>,
+) -> io::Result<()> {
+    let twin_fingerprint = resolution_fingerprint(twin_kind, subject_refs, parts, predicate)?;
+    for existing in list_resolutions(ledger_dir)? {
+        if existing.status == ResolutionStatus::Active
+            && resolution_matches_fingerprint(&existing, &twin_fingerprint)?
+        {
+            update_resolution_status(ledger_dir, &existing.id, ResolutionStatus::Disabled)?;
+        }
+    }
+    Ok(())
 }
 
 fn reactivate_resolution(
@@ -335,6 +387,7 @@ fn resolution_subject_order_is_commutative(kind: &ResolutionKind) -> bool {
         ResolutionKind::SameSource
             | ResolutionKind::NotSameSource
             | ResolutionKind::TransferLink
+            | ResolutionKind::NotTransferLink
             | ResolutionKind::TransferSplit
             | ResolutionKind::ReversalLink
     )
@@ -342,6 +395,71 @@ fn resolution_subject_order_is_commutative(kind: &ResolutionKind) -> bool {
 
 fn typed_ref_sort_key(value: &TypedRef) -> String {
     serde_json::to_string(value).unwrap_or_default()
+}
+
+/// A `(login, label, entry_id)` identity for a login-account entry — the canonical
+/// identity of a transfer leg (survives GL merges/unposts, which reassign GL txn
+/// ids). Used by [`TransferPolicy`].
+pub type TransferEntry = (String, String, String);
+
+/// Canonicalize a source-entry pair so `(a, b)` and `(b, a)` hash identically
+/// (transfers are commutative — mirrors `resolution_subject_order_is_commutative`).
+fn canonical_transfer_pair(a: TransferEntry, b: TransferEntry) -> (TransferEntry, TransferEntry) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// Negative transfer memory. Loads active [`ResolutionKind::NotTransferLink`]
+/// resolutions into a set of canonically-ordered source-entry pairs. Mirrors
+/// [`crate::dedup::DedupPolicy::from_resolutions`]. Consulted by the two matchers
+/// (`categorize::find_transfer_match` / `find_gl_transfer_match`) — which filter
+/// blocked candidates BEFORE the exactly-one uniqueness count so a blocked
+/// candidate cannot spoil uniqueness for the remaining one — and, belt-and-braces,
+/// by the TransferLink/MergeGlTransfer proposal arms (a stale Active TransferLink
+/// could otherwise coexist with a NotTransferLink).
+#[derive(Debug, Default)]
+pub struct TransferPolicy {
+    blocked: std::collections::HashSet<(TransferEntry, TransferEntry)>,
+}
+
+impl TransferPolicy {
+    pub fn from_resolutions(ledger_dir: &Path) -> io::Result<Self> {
+        let mut blocked = std::collections::HashSet::new();
+        for resolution in list_resolutions(ledger_dir)?
+            .into_iter()
+            .filter(|resolution| resolution.status == ResolutionStatus::Active)
+            .filter(|resolution| resolution.kind == ResolutionKind::NotTransferLink)
+        {
+            let entries: Vec<TransferEntry> = resolution
+                .subject_refs
+                .iter()
+                .filter_map(parse_login_entry_ref)
+                .collect();
+            if let [a, b] = entries.as_slice() {
+                blocked.insert(canonical_transfer_pair(a.clone(), b.clone()));
+            }
+        }
+        Ok(Self { blocked })
+    }
+
+    /// Whether the pair `(a, b)` was marked not-a-transfer (order-independent).
+    pub fn blocks(&self, a: &TransferEntry, b: &TransferEntry) -> bool {
+        self.blocked
+            .contains(&canonical_transfer_pair(a.clone(), b.clone()))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocked.is_empty()
+    }
+
+    /// Inject a blocked pair without persisting a resolution (unit tests only).
+    #[cfg(test)]
+    pub(crate) fn block_for_test(&mut self, a: TransferEntry, b: TransferEntry) {
+        self.blocked.insert(canonical_transfer_pair(a, b));
+    }
 }
 
 pub fn disable_resolution(ledger_dir: &Path, id: &str) -> io::Result<Resolution> {
@@ -662,11 +780,16 @@ fn resolution_backed_proposals(
                 }
             }
             ResolutionKind::TransferLink => {
-                let other = resolution
+                let other_ref = resolution
                     .subject_refs
                     .iter()
-                    .find(|candidate| *candidate != &source_ref)
-                    .and_then(parse_login_entry_ref);
+                    .find(|candidate| *candidate != &source_ref);
+                // Negative memory overrides a stale Active TransferLink twin (see
+                // ActiveResolutions::transfer_is_blocked / TransferPolicy).
+                if other_ref.is_some_and(|other| active.transfer_is_blocked(&source_ref, other)) {
+                    continue;
+                }
+                let other = other_ref.and_then(parse_login_entry_ref);
                 if let Some((other_login, other_label, other_entry_id)) = other {
                     proposals.push(link_transfer_proposal(LinkTransferProposalInput {
                         login_name,
@@ -714,6 +837,29 @@ fn gl_proposals(
     ledger_dir: &Path,
 ) -> Result<Vec<AutomationProposal>, Box<dyn std::error::Error + Send + Sync>> {
     let suggestions = crate::categorize::suggest_gl_categories(ledger_dir)?;
+    // Belt-and-braces negative-transfer filter. suggest_gl_categories already runs
+    // its transfer matcher through TransferPolicy, so a blocked pair should not
+    // surface a transfer_match; the guard below is a redundant safety net keyed by
+    // the txns' source entries (built only when some pair is actually blocked).
+    let transfer_policy = TransferPolicy::from_resolutions(ledger_dir)?;
+    let gl_source_by_txn: BTreeMap<String, TransferEntry> = if transfer_policy.is_empty() {
+        BTreeMap::new()
+    } else {
+        let gl_journal_path = ledger_dir.join("general.journal");
+        crate::ledger_open::run_hledger_print(&gl_journal_path)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|txn| {
+                let id = txn.ttags.iter().find(|(k, _)| k == "id").map(|(_, v)| v)?;
+                let source = txn
+                    .ttags
+                    .iter()
+                    .find(|(k, _)| k == "source")
+                    .map(|(_, v)| v)?;
+                Some((id.clone(), parse_source_tag(source)?))
+            })
+            .collect()
+    };
     // A txn that some OTHER txn uniquely points at as its transfer counterpart is
     // a possible transfer leg. Transfer uniqueness is asymmetric (T may have two
     // same-amount candidates and get transfer_match: None while another txn
@@ -731,6 +877,15 @@ fn gl_proposals(
         // priority over rule/ML recategorization (mirrors the post paths, which
         // check transferMatch before ruleAccount).
         if let Some(transfer) = suggestion.transfer_match {
+            // Skip a blocked (not-a-transfer) GL pair (see gl_source_by_txn above).
+            if let (Some(a), Some(b)) = (
+                gl_source_by_txn.get(&txn_id),
+                gl_source_by_txn.get(&transfer.txn_id),
+            ) {
+                if transfer_policy.blocks(a, b) {
+                    continue;
+                }
+            }
             let refs = vec![gl_txn_ref(&txn_id), gl_txn_ref(&transfer.txn_id)];
             proposals.push(AutomationProposal {
                 id: proposal_id("merge-gl-transfer", &refs, Some(&transfer.txn_id)),
@@ -1334,6 +1489,22 @@ impl<'a> ActiveResolutions<'a> {
             .any(|resolution| resolution.kind == ResolutionKind::IgnoreSource)
     }
 
+    /// Whether an Active NotTransferLink links `a` and `b`. Login-side belt-and-
+    /// braces mirroring [`TransferPolicy`] (used by the matchers): the
+    /// resolution_backed TransferLink arm reads an Active TransferLink resolution
+    /// directly, so a NotTransferLink that overrides a stale TransferLink twin must
+    /// be honored here too.
+    fn transfer_is_blocked(&self, a: &TypedRef, b: &TypedRef) -> bool {
+        let b_key = ref_key(b);
+        self.for_subject(a).iter().any(|resolution| {
+            resolution.kind == ResolutionKind::NotTransferLink
+                && resolution
+                    .subject_refs
+                    .iter()
+                    .any(|subject| ref_key(subject) == b_key)
+        })
+    }
+
     fn entry_is_resolved(&self, subject: &TypedRef) -> bool {
         self.for_subject(subject).iter().any(|resolution| {
             matches!(
@@ -1407,6 +1578,7 @@ fn validate_resolution_input(input: &NewResolutionInput) -> io::Result<()> {
             }
         }
         ResolutionKind::TransferLink
+        | ResolutionKind::NotTransferLink
         | ResolutionKind::SameSource
         | ResolutionKind::NotSameSource
         | ResolutionKind::ReversalLink => {
@@ -1562,6 +1734,16 @@ fn parse_login_account_locator(locator: &str) -> Option<(String, String)> {
     let rest = locator.strip_prefix("logins/")?;
     let (login_name, rest) = rest.split_once("/accounts/")?;
     Some((login_name.to_string(), rest.to_string()))
+}
+
+/// Parse a generated GL txn's `source` tag
+/// (`logins/{login}/accounts/{label}:{entry_id}`) into a [`TransferEntry`].
+/// Mirrors `categorize::txn_source_login_label` (which drops the entry_id).
+fn parse_source_tag(source: &str) -> Option<TransferEntry> {
+    let rest = source.strip_prefix("logins/")?;
+    let (login, rest) = rest.split_once("/accounts/")?;
+    let (label, entry_id) = rest.rsplit_once(':')?;
+    Some((login.to_string(), label.to_string(), entry_id.to_string()))
 }
 
 fn parse_gl_txn_ref(value: &TypedRef) -> Option<String> {
@@ -2097,6 +2279,220 @@ mod tests {
         };
         assert!(err.to_string().contains("exactly two subject refs"));
 
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn not_transfer_link_requires_two_subjects_and_no_parts(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("not-transfer-link-validation")?;
+        let e1 = login_entry_ref("bank", "checking", "entry-1");
+        let e2 = login_entry_ref("card", "primary", "entry-2");
+        let e3 = login_entry_ref("bank", "checking", "entry-3");
+
+        let three = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::NotTransferLink,
+                subject_refs: vec![e1.clone(), e2.clone(), e3],
+                parts: Vec::new(),
+                notes: None,
+                predicate: None,
+            },
+        );
+        let three_err = match three {
+            Err(err) => err,
+            Ok(_) => return Err("not-transfer-link with three subjects should fail".into()),
+        };
+        assert!(three_err.to_string().contains("exactly two subject refs"));
+
+        let with_parts = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::NotTransferLink,
+                subject_refs: vec![e1.clone(), e2.clone()],
+                parts: vec![ResolutionPart {
+                    amount: None,
+                    account: Some("Expenses:Bank Fees".to_string()),
+                    ref_: None,
+                    notes: None,
+                }],
+                notes: None,
+                predicate: None,
+            },
+        );
+        let with_parts_err = match with_parts {
+            Err(err) => err,
+            Ok(_) => return Err("not-transfer-link with parts should fail".into()),
+        };
+        assert!(with_parts_err
+            .to_string()
+            .contains("must not include parts"));
+
+        let ok = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::NotTransferLink,
+                subject_refs: vec![e1, e2],
+                parts: Vec::new(),
+                notes: None,
+                predicate: None,
+            },
+        )?;
+        assert_eq!(ok.kind, ResolutionKind::NotTransferLink);
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn not_transfer_link_fingerprint_is_commutative(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("not-transfer-link-commutative")?;
+        let left = login_entry_ref("bank", "checking", "entry-1");
+        let right = login_entry_ref("card", "primary", "entry-2");
+        let first = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::NotTransferLink,
+                subject_refs: vec![left.clone(), right.clone()],
+                parts: Vec::new(),
+                notes: None,
+                predicate: None,
+            },
+        )?;
+        let second = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::NotTransferLink,
+                subject_refs: vec![right, left],
+                parts: Vec::new(),
+                notes: None,
+                predicate: None,
+            },
+        )?;
+        assert_eq!(first.id, second.id);
+        assert_eq!(list_resolutions(&root)?.len(), 1);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn transfer_link_and_not_transfer_link_are_mutually_exclusive(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("transfer-link-mutual-exclusion")?;
+        let left = login_entry_ref("bank", "checking", "entry-1");
+        let right = login_entry_ref("card", "primary", "entry-2");
+
+        let transfer = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::TransferLink,
+                subject_refs: vec![left.clone(), right.clone()],
+                parts: Vec::new(),
+                notes: None,
+                predicate: None,
+            },
+        )?;
+        assert_eq!(transfer.status, ResolutionStatus::Active);
+
+        // Creating the NotTransferLink twin (commutative subject order) disables it.
+        let negative = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::NotTransferLink,
+                subject_refs: vec![right.clone(), left.clone()],
+                parts: Vec::new(),
+                notes: None,
+                predicate: None,
+            },
+        )?;
+        assert_eq!(negative.status, ResolutionStatus::Active);
+        let after_negative = list_resolutions(&root)?;
+        assert_eq!(
+            after_negative
+                .iter()
+                .find(|r| r.id == transfer.id)
+                .map(|r| &r.status),
+            Some(&ResolutionStatus::Disabled)
+        );
+
+        // Creating the TransferLink again disables the NotTransferLink twin.
+        let transfer_again = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::TransferLink,
+                subject_refs: vec![left, right],
+                parts: Vec::new(),
+                notes: None,
+                predicate: None,
+            },
+        )?;
+        assert_eq!(transfer_again.status, ResolutionStatus::Active);
+        let after_transfer = list_resolutions(&root)?;
+        assert_eq!(
+            after_transfer
+                .iter()
+                .find(|r| r.id == negative.id)
+                .map(|r| &r.status),
+            Some(&ResolutionStatus::Disabled)
+        );
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn auto_link_transfer_suppressed_when_pair_blocked(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = temp_dir("auto-link-transfer-blocked")?;
+        let login_name = "bank";
+        let label = "checking";
+        write_test_login_entry(&root, login_name, label, "entry-1")?;
+        let e1 = login_entry_ref(login_name, label, "entry-1");
+        let e2 = login_entry_ref("card", "primary", "entry-2");
+
+        // A TransferLink alone yields an Auto LinkTransfer proposal (positive control).
+        let transfer = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::TransferLink,
+                subject_refs: vec![e1.clone(), e2.clone()],
+                parts: Vec::new(),
+                notes: None,
+                predicate: None,
+            },
+        )?;
+        let scope = || AutomationScope {
+            login_name: Some(login_name.to_string()),
+            label: Some(label.to_string()),
+            include_gl: Some(false),
+        };
+        assert!(list_automation_proposals(&root, scope())?
+            .iter()
+            .any(|p| p.kind == AutomationProposalKind::LinkTransfer));
+
+        // A NotTransferLink for the same pair disables the twin; force the stale
+        // coexistence (both Active) to exercise the belt-and-braces guard.
+        let negative = create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::NotTransferLink,
+                subject_refs: vec![e2, e1],
+                parts: Vec::new(),
+                notes: None,
+                predicate: None,
+            },
+        )?;
+        enable_resolution(&root, &transfer.id)?;
+        assert_eq!(
+            enable_resolution(&root, &negative.id)?.status,
+            ResolutionStatus::Active
+        );
+
+        assert!(!list_automation_proposals(&root, scope())?
+            .iter()
+            .any(|p| p.kind == AutomationProposalKind::LinkTransfer));
         let _ = fs::remove_dir_all(root);
         Ok(())
     }

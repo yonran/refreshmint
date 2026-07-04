@@ -119,6 +119,9 @@ export type ResolutionKind =
     | 'category-rule'
     | 'posting-split'
     | 'transfer-link'
+    // Negative transfer memory: the two login-entry subjects are NOT a transfer of
+    // each other. Mirrors Rust automation::ResolutionKind::NotTransferLink.
+    | 'not-transfer-link'
     | 'transfer-split'
     | 'ignore-source'
     | 'pending-retired'

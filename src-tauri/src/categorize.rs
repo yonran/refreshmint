@@ -135,6 +135,10 @@ pub fn suggest_categories(
     // Collect unposted transfer candidates from other login accounts.
     let transfer_candidates = collect_transfer_candidates(ledger_dir, login_name, label)?;
 
+    // Negative transfer memory (NotTransferLink resolutions). Filters blocked
+    // candidates inside find_transfer_match. See automation::TransferPolicy.
+    let transfer_policy = crate::automation::TransferPolicy::from_resolutions(ledger_dir)?;
+
     // Active category rules that apply to this login/account (global + scoped),
     // in newest-first match order. See automation::matching_rule_account.
     let rules =
@@ -145,12 +149,15 @@ pub fn suggest_categories(
     for entry in &entries {
         let result = process_entry(
             entry,
+            login_name,
+            label,
             &gl_by_id,
             &source_locator,
             global_model.as_ref(),
             account_model.as_ref(),
             account_sample_count,
             &transfer_candidates,
+            &transfer_policy,
             &rules,
         );
         results.insert(entry.id.clone(), result);
@@ -193,6 +200,10 @@ pub fn suggest_gl_categories(
     // Build transfer candidates from the Expenses:Unknown set.
     let transfer_candidates = build_gl_transfer_candidates(&unknown_txns);
 
+    // Negative transfer memory (NotTransferLink resolutions). Filters blocked
+    // candidates inside find_gl_transfer_match. See automation::TransferPolicy.
+    let transfer_policy = crate::automation::TransferPolicy::from_resolutions(ledger_dir)?;
+
     // Global category rules apply to GL txns; per-txn scoping is refined below
     // from the txn's `source` tag when present. See automation::matching_rule_account
     // and CategoryResult::rule_account (kept in sync).
@@ -209,7 +220,8 @@ pub fn suggest_gl_categories(
         };
 
         // Transfer detection has priority over ML suggestion.
-        let transfer_match = find_gl_transfer_match(txn, &txn_id, &transfer_candidates);
+        let transfer_match =
+            find_gl_transfer_match(txn, &txn_id, &transfer_candidates, &transfer_policy);
 
         let suggested = if transfer_match.is_some() {
             None
@@ -347,6 +359,9 @@ struct GlTransferCandidate {
     date: String,
     amount_f64: f64,
     commodity: String,
+    /// The candidate's source entry, parsed from its `source` tag. `None` for
+    /// manual GL txns with no source tag (which can never carry negative memory).
+    source: Option<crate::automation::TransferEntry>,
 }
 
 /// Build a list of transfer candidates from `Expenses:Unknown` GL transactions.
@@ -380,6 +395,7 @@ fn build_gl_transfer_candidates(
             date: txn.tdate.clone(),
             amount_f64: amount.aquantity.floating_point,
             commodity: amount.acommodity.clone(),
+            source: txn_source_triple(txn),
         });
     }
     candidates
@@ -393,6 +409,7 @@ fn find_gl_transfer_match(
     txn: &crate::hledger::Transaction,
     txn_id: &str,
     candidates: &[GlTransferCandidate],
+    policy: &crate::automation::TransferPolicy,
 ) -> Option<GlTransferMatch> {
     // Get this transaction's explicit posting amount.
     let posting = txn
@@ -405,6 +422,8 @@ fn find_gl_transfer_match(
         return None;
     }
     let txn_date = parse_date(&txn.tdate)?;
+    // The subject txn's source entry (if any), for negative-memory filtering.
+    let subject_source = txn_source_triple(txn);
 
     let matches: Vec<&GlTransferCandidate> = candidates
         .iter()
@@ -416,6 +435,13 @@ fn find_gl_transfer_match(
                 && parse_date(&c.date)
                     .map(|cd| (txn_date - cd).num_days().abs() <= 3)
                     .unwrap_or(false)
+                // Skip pairs marked not-a-transfer (both sides need a source tag).
+                // Filtered BEFORE the exactly-one count so a blocked candidate does
+                // not spoil uniqueness. See automation::TransferPolicy.
+                && !match (&subject_source, &c.source) {
+                    (Some(a), Some(b)) => policy.blocks(a, b),
+                    _ => false,
+                }
         })
         .collect();
 
@@ -672,9 +698,16 @@ fn collect_transfer_candidates(
 /// Returns `Some(TransferMatch)` only when EXACTLY ONE candidate has the
 /// opposite amount (sum ≈ 0), same commodity, and a date within ±3 days.
 /// Returns `None` when there are 0 or 2+ matches.
+///
+/// `policy` (negative transfer memory) filters blocked candidates BEFORE the
+/// exactly-one uniqueness count, so a blocked candidate cannot spoil uniqueness
+/// for the remaining one. See `automation::TransferPolicy`.
 fn find_transfer_match(
     entry: &account_journal::AccountEntry,
+    subject_login: &str,
+    subject_label: &str,
     candidates: &[TransferCandidate],
+    policy: &crate::automation::TransferPolicy,
 ) -> Option<TransferMatch> {
     let first_posting = entry.postings.first()?;
     let amt = first_posting.amount.as_ref()?;
@@ -683,6 +716,11 @@ fn find_transfer_match(
         return None;
     }
     let entry_date = parse_date(&entry.date)?;
+    let subject = (
+        subject_login.to_string(),
+        subject_label.to_string(),
+        entry.id.clone(),
+    );
 
     let matches: Vec<&TransferCandidate> = candidates
         .iter()
@@ -693,6 +731,7 @@ fn find_transfer_match(
                 && parse_date(&c.date)
                     .map(|cd| (entry_date - cd).num_days().abs() <= 3)
                     .unwrap_or(false)
+                && !candidate_is_blocked(policy, &subject, &c.locator, &c.entry_id)
         })
         .collect();
 
@@ -710,6 +749,47 @@ fn find_transfer_match(
 
 fn parse_date(s: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()
+}
+
+/// Parse a `logins/{login}/accounts/{label}` locator. Mirrors
+/// `automation::parse_login_account_locator`.
+fn parse_login_account_locator(locator: &str) -> Option<(String, String)> {
+    let rest = locator.strip_prefix("logins/")?;
+    let (login, label) = rest.split_once("/accounts/")?;
+    Some((login.to_string(), label.to_string()))
+}
+
+/// Whether `policy` marks the (subject, candidate) source pair not-a-transfer.
+/// A candidate whose locator does not parse is never blocked. See
+/// `automation::TransferPolicy`.
+fn candidate_is_blocked(
+    policy: &crate::automation::TransferPolicy,
+    subject: &crate::automation::TransferEntry,
+    candidate_locator: &str,
+    candidate_entry_id: &str,
+) -> bool {
+    match parse_login_account_locator(candidate_locator) {
+        Some((login, label)) => {
+            policy.blocks(subject, &(login, label, candidate_entry_id.to_string()))
+        }
+        None => false,
+    }
+}
+
+/// Parse a generated GL txn's `source` tag
+/// (`logins/{login}/accounts/{label}:{entry_id}`) into a `TransferEntry`. Mirrors
+/// `txn_source_login_label` (which drops the entry_id) and
+/// `automation::parse_source_tag`.
+fn txn_source_triple(txn: &hledger::Transaction) -> Option<crate::automation::TransferEntry> {
+    let source = txn
+        .ttags
+        .iter()
+        .find(|(k, _)| k == "source")
+        .map(|(_, v)| v)?;
+    let rest = source.strip_prefix("logins/")?;
+    let (login, rest) = rest.split_once("/accounts/")?;
+    let (label, entry_id) = rest.rsplit_once(':')?;
+    Some((login.to_string(), label.to_string(), entry_id.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -739,12 +819,15 @@ fn gl_status_str(status: &hledger::Status) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 fn process_entry(
     entry: &account_journal::AccountEntry,
+    login_name: &str,
+    label: &str,
     gl_by_id: &HashMap<String, &hledger::Transaction>,
     _source_locator: &str,
     global_model: Option<&MnbModel>,
     account_model: Option<&MnbModel>,
     account_sample_count: usize,
     transfer_candidates: &[TransferCandidate],
+    transfer_policy: &crate::automation::TransferPolicy,
     rules: &[crate::automation::Resolution],
 ) -> CategoryResult {
     // --- Amount / status drift (posted entries only) ---
@@ -795,7 +878,13 @@ fn process_entry(
                 .any(|(k, v)| k == "isTransfer" && v == "true");
 
         let transfer_match = if is_probable_transfer {
-            find_transfer_match(entry, transfer_candidates)
+            find_transfer_match(
+                entry,
+                login_name,
+                label,
+                transfer_candidates,
+                transfer_policy,
+            )
         } else {
             None
         };
@@ -1140,10 +1229,90 @@ mod tests {
             21.32,
             "USD",
         )];
-        let result = find_transfer_match(&entry, &candidates);
+        let result = find_transfer_match(
+            &entry,
+            "chase",
+            "checking",
+            &candidates,
+            &crate::automation::TransferPolicy::default(),
+        );
         assert!(result.is_some());
         let m = result.unwrap();
         assert_eq!(m.entry_id, "txn-b");
+    }
+
+    #[test]
+    fn find_transfer_match_blocked_pair_returns_none() {
+        // Negative transfer memory: a would-be-unique match is suppressed when the
+        // pair is blocked. Mirrors dedup::policy_not_same_source_blocks_heuristic_match.
+        let entry = make_entry("e1", "Transfer out", vec![]);
+        let candidates = vec![make_candidate(
+            "logins/boa/accounts/savings",
+            "txn-b",
+            "2024-01-15",
+            21.32,
+            "USD",
+        )];
+        let mut policy = crate::automation::TransferPolicy::default();
+        policy.block_for_test(
+            (
+                "chase".to_string(),
+                "checking".to_string(),
+                "e1".to_string(),
+            ),
+            (
+                "boa".to_string(),
+                "savings".to_string(),
+                "txn-b".to_string(),
+            ),
+        );
+        assert!(find_transfer_match(&entry, "chase", "checking", &candidates, &policy).is_none());
+    }
+
+    #[test]
+    fn find_transfer_match_blocked_candidate_does_not_spoil_uniqueness() {
+        // Two same-amount candidates → ambiguous → None. Blocking one leaves the
+        // other uniquely matching (blocked candidates are filtered BEFORE the count).
+        let entry = make_entry("e1", "Transfer out", vec![]);
+        let candidates = vec![
+            make_candidate(
+                "logins/boa/accounts/savings",
+                "txn-b",
+                "2024-01-15",
+                21.32,
+                "USD",
+            ),
+            make_candidate(
+                "logins/boa/accounts/checking",
+                "txn-c",
+                "2024-01-15",
+                21.32,
+                "USD",
+            ),
+        ];
+        assert!(find_transfer_match(
+            &entry,
+            "chase",
+            "checking",
+            &candidates,
+            &crate::automation::TransferPolicy::default(),
+        )
+        .is_none());
+        let mut policy = crate::automation::TransferPolicy::default();
+        policy.block_for_test(
+            (
+                "chase".to_string(),
+                "checking".to_string(),
+                "e1".to_string(),
+            ),
+            (
+                "boa".to_string(),
+                "savings".to_string(),
+                "txn-b".to_string(),
+            ),
+        );
+        let m = find_transfer_match(&entry, "chase", "checking", &candidates, &policy).unwrap();
+        assert_eq!(m.entry_id, "txn-c");
     }
 
     #[test]
@@ -1165,7 +1334,14 @@ mod tests {
                 "USD",
             ),
         ];
-        assert!(find_transfer_match(&entry, &candidates).is_none());
+        assert!(find_transfer_match(
+            &entry,
+            "chase",
+            "checking",
+            &candidates,
+            &crate::automation::TransferPolicy::default(),
+        )
+        .is_none());
     }
 
     #[test]
@@ -1178,7 +1354,14 @@ mod tests {
             21.32,
             "EUR", // wrong commodity
         )];
-        assert!(find_transfer_match(&entry, &candidates).is_none());
+        assert!(find_transfer_match(
+            &entry,
+            "chase",
+            "checking",
+            &candidates,
+            &crate::automation::TransferPolicy::default(),
+        )
+        .is_none());
     }
 
     #[test]
@@ -1191,7 +1374,14 @@ mod tests {
             21.32,
             "USD",
         )];
-        assert!(find_transfer_match(&entry, &candidates).is_none());
+        assert!(find_transfer_match(
+            &entry,
+            "chase",
+            "checking",
+            &candidates,
+            &crate::automation::TransferPolicy::default(),
+        )
+        .is_none());
     }
 
     // --- suggest_category integration ---
