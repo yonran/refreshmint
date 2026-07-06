@@ -26,11 +26,6 @@ export type PipelineSubTab =
     | 'account-rows'
     | 'gl-rows';
 
-export type PostDraft = {
-    counterpartAccount: string;
-    postingIndex: string;
-};
-
 export type SecretPromptState = {
     title: string;
     message: string;

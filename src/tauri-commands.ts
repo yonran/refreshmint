@@ -785,22 +785,6 @@ export async function postLoginAccountEntrySplit(
     });
 }
 
-export async function unpostLoginAccountEntry(
-    ledger: string,
-    loginName: string,
-    label: string,
-    entryId: string,
-    postingIndex: number | null,
-): Promise<void> {
-    await invoke('unpost_login_account_entry', {
-        ledger,
-        loginName,
-        label,
-        entryId,
-        postingIndex,
-    });
-}
-
 export interface UnpostedTransferResult {
     loginName: string;
     label: string;

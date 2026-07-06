@@ -5,30 +5,23 @@ import {
     open as openDialog,
 } from '@tauri-apps/plugin-dialog';
 import {
-    type AccountJournalEntry,
     type DomainSecretEntry,
-    type DocumentWithInfo,
     type LedgerView,
     type LoginConfig,
     type MigrationOutcome,
     createLogin,
     deleteLogin,
     deleteLoginAccount,
-    getLoginAccountJournal,
-    getLoginAccountUnposted,
     getLoginConfig,
     getLoginUsername,
     getScrapeDebugSessionSocket,
-    listLoginAccountDocuments,
     listLoginSecrets,
     listScrapeExtensions,
     loadScrapeExtension,
     migrateLedger,
     migrateLoginSecrets,
-    postLoginAccountEntry,
     removeLoginDomain,
     repairLoginAccountLabels,
-    runLoginAccountExtraction,
     getScrapeLog,
     runScrapeForLogin,
     setLoginAccount,
@@ -39,11 +32,9 @@ import {
     startScrapeDebugSessionForLogin,
     stopScrapeDebugSession,
     syncLoginSecretsForExtension,
-    unpostLoginAccountEntry,
 } from '../tauri-commands.ts';
 import {
     type LoginAccountMapping,
-    type PostDraft,
     type SecretPromptState,
     normalizeLoginConfig,
 } from '../types.ts';
@@ -119,9 +110,6 @@ export function ScrapeTab({
     autoScrapeActive,
     headlessScrape,
 }: ScrapeTabProps) {
-    const [selectedPipelineLabel, setSelectedPipelineLabel] = useState<
-        string | null
-    >(null);
     const [scrapeExtension, setScrapeExtension] = useState('');
     const [scrapeExtensions, setScrapeExtensions] = useState<string[]>([]);
     const [scrapeStatus, setScrapeStatus] = useState<string | null>(null);
@@ -166,24 +154,6 @@ export function ScrapeTab({
     const [isSavingAccountSecret, setIsSavingAccountSecret] = useState(false);
     const [busySecretKey, setBusySecretKey] = useState<string | null>(null);
     const [isRunningScrape, setIsRunningScrape] = useState(false);
-    const [documents, setDocuments] = useState<DocumentWithInfo[]>([]);
-    const [selectedDocumentNames, setSelectedDocumentNames] = useState<
-        string[]
-    >([]);
-    const [unpostedEntries, setUnpostedEntries] = useState<
-        AccountJournalEntry[]
-    >([]);
-    const [pipelineStatus, setPipelineStatus] = useState<string | null>(null);
-    const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
-    const [isRunningExtraction, setIsRunningExtraction] = useState(false);
-    const [isLoadingAccountJournal, setIsLoadingAccountJournal] =
-        useState(false);
-    const [isLoadingUnposted, setIsLoadingUnposted] = useState(false);
-    const [postDrafts, setPostDrafts] = useState<Record<string, PostDraft>>({});
-    const [busyPostEntryId, setBusyPostEntryId] = useState<string | null>(null);
-    const [unpostEntryId, setUnpostEntryId] = useState('');
-    const [unpostPostingIndex, setUnpostPostingIndex] = useState('');
-    const [isUnpostingEntry, setIsUnpostingEntry] = useState(false);
 
     const secretDomainRef = useRef('');
     const ledgerPath = ledger?.path ?? null;
@@ -216,13 +186,6 @@ export function ScrapeTab({
                   ).sort(([a], [b]) => a.localeCompare(b)),
         [selectedLoginConfig],
     );
-    // Labels for the selected login that have a GL account mapping.
-    const selectedLoginMappedLabels = selectedLoginAccounts
-        .filter(([, cfg]) => (cfg.glAccount?.trim() ?? '').length > 0)
-        .map(([label]) => label);
-    const hasResolvedLoginMapping =
-        selectedPipelineLabel !== null &&
-        selectedLoginMappedLabels.includes(selectedPipelineLabel);
     const selectedLoginConflictCount = selectedLoginAccounts.reduce(
         (count, [, config]) => {
             const glAccount = config.glAccount?.trim() ?? '';
@@ -261,7 +224,6 @@ export function ScrapeTab({
     useEffect(() => {
         setScrapeStatus(null);
         setScrapeDebugSocket(null);
-        setSelectedPipelineLabel(null);
         setSelectedLoginExtensionDraft('');
         setNewLoginName('');
         setNewLoginExtension('');
@@ -276,19 +238,6 @@ export function ScrapeTab({
         setIsLoadingAccountSecrets(false);
         setIsSavingAccountSecret(false);
         setBusySecretKey(null);
-        setDocuments([]);
-        setSelectedDocumentNames([]);
-        setUnpostedEntries([]);
-        setPipelineStatus(null);
-        setIsLoadingDocuments(false);
-        setIsRunningExtraction(false);
-        setIsLoadingAccountJournal(false);
-        setIsLoadingUnposted(false);
-        setPostDrafts({});
-        setBusyPostEntryId(null);
-        setUnpostEntryId('');
-        setUnpostPostingIndex('');
-        setIsUnpostingEntry(false);
         setScrapeLogEntries([]);
     }, [ledgerPath]);
 
@@ -416,21 +365,6 @@ export function ScrapeTab({
         const extension = selectedLoginConfig?.extension?.trim() ?? '';
         setSelectedLoginExtensionDraft(extension);
     }, [selectedLoginConfig]);
-
-    // Auto-select the pipeline label when it can be unambiguously determined.
-    useEffect(() => {
-        if (selectedLoginMappedLabels.length === 1) {
-            setSelectedPipelineLabel(selectedLoginMappedLabels[0] ?? null);
-        } else {
-            // Clear if the previously selected label is no longer valid.
-            setSelectedPipelineLabel((current) =>
-                current !== null && selectedLoginMappedLabels.includes(current)
-                    ? current
-                    : null,
-            );
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [selectedLoginName, selectedLoginMappedLabels.join(',')]);
 
     // Load account secrets when login or secrets panel state changes.
     useEffect(() => {
@@ -631,97 +565,6 @@ export function ScrapeTab({
             window.clearTimeout(timer);
         };
     }, [activeScrapeLoginName, ledgerPath]);
-
-    // Load documents/journal/unposted for the currently selected scrape account mapping.
-    useEffect(() => {
-        if (ledgerPath === null) {
-            setDocuments([]);
-            setSelectedDocumentNames([]);
-            setUnpostedEntries([]);
-            setPostDrafts({});
-            setIsLoadingDocuments(false);
-            setIsLoadingAccountJournal(false);
-            setIsLoadingUnposted(false);
-            return;
-        }
-
-        const loginName = selectedLoginName.trim();
-        const label = selectedPipelineLabel;
-        if (loginName.length === 0 || label === null) {
-            setDocuments([]);
-            setSelectedDocumentNames([]);
-            setUnpostedEntries([]);
-            setPostDrafts({});
-            setIsLoadingDocuments(false);
-            setIsLoadingAccountJournal(false);
-            setIsLoadingUnposted(false);
-            return;
-        }
-
-        let cancelled = false;
-        const timer = window.setTimeout(() => {
-            setIsLoadingDocuments(true);
-            setIsLoadingAccountJournal(true);
-            setIsLoadingUnposted(true);
-            void Promise.all([
-                listLoginAccountDocuments(ledgerPath, loginName, label),
-                getLoginAccountJournal(ledgerPath, loginName, label),
-                getLoginAccountUnposted(ledgerPath, loginName, label),
-            ])
-                .then(
-                    ([fetchedDocuments, _fetchedJournal, fetchedUnposted]) => {
-                        if (cancelled) return;
-                        setDocuments(fetchedDocuments);
-                        setSelectedDocumentNames((current) =>
-                            current.filter((name) =>
-                                fetchedDocuments.some(
-                                    (doc) => doc.filename === name,
-                                ),
-                            ),
-                        );
-                        setUnpostedEntries(fetchedUnposted);
-                        setPostDrafts((current) => {
-                            const next: Record<string, PostDraft> = {};
-                            for (const entry of fetchedUnposted) {
-                                next[entry.id] = current[entry.id] ?? {
-                                    counterpartAccount: '',
-                                    postingIndex: '',
-                                };
-                            }
-                            return next;
-                        });
-                    },
-                )
-                .catch((error: unknown) => {
-                    if (!cancelled) {
-                        setDocuments([]);
-                        setSelectedDocumentNames([]);
-                        setUnpostedEntries([]);
-                        setPostDrafts({});
-                        setPipelineStatus(
-                            `Failed to load login pipeline data: ${String(error)}`,
-                        );
-                    }
-                })
-                .finally(() => {
-                    if (!cancelled) {
-                        setIsLoadingDocuments(false);
-                        setIsLoadingAccountJournal(false);
-                        setIsLoadingUnposted(false);
-                    }
-                });
-        }, 250);
-
-        return () => {
-            cancelled = true;
-            window.clearTimeout(timer);
-        };
-    }, [
-        ledgerPath,
-        selectedLoginName,
-        selectedPipelineLabel,
-        selectedLoginAccounts,
-    ]);
 
     // ─── Handlers ───────────────────────────────────────────────────────────────
 
@@ -1295,229 +1138,6 @@ export function ScrapeTab({
         void handleSaveDomainCredentials();
     }
 
-    function parseOptionalIndex(raw: string): {
-        value: number | null;
-        error: string | null;
-    } {
-        const trimmed = raw.trim();
-        if (trimmed.length === 0) return { value: null, error: null };
-        const parsed = Number.parseInt(trimmed, 10);
-        if (!Number.isFinite(parsed) || Number.isNaN(parsed) || parsed < 0) {
-            return {
-                value: null,
-                error: 'Posting index must be a non-negative integer.',
-            };
-        }
-        return { value: parsed, error: null };
-    }
-
-    async function refreshAccountPipelineData(
-        loginName: string,
-        label: string,
-    ) {
-        if (!ledger) return;
-
-        setIsLoadingDocuments(true);
-        setIsLoadingAccountJournal(true);
-        setIsLoadingUnposted(true);
-        try {
-            const [fetchedDocuments, _fetchedJournal, fetchedUnposted] =
-                await Promise.all([
-                    listLoginAccountDocuments(ledger.path, loginName, label),
-                    getLoginAccountJournal(ledger.path, loginName, label),
-                    getLoginAccountUnposted(ledger.path, loginName, label),
-                ]);
-            setDocuments(fetchedDocuments);
-            setSelectedDocumentNames((current) =>
-                current.filter((name) =>
-                    fetchedDocuments.some((doc) => doc.filename === name),
-                ),
-            );
-            setUnpostedEntries(fetchedUnposted);
-            setPostDrafts((current) => {
-                const next: Record<string, PostDraft> = {};
-                for (const entry of fetchedUnposted) {
-                    next[entry.id] = current[entry.id] ?? {
-                        counterpartAccount: '',
-                        postingIndex: '',
-                    };
-                }
-                return next;
-            });
-        } finally {
-            setIsLoadingDocuments(false);
-            setIsLoadingAccountJournal(false);
-            setIsLoadingUnposted(false);
-        }
-    }
-
-    async function handleRefreshAccountPipelineData() {
-        const loginName = selectedLoginName.trim();
-        const label = selectedPipelineLabel;
-        if (loginName.length === 0 || label === null) {
-            setPipelineStatus('Select a login and label first.');
-            return;
-        }
-        try {
-            await refreshAccountPipelineData(loginName, label);
-            setPipelineStatus(
-                `Loaded documents and journals for ${loginName}/${label}.`,
-            );
-        } catch (error) {
-            setPipelineStatus(
-                `Failed to refresh account pipeline data: ${String(error)}`,
-            );
-        }
-    }
-
-    function handleToggleDocumentSelection(filename: string, checked: boolean) {
-        setSelectedDocumentNames((current) => {
-            if (checked) {
-                if (current.includes(filename)) return current;
-                return [...current, filename];
-            }
-            return current.filter((name) => name !== filename);
-        });
-        setPipelineStatus(null);
-    }
-
-    async function handleRunExtraction() {
-        if (!ledger) return;
-        const loginName = selectedLoginName.trim();
-        const label = selectedPipelineLabel;
-        if (loginName.length === 0 || label === null) {
-            setPipelineStatus('Select a login and label first.');
-            return;
-        }
-        const documentNames =
-            selectedDocumentNames.length > 0
-                ? selectedDocumentNames
-                : documents.map((doc) => doc.filename);
-        if (documentNames.length === 0) {
-            setPipelineStatus('No documents selected.');
-            return;
-        }
-
-        setIsRunningExtraction(true);
-        setPipelineStatus(
-            `Running extraction for ${documentNames.length} document(s)...`,
-        );
-        try {
-            const result = await runLoginAccountExtraction(
-                ledger.path,
-                loginName,
-                label,
-                documentNames,
-            );
-            await refreshAccountPipelineData(loginName, label);
-            const newCount = result.newEntryCount;
-            setPipelineStatus(
-                `Extraction complete. Added ${newCount} new transaction(s).`,
-            );
-        } catch (error) {
-            setPipelineStatus(`Extraction failed: ${String(error)}`);
-        } finally {
-            setIsRunningExtraction(false);
-        }
-    }
-
-    function handleSetPostDraft(entryId: string, patch: Partial<PostDraft>) {
-        setPostDrafts((current) => ({
-            ...current,
-            [entryId]: {
-                counterpartAccount: '',
-                postingIndex: '',
-                ...current[entryId],
-                ...patch,
-            },
-        }));
-        setPipelineStatus(null);
-    }
-
-    async function handlePostAccountEntry(entryId: string) {
-        if (!ledger) return;
-        const loginName = selectedLoginName.trim();
-        const label = selectedPipelineLabel;
-        if (loginName.length === 0 || label === null) {
-            setPipelineStatus('Select a login and label first.');
-            return;
-        }
-        const draft = postDrafts[entryId] ?? {
-            counterpartAccount: '',
-            postingIndex: '',
-        };
-        const counterpartAccount = draft.counterpartAccount.trim();
-        if (counterpartAccount.length === 0) {
-            setPipelineStatus('Counterpart account is required.');
-            return;
-        }
-
-        const postingIndex = parseOptionalIndex(draft.postingIndex);
-        if (postingIndex.error !== null) {
-            setPipelineStatus(postingIndex.error);
-            return;
-        }
-
-        setBusyPostEntryId(entryId);
-        try {
-            const glId = await postLoginAccountEntry(
-                ledger.path,
-                loginName,
-                label,
-                entryId,
-                counterpartAccount,
-                postingIndex.value,
-            );
-            await refreshAccountPipelineData(loginName, label);
-            setUnpostEntryId(entryId);
-            setPipelineStatus(`Posted ${entryId} to ${glId}.`);
-            onLedgerRefresh();
-        } catch (error) {
-            setPipelineStatus(`Post failed: ${String(error)}`);
-        } finally {
-            setBusyPostEntryId(null);
-        }
-    }
-
-    async function handleUnpostAccountEntry() {
-        if (!ledger) return;
-        const loginName = selectedLoginName.trim();
-        const label = selectedPipelineLabel;
-        if (loginName.length === 0 || label === null) {
-            setPipelineStatus('Select a login and label first.');
-            return;
-        }
-        const entryId = unpostEntryId.trim();
-        if (entryId.length === 0) {
-            setPipelineStatus('Entry ID is required for unpost.');
-            return;
-        }
-
-        const postingIndex = parseOptionalIndex(unpostPostingIndex);
-        if (postingIndex.error !== null) {
-            setPipelineStatus(postingIndex.error);
-            return;
-        }
-
-        setIsUnpostingEntry(true);
-        try {
-            await unpostLoginAccountEntry(
-                ledger.path,
-                loginName,
-                label,
-                entryId,
-                postingIndex.value,
-            );
-            await refreshAccountPipelineData(loginName, label);
-            setPipelineStatus(`Unposted ${entryId}.`);
-            onLedgerRefresh();
-        } catch (error) {
-            setPipelineStatus(`Unpost failed: ${String(error)}`);
-        } finally {
-            setIsUnpostingEntry(false);
-        }
-    }
-
     async function handleMigrateLegacyLedger() {
         if (!ledger) return;
         setIsMigratingLegacyLedger(true);
@@ -1557,17 +1177,6 @@ export function ScrapeTab({
             localStorage.setItem(`lastScrape:${loginName}`, timestamp);
             setScrapeStatus(`Scrape completed for ${loginName}.`);
             await onScrapeComplete(loginName);
-            try {
-                // Refresh pipeline for all mapped labels of this login.
-                if (selectedPipelineLabel !== null) {
-                    await refreshAccountPipelineData(
-                        loginName,
-                        selectedPipelineLabel,
-                    );
-                }
-            } catch {
-                // Surface scrape success first; pipeline reload errors are non-fatal here.
-            }
         } catch (error) {
             setScrapeStatus(`Scrape failed: ${String(error)}`);
         } finally {
@@ -2590,336 +2199,11 @@ export function ScrapeTab({
                         </div>
                     </details>
                 </section>
-                <section className="pipeline-panel">
-                    <div className="txn-form-header">
-                        <div>
-                            <h3>Extraction pipeline</h3>
-                            <p>
-                                Select documents, run extraction, and review
-                                account-level journal and posting state.
-                            </p>
-                        </div>
-                        <div className="header-actions">
-                            {selectedLoginMappedLabels.length > 1 ? (
-                                <label className="field">
-                                    <span>Label</span>
-                                    <select
-                                        value={selectedPipelineLabel ?? ''}
-                                        onChange={(event) => {
-                                            setSelectedPipelineLabel(
-                                                event.target.value.length > 0
-                                                    ? event.target.value
-                                                    : null,
-                                            );
-                                        }}
-                                    >
-                                        <option value="">Select label</option>
-                                        {selectedLoginMappedLabels.map(
-                                            (label) => (
-                                                <option
-                                                    key={label}
-                                                    value={label}
-                                                >
-                                                    {label}
-                                                </option>
-                                            ),
-                                        )}
-                                    </select>
-                                </label>
-                            ) : null}
-                            <button
-                                className="ghost-button"
-                                type="button"
-                                onClick={() => {
-                                    void handleRefreshAccountPipelineData();
-                                }}
-                                disabled={
-                                    !hasResolvedLoginMapping ||
-                                    isLoadingDocuments ||
-                                    isLoadingAccountJournal ||
-                                    isLoadingUnposted ||
-                                    isRunningExtraction ||
-                                    busyPostEntryId !== null ||
-                                    isUnpostingEntry
-                                }
-                            >
-                                {isLoadingDocuments ||
-                                isLoadingAccountJournal ||
-                                isLoadingUnposted
-                                    ? 'Refreshing...'
-                                    : 'Refresh pipeline'}
-                            </button>
-                        </div>
-                    </div>
-                    <div className="pipeline-actions">
-                        <button
-                            type="button"
-                            className="ghost-button"
-                            onClick={() => {
-                                setSelectedDocumentNames(
-                                    documents.map((doc) => doc.filename),
-                                );
-                                setPipelineStatus(null);
-                            }}
-                            disabled={
-                                isLoadingDocuments || documents.length === 0
-                            }
-                        >
-                            Select all docs
-                        </button>
-                        <button
-                            type="button"
-                            className="ghost-button"
-                            onClick={() => {
-                                setSelectedDocumentNames([]);
-                                setPipelineStatus(null);
-                            }}
-                            disabled={
-                                isLoadingDocuments ||
-                                selectedDocumentNames.length === 0
-                            }
-                        >
-                            Clear selection
-                        </button>
-                        <button
-                            type="button"
-                            className="primary-button"
-                            onClick={() => {
-                                void handleRunExtraction();
-                            }}
-                            disabled={
-                                isRunningExtraction ||
-                                !hasResolvedLoginMapping ||
-                                scrapeExtension.trim().length === 0
-                            }
-                        >
-                            {isRunningExtraction
-                                ? 'Running extraction...'
-                                : `Run extraction (${selectedDocumentNames.length > 0 ? selectedDocumentNames.length : documents.length})`}
-                        </button>
-                    </div>
-                    {isLoadingDocuments ? (
-                        <p className="status">Loading documents...</p>
-                    ) : documents.length === 0 ? (
-                        <p className="hint">
-                            {!hasActiveScrapeLogin
-                                ? 'Select a login to view documents.'
-                                : !hasResolvedLoginMapping
-                                  ? 'Configure a GL account mapping for this login to view documents.'
-                                  : 'No documents found for this login account mapping.'}
-                        </p>
-                    ) : (
-                        <div className="table-wrap">
-                            <table className="ledger-table">
-                                <thead>
-                                    <tr>
-                                        <th>Select</th>
-                                        <th>Document</th>
-                                        <th>Coverage End</th>
-                                        <th>Scrape Session</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {documents.map((document) => (
-                                        <tr key={document.filename}>
-                                            <td>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={selectedDocumentNames.includes(
-                                                        document.filename,
-                                                    )}
-                                                    onChange={(event) => {
-                                                        handleToggleDocumentSelection(
-                                                            document.filename,
-                                                            event.target
-                                                                .checked,
-                                                        );
-                                                    }}
-                                                />
-                                            </td>
-                                            <td>
-                                                <span className="mono">
-                                                    {document.filename}
-                                                </span>
-                                            </td>
-                                            <td className="mono">
-                                                {document.info
-                                                    ?.coverageEndDate ?? '-'}
-                                            </td>
-                                            <td className="mono">
-                                                {document.info
-                                                    ?.scrapeSessionId ?? '-'}
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
-                    <div className="txn-form-header">
-                        <div>
-                            <h3>Posting queue</h3>
-                            <p>
-                                Assign counterpart accounts for unposted
-                                entries.
-                            </p>
-                        </div>
-                    </div>
-                    {isLoadingUnposted ? (
-                        <p className="status">Loading unposted entries...</p>
-                    ) : unpostedEntries.length === 0 ? (
-                        <p className="hint">
-                            {!hasActiveScrapeLogin
-                                ? 'Select a login to view unposted entries.'
-                                : !hasResolvedLoginMapping
-                                  ? 'Configure a GL account mapping for this login to view unposted entries.'
-                                  : 'No unposted entries for this login mapping.'}
-                        </p>
-                    ) : (
-                        <div className="table-wrap">
-                            <table className="ledger-table">
-                                <thead>
-                                    <tr>
-                                        <th>Date</th>
-                                        <th>ID</th>
-                                        <th>Description</th>
-                                        <th>Counterpart</th>
-                                        <th>Posting Index</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {unpostedEntries.map((entry) => {
-                                        const draft = postDrafts[entry.id] ?? {
-                                            counterpartAccount: '',
-                                            postingIndex: '',
-                                        };
-                                        const isBusy =
-                                            busyPostEntryId === entry.id;
-                                        return (
-                                            <tr key={entry.id}>
-                                                <td className="mono">
-                                                    {entry.date}
-                                                </td>
-                                                <td className="mono">
-                                                    {entry.id}
-                                                </td>
-                                                <td>{entry.description}</td>
-                                                <td>
-                                                    <input
-                                                        type="text"
-                                                        value={
-                                                            draft.counterpartAccount
-                                                        }
-                                                        placeholder="Expenses:Food"
-                                                        onChange={(event) => {
-                                                            handleSetPostDraft(
-                                                                entry.id,
-                                                                {
-                                                                    counterpartAccount:
-                                                                        event
-                                                                            .target
-                                                                            .value,
-                                                                },
-                                                            );
-                                                        }}
-                                                    />
-                                                </td>
-                                                <td>
-                                                    <input
-                                                        type="text"
-                                                        value={
-                                                            draft.postingIndex
-                                                        }
-                                                        placeholder="optional"
-                                                        onChange={(event) => {
-                                                            handleSetPostDraft(
-                                                                entry.id,
-                                                                {
-                                                                    postingIndex:
-                                                                        event
-                                                                            .target
-                                                                            .value,
-                                                                },
-                                                            );
-                                                        }}
-                                                    />
-                                                </td>
-                                                <td>
-                                                    <div className="pipeline-row-actions">
-                                                        <button
-                                                            type="button"
-                                                            className="primary-button"
-                                                            onClick={() => {
-                                                                void handlePostAccountEntry(
-                                                                    entry.id,
-                                                                );
-                                                            }}
-                                                            disabled={
-                                                                isBusy ||
-                                                                isUnpostingEntry
-                                                            }
-                                                        >
-                                                            {isBusy
-                                                                ? 'Posting...'
-                                                                : 'Post'}
-                                                        </button>
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
-                    <div className="txn-grid">
-                        <label className="field">
-                            <span>Unpost entry ID</span>
-                            <input
-                                type="text"
-                                value={unpostEntryId}
-                                placeholder="entry id"
-                                onChange={(event) => {
-                                    setUnpostEntryId(event.target.value);
-                                    setPipelineStatus(null);
-                                }}
-                            />
-                        </label>
-                        <label className="field">
-                            <span>Unpost posting index (optional)</span>
-                            <input
-                                type="text"
-                                value={unpostPostingIndex}
-                                placeholder="0"
-                                onChange={(event) => {
-                                    setUnpostPostingIndex(event.target.value);
-                                    setPipelineStatus(null);
-                                }}
-                            />
-                        </label>
-                    </div>
-                    <div className="pipeline-actions">
-                        <button
-                            type="button"
-                            className="ghost-button"
-                            onClick={() => {
-                                void handleUnpostAccountEntry();
-                            }}
-                            disabled={isUnpostingEntry}
-                        >
-                            {isUnpostingEntry ? 'Unposting...' : 'Unpost entry'}
-                        </button>
-                    </div>
-                </section>
                 {scrapeExtensions.length === 0 && !isLoadingScrapeExtensions ? (
                     <p className="hint">
                         No runnable extensions found in extensions/*/driver.mjs.
                     </p>
                 ) : null}
-                {pipelineStatus === null ? null : (
-                    <p className="status">{pipelineStatus}</p>
-                )}
             </section>
         </div>
     );
