@@ -1295,9 +1295,12 @@ fn run_account_journal(
     let journal_path =
         crate::account_journal::login_account_journal_path(&ledger_dir, &login_name, &label);
     let entries = crate::account_journal::read_journal_at_path(&journal_path)?;
+    let extra = crate::ledger::read_refreshmint_config(&ledger_dir)
+        .map(|c| c.extra_transfer_patterns)
+        .unwrap_or_default();
     println!(
         "{}",
-        serde_json::to_string_pretty(&map_entries_for_cli(entries))?
+        serde_json::to_string_pretty(&map_entries_for_cli(entries, &extra))?
     );
     Ok(())
 }
@@ -1312,9 +1315,12 @@ fn run_account_unposted(
     let label = require_cli_label(&args.label)?;
     let entries = crate::post::get_unposted_login_account(&ledger_dir, &login_name, &label)
         .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let extra = crate::ledger::read_refreshmint_config(&ledger_dir)
+        .map(|c| c.extra_transfer_patterns)
+        .unwrap_or_default();
     println!(
         "{}",
-        serde_json::to_string_pretty(&map_entries_for_cli(entries))?
+        serde_json::to_string_pretty(&map_entries_for_cli(entries, &extra))?
     );
     Ok(())
 }
@@ -1589,6 +1595,9 @@ fn run_account_transfer(
 
 fn map_entries_for_cli(
     entries: Vec<crate::account_journal::AccountEntry>,
+    // Configured extraTransferPatterns, so the isTransfer flag also fires for
+    // user-configured descriptions (mirrors the GUI listing path).
+    extra_transfer_patterns: &[String],
 ) -> Vec<CliAccountJournalEntry> {
     entries
         .into_iter()
@@ -1598,7 +1607,10 @@ fn map_entries_for_cli(
                 crate::account_journal::EntryStatus::Pending => "pending",
                 crate::account_journal::EntryStatus::Unmarked => "unmarked",
             };
-            let is_transfer = crate::transfer_detector::is_probable_transfer(&entry.description);
+            let is_transfer = crate::transfer_detector::is_probable_transfer_with_extra(
+                &entry.description,
+                extra_transfer_patterns,
+            );
             CliAccountJournalEntry {
                 id: entry.id,
                 date: entry.date,
@@ -1808,9 +1820,9 @@ fn default_ledger_dir(context: tauri::Context<tauri::Wry>) -> Result<PathBuf, Bo
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        evidence_ref_matches_document, parse_prompt_overrides, post_all_counterpart,
-        require_cli_existing_login, require_cli_label, require_cli_login_name,
-        resolve_extraction_document_names, run_account_extract_with_dir,
+        evidence_ref_matches_document, map_entries_for_cli, parse_prompt_overrides,
+        post_all_counterpart, require_cli_existing_login, require_cli_label,
+        require_cli_login_name, resolve_extraction_document_names, run_account_extract_with_dir,
         run_account_post_all_with_dir, run_extension_load_with_dir, run_gl_add_with_dir,
         run_new_with_ledger_path, run_secret, AccountCommand, AddArgs, Cli, Commands,
         ExtensionLoadArgs, LoginCommand, SecretAddArgs, SecretArgs, SecretCommand, SecretListArgs,
@@ -1823,6 +1835,34 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn map_entries_for_cli_honors_extra_transfer_patterns() {
+        // The isTransfer flag (which gates the Pipeline Link Transfer button) must
+        // fire for a configured extraTransferPattern. "MOVE MONEY" matches no
+        // built-in transfer pattern.
+        let entry = crate::account_journal::AccountEntry {
+            id: "e1".to_string(),
+            date: "2024-01-15".to_string(),
+            status: crate::account_journal::EntryStatus::Cleared,
+            description: "MOVE MONEY 123".to_string(),
+            comment: String::new(),
+            evidence: vec![],
+            postings: vec![],
+            tags: vec![],
+            extracted_by: None,
+            posted: None,
+            posted_postings: vec![],
+        };
+        assert!(
+            !map_entries_for_cli(vec![entry.clone()], &[])[0].is_transfer,
+            "unconfigured description is not a built-in transfer"
+        );
+        assert!(
+            map_entries_for_cli(vec![entry], &["move money".to_string()])[0].is_transfer,
+            "configured pattern should mark the entry as a transfer"
+        );
+    }
 
     #[test]
     fn ensure_refreshmint_extension_replaces_or_adds() {

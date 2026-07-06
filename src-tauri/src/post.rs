@@ -1003,10 +1003,17 @@ pub fn get_unposted_entries_for_transfer(
             .first()
             .and_then(|p| p.amount.as_ref())
             .and_then(|a| a.quantity.parse().ok());
+        // Honor configured extraTransferPatterns so a custom description is not
+        // penalized as a non-transfer (mirrors the matchers).
+        let extra_patterns = crate::ledger::read_refreshmint_config(ledger_dir)
+            .map(|c| c.extra_transfer_patterns)
+            .unwrap_or_default();
 
         result.sort_by(|a, b| {
-            let score_a = transfer_candidate_score(&a.2, &src_date, &src_desc, src_amount);
-            let score_b = transfer_candidate_score(&b.2, &src_date, &src_desc, src_amount);
+            let score_a =
+                transfer_candidate_score(&a.2, &src_date, &src_desc, src_amount, &extra_patterns);
+            let score_b =
+                transfer_candidate_score(&b.2, &src_date, &src_desc, src_amount, &extra_patterns);
             score_a.cmp(&score_b)
         });
     } else {
@@ -1018,16 +1025,24 @@ pub fn get_unposted_entries_for_transfer(
 }
 
 /// Compute a ranking score for a transfer candidate (lower = better match).
+///
+/// `extra_patterns` are the configured `extraTransferPatterns` so a
+/// user-configured description also counts as a probable transfer here (mirrors
+/// the matchers, which already honor them via TransferSettings).
 fn transfer_candidate_score(
     entry: &account_journal::AccountEntry,
     src_date: &str,
     src_desc: &str,
     src_amount: Option<f64>,
+    extra_patterns: &[String],
 ) -> i64 {
     let mut score: i64 = 0;
 
     // Penalize entries not labelled as transfers.
-    if !crate::transfer_detector::is_probable_transfer(&entry.description) {
+    if !crate::transfer_detector::is_probable_transfer_with_extra(
+        &entry.description,
+        extra_patterns,
+    ) {
         score += 1000;
     }
 
@@ -1046,7 +1061,7 @@ fn transfer_candidate_score(
         .and_then(|p| p.amount.as_ref())
         .and_then(|a| a.quantity.parse().ok());
     if let (Some(sa), Some(ea)) = (src_amount, entry_amount) {
-        if (sa + ea).abs() < 0.005 {
+        if (sa + ea).abs() < TRANSFER_CANCEL_EPSILON {
             score -= 50;
         }
     }
@@ -4034,6 +4049,27 @@ mod tests {
             "both GL txns must survive the refused merge"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn transfer_candidate_score_honors_extra_patterns() {
+        // A configured extraTransferPattern must exempt a candidate from the
+        // +1000 non-transfer penalty, mirroring the matchers. "MOVE MONEY"
+        // matches no built-in transfer pattern.
+        let entry = make_entry("cand", "2024-01-20", "MOVE MONEY 123", "50.00");
+        let without = transfer_candidate_score(&entry, "2024-01-15", "unrelated", None, &[]);
+        let with = transfer_candidate_score(
+            &entry,
+            "2024-01-15",
+            "unrelated",
+            None,
+            &["move money".to_string()],
+        );
+        assert_eq!(
+            without - with,
+            1000,
+            "a configured pattern should drop exactly the non-transfer penalty"
+        );
     }
 
     #[test]

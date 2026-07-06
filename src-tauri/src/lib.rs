@@ -1687,7 +1687,10 @@ fn get_account_journal(
     let account_name = require_non_empty_input("account_name", account_name)?;
     let entries =
         account_journal::read_journal(&target_dir, &account_name).map_err(|err| err.to_string())?;
-    Ok(map_account_journal_entries(entries))
+    Ok(map_account_journal_entries(
+        entries,
+        &load_extra_transfer_patterns(&target_dir),
+    ))
 }
 
 #[tauri::command]
@@ -1703,7 +1706,10 @@ fn get_login_account_journal(
         account_journal::login_account_journal_path(&target_dir, &login_name, &label);
     let entries =
         account_journal::read_journal_at_path(&journal_path).map_err(|err| err.to_string())?;
-    Ok(map_account_journal_entries(entries))
+    Ok(map_account_journal_entries(
+        entries,
+        &load_extra_transfer_patterns(&target_dir),
+    ))
 }
 
 #[tauri::command]
@@ -1711,7 +1717,10 @@ fn get_unposted(ledger: String, account_name: String) -> Result<Vec<AccountJourn
     let target_dir = std::path::PathBuf::from(ledger);
     let account_name = require_non_empty_input("account_name", account_name)?;
     let entries = post::get_unposted(&target_dir, &account_name).map_err(|err| err.to_string())?;
-    Ok(map_account_journal_entries(entries))
+    Ok(map_account_journal_entries(
+        entries,
+        &load_extra_transfer_patterns(&target_dir),
+    ))
 }
 
 #[tauri::command]
@@ -1725,7 +1734,10 @@ fn get_login_account_unposted(
     let label = require_label_input(label)?;
     let entries = post::get_unposted_login_account(&target_dir, &login_name, &label)
         .map_err(|err| err.to_string())?;
-    Ok(map_account_journal_entries(entries))
+    Ok(map_account_journal_entries(
+        entries,
+        &load_extra_transfer_patterns(&target_dir),
+    ))
 }
 
 #[tauri::command]
@@ -2065,10 +2077,11 @@ fn get_unposted_entries_for_transfer(
         &source_entry_id,
     )
     .map_err(|err| err.to_string())?;
+    let extra_transfer_patterns = load_extra_transfer_patterns(&target_dir);
     let results = triples
         .into_iter()
         .flat_map(|(login_name, label, e)| {
-            map_account_journal_entries(vec![e])
+            map_account_journal_entries(vec![e], &extra_transfer_patterns)
                 .into_iter()
                 .map(move |entry| UnpostedTransferResult {
                     login_name: login_name.clone(),
@@ -2294,13 +2307,27 @@ fn repair_orphaned_gl_txn(ledger: String, gl_txn_id: String) -> Result<(), Strin
     post::repair_orphaned_gl_txn(&target_dir, &gl_txn_id, "gui").map_err(|err| err.to_string())
 }
 
+/// Load configured extraTransferPatterns for the isTransfer flag; a missing or
+/// unreadable config yields none.
+fn load_extra_transfer_patterns(dir: &std::path::Path) -> Vec<String> {
+    crate::ledger::read_refreshmint_config(dir)
+        .map(|c| c.extra_transfer_patterns)
+        .unwrap_or_default()
+}
+
 fn map_account_journal_entries(
     entries: Vec<account_journal::AccountEntry>,
+    // Configured extraTransferPatterns, so the isTransfer flag (which gates the
+    // Pipeline Link Transfer button) also fires for user-configured descriptions.
+    extra_transfer_patterns: &[String],
 ) -> Vec<AccountJournalEntry> {
     entries
         .into_iter()
         .map(|e| {
-            let is_transfer = transfer_detector::is_probable_transfer(&e.description);
+            let is_transfer = transfer_detector::is_probable_transfer_with_extra(
+                &e.description,
+                extra_transfer_patterns,
+            );
             let (bank_status, status_marker) = match e.status {
                 account_journal::EntryStatus::Cleared => ("posted", "*"),
                 account_journal::EntryStatus::Pending => ("pending", "!"),
