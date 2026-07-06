@@ -3177,4 +3177,53 @@ mod tests {
         let _ = fs::remove_dir_all(root);
         Ok(())
     }
+
+    #[test]
+    fn gl_merge_transfer_proposal_suppressed_when_pair_blocked(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // GL twin of auto_link_transfer_suppressed_when_pair_blocked: two
+        // cancelling Unknown GL txns in different accounts uniquely match as a
+        // transfer, yielding an Auto MergeGlTransfer proposal. A NotTransferLink
+        // for the pair must suppress it (see the gl_proposals skip).
+        let root = temp_dir("gl-merge-blocked")?;
+        let mut journal = String::new();
+        journal.push_str(&gl_amount_block(
+            "txn-a", "MOVE OUT", "ea", "checking", "-10.00",
+        ));
+        journal.push_str(&gl_amount_block(
+            "txn-b", "MOVE IN", "eb", "savings", "10.00",
+        ));
+        fs::write(root.join("general.journal"), journal)?;
+
+        let scope = || AutomationScope {
+            login_name: None,
+            label: None,
+            include_gl: Some(true),
+        };
+        // Positive control: the pair surfaces a MergeGlTransfer proposal.
+        assert!(list_automation_proposals(&root, scope())?
+            .iter()
+            .any(|p| p.kind == AutomationProposalKind::MergeGlTransfer));
+
+        // Block the pair as not-a-transfer (keyed by the two source entries).
+        create_resolution(
+            &root,
+            NewResolutionInput {
+                kind: ResolutionKind::NotTransferLink,
+                subject_refs: vec![
+                    login_entry_ref("chase", "checking", "ea"),
+                    login_entry_ref("chase", "savings", "eb"),
+                ],
+                parts: Vec::new(),
+                notes: None,
+                predicate: None,
+            },
+        )?;
+
+        assert!(!list_automation_proposals(&root, scope())?
+            .iter()
+            .any(|p| p.kind == AutomationProposalKind::MergeGlTransfer));
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
 }

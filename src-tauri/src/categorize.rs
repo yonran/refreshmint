@@ -1442,6 +1442,132 @@ mod tests {
         assert_eq!(m.entry_id, "txn-c");
     }
 
+    // --- GL-level transfer matching (twins of the account-level policy tests) ---
+
+    fn make_gl_amount(quantity: f64, commodity: &str) -> hledger::Amount {
+        hledger::Amount {
+            acommodity: commodity.to_string(),
+            aquantity: hledger::DecimalRaw {
+                decimal_places: 2,
+                decimal_mantissa: serde_json::Number::from((quantity * 100.0).round() as i64),
+                floating_point: quantity,
+            },
+            astyle: None,
+            acost: None,
+            acostbasis: None,
+        }
+    }
+
+    /// A GL `Expenses:Unknown` subject txn whose explicit posting carries `amount`.
+    fn make_gl_subject(source: &str, amount: f64) -> hledger::Transaction {
+        let mut txn = make_generated_gl_txn(source, "Expenses:Unknown", "Transfer out");
+        txn.tpostings[0].pamount = vec![make_gl_amount(amount, "USD")];
+        txn
+    }
+
+    fn make_gl_candidate(
+        txn_id: &str,
+        amount: f64,
+        source: (&str, &str, &str),
+    ) -> GlTransferCandidate {
+        GlTransferCandidate {
+            txn_id: txn_id.to_string(),
+            description: "Transfer in".to_string(),
+            date: "2024-01-15".to_string(),
+            amount_f64: amount,
+            commodity: "USD".to_string(),
+            source: Some((
+                source.0.to_string(),
+                source.1.to_string(),
+                source.2.to_string(),
+            )),
+        }
+    }
+
+    /// GL twin of `find_transfer_match`: unique-or-none semantics.
+    fn find_gl_transfer_match(
+        txn: &hledger::Transaction,
+        txn_id: &str,
+        candidates: &[GlTransferCandidate],
+        policy: &crate::automation::TransferPolicy,
+    ) -> Option<GlTransferMatch> {
+        unique_or_candidates(find_gl_transfer_matches(
+            txn,
+            txn_id,
+            candidates,
+            policy,
+            &TransferSettings::default(),
+        ))
+        .0
+    }
+
+    #[test]
+    fn find_gl_transfer_match_blocked_pair_returns_none() {
+        // GL twin of find_transfer_match_blocked_pair_returns_none: a would-be
+        // unique match is suppressed when the pair is blocked.
+        let subject = make_gl_subject("logins/chase/accounts/checking:e1", -21.32);
+        let candidates = vec![make_gl_candidate(
+            "gl-b",
+            21.32,
+            ("boa", "savings", "txn-b"),
+        )];
+        assert!(find_gl_transfer_match(
+            &subject,
+            "gl-a",
+            &candidates,
+            &crate::automation::TransferPolicy::default(),
+        )
+        .is_some());
+        let mut policy = crate::automation::TransferPolicy::default();
+        policy.block_for_test(
+            (
+                "chase".to_string(),
+                "checking".to_string(),
+                "e1".to_string(),
+            ),
+            (
+                "boa".to_string(),
+                "savings".to_string(),
+                "txn-b".to_string(),
+            ),
+        );
+        assert!(find_gl_transfer_match(&subject, "gl-a", &candidates, &policy).is_none());
+    }
+
+    #[test]
+    fn find_gl_transfer_match_blocked_candidate_does_not_spoil_uniqueness() {
+        // GL twin: two same-amount candidates → ambiguous → None. Blocking one
+        // leaves the other uniquely matching (blocked candidates are filtered
+        // BEFORE the count).
+        let subject = make_gl_subject("logins/chase/accounts/checking:e1", -21.32);
+        let candidates = vec![
+            make_gl_candidate("gl-b", 21.32, ("boa", "savings", "txn-b")),
+            make_gl_candidate("gl-c", 21.32, ("boa", "brokerage", "txn-c")),
+        ];
+        assert!(find_gl_transfer_match(
+            &subject,
+            "gl-a",
+            &candidates,
+            &crate::automation::TransferPolicy::default(),
+        )
+        .is_none());
+        let mut policy = crate::automation::TransferPolicy::default();
+        policy.block_for_test(
+            (
+                "chase".to_string(),
+                "checking".to_string(),
+                "e1".to_string(),
+            ),
+            (
+                "boa".to_string(),
+                "savings".to_string(),
+                "txn-b".to_string(),
+            ),
+        );
+        let m = find_gl_transfer_match(&subject, "gl-a", &candidates, &policy).unwrap();
+        assert_eq!(m.txn_id, "gl-c");
+    }
+
     #[test]
     fn find_transfer_match_two_candidates_returns_none() {
         let entry = make_entry("e1", "Transfer out", vec![]);
