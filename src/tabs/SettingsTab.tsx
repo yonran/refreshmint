@@ -1547,6 +1547,9 @@ export function SettingsTab({
                                                         scrapeAccountOptions
                                                     }
                                                     placeholder="Assets:Bank:Checking (blank = ignored)"
+                                                    disabled={
+                                                        isSavingLoginConfig
+                                                    }
                                                 />
                                             </label>
                                         </div>

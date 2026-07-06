@@ -12,6 +12,7 @@ export function AccountInput({
     oldAccount,
     autoFocus,
     placeholder = 'Account name…',
+    disabled,
 }: {
     value: string;
     onChange: (value: string) => void;
@@ -21,6 +22,7 @@ export function AccountInput({
     oldAccount?: string | string[];
     autoFocus?: boolean;
     placeholder?: string;
+    disabled?: boolean;
 }) {
     const [suggestions, setSuggestions] = useState<string[]>([]);
     const [activeIndex, setActiveIndex] = useState(-1);
@@ -77,6 +79,7 @@ export function AccountInput({
                 value={value}
                 placeholder={placeholder}
                 autoFocus={autoFocus}
+                disabled={disabled}
                 onFocus={(e) => {
                     e.target.select();
                     computeSuggestions(e.target.value);
