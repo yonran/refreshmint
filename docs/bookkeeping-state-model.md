@@ -251,6 +251,27 @@ Each hledger transaction block asserts one accounting transaction in the GL.
   source posting automation, so operations such as sync, undo, and transfer
   merge may treat it as app-managed.
 
+A generated transfer (two `source` tags) has two posting shapes:
+
+- Exact transfer: leg 1 carries the explicit amount, leg 2 is elided (hledger
+  infers its negation).
+- Fee-tolerant transfer (three postings, all amounts explicit): both real
+  legs plus a user-chosen fee account posting carrying the residual
+  `-(a1 + a2)` at the legs' decimal precision, so the block balances by
+  construction. Sync preserves the fee account and recomputes the residual
+  from the current source amounts (dropping the fee leg when the legs cancel
+  again). See `post::format_transfer_gl_transaction_with_fee`.
+
+```text
+2026-01-15  * Transfer to savings  ; id: <uuid>
+    ; generated-by: refreshmint-post
+    ; source: logins/chase/accounts/checking:<entry-id>
+    ; source: logins/boa/accounts/savings:<entry-id>
+    Assets:Checking  -100.00 USD
+    Assets:Savings  99.75 USD
+    Expenses:Bank Fees  0.25 USD
+```
+
 `general.journal` is the current accounting surface. Rows in account journals,
 operations logs, resolutions, links, and reconciliation files explain where
 that surface came from and what actions are allowed to modify it.
@@ -332,9 +353,18 @@ can be regenerated from current ledger state and active resolutions.
   accounts and amounts in `parts`.
 - `transfer-link`: the subject source entries should be treated as one
   transfer.
+- `not-transfer-link`: negative memory — the two subject source entries are
+  NOT a transfer of each other. Created automatically when a merged transfer
+  is unposted and by the explicit "Not a transfer" actions; consulted by the
+  transfer matchers (`automation::TransferPolicy`) so the pair is never
+  auto-matched again. Mutually exclusive with `transfer-link` for the same
+  pair: creating either kind disables an active resolution of the other kind.
+  Identity is the source-entry pair, so it survives merges and unposts; manual
+  GL transactions without `source:` tags cannot carry this memory.
 - `transfer-split`: planned vocabulary for representing a transfer by the
   parts in `parts`; proposal generation and application are not implemented
-  yet.
+  yet (fee-tolerant transfers use a third explicit fee posting instead — see
+  the generated-transaction shape below).
 - `same-source`: the subject refs represent the same external source event.
 - `not-same-source`: the subject refs must not be deduplicated or merged
   together.

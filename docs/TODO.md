@@ -266,23 +266,31 @@ Still open:
 
 ### Transfers
 
-- Show near-miss candidates instead of exactly-one-or-nothing: 2+ candidates
-  in the window currently return None with no indication a match existed.
-- Pre-filter and rank the Transactions-tab Link Transfer modal by opposite
-  amount/date proximity (`transfer_candidate_score` already exists); it
-  currently lists all posted history unsorted, and its `amt:` search prefix is
-  undocumented.
-- Not-a-transfer negative memory: unposting a false-positive auto-transfer
-  does not stop it being re-detected and re-posted on the next Post All (and
-  the Pipeline path saved a transfer-link resolution asserting the wrong pair).
-- Fee-tolerant merge writing both real legs plus an explicit fee posting
-  (gives `TransferSplit` its implementation).
-- One-click Unmerge/Unpost on transfer rows (backend `unpost` is already
-  transfer-aware; the only GUI unpost is typing an entry ID in ScrapeTab).
-- Record transfer resolutions from the auto-ETL and CLI paths too (only the
-  Pipeline UI path saves one today).
-- Configurable date window and user-extensible transfer description patterns
-  (both are hardcoded: ±3 days, uppercase substring list).
+- ✅ Near-miss candidates: 2+ in-window matches now populate
+  `transferCandidates` (date-proximity order) on both suggestion levels instead
+  of silently returning None; the same commit stops same-login-account GL pairs
+  (refund/charge) matching as self-transfers (`a4f0420`).
+- ✅ Transactions-tab Link Transfer modal ranked: empty search pre-filters to
+  cancelling amounts within ±14 days sorted by date proximity; the `amt:`
+  search prefix is advertised in the placeholder; near-miss rows get a
+  non-destructive "N possible" chip that opens the modal (`cb06cef`).
+- ✅ Not-a-transfer negative memory: new `not-transfer-link` resolution kind +
+  `TransferPolicy` filter inside both matchers and the proposal arms, mutually
+  exclusive with `transfer-link` (`7ecb793`); unposting a merged transfer
+  auto-records it, killing the re-post loop (`386a7f5`); explicit "Not a
+  transfer" actions in Pipeline and Transactions (`8957566`).
+- ✅ Fee-tolerant merge/post/sync: an explicit fee account writes both real
+  legs plus a fee posting with all amounts explicit, balancing by construction;
+  sync preserves and recomputes the fee leg (`c08d18d`). `TransferSplit`
+  remains planned vocabulary — fee merges do not use it.
+- ✅ One-click Unmerge on transfer rows: `unpost_gl_transaction` resolves the
+  source entry server-side from the GL txn id; Transactions context menu gains
+  "Unmerge transfer" with confirm + error banner (`8957566`).
+- ✅ Transfer resolutions recorded from the auto-ETL and CLI post-all paths
+  (idempotent via fingerprint dedup) (`9deea61`).
+- ✅ Configurable `transferDateWindowDays` and `extraTransferPatterns` in
+  `refreshmint.json`; the cancel epsilon is a shared named constant
+  (`3aac617`).
 
 ### Reports (plumbing exists; presentation missing)
 
