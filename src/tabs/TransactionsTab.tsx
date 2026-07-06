@@ -766,6 +766,11 @@ export function TransactionsTab({
         txnId2: string,
         feeAccount?: string,
     ) {
+        // Guard against a double-click firing a second concurrent merge (matching
+        // the unmerge/not-a-transfer handlers): the second one races the first's
+        // GL mutation and fails in the backend, showing a spurious error banner
+        // despite the merge having succeeded.
+        if (transferActionBusy) return;
         setBulkRecategorizeError(null);
         setTransferActionBusy(true);
         try {
@@ -2243,6 +2248,7 @@ export function TransactionsTab({
                     void handleAcceptSuggestions(edits);
                 }}
                 acceptSuggestionsBusy={isAcceptingSuggestions}
+                transferActionBusy={transferActionBusy}
                 onOpenSimilarRecategorize={handleOpenSimilarRecategorize}
                 hideObviousAmounts={hideObviousAmounts}
                 onAddSearchTerm={appendSearchTerm}

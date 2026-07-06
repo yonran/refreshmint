@@ -1631,6 +1631,10 @@ export function PipelineTab({
         feeAccount?: string,
     ) {
         if (!selectedLoginAccount || transferModalEntryId === null) return;
+        // Guard against a double-click firing a second concurrent post (matching
+        // the per-row Link buttons, which disable on busyPostEntryId): the second
+        // post races the first and fails in the backend.
+        if (busyPostEntryId !== null) return;
         const { loginName, label } = selectedLoginAccount;
         setBusyPostEntryId(transferModalEntryId);
         setTransferModalEntryId(null);
@@ -3133,7 +3137,8 @@ export function PipelineTab({
                                                     className="ghost-button"
                                                     disabled={
                                                         transferModalFeeAccount.trim() ===
-                                                        ''
+                                                            '' ||
+                                                        busyPostEntryId !== null
                                                     }
                                                     onClick={() => {
                                                         void handleLinkTransferFromModal(
@@ -3231,6 +3236,10 @@ export function PipelineTab({
                                                                             <button
                                                                                 type="button"
                                                                                 className="primary-button"
+                                                                                disabled={
+                                                                                    busyPostEntryId !==
+                                                                                    null
+                                                                                }
                                                                                 onClick={() => {
                                                                                     // Non-cancelling pair →
                                                                                     // prompt for a fee

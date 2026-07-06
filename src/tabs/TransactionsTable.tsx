@@ -385,6 +385,7 @@ export function TransactionsTable({
     onBulkRecategorize,
     onAcceptSuggestions,
     acceptSuggestionsBusy = false,
+    transferActionBusy = false,
     onOpenSimilarRecategorize,
     hideObviousAmounts = true,
     onAddSearchTerm,
@@ -425,6 +426,9 @@ export function TransactionsTable({
     onAcceptSuggestions?: (edits: AcceptAllEdit[]) => void;
     // True while a batch accept is running, to disable the trigger buttons.
     acceptSuggestionsBusy?: boolean;
+    // True while a merge/unmerge/not-a-transfer action is running, to disable the
+    // ↔ merge chip so a double-click can't fire a second concurrent merge.
+    transferActionBusy?: boolean;
     onOpenSimilarRecategorize?: (seed: SimilarRecategorizeSeed) => void;
     hideObviousAmounts?: boolean;
     onAddSearchTerm?: (term: string) => void;
@@ -1290,6 +1294,9 @@ export function TransactionsTable({
                                                                             <button
                                                                                 type="button"
                                                                                 className="ghost-button"
+                                                                                disabled={
+                                                                                    transferActionBusy
+                                                                                }
                                                                                 onClick={() => {
                                                                                     onMergeTransfer(
                                                                                         txn.id,
