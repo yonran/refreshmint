@@ -1424,19 +1424,34 @@ fn run_account_post_all_with_dir(
                 let parts: Vec<&str> = tm.account_locator.split('/').collect();
                 match (parts.get(1), parts.get(3)) {
                     (Some(other_login), Some(other_label)) => {
-                        crate::post::post_login_account_transfer(
+                        // Record the transfer decision as a durable TransferLink
+                        // resolution BEFORE posting (idempotent via fingerprint
+                        // dedup). Mirrors the GUI paths (PipelineTab / App.tsx
+                        // auto-ETL via createTransferLinkResolution in
+                        // src/automation-utils.ts). With the TransferPolicy
+                        // filter in the matchers, blocked pairs never reach this
+                        // branch.
+                        crate::automation::create_transfer_link(
                             ledger_dir,
-                            &login_name,
-                            label,
-                            &entry.id,
-                            other_login,
-                            other_label,
-                            &tm.entry_id,
-                            None,
-                            "cli",
+                            (&login_name, label, &entry.id),
+                            (other_login, other_label, &tm.entry_id),
                         )
-                        .map(|_| "transfer")
                         .map_err(|err| err.to_string())
+                        .and_then(|_| {
+                            crate::post::post_login_account_transfer(
+                                ledger_dir,
+                                &login_name,
+                                label,
+                                &entry.id,
+                                other_login,
+                                other_label,
+                                &tm.entry_id,
+                                None,
+                                "cli",
+                            )
+                            .map(|_| "transfer")
+                            .map_err(|err| err.to_string())
+                        })
                     }
                     _ => Err(format!(
                         "malformed transfer locator: {}",
@@ -2350,6 +2365,95 @@ mod tests {
             policy_applied >= 1,
             "policy loop should have applied the entry-bound PostCategory proposal"
         );
+
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn run_account_post_all_transfer_records_transfer_link_resolution() {
+        // Auto post-all must record the transfer decision as a durable
+        // TransferLink resolution (idempotent via fingerprint dedup), not just
+        // post it — otherwise the automation ledger has no record of the link.
+        let base_dir = create_temp_dir();
+        let ledger_dir = base_dir.join("ledger.refreshmint");
+        crate::ledger::new_ledger_at_dir(&ledger_dir).unwrap();
+
+        let mut chase_cfg = crate::login_config::LoginConfig::default();
+        chase_cfg.accounts.insert(
+            "checking".to_string(),
+            crate::login_config::LoginAccountConfig { gl_account: None },
+        );
+        crate::login_config::write_login_config(&ledger_dir, "chase", &chase_cfg).unwrap();
+        let mut boa_cfg = crate::login_config::LoginConfig::default();
+        boa_cfg.accounts.insert(
+            "savings".to_string(),
+            crate::login_config::LoginAccountConfig { gl_account: None },
+        );
+        crate::login_config::write_login_config(&ledger_dir, "boa", &boa_cfg).unwrap();
+
+        let make = |account: &str, amount: &str, id: &str| crate::account_journal::AccountEntry {
+            id: id.to_string(),
+            date: "2026-01-01".to_string(),
+            status: crate::account_journal::EntryStatus::Cleared,
+            description: "Transfer".to_string(),
+            comment: String::new(),
+            evidence: vec![],
+            postings: vec![crate::account_journal::EntryPosting {
+                account: account.to_string(),
+                amount: Some(crate::account_journal::SimpleAmount {
+                    quantity: amount.to_string(),
+                    commodity: "USD".to_string(),
+                }),
+            }],
+            tags: vec![("isTransfer".to_string(), "true".to_string())],
+            extracted_by: None,
+            posted: None,
+            posted_postings: vec![],
+        };
+        crate::account_journal::write_journal_at_path(
+            &crate::account_journal::login_account_journal_path(&ledger_dir, "chase", "checking"),
+            &[make("Assets:Checking", "-100.00", "out-1")],
+        )
+        .unwrap();
+        crate::account_journal::write_journal_at_path(
+            &crate::account_journal::login_account_journal_path(&ledger_dir, "boa", "savings"),
+            &[make("Assets:Savings", "100.00", "in-1")],
+        )
+        .unwrap();
+
+        run_account_post_all_with_dir(&ledger_dir, "chase", &Some("checking".to_string())).unwrap();
+
+        let gl = fs::read_to_string(ledger_dir.join("general.journal")).unwrap();
+        assert!(
+            gl.contains("source: logins/chase/accounts/checking:out-1")
+                && gl.contains("source: logins/boa/accounts/savings:in-1"),
+            "post-all should post the transfer, got: {gl}"
+        );
+        let transfer_links: Vec<_> = crate::automation::list_resolutions(&ledger_dir)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.kind == crate::automation::ResolutionKind::TransferLink)
+            .collect();
+        assert_eq!(
+            transfer_links.len(),
+            1,
+            "post-all should record exactly one TransferLink resolution"
+        );
+        assert_eq!(
+            transfer_links[0].status,
+            crate::automation::ResolutionStatus::Active
+        );
+
+        // Second run: nothing left to post; the resolution set is unchanged
+        // (fingerprint dedup makes recording idempotent).
+        run_account_post_all_with_dir(&ledger_dir, "chase", &Some("checking".to_string())).unwrap();
+        let after: Vec<_> = crate::automation::list_resolutions(&ledger_dir)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.kind == crate::automation::ResolutionKind::TransferLink)
+            .collect();
+        assert_eq!(after.len(), 1, "second run must not duplicate resolutions");
+        assert_eq!(after[0].id, transfer_links[0].id);
 
         let _ = fs::remove_dir_all(&base_dir);
     }

@@ -51,7 +51,11 @@ import {
     type UnpostedTransferResult,
     type TypedRef,
 } from '../tauri-commands.ts';
-import { resolutionInputFromProposal } from '../automation-utils.ts';
+import {
+    createTransferLinkResolution,
+    loginEntryRef,
+    resolutionInputFromProposal,
+} from '../automation-utils.ts';
 import {
     type LoginAccountRef,
     type PipelineSubTab,
@@ -79,20 +83,6 @@ interface PipelineTabProps {
     onSessionChange: (
         updater: (current: PipelineTabSession) => PipelineTabSession,
     ) => void;
-}
-
-function loginEntryRef(
-    loginName: string,
-    label: string,
-    entryId: string,
-): TypedRef {
-    return {
-        kind: 'login-entry',
-        locator: `logins/${loginName}/accounts/${label}`,
-        entryId,
-        loginName,
-        label,
-    };
 }
 
 // Login-account scope ref for a CategoryRule (no entryId — matches the Rust
@@ -149,22 +139,6 @@ function filterLoginAccountResolutions(
                 ref.label === label,
         ),
     );
-}
-
-async function createTransferLinkResolution(
-    ledgerPath: string,
-    left: LoginAccountRef & { entryId: string },
-    right: LoginAccountRef & { entryId: string },
-): Promise<Resolution> {
-    return createResolution(ledgerPath, {
-        kind: 'transfer-link',
-        subjectRefs: [
-            loginEntryRef(left.loginName, left.label, left.entryId),
-            loginEntryRef(right.loginName, right.label, right.entryId),
-        ],
-        parts: [],
-        notes: 'Created from Pipeline transfer link',
-    });
 }
 
 export function PipelineTab({

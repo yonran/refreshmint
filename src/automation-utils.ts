@@ -1,4 +1,49 @@
-import type { AutomationProposal, NewResolutionInput } from './tauri-commands';
+import type {
+    AutomationProposal,
+    NewResolutionInput,
+    Resolution,
+    TypedRef,
+} from './tauri-commands';
+import { createResolution } from './tauri-commands';
+
+/** A login-entry TypedRef. Mirrors Rust automation::login_entry_ref. */
+export function loginEntryRef(
+    loginName: string,
+    label: string,
+    entryId: string,
+): TypedRef {
+    return {
+        kind: 'login-entry',
+        locator: `logins/${loginName}/accounts/${label}`,
+        entryId,
+        loginName,
+        label,
+    };
+}
+
+/**
+ * Record a transfer decision as a durable transfer-link resolution. Idempotent
+ * via backend fingerprint dedup; creating it disables any active
+ * not-transfer-link twin (mutual exclusion in Rust create_resolution). Shared
+ * by PipelineTab's Link Transfer actions and App.tsx auto-ETL; CLI post-all
+ * records its own via Rust automation::create_transfer_link.
+ */
+export async function createTransferLinkResolution(
+    ledgerPath: string,
+    left: { loginName: string; label: string; entryId: string },
+    right: { loginName: string; label: string; entryId: string },
+    notes = 'Created from Pipeline transfer link',
+): Promise<Resolution> {
+    return createResolution(ledgerPath, {
+        kind: 'transfer-link',
+        subjectRefs: [
+            loginEntryRef(left.loginName, left.label, left.entryId),
+            loginEntryRef(right.loginName, right.label, right.entryId),
+        ],
+        parts: [],
+        notes,
+    });
+}
 
 /**
  * Map an automation proposal to the durable resolution it would create when

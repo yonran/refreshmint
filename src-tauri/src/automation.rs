@@ -324,6 +324,32 @@ fn disable_transfer_twin(
     Ok(())
 }
 
+/// Create (or reactivate) a [`ResolutionKind::TransferLink`] for a source-entry
+/// pair, each `(login_name, label, entry_id)`. Used by CLI post-all (cli.rs) to
+/// record auto-detected transfers before posting (the GUI paths create theirs
+/// via the createTransferLinkResolution helper in src/automation-utils.ts).
+/// Idempotent via fingerprint dedup; mutual exclusion disables any Active
+/// NotTransferLink twin (see `create_resolution`).
+pub fn create_transfer_link(
+    ledger_dir: &Path,
+    a: (&str, &str, &str),
+    b: (&str, &str, &str),
+) -> io::Result<Resolution> {
+    create_resolution(
+        ledger_dir,
+        NewResolutionInput {
+            kind: ResolutionKind::TransferLink,
+            subject_refs: vec![
+                login_entry_ref(a.0, a.1, a.2),
+                login_entry_ref(b.0, b.1, b.2),
+            ],
+            parts: Vec::new(),
+            notes: None,
+            predicate: None,
+        },
+    )
+}
+
 /// Create (or reactivate) a [`ResolutionKind::NotTransferLink`] for a source-entry
 /// pair, each `(login_name, label, entry_id)`. Building block for auto-record-on-
 /// unpost (`post::unpost_login_account_entry`) and the explicit "Not a transfer"

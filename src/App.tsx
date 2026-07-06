@@ -10,6 +10,7 @@ import {
     save as saveDialog,
 } from '@tauri-apps/plugin-dialog';
 import './App.css';
+import { createTransferLinkResolution } from './automation-utils.ts';
 import {
     type ActiveTab,
     addRecentLedger,
@@ -458,6 +459,22 @@ function App() {
                                 const otherLogin = parts[1] ?? '';
                                 const otherLabel = parts[3] ?? '';
                                 if (otherLogin && otherLabel) {
+                                    // Record the transfer decision as a durable
+                                    // transfer-link resolution BEFORE posting
+                                    // (idempotent; mirrors PipelineTab and CLI
+                                    // post-all — see automation-utils.ts).
+                                    await createTransferLinkResolution(
+                                        ledgerPath,
+                                        { loginName, label, entryId: entry.id },
+                                        {
+                                            loginName: otherLogin,
+                                            label: otherLabel,
+                                            entryId:
+                                                suggestion.transferMatch
+                                                    .entryId,
+                                        },
+                                        'Created from auto-ETL transfer link',
+                                    );
                                     await postLoginAccountTransfer(
                                         ledgerPath,
                                         loginName,
