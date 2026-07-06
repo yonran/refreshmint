@@ -52,7 +52,12 @@ function eligibility(t: TransactionRow) {
 }
 
 function suggestion(suggested: string | null): GlCategoryResult {
-    return { suggested, transferMatch: null, ruleAccount: null };
+    return {
+        suggested,
+        transferMatch: null,
+        transferCandidates: [],
+        ruleAccount: null,
+    };
 }
 
 describe('buildAcceptAllEdits', () => {

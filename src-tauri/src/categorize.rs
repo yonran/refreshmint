@@ -34,6 +34,11 @@ pub struct CategoryResult {
     /// Auto-detected transfer match (only set when a unique opposite-amount
     /// unposted entry exists within ±3 days across other login accounts).
     pub transfer_match: Option<TransferMatch>,
+    /// Near-miss transfer candidates: when 2+ candidates match (post
+    /// negative-memory filter), `transfer_match` stays `None` and this carries
+    /// all of them in date-proximity order; empty when 0 or exactly 1 match.
+    /// Keep in sync with `GlCategoryResult::transfer_candidates`.
+    pub transfer_candidates: Vec<TransferMatch>,
     /// Counterpart account of the first matching active `CategoryRule` (see
     /// `automation::matching_rule_account`). Independent of `suggested`: rules are
     /// deterministic and get policy `Auto`, ML `suggested` stays `Review`. The
@@ -61,6 +66,11 @@ pub struct GlCategoryResult {
     /// Auto-detected transfer counterpart among other `Expenses:Unknown` GL
     /// transactions with opposite amount within ±3 days.
     pub transfer_match: Option<GlTransferMatch>,
+    /// Near-miss transfer candidates: when 2+ candidates match (post
+    /// negative-memory filter), `transfer_match` stays `None` and this carries
+    /// all of them in date-proximity order; empty when 0 or exactly 1 match.
+    /// Keep in sync with `CategoryResult::transfer_candidates`.
+    pub transfer_candidates: Vec<GlTransferMatch>,
     /// Counterpart account of the first matching active `CategoryRule` (see
     /// `automation::matching_rule_account`). Independent of `suggested`; keep in
     /// sync with `CategoryResult::rule_account`.
@@ -136,7 +146,7 @@ pub fn suggest_categories(
     let transfer_candidates = collect_transfer_candidates(ledger_dir, login_name, label)?;
 
     // Negative transfer memory (NotTransferLink resolutions). Filters blocked
-    // candidates inside find_transfer_match. See automation::TransferPolicy.
+    // candidates inside find_transfer_matches. See automation::TransferPolicy.
     let transfer_policy = crate::automation::TransferPolicy::from_resolutions(ledger_dir)?;
 
     // Active category rules that apply to this login/account (global + scoped),
@@ -201,7 +211,7 @@ pub fn suggest_gl_categories(
     let transfer_candidates = build_gl_transfer_candidates(&unknown_txns);
 
     // Negative transfer memory (NotTransferLink resolutions). Filters blocked
-    // candidates inside find_gl_transfer_match. See automation::TransferPolicy.
+    // candidates inside find_gl_transfer_matches. See automation::TransferPolicy.
     let transfer_policy = crate::automation::TransferPolicy::from_resolutions(ledger_dir)?;
 
     // Global category rules apply to GL txns; per-txn scoping is refined below
@@ -220,8 +230,9 @@ pub fn suggest_gl_categories(
         };
 
         // Transfer detection has priority over ML suggestion.
-        let transfer_match =
-            find_gl_transfer_match(txn, &txn_id, &transfer_candidates, &transfer_policy);
+        let (transfer_match, near_miss_candidates) = unique_or_candidates(
+            find_gl_transfer_matches(txn, &txn_id, &transfer_candidates, &transfer_policy),
+        );
 
         let suggested = if transfer_match.is_some() {
             None
@@ -277,6 +288,7 @@ pub fn suggest_gl_categories(
             GlCategoryResult {
                 suggested,
                 transfer_match,
+                transfer_candidates: near_miss_candidates,
                 rule_account,
             },
         );
@@ -401,61 +413,77 @@ fn build_gl_transfer_candidates(
     candidates
 }
 
-/// Find a unique transfer match for a GL `Expenses:Unknown` transaction.
-///
-/// Returns `Some(GlTransferMatch)` only when EXACTLY ONE other candidate has
-/// the opposite amount (sum ≈ 0), same commodity, and date within ±3 days.
-fn find_gl_transfer_match(
+/// Find all transfer-candidate matches for a GL `Expenses:Unknown` transaction,
+/// in date-proximity order (closest date first): opposite amount (sum ≈ 0), same
+/// commodity, date within ±3 days. The caller splits unique-match vs near-miss
+/// semantics via [`unique_or_candidates`].
+fn find_gl_transfer_matches(
     txn: &crate::hledger::Transaction,
     txn_id: &str,
     candidates: &[GlTransferCandidate],
     policy: &crate::automation::TransferPolicy,
-) -> Option<GlTransferMatch> {
+) -> Vec<GlTransferMatch> {
     // Get this transaction's explicit posting amount.
-    let posting = txn
+    let Some(posting) = txn
         .tpostings
         .iter()
-        .find(|p| p.paccount != "Expenses:Unknown")?;
-    let amount = posting.pamount.first()?;
+        .find(|p| p.paccount != "Expenses:Unknown")
+    else {
+        return Vec::new();
+    };
+    let Some(amount) = posting.pamount.first() else {
+        return Vec::new();
+    };
     let amount_f64 = amount.aquantity.floating_point;
     if amount_f64.is_nan() {
-        return None;
+        return Vec::new();
     }
-    let txn_date = parse_date(&txn.tdate)?;
-    // The subject txn's source entry (if any), for negative-memory filtering.
+    let Some(txn_date) = parse_date(&txn.tdate) else {
+        return Vec::new();
+    };
+    // The subject txn's source entry (if any), for the same-account exclusion and
+    // negative-memory filtering below.
     let subject_source = txn_source_triple(txn);
 
-    let matches: Vec<&GlTransferCandidate> = candidates
+    let mut matches: Vec<(i64, &GlTransferCandidate)> = candidates
         .iter()
-        .filter(|c| {
-            c.txn_id != txn_id
+        .filter_map(|c| {
+            let day_distance = parse_date(&c.date).map(|cd| (txn_date - cd).num_days().abs())?;
+            (c.txn_id != txn_id
                 && c.commodity == amount.acommodity
                 && !c.amount_f64.is_nan()
                 && (amount_f64 + c.amount_f64).abs() < 0.005
-                && parse_date(&c.date)
-                    .map(|cd| (txn_date - cd).num_days().abs() <= 3)
-                    .unwrap_or(false)
+                && day_distance <= 3
+                // A candidate from the SAME login account is never a transfer leg
+                // (mirrors the account-level cross-account rule: refund/charge
+                // pairs must not collapse into self-transfers). Candidates without
+                // a source tag are not excluded.
+                && !match (&subject_source, &c.source) {
+                    (Some((login_a, label_a, _)), Some((login_b, label_b, _))) => {
+                        login_a == login_b && label_a == label_b
+                    }
+                    _ => false,
+                }
                 // Skip pairs marked not-a-transfer (both sides need a source tag).
                 // Filtered BEFORE the exactly-one count so a blocked candidate does
                 // not spoil uniqueness. See automation::TransferPolicy.
                 && !match (&subject_source, &c.source) {
                     (Some(a), Some(b)) => policy.blocks(a, b),
                     _ => false,
-                }
+                })
+            .then_some((day_distance, c))
         })
         .collect();
-
-    if matches.len() == 1 {
-        let m = matches[0];
-        Some(GlTransferMatch {
+    matches.sort_by_key(|(day_distance, _)| *day_distance);
+    matches
+        .into_iter()
+        .map(|(_, m)| GlTransferMatch {
             txn_id: m.txn_id.clone(),
             description: m.description.clone(),
             date: m.date.clone(),
             matched_amount: format!("{} {}", m.amount_f64, m.commodity),
         })
-    } else {
-        None
-    }
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -693,57 +721,74 @@ fn collect_transfer_candidates(
     Ok(candidates)
 }
 
-/// Find a unique transfer match for an unposted entry.
-///
-/// Returns `Some(TransferMatch)` only when EXACTLY ONE candidate has the
-/// opposite amount (sum ≈ 0), same commodity, and a date within ±3 days.
-/// Returns `None` when there are 0 or 2+ matches.
+/// Find all transfer-candidate matches for an unposted entry, in date-proximity
+/// order (closest date first): opposite amount (sum ≈ 0), same commodity, date
+/// within ±3 days. The caller splits unique-match vs near-miss semantics via
+/// [`unique_or_candidates`].
 ///
 /// `policy` (negative transfer memory) filters blocked candidates BEFORE the
-/// exactly-one uniqueness count, so a blocked candidate cannot spoil uniqueness
-/// for the remaining one. See `automation::TransferPolicy`.
-fn find_transfer_match(
+/// caller's exactly-one uniqueness count, so a blocked candidate cannot spoil
+/// uniqueness for the remaining one. See `automation::TransferPolicy`.
+fn find_transfer_matches(
     entry: &account_journal::AccountEntry,
     subject_login: &str,
     subject_label: &str,
     candidates: &[TransferCandidate],
     policy: &crate::automation::TransferPolicy,
-) -> Option<TransferMatch> {
-    let first_posting = entry.postings.first()?;
-    let amt = first_posting.amount.as_ref()?;
+) -> Vec<TransferMatch> {
+    let Some(first_posting) = entry.postings.first() else {
+        return Vec::new();
+    };
+    let Some(amt) = first_posting.amount.as_ref() else {
+        return Vec::new();
+    };
     let entry_amount: f64 = amt.quantity.trim().parse().unwrap_or(f64::NAN);
     if entry_amount.is_nan() {
-        return None;
+        return Vec::new();
     }
-    let entry_date = parse_date(&entry.date)?;
+    let Some(entry_date) = parse_date(&entry.date) else {
+        return Vec::new();
+    };
     let subject = (
         subject_login.to_string(),
         subject_label.to_string(),
         entry.id.clone(),
     );
 
-    let matches: Vec<&TransferCandidate> = candidates
+    let mut matches: Vec<(i64, &TransferCandidate)> = candidates
         .iter()
-        .filter(|c| {
-            c.commodity == amt.commodity
+        .filter_map(|c| {
+            let day_distance = parse_date(&c.date).map(|cd| (entry_date - cd).num_days().abs())?;
+            (c.commodity == amt.commodity
                 && !c.amount_f64.is_nan()
                 && (entry_amount + c.amount_f64).abs() < 0.005
-                && parse_date(&c.date)
-                    .map(|cd| (entry_date - cd).num_days().abs() <= 3)
-                    .unwrap_or(false)
-                && !candidate_is_blocked(policy, &subject, &c.locator, &c.entry_id)
+                && day_distance <= 3
+                && !candidate_is_blocked(policy, &subject, &c.locator, &c.entry_id))
+            .then_some((day_distance, c))
         })
         .collect();
-
-    if matches.len() == 1 {
-        let m = matches[0];
-        Some(TransferMatch {
+    matches.sort_by_key(|(day_distance, _)| *day_distance);
+    matches
+        .into_iter()
+        .map(|(_, m)| TransferMatch {
             account_locator: m.locator.clone(),
             entry_id: m.entry_id.clone(),
             matched_amount: format!("{} {}", m.amount_f64, m.commodity),
         })
+        .collect()
+}
+
+/// Split a matcher result into (unique match, near-miss candidates): exactly one
+/// match → `(Some, [])`; 2+ → `(None, all)`; 0 → `(None, [])`. Shared by the
+/// account-level and GL-level transfer detection so both report identical
+/// near-miss semantics.
+fn unique_or_candidates<T>(mut matches: Vec<T>) -> (Option<T>, Vec<T>) {
+    if matches.len() == 1 {
+        (matches.pop(), Vec::new())
+    } else if matches.is_empty() {
+        (None, Vec::new())
     } else {
-        None
+        (None, matches)
     }
 }
 
@@ -870,23 +915,23 @@ fn process_entry(
     };
 
     // --- Transfer detection + category suggestion (unposted entries only) ---
-    let (transfer_match, suggested) = if entry.posted.is_none() {
+    let (transfer_match, near_miss_candidates, suggested) = if entry.posted.is_none() {
         let is_probable_transfer = transfer_detector::is_probable_transfer(&entry.description)
             || entry
                 .tags
                 .iter()
                 .any(|(k, v)| k == "isTransfer" && v == "true");
 
-        let transfer_match = if is_probable_transfer {
-            find_transfer_match(
+        let (transfer_match, near_miss_candidates) = if is_probable_transfer {
+            unique_or_candidates(find_transfer_matches(
                 entry,
                 login_name,
                 label,
                 transfer_candidates,
                 transfer_policy,
-            )
+            ))
         } else {
-            None
+            (None, Vec::new())
         };
 
         let suggested = if transfer_match.is_none() {
@@ -895,9 +940,9 @@ fn process_entry(
             None
         };
 
-        (transfer_match, suggested)
+        (transfer_match, near_miss_candidates, suggested)
     } else {
-        (None, None)
+        (None, Vec::new(), None)
     };
 
     // Category rule match (independent of ML `suggested` and posted status).
@@ -913,6 +958,7 @@ fn process_entry(
         amount_changed,
         status_changed,
         transfer_match,
+        transfer_candidates: near_miss_candidates,
         rule_account,
     }
 }
@@ -1216,6 +1262,25 @@ mod tests {
             amount_f64: amount,
             commodity: commodity.to_string(),
         }
+    }
+
+    /// Old exactly-one semantics (find_transfer_matches + unique_or_candidates),
+    /// kept as a helper so the pre-near-miss tests still assert the same behavior.
+    fn find_transfer_match(
+        entry: &AccountEntry,
+        subject_login: &str,
+        subject_label: &str,
+        candidates: &[TransferCandidate],
+        policy: &crate::automation::TransferPolicy,
+    ) -> Option<TransferMatch> {
+        unique_or_candidates(find_transfer_matches(
+            entry,
+            subject_login,
+            subject_label,
+            candidates,
+            policy,
+        ))
+        .0
     }
 
     #[test]
@@ -1580,6 +1645,147 @@ mod tests {
             Some("Expenses:Groceries")
         );
         assert!(results["e-other"].rule_account.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suggest_categories_two_candidates_populate_transfer_candidates() {
+        // Near-miss semantics: with 2+ post-filter matches, transfer_match stays
+        // None and transfer_candidates carries all of them in date-proximity order.
+        let dir = categorize_temp_dir("near-miss-account");
+        let mut chase_cfg = login_config::LoginConfig::default();
+        chase_cfg.accounts.insert(
+            "checking".to_string(),
+            login_config::LoginAccountConfig {
+                gl_account: Some("Assets:Checking".to_string()),
+            },
+        );
+        login_config::write_login_config(&dir, "chase", &chase_cfg).unwrap();
+        let mut boa_cfg = login_config::LoginConfig::default();
+        for label in ["savings", "brokerage"] {
+            boa_cfg.accounts.insert(
+                label.to_string(),
+                login_config::LoginAccountConfig { gl_account: None },
+            );
+        }
+        login_config::write_login_config(&dir, "boa", &boa_cfg).unwrap();
+
+        // Subject: -21.32 on 2024-01-15 (make_entry defaults).
+        let jpath = account_journal::login_account_journal_path(&dir, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &jpath,
+            &[make_entry("e-out", "Transfer to savings", vec![])],
+        )
+        .unwrap();
+        // Two +21.32 candidates: savings 2 days away, brokerage same day.
+        let mut far = make_entry("e-far", "Transfer in", vec![]);
+        far.date = "2024-01-17".to_string();
+        far.postings[0].amount = Some(SimpleAmount {
+            commodity: "USD".to_string(),
+            quantity: "21.32".to_string(),
+        });
+        let mut near = make_entry("e-near", "Transfer in", vec![]);
+        near.postings[0].amount = Some(SimpleAmount {
+            commodity: "USD".to_string(),
+            quantity: "21.32".to_string(),
+        });
+        account_journal::write_journal_at_path(
+            &account_journal::login_account_journal_path(&dir, "boa", "savings"),
+            &[far],
+        )
+        .unwrap();
+        account_journal::write_journal_at_path(
+            &account_journal::login_account_journal_path(&dir, "boa", "brokerage"),
+            &[near],
+        )
+        .unwrap();
+
+        let results = suggest_categories(&dir, "chase", "checking").unwrap();
+        let result = &results["e-out"];
+        assert!(
+            result.transfer_match.is_none(),
+            "ambiguous match must not set transfer_match"
+        );
+        let ids: Vec<&str> = result
+            .transfer_candidates
+            .iter()
+            .map(|c| c.entry_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["e-near", "e-far"],
+            "candidates must be in date-proximity order"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suggest_gl_categories_two_candidates_populate_transfer_candidates() {
+        let dir = categorize_temp_dir("near-miss-gl");
+        std::fs::write(
+            dir.join("general.journal"),
+            "2026-01-03 Transfer out  ; id: txn-out\n    \
+             ; source: logins/chase/accounts/checking:e1\n    \
+             Assets:Chase  -50.00 USD\n    Expenses:Unknown\n\n\
+             2026-01-01 Transfer in far  ; id: txn-far\n    \
+             ; source: logins/boa/accounts/savings:e2\n    \
+             Assets:Boa  50.00 USD\n    Expenses:Unknown\n\n\
+             2026-01-03 Transfer in near  ; id: txn-near\n    \
+             ; source: logins/boa/accounts/brokerage:e3\n    \
+             Assets:BoaBrokerage  50.00 USD\n    Expenses:Unknown\n",
+        )
+        .unwrap();
+
+        let results = suggest_gl_categories(&dir).unwrap();
+        let result = &results["txn-out"];
+        assert!(
+            result.transfer_match.is_none(),
+            "ambiguous match must not set transfer_match"
+        );
+        let ids: Vec<&str> = result
+            .transfer_candidates
+            .iter()
+            .map(|c| c.txn_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["txn-near", "txn-far"],
+            "candidates must be in date-proximity order"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suggest_gl_categories_excludes_same_source_account_candidates() {
+        // Audit gap: a refund/charge pair from the SAME login account must not
+        // collapse into a self-transfer. A candidate without a source tag is not
+        // excluded (and here becomes the unique match).
+        let dir = categorize_temp_dir("gl-same-account");
+        std::fs::write(
+            dir.join("general.journal"),
+            "2026-01-03 Charge  ; id: txn-charge\n    \
+             ; source: logins/chase/accounts/checking:e1\n    \
+             Assets:Chase  -30.00 USD\n    Expenses:Unknown\n\n\
+             2026-01-03 Refund  ; id: txn-refund\n    \
+             ; source: logins/chase/accounts/checking:e2\n    \
+             Assets:Chase  30.00 USD\n    Expenses:Unknown\n\n\
+             2026-01-03 Manual counterpart  ; id: txn-manual\n    \
+             Assets:Manual  30.00 USD\n    Expenses:Unknown\n",
+        )
+        .unwrap();
+
+        let results = suggest_gl_categories(&dir).unwrap();
+        let result = &results["txn-charge"];
+        // txn-refund (same source account) is excluded; txn-manual (no source
+        // tag) remains and matches uniquely.
+        assert_eq!(
+            result.transfer_match.as_ref().map(|m| m.txn_id.as_str()),
+            Some("txn-manual"),
+            "same-source-account candidate must be excluded; got {result:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

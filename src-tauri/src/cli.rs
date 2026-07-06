@@ -2147,6 +2147,7 @@ mod tests {
             amount_changed: false,
             status_changed: false,
             transfer_match: None,
+            transfer_candidates: Vec::new(),
             rule_account: Some("Expenses:Groceries".to_string()),
         };
         assert_eq!(post_all_counterpart(Some(&with_rule)), "Expenses:Groceries");
@@ -2155,6 +2156,7 @@ mod tests {
             amount_changed: false,
             status_changed: false,
             transfer_match: None,
+            transfer_candidates: Vec::new(),
             rule_account: None,
         };
         assert_eq!(

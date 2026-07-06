@@ -47,8 +47,8 @@ pub enum ResolutionKind {
     /// Negative transfer memory: the two `login-entry` subjects are NOT a transfer
     /// of each other. Created automatically on unpost of a merged transfer and via
     /// an explicit "Not a transfer" action. Consulted by [`TransferPolicy`] (loaded
-    /// into the two matchers `categorize::find_transfer_match` /
-    /// `find_gl_transfer_match`) and by the TransferLink/MergeGlTransfer proposal
+    /// into the two matchers `categorize::find_transfer_matches` /
+    /// `find_gl_transfer_matches`) and by the TransferLink/MergeGlTransfer proposal
     /// arms. Mutually exclusive with `TransferLink` for the same pair (see
     /// `create_resolution`). Deliberately NOT part of `entry_is_resolved`.
     NotTransferLink,
@@ -440,7 +440,7 @@ fn canonical_transfer_pair(a: TransferEntry, b: TransferEntry) -> (TransferEntry
 /// Negative transfer memory. Loads active [`ResolutionKind::NotTransferLink`]
 /// resolutions into a set of canonically-ordered source-entry pairs. Mirrors
 /// [`crate::dedup::DedupPolicy::from_resolutions`]. Consulted by the two matchers
-/// (`categorize::find_transfer_match` / `find_gl_transfer_match`) — which filter
+/// (`categorize::find_transfer_matches` / `find_gl_transfer_matches`) — which filter
 /// blocked candidates BEFORE the exactly-one uniqueness count so a blocked
 /// candidate cannot spoil uniqueness for the remaining one — and, belt-and-braces,
 /// by the TransferLink/MergeGlTransfer proposal arms (a stale Active TransferLink

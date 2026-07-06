@@ -503,7 +503,7 @@ pub fn unpost_login_account_entry(
     // block with exactly two `; source:` legs) records a NotTransferLink for the
     // pair so it does not silently re-post; mutual exclusion also disables the
     // TransferLink twin. Consulted by automation::TransferPolicy (loaded into
-    // categorize::find_transfer_match / find_gl_transfer_match, and the auto-post
+    // categorize::find_transfer_matches / find_gl_transfer_matches, and the auto-post
     // paths). Best-effort AFTER the committed unpost: a failure here must NOT roll
     // it back (log + proceed).
     let sources = parse_sources_from_block(&gl_block);

@@ -937,6 +937,13 @@ export interface CategoryResult {
     /** Auto-detected transfer match, or null if none / ambiguous. */
     transferMatch: TransferMatch | null;
     /**
+     * Near-miss transfer candidates: when 2+ candidates match, `transferMatch`
+     * stays null and this carries all of them in date-proximity order; empty
+     * when 0 or exactly 1 match. Mirrors Rust
+     * categorize::CategoryResult::transfer_candidates.
+     */
+    transferCandidates: TransferMatch[];
+    /**
      * Counterpart account of the first matching active CategoryRule, or null.
      * Independent of `suggested`; post paths prefer it over 'Expenses:Unknown'.
      * Mirrors Rust categorize::CategoryResult::rule_account.
@@ -965,6 +972,13 @@ export interface GlCategoryResult {
     suggested: string | null;
     /** Auto-detected transfer pair among other Expenses:Unknown GL txns. */
     transferMatch: GlTransferMatch | null;
+    /**
+     * Near-miss transfer candidates: when 2+ candidates match, `transferMatch`
+     * stays null and this carries all of them in date-proximity order; empty
+     * when 0 or exactly 1 match. Mirrors Rust
+     * categorize::GlCategoryResult::transfer_candidates.
+     */
+    transferCandidates: GlTransferMatch[];
     /**
      * Counterpart account of the first matching active CategoryRule, or null.
      * Mirrors Rust categorize::GlCategoryResult::rule_account.
