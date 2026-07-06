@@ -2679,6 +2679,13 @@ export function PipelineTab({
                                                     const transferMatch =
                                                         suggestion?.transferMatch ??
                                                         null;
+                                                    // Near-miss transfer candidates
+                                                    // (2+ ambiguous matches; see
+                                                    // CategoryResult.transferCandidates).
+                                                    const transferCandidateCount =
+                                                        suggestion
+                                                            ?.transferCandidates
+                                                            .length ?? 0;
                                                     const isBusy =
                                                         busyPostEntryId ===
                                                         entry.id;
@@ -2855,7 +2862,9 @@ export function PipelineTab({
                                                                             )}
                                                                             {(entry.isTransfer ||
                                                                                 transferMatch !==
-                                                                                    null) && (
+                                                                                    null ||
+                                                                                transferCandidateCount >=
+                                                                                    2) && (
                                                                                 <button
                                                                                     type="button"
                                                                                     className="ghost-button"
@@ -2872,8 +2881,10 @@ export function PipelineTab({
                                                                                         );
                                                                                     }}
                                                                                 >
-                                                                                    Link
-                                                                                    Transfer
+                                                                                    {transferCandidateCount >=
+                                                                                    2
+                                                                                        ? `Link Transfer (${transferCandidateCount} possible)`
+                                                                                        : 'Link Transfer'}
                                                                                 </button>
                                                                             )}
                                                                             <button

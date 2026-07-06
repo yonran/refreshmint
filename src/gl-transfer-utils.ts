@@ -1,4 +1,5 @@
 import type { TransactionRow } from './tauri-commands.ts';
+import { UNCATEGORIZED_GL_ACCOUNT } from './tauri-commands.ts';
 
 export type BookkeepingFilter =
     | 'all'
@@ -61,6 +62,96 @@ export function filterGlTransferCandidates(
                 t.description.toLowerCase().includes(q) || t.date.includes(q)
             );
         });
+}
+
+/**
+ * Two amounts cancel below this epsilon (cents tolerance). Mirrors the Rust
+ * matchers' TRANSFER_CANCEL_EPSILON (src-tauri/src/post.rs).
+ */
+const TRANSFER_CANCEL_EPSILON = 0.005;
+
+/** Pre-filter window for the no-search transfer candidate ranking, in days. */
+const RANK_DATE_WINDOW_DAYS = 14;
+
+/** Parse a "<quantity> <commodity>" posting amount string. */
+function parsePostingAmount(
+    amount: string | null,
+): { value: number; commodity: string } | null {
+    if (amount === null) return null;
+    const [quantity, commodity = ''] = amount.trim().split(/\s+/);
+    const value = Number(quantity);
+    return Number.isFinite(value) ? { value, commodity } : null;
+}
+
+/**
+ * The signed amount of a GL row's first explicit non-`Expenses:Unknown`
+ * posting. Mirrors the Rust GL transfer-candidate shape
+ * (categorize::build_gl_transfer_candidates).
+ */
+function explicitPostingAmount(
+    txn: TransactionRow,
+): { value: number; commodity: string } | null {
+    for (const posting of txn.postings) {
+        if (posting.account === UNCATEGORIZED_GL_ACCOUNT) continue;
+        const parsed = parsePostingAmount(posting.amount);
+        if (parsed !== null) return parsed;
+    }
+    return null;
+}
+
+/** Absolute day distance between two YYYY-MM-DD dates; null if unparseable. */
+function dayDistance(a: string, b: string): number | null {
+    const ta = Date.parse(a);
+    const tb = Date.parse(b);
+    if (Number.isNaN(ta) || Number.isNaN(tb)) return null;
+    return Math.abs(ta - tb) / (24 * 60 * 60 * 1000);
+}
+
+/**
+ * Rank the Link Transfer modal's candidate list for `subject`.
+ *
+ * With an empty search: pre-filter to opposite-sign cancelling amounts (same
+ * commodity, |a+b| < 0.005) within ±14 days, sorted by date proximity — the
+ * likely counterparts float to the top instead of listing all history.
+ * With search text: keep `filterGlTransferCandidates`'s filtering (text /
+ * date / `amt:`), but apply the same date-proximity sort.
+ */
+export function rankGlTransferCandidates(
+    transactions: TransactionRow[],
+    subject: TransactionRow,
+    search: string,
+): TransactionRow[] {
+    const filtered = filterGlTransferCandidates(
+        transactions,
+        subject.id,
+        search,
+    );
+    const subjectAmount = explicitPostingAmount(subject);
+    const prefiltered =
+        search.trim() === ''
+            ? filtered.filter((t) => {
+                  if (subjectAmount === null) return false;
+                  const candidateAmount = explicitPostingAmount(t);
+                  if (candidateAmount === null) return false;
+                  const distance = dayDistance(subject.date, t.date);
+                  return (
+                      candidateAmount.commodity === subjectAmount.commodity &&
+                      Math.abs(candidateAmount.value + subjectAmount.value) <
+                          TRANSFER_CANCEL_EPSILON &&
+                      distance !== null &&
+                      distance <= RANK_DATE_WINDOW_DAYS
+                  );
+              })
+            : filtered;
+    return prefiltered
+        .map((t, index) => ({
+            t,
+            index,
+            distance:
+                dayDistance(subject.date, t.date) ?? Number.POSITIVE_INFINITY,
+        }))
+        .sort((a, b) => a.distance - b.distance || a.index - b.index)
+        .map(({ t }) => t);
 }
 
 export function filterTransactionsByBookkeepingState(

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
     filterGlTransferCandidates,
     filterTransactionsByBookkeepingState,
+    rankGlTransferCandidates,
 } from './gl-transfer-utils.ts';
 import type { TransactionRow } from './tauri-commands.ts';
 
@@ -165,6 +166,86 @@ describe('filterGlTransferCandidates', () => {
         );
         expect(result).toHaveLength(1);
         expect(result[0]?.id).toBe('a');
+    });
+});
+
+describe('rankGlTransferCandidates', () => {
+    // A refreshmint-posted txn whose explicit (non-Unknown) posting carries the
+    // amount, mirroring the GL transfer-candidate shape.
+    function makeCandidate(
+        id: string,
+        date: string,
+        amount: string,
+    ): TransactionRow {
+        return makeTxn(id, {
+            comment: REFRESHMINT_COMMENT,
+            date,
+            postings: [
+                {
+                    account: 'Assets:Checking',
+                    amount,
+                    comment: '',
+                    totals: null,
+                },
+                {
+                    account: 'Expenses:Unknown',
+                    amount: null,
+                    comment: '',
+                    totals: null,
+                },
+            ],
+        });
+    }
+
+    const subject = makeCandidate('subject', '2026-01-15', '-100.00 USD');
+
+    it('empty search pre-filters to cancelling amounts within 14 days, sorted by date proximity', () => {
+        const near = makeCandidate('near', '2026-01-16', '100.00 USD');
+        const far = makeCandidate('far', '2026-01-25', '100.00 USD');
+        const tooFar = makeCandidate('too-far', '2026-02-15', '100.00 USD');
+        const wrongAmount = makeCandidate('wrong', '2026-01-15', '55.00 USD');
+        const sameSign = makeCandidate(
+            'same-sign',
+            '2026-01-15',
+            '-100.00 USD',
+        );
+        const result = rankGlTransferCandidates(
+            [tooFar, wrongAmount, far, sameSign, near, subject],
+            subject,
+            '',
+        );
+        expect(result.map((t) => t.id)).toEqual(['near', 'far']);
+    });
+
+    it('empty search excludes different commodities', () => {
+        const eur = makeCandidate('eur', '2026-01-15', '100.00 EUR');
+        expect(rankGlTransferCandidates([eur], subject, '')).toEqual([]);
+    });
+
+    it('search text keeps the existing filter but sorts by date proximity', () => {
+        const far = makeTxn('far', {
+            comment: REFRESHMINT_COMMENT,
+            date: '2026-03-01',
+            description: 'AUTOPAY ONE',
+        });
+        const near = makeTxn('near', {
+            comment: REFRESHMINT_COMMENT,
+            date: '2026-01-20',
+            description: 'AUTOPAY TWO',
+        });
+        const noMatch = makeTxn('no-match', {
+            comment: REFRESHMINT_COMMENT,
+            date: '2026-01-15',
+            description: 'AMAZON',
+        });
+        const result = rankGlTransferCandidates(
+            [far, near, noMatch],
+            subject,
+            'autopay',
+        );
+        // Non-cancelling amounts stay visible with search text; only the sort
+        // changes.
+        expect(result.map((t) => t.id)).toEqual(['near', 'far']);
     });
 });
 

@@ -803,6 +803,11 @@ export function TransactionsTable({
                                     glCategorySuggestions[txn.id];
                                 const transferMatch =
                                     glSuggestion?.transferMatch ?? null;
+                                // Near-miss transfer candidates (2+ ambiguous
+                                // matches; see GlCategoryResult.transferCandidates).
+                                const transferCandidateCount =
+                                    glSuggestion?.transferCandidates.length ??
+                                    0;
                                 const suggested =
                                     glSuggestion?.suggested ?? null;
                                 const eligible =
@@ -1246,6 +1251,39 @@ export function TransactionsTable({
                                                                                 {
                                                                                     transferMatch.description
                                                                                 }
+                                                                            </button>
+                                                                        )}
+                                                                    {isNonBalanceSheet &&
+                                                                        !isEditing &&
+                                                                        transferMatch ===
+                                                                            null &&
+                                                                        transferCandidateCount >=
+                                                                            2 &&
+                                                                        onOpenLinkTransfer !==
+                                                                            undefined && (
+                                                                            // Ambiguous
+                                                                            // near-miss:
+                                                                            // open the
+                                                                            // Link
+                                                                            // Transfer
+                                                                            // modal, no
+                                                                            // one-click
+                                                                            // merge.
+                                                                            <button
+                                                                                type="button"
+                                                                                className="ghost-button"
+                                                                                title="Multiple possible transfer counterparts; open Link Transfer to pick one"
+                                                                                onClick={() => {
+                                                                                    onOpenLinkTransfer(
+                                                                                        txn.id,
+                                                                                    );
+                                                                                }}
+                                                                            >
+                                                                                ↔{' '}
+                                                                                {
+                                                                                    transferCandidateCount
+                                                                                }{' '}
+                                                                                possible
                                                                             </button>
                                                                         )}
                                                                     {isUnknown &&

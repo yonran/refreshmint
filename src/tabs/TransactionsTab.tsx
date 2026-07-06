@@ -29,6 +29,7 @@ import {
     filterGlTransferCandidates,
     filterTransactionsByBookkeepingState,
     hasStagingPosting,
+    rankGlTransferCandidates,
     type BookkeepingFilter,
 } from '../gl-transfer-utils.ts';
 import {
@@ -2177,11 +2178,23 @@ export function TransactionsTab({
             />
             {glTransferModalTxnId !== null &&
                 ((modalTxnId) => {
-                    const candidates = filterGlTransferCandidates(
-                        ledger.transactions,
-                        modalTxnId,
-                        glTransferModalSearch,
+                    // Rank likely counterparts first (cancelling amounts within
+                    // ±14 days, by date proximity) when the search box is empty;
+                    // fall back to the plain filter if the subject row is gone.
+                    const subject = ledger.transactions.find(
+                        (t) => t.id === modalTxnId,
                     );
+                    const candidates = subject
+                        ? rankGlTransferCandidates(
+                              ledger.transactions,
+                              subject,
+                              glTransferModalSearch,
+                          )
+                        : filterGlTransferCandidates(
+                              ledger.transactions,
+                              modalTxnId,
+                              glTransferModalSearch,
+                          );
                     return (
                         <div
                             className="modal-overlay"
@@ -2209,7 +2222,7 @@ export function TransactionsTab({
                                 </div>
                                 <input
                                     type="search"
-                                    placeholder="Search transactions…"
+                                    placeholder="Search… (text, date, or amt:12.34)"
                                     value={glTransferModalSearch}
                                     onChange={(e) => {
                                         setGlTransferModalSearch(
