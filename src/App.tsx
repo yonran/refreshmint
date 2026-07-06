@@ -702,7 +702,7 @@ function App() {
                         }
                         setLedger(opened);
                         recordRecentLedger(path);
-                        setOpenStatus(`Opened ${opened.path}`);
+                        setOpenStatus(null);
                         return;
                     } catch {
                         if (!isStartupCancelled()) {
@@ -787,7 +787,7 @@ function App() {
             const opened = await openLedger(path);
             setLedger(opened);
             recordRecentLedger(path);
-            setOpenStatus(`Opened ${opened.path}`);
+            setOpenStatus(null);
         } catch (error) {
             setOpenStatus(`Failed to open ledger: ${String(error)}`);
         } finally {
@@ -805,7 +805,7 @@ function App() {
             const opened = await openLedger(path);
             setLedger(opened);
             recordRecentLedger(path);
-            setOpenStatus(`Opened ${opened.path}`);
+            setOpenStatus(null);
         } catch (error) {
             pruneRecentLedger(path);
             setOpenStatus(`Failed to open ledger: ${String(error)}`);
@@ -1025,14 +1025,29 @@ function App() {
             autoCorrect="off"
             spellCheck={false}
         >
-            <header className="app-header">
+            <header
+                className={
+                    ledger === null
+                        ? 'app-header'
+                        : 'app-header app-header-compact'
+                }
+            >
                 <div>
                     <p className="app-eyebrow">Refreshmint</p>
-                    <h1>Ledger workspace</h1>
-                    <p className="app-subtitle">
-                        Open a <span>.refreshmint</span> directory to review
-                        accounts, transactions, and scraping extensions.
-                    </p>
+                    {ledger === null ? (
+                        <>
+                            <h1>Ledger workspace</h1>
+                            <p className="app-subtitle">
+                                Open a <span>.refreshmint</span> directory to
+                                review accounts, transactions, and scraping
+                                extensions.
+                            </p>
+                        </>
+                    ) : (
+                        <h1 className="app-title-compact mono">
+                            {ledger.path}
+                        </h1>
+                    )}
                 </div>
                 <div className="app-actions">
                     <button
@@ -1054,12 +1069,12 @@ function App() {
                         Open...
                     </button>
                 </div>
-                {createStatus === null ? null : (
+                {ledger === null && createStatus !== null ? (
                     <p className="status">{createStatus}</p>
-                )}
-                {openStatus === null ? null : (
+                ) : null}
+                {ledger === null && openStatus !== null ? (
                     <p className="status">{openStatus}</p>
-                )}
+                ) : null}
             </header>
 
             {ledger === null ? (
