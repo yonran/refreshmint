@@ -1683,7 +1683,19 @@ pub fn sync_gl_transaction(
     // 4. Rebuild the GL block.
     let new_block = match loaded.as_slice() {
         [(loc1, _, e1), (loc2, _, e2)] => {
-            // Transfer: two sources. A 3-posting block carries a fee leg
+            // Transfer: two sources. A 2-posting block is fee-less; a 3-posting
+            // block carries a single fee leg. More than 3 means a manual extra
+            // leg that format_transfer_gl_transaction_with_fee cannot reproduce
+            // (it only recognizes one trailing fee leg), so rewriting would
+            // silently discard it. Refuse, mirroring the 1-source split refusal
+            // below.
+            if count_posting_lines(&gl_block) > 3 {
+                return Err(format!(
+                    "GL transaction {gl_txn_id} has more than 3 postings; sync would discard the extra leg. Unpost and re-post it instead."
+                )
+                .into());
+            }
+            // A 3-posting block carries a fee leg
             // (format_transfer_gl_transaction_with_fee); carry its account over
             // and let the formatter recompute the residual from the CURRENT
             // entry amounts (it drops the fee leg if the legs now cancel).
@@ -3018,6 +3030,42 @@ mod tests {
         assert!(
             !gl.contains("Expenses:Bank Fees"),
             "cancelling legs should drop the fee leg, got: {gl}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_refuses_transfer_block_with_extra_leg() {
+        // A 2-source block with 4+ postings (fee leg + a manual extra leg) cannot
+        // be reproduced by format_transfer_gl_transaction_with_fee, which only
+        // recognizes a single trailing fee leg. Rewriting it would silently
+        // discard the extra leg, so sync must refuse (mirrors the 1-source split
+        // refusal).
+        let root = temp_dir("sync-extra-leg");
+        let (gl1, gl2) = post_pair_for_merge(&root, "-100.00", "99.75");
+        let merged =
+            merge_gl_transfer(&root, &gl1, &gl2, Some("Expenses:Bank Fees"), "test").unwrap();
+
+        // Inject a 4th posting line into the block, simulating a manual edit.
+        let gl_path = root.join("general.journal");
+        let gl = fs::read_to_string(&gl_path).unwrap();
+        let gl = gl.replace(
+            "    Expenses:Bank Fees  0.25 USD\n",
+            "    Expenses:Bank Fees  0.25 USD\n    Expenses:Extra  1.00 USD\n",
+        );
+        fs::write(&gl_path, &gl).unwrap();
+
+        let err = sync_gl_transaction(&root, "chase", "checking", "txn-1", "test").unwrap_err();
+        assert!(
+            err.to_string().contains("more than 3 postings"),
+            "expected extra-leg refusal, got: {err}"
+        );
+        let after = fs::read_to_string(&gl_path).unwrap();
+        assert!(
+            after.contains(&format!("id: {merged}"))
+                && after.contains("    Expenses:Extra  1.00 USD\n")
+                && after.contains("    Expenses:Bank Fees  0.25 USD\n"),
+            "block must be unchanged by the refused sync, got: {after}"
         );
         let _ = fs::remove_dir_all(&root);
     }
