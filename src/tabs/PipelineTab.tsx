@@ -67,7 +67,7 @@ import {
     normalizeLoginConfig,
     suggestGlAccountName,
 } from '../types.ts';
-import { AccountInput, TransactionsTable } from './TransactionsTable.tsx';
+import { AccountInput } from './TransactionsTable.tsx';
 import { TRANSFER_CANCEL_EPSILON } from '../gl-transfer-utils.ts';
 
 interface PipelineTabProps {
@@ -76,7 +76,6 @@ interface PipelineTabProps {
     loginAccounts: LoginAccountRef[];
     loginConfigsByName: Record<string, LoginConfig>;
     hasLoadedLoginConfigs: boolean;
-    hideObviousAmounts: boolean;
     onLedgerRefresh: () => void;
     onLoginConfigChanged: () => void;
     onViewGlTransaction: (glTxnId: string) => void;
@@ -148,7 +147,6 @@ export function PipelineTab({
     loginAccounts,
     loginConfigsByName,
     hasLoadedLoginConfigs,
-    hideObviousAmounts,
     onLedgerRefresh,
     onLoginConfigChanged,
     onViewGlTransaction,
@@ -444,20 +442,6 @@ export function PipelineTab({
             setIsLoadingPipelineBulkStats(false);
         }
     }, [ledgerPath, loginAccounts, loginConfigsByName]);
-
-    const pipelineGlRows = useMemo(() => {
-        if (accountJournalEntries.length === 0) return [];
-        const postedIds = new Set(
-            accountJournalEntries
-                .filter((e) => e.posted !== null)
-                .map((e) => {
-                    const parts = (e.posted ?? '').split(':');
-                    return parts[parts.length - 1] ?? '';
-                })
-                .filter((id) => id.length > 0),
-        );
-        return ledger.transactions.filter((txn) => postedIds.has(txn.id));
-    }, [ledger, accountJournalEntries]);
 
     const pipelineGlAccount = useMemo<string | null>(() => {
         if (!selectedLoginAccount) return null;
@@ -2002,17 +1986,6 @@ export function PipelineTab({
                     >
                         Account Rows
                     </button>
-                    <button
-                        className={
-                            pipelineSubTab === 'gl-rows' ? 'tab active' : 'tab'
-                        }
-                        onClick={() => {
-                            setPipelineSubTab('gl-rows');
-                        }}
-                        type="button"
-                    >
-                        GL Rows
-                    </button>
                 </div>
                 {selectedLoginAccount === null ? (
                     <p className="hint">
@@ -2193,309 +2166,187 @@ export function PipelineTab({
                             </div>
                         )}
                     </>
-                ) : pipelineSubTab === 'account-rows' ? (
-                    isLoadingAccountJournal ? (
-                        <p className="status">Loading account rows...</p>
-                    ) : (
-                        <div className="account-rows-panel">
-                            <div className="pipeline-panel">
-                                <div className="pipeline-actions pipeline-gl-account-row">
-                                    <span className="pipeline-gl-account-label">
-                                        GL Account:
+                ) : isLoadingAccountJournal ? (
+                    <p className="status">Loading account rows...</p>
+                ) : (
+                    <div className="account-rows-panel">
+                        <div className="pipeline-panel">
+                            <div className="pipeline-actions pipeline-gl-account-row">
+                                <span className="pipeline-gl-account-label">
+                                    GL Account:
+                                </span>
+                                {pipelineGlAccount !== null &&
+                                pipelineGlAccount !== '' ? (
+                                    <span className="mono">
+                                        {pipelineGlAccount}
                                     </span>
-                                    {pipelineGlAccount !== null &&
-                                    pipelineGlAccount !== '' ? (
-                                        <span className="mono">
-                                            {pipelineGlAccount}
-                                        </span>
-                                    ) : (
-                                        <>
-                                            <input
-                                                type="text"
-                                                placeholder={suggestGlAccountName(
-                                                    selectedLoginAccount.label,
-                                                )}
-                                                value={pipelineGlAccountDraft}
-                                                onChange={(e) => {
-                                                    setPipelineGlAccountDraft(
-                                                        e.target.value,
-                                                    );
-                                                }}
-                                            />
-                                            <button
-                                                type="button"
-                                                className="primary-button"
-                                                disabled={
-                                                    isSavingPipelineGlAccount ||
-                                                    selectedLoginLocked ||
-                                                    pipelineGlAccountDraft.trim()
-                                                        .length === 0
-                                                }
-                                                onClick={() => {
-                                                    void handleSavePipelineGlAccount();
-                                                }}
-                                            >
-                                                {isSavingPipelineGlAccount
-                                                    ? 'Saving...'
-                                                    : 'Save GL Account'}
-                                            </button>
-                                        </>
-                                    )}
-                                </div>
-                                <div className="pipeline-actions">
-                                    <button
-                                        type="button"
-                                        className="primary-button"
-                                        disabled={
-                                            isPipelinePosting ||
-                                            isPipelinePostingAllLedger ||
-                                            glLockStatus.locked ||
-                                            selectedLoginLocked ||
-                                            unpostedEntries.length === 0
-                                        }
-                                        onClick={() => {
-                                            void handlePipelinePostAll();
-                                        }}
-                                    >
-                                        {isPipelinePosting
-                                            ? 'Posting...'
-                                            : `Post All (${unpostedEntries.length.toString()})`}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="ghost-button"
-                                        disabled={
-                                            isPipelinePosting ||
-                                            isPipelinePostingAllLedger ||
-                                            glLockStatus.locked ||
-                                            selectedLoginLocked ||
-                                            pipelineSelectedEntryIds.size === 0
-                                        }
-                                        onClick={() => {
-                                            void handlePipelinePostSelected();
-                                        }}
-                                    >
-                                        {`Post Selected (${pipelineSelectedEntryIds.size.toString()})`}
-                                    </button>
-                                </div>
+                                ) : (
+                                    <>
+                                        <input
+                                            type="text"
+                                            placeholder={suggestGlAccountName(
+                                                selectedLoginAccount.label,
+                                            )}
+                                            value={pipelineGlAccountDraft}
+                                            onChange={(e) => {
+                                                setPipelineGlAccountDraft(
+                                                    e.target.value,
+                                                );
+                                            }}
+                                        />
+                                        <button
+                                            type="button"
+                                            className="primary-button"
+                                            disabled={
+                                                isSavingPipelineGlAccount ||
+                                                selectedLoginLocked ||
+                                                pipelineGlAccountDraft.trim()
+                                                    .length === 0
+                                            }
+                                            onClick={() => {
+                                                void handleSavePipelineGlAccount();
+                                            }}
+                                        >
+                                            {isSavingPipelineGlAccount
+                                                ? 'Saving...'
+                                                : 'Save GL Account'}
+                                        </button>
+                                    </>
+                                )}
                             </div>
-                            {automationProposals.length > 0 && (
-                                <div className="pipeline-panel">
-                                    <h3>Automation proposals</h3>
-                                    <div className="table-wrap">
-                                        <table className="ledger-table">
-                                            <thead>
-                                                <tr>
-                                                    <th>Kind</th>
-                                                    <th>Policy</th>
-                                                    <th>Applies to</th>
-                                                    <th>Result</th>
-                                                    <th>Undo</th>
-                                                    <th>Reasons</th>
-                                                    <th>Actions</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {automationProposals.map(
-                                                    (proposal) => {
-                                                        const result =
-                                                            proposal
-                                                                .proposedResult
-                                                                .suggestedAccount ??
-                                                            proposal
-                                                                .proposedResult
-                                                                .transferMatch
-                                                                ?.entryId ??
-                                                            (proposal
-                                                                .proposedResult
-                                                                .parts.length >
-                                                            0
-                                                                ? proposal.proposedResult.parts
-                                                                      .map(
-                                                                          (
-                                                                              part,
-                                                                          ) =>
-                                                                              `${part.account ?? '(account)'} ${part.amount ?? ''}`.trim(),
-                                                                      )
-                                                                      .join(
-                                                                          ' + ',
-                                                                      )
-                                                                : null) ??
-                                                            proposal
-                                                                .proposedResult
-                                                                .notes ??
-                                                            proposal
-                                                                .proposedResult
-                                                                .importAnomalyId ??
-                                                            '-';
-                                                        const reasons =
-                                                            proposal.reasons
-                                                                .map(
-                                                                    (reason) =>
-                                                                        `${reason.field}: ${reason.detail}`,
-                                                                )
-                                                                .join(', ');
-                                                        const isApplyable =
-                                                            proposal.blockers
-                                                                .length === 0 &&
-                                                            proposal.canApply;
-                                                        const canSaveDecision =
-                                                            proposal.blockers
-                                                                .length === 0 &&
-                                                            resolutionInputFromProposal(
-                                                                proposal,
-                                                            ) != null;
-                                                        return (
-                                                            <tr
-                                                                key={
-                                                                    proposal.id
-                                                                }
-                                                            >
-                                                                <td>
-                                                                    {
-                                                                        proposal.kind
-                                                                    }
-                                                                </td>
-                                                                <td>
-                                                                    {
-                                                                        proposal.policyDecision
-                                                                    }
-                                                                </td>
-                                                                <td>
-                                                                    {proposal.subjectRefs
-                                                                        .map(
-                                                                            refLabel,
-                                                                        )
-                                                                        .join(
-                                                                            ' <-> ',
-                                                                        )}
-                                                                </td>
-                                                                <td>
-                                                                    {result}
-                                                                </td>
-                                                                <td>
-                                                                    {
-                                                                        proposal.reversible
-                                                                    }
-                                                                </td>
-                                                                <td>
-                                                                    {proposal
-                                                                        .blockers
-                                                                        .length ===
-                                                                    0
-                                                                        ? reasons
-                                                                        : proposal.blockers
-                                                                              .map(
-                                                                                  (
-                                                                                      blocker,
-                                                                                  ) =>
-                                                                                      blocker.detail,
-                                                                              )
-                                                                              .join(
-                                                                                  ', ',
-                                                                              )}
-                                                                </td>
-                                                                <td>
-                                                                    <div className="txn-actions">
-                                                                        <button
-                                                                            type="button"
-                                                                            className="ghost-button"
-                                                                            disabled={
-                                                                                !isApplyable ||
-                                                                                busyProposalId ===
-                                                                                    proposal.id
-                                                                            }
-                                                                            onClick={() => {
-                                                                                void handleApplyAutomationProposal(
-                                                                                    proposal,
-                                                                                );
-                                                                            }}
-                                                                        >
-                                                                            Apply
-                                                                        </button>
-                                                                        <button
-                                                                            type="button"
-                                                                            className="ghost-button"
-                                                                            disabled={
-                                                                                !canSaveDecision ||
-                                                                                busyProposalId ===
-                                                                                    proposal.id
-                                                                            }
-                                                                            onClick={() => {
-                                                                                void handleSaveAutomationProposalDecision(
-                                                                                    proposal,
-                                                                                );
-                                                                            }}
-                                                                        >
-                                                                            Save
-                                                                            decision
-                                                                        </button>
-                                                                    </div>
-                                                                </td>
-                                                            </tr>
-                                                        );
-                                                    },
-                                                )}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            )}
-                            {activeResolutions.length > 0 && (
-                                <div className="pipeline-panel">
-                                    <h3>Saved decisions</h3>
-                                    <div className="table-wrap">
-                                        <table className="ledger-table">
-                                            <thead>
-                                                <tr>
-                                                    <th>Kind</th>
-                                                    <th>Status</th>
-                                                    <th>Applies to</th>
-                                                    <th>Outcome</th>
-                                                    <th>Updated</th>
-                                                    <th>Notes</th>
-                                                    <th>Actions</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {activeResolutions.map(
-                                                    (resolution) => (
-                                                        <tr key={resolution.id}>
+                            <div className="pipeline-actions">
+                                <button
+                                    type="button"
+                                    className="primary-button"
+                                    disabled={
+                                        isPipelinePosting ||
+                                        isPipelinePostingAllLedger ||
+                                        glLockStatus.locked ||
+                                        selectedLoginLocked ||
+                                        unpostedEntries.length === 0
+                                    }
+                                    onClick={() => {
+                                        void handlePipelinePostAll();
+                                    }}
+                                >
+                                    {isPipelinePosting
+                                        ? 'Posting...'
+                                        : `Post All (${unpostedEntries.length.toString()})`}
+                                </button>
+                                <button
+                                    type="button"
+                                    className="ghost-button"
+                                    disabled={
+                                        isPipelinePosting ||
+                                        isPipelinePostingAllLedger ||
+                                        glLockStatus.locked ||
+                                        selectedLoginLocked ||
+                                        pipelineSelectedEntryIds.size === 0
+                                    }
+                                    onClick={() => {
+                                        void handlePipelinePostSelected();
+                                    }}
+                                >
+                                    {`Post Selected (${pipelineSelectedEntryIds.size.toString()})`}
+                                </button>
+                            </div>
+                        </div>
+                        {automationProposals.length > 0 && (
+                            <div className="pipeline-panel">
+                                <h3>Automation proposals</h3>
+                                <div className="table-wrap">
+                                    <table className="ledger-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Kind</th>
+                                                <th>Policy</th>
+                                                <th>Applies to</th>
+                                                <th>Result</th>
+                                                <th>Undo</th>
+                                                <th>Reasons</th>
+                                                <th>Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {automationProposals.map(
+                                                (proposal) => {
+                                                    const result =
+                                                        proposal.proposedResult
+                                                            .suggestedAccount ??
+                                                        proposal.proposedResult
+                                                            .transferMatch
+                                                            ?.entryId ??
+                                                        (proposal.proposedResult
+                                                            .parts.length > 0
+                                                            ? proposal.proposedResult.parts
+                                                                  .map((part) =>
+                                                                      `${part.account ?? '(account)'} ${part.amount ?? ''}`.trim(),
+                                                                  )
+                                                                  .join(' + ')
+                                                            : null) ??
+                                                        proposal.proposedResult
+                                                            .notes ??
+                                                        proposal.proposedResult
+                                                            .importAnomalyId ??
+                                                        '-';
+                                                    const reasons =
+                                                        proposal.reasons
+                                                            .map(
+                                                                (reason) =>
+                                                                    `${reason.field}: ${reason.detail}`,
+                                                            )
+                                                            .join(', ');
+                                                    const isApplyable =
+                                                        proposal.blockers
+                                                            .length === 0 &&
+                                                        proposal.canApply;
+                                                    const canSaveDecision =
+                                                        proposal.blockers
+                                                            .length === 0 &&
+                                                        resolutionInputFromProposal(
+                                                            proposal,
+                                                        ) != null;
+                                                    return (
+                                                        <tr key={proposal.id}>
                                                             <td>
-                                                                {
-                                                                    resolution.kind
-                                                                }
+                                                                {proposal.kind}
                                                             </td>
                                                             <td>
                                                                 {
-                                                                    resolution.status
+                                                                    proposal.policyDecision
                                                                 }
                                                             </td>
                                                             <td>
-                                                                {resolutionSubjectLabel(
-                                                                    resolution,
-                                                                )}
+                                                                {proposal.subjectRefs
+                                                                    .map(
+                                                                        refLabel,
+                                                                    )
+                                                                    .join(
+                                                                        ' <-> ',
+                                                                    )}
                                                             </td>
+                                                            <td>{result}</td>
                                                             <td>
-                                                                {resolutionResultLabel(
-                                                                    resolution,
-                                                                )}
-                                                            </td>
-                                                            <td className="mono">
                                                                 {
-                                                                    resolution.updatedAt
+                                                                    proposal.reversible
                                                                 }
                                                             </td>
                                                             <td>
-                                                                <div>
-                                                                    {resolution.notes ??
-                                                                        '-'}
-                                                                </div>
-                                                                <div className="hint mono">
-                                                                    {
-                                                                        resolution.id
-                                                                    }
-                                                                </div>
+                                                                {proposal
+                                                                    .blockers
+                                                                    .length ===
+                                                                0
+                                                                    ? reasons
+                                                                    : proposal.blockers
+                                                                          .map(
+                                                                              (
+                                                                                  blocker,
+                                                                              ) =>
+                                                                                  blocker.detail,
+                                                                          )
+                                                                          .join(
+                                                                              ', ',
+                                                                          )}
                                                             </td>
                                                             <td>
                                                                 <div className="txn-actions">
@@ -2503,144 +2354,250 @@ export function PipelineTab({
                                                                         type="button"
                                                                         className="ghost-button"
                                                                         disabled={
-                                                                            resolution.status !==
-                                                                                'active' ||
-                                                                            busyResolutionId ===
-                                                                                resolution.id
+                                                                            !isApplyable ||
+                                                                            busyProposalId ===
+                                                                                proposal.id
                                                                         }
                                                                         onClick={() => {
-                                                                            void handleDisableResolution(
-                                                                                resolution,
+                                                                            void handleApplyAutomationProposal(
+                                                                                proposal,
                                                                             );
                                                                         }}
                                                                     >
-                                                                        Disable
+                                                                        Apply
                                                                     </button>
                                                                     <button
                                                                         type="button"
                                                                         className="ghost-button"
                                                                         disabled={
-                                                                            resolution.status !==
-                                                                                'disabled' ||
-                                                                            busyResolutionId ===
-                                                                                resolution.id
+                                                                            !canSaveDecision ||
+                                                                            busyProposalId ===
+                                                                                proposal.id
                                                                         }
                                                                         onClick={() => {
-                                                                            void handleEnableResolution(
-                                                                                resolution,
+                                                                            void handleSaveAutomationProposalDecision(
+                                                                                proposal,
                                                                             );
                                                                         }}
                                                                     >
-                                                                        Enable
+                                                                        Save
+                                                                        decision
                                                                     </button>
                                                                 </div>
                                                             </td>
                                                         </tr>
-                                                    ),
-                                                )}
-                                            </tbody>
-                                        </table>
-                                    </div>
+                                                    );
+                                                },
+                                            )}
+                                        </tbody>
+                                    </table>
                                 </div>
-                            )}
-                            {importAnomalies.length > 0 && (
-                                <div className="pipeline-panel">
-                                    <h3>Import anomalies</h3>
-                                    <div className="table-wrap">
-                                        <table className="ledger-table">
-                                            <thead>
-                                                <tr>
-                                                    <th>Kind</th>
-                                                    <th>Date</th>
-                                                    <th>Description</th>
-                                                    <th>Amount</th>
-                                                    <th>Source entry</th>
-                                                    <th>Evidence</th>
-                                                    <th>Reason</th>
-                                                    <th>Actions</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {importAnomalies.map(
-                                                    (anomaly) => (
-                                                        <tr key={anomaly.id}>
-                                                            <td>
-                                                                {anomaly.kind}
-                                                            </td>
-                                                            <td className="mono">
-                                                                {anomaly.date}
-                                                            </td>
-                                                            <td>
-                                                                {
-                                                                    anomaly.description
-                                                                }
-                                                            </td>
-                                                            <td className="mono">
-                                                                {anomaly.amount ??
+                            </div>
+                        )}
+                        {activeResolutions.length > 0 && (
+                            <div className="pipeline-panel">
+                                <h3>Saved decisions</h3>
+                                <div className="table-wrap">
+                                    <table className="ledger-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Kind</th>
+                                                <th>Status</th>
+                                                <th>Applies to</th>
+                                                <th>Outcome</th>
+                                                <th>Updated</th>
+                                                <th>Notes</th>
+                                                <th>Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {activeResolutions.map(
+                                                (resolution) => (
+                                                    <tr key={resolution.id}>
+                                                        <td>
+                                                            {resolution.kind}
+                                                        </td>
+                                                        <td>
+                                                            {resolution.status}
+                                                        </td>
+                                                        <td>
+                                                            {resolutionSubjectLabel(
+                                                                resolution,
+                                                            )}
+                                                        </td>
+                                                        <td>
+                                                            {resolutionResultLabel(
+                                                                resolution,
+                                                            )}
+                                                        </td>
+                                                        <td className="mono">
+                                                            {
+                                                                resolution.updatedAt
+                                                            }
+                                                        </td>
+                                                        <td>
+                                                            <div>
+                                                                {resolution.notes ??
                                                                     '-'}
-                                                            </td>
-                                                            <td className="mono">
-                                                                {
-                                                                    anomaly.sourceEntryId
-                                                                }
-                                                            </td>
-                                                            <td>
-                                                                {anomaly
-                                                                    .evidence
-                                                                    .length ===
-                                                                0
-                                                                    ? '-'
-                                                                    : anomaly.evidence.join(
-                                                                          ', ',
-                                                                      )}
-                                                            </td>
-                                                            <td>
-                                                                {anomaly
-                                                                    .safetyReasons
-                                                                    .length ===
-                                                                0
-                                                                    ? anomaly.coverageDocument
-                                                                    : anomaly.safetyReasons.join(
-                                                                          ', ',
-                                                                      )}
-                                                            </td>
-                                                            <td>
-                                                                <div className="txn-actions">
-                                                                    {anomaly.glTxnId !=
-                                                                        null && (
-                                                                        <button
-                                                                            type="button"
-                                                                            className="ghost-button"
-                                                                            onClick={() => {
-                                                                                if (
-                                                                                    anomaly.glTxnId !=
-                                                                                    null
-                                                                                )
-                                                                                    onViewGlTransaction(
-                                                                                        anomaly.glTxnId,
-                                                                                    );
-                                                                            }}
-                                                                        >
-                                                                            View
-                                                                            GL
-                                                                        </button>
-                                                                    )}
-                                                                    <button
-                                                                        type="button"
-                                                                        className="ghost-button"
-                                                                        disabled={
-                                                                            busyAnomalyId ===
-                                                                            anomaly.id
-                                                                        }
-                                                                        onClick={() => {
-                                                                            void handleReviewAnomaly(
-                                                                                anomaly.id,
+                                                            </div>
+                                                            <div className="hint mono">
+                                                                {resolution.id}
+                                                            </div>
+                                                        </td>
+                                                        <td>
+                                                            <div className="txn-actions">
+                                                                <button
+                                                                    type="button"
+                                                                    className="ghost-button"
+                                                                    disabled={
+                                                                        resolution.status !==
+                                                                            'active' ||
+                                                                        busyResolutionId ===
+                                                                            resolution.id
+                                                                    }
+                                                                    onClick={() => {
+                                                                        void handleDisableResolution(
+                                                                            resolution,
+                                                                        );
+                                                                    }}
+                                                                >
+                                                                    Disable
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    className="ghost-button"
+                                                                    disabled={
+                                                                        resolution.status !==
+                                                                            'disabled' ||
+                                                                        busyResolutionId ===
+                                                                            resolution.id
+                                                                    }
+                                                                    onClick={() => {
+                                                                        void handleEnableResolution(
+                                                                            resolution,
+                                                                        );
+                                                                    }}
+                                                                >
+                                                                    Enable
+                                                                </button>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                ),
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        )}
+                        {importAnomalies.length > 0 && (
+                            <div className="pipeline-panel">
+                                <h3>Import anomalies</h3>
+                                <div className="table-wrap">
+                                    <table className="ledger-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Kind</th>
+                                                <th>Date</th>
+                                                <th>Description</th>
+                                                <th>Amount</th>
+                                                <th>Source entry</th>
+                                                <th>Evidence</th>
+                                                <th>Reason</th>
+                                                <th>Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {importAnomalies.map((anomaly) => (
+                                                <tr key={anomaly.id}>
+                                                    <td>{anomaly.kind}</td>
+                                                    <td className="mono">
+                                                        {anomaly.date}
+                                                    </td>
+                                                    <td>
+                                                        {anomaly.description}
+                                                    </td>
+                                                    <td className="mono">
+                                                        {anomaly.amount ?? '-'}
+                                                    </td>
+                                                    <td className="mono">
+                                                        {anomaly.sourceEntryId}
+                                                    </td>
+                                                    <td>
+                                                        {anomaly.evidence
+                                                            .length === 0
+                                                            ? '-'
+                                                            : anomaly.evidence.join(
+                                                                  ', ',
+                                                              )}
+                                                    </td>
+                                                    <td>
+                                                        {anomaly.safetyReasons
+                                                            .length === 0
+                                                            ? anomaly.coverageDocument
+                                                            : anomaly.safetyReasons.join(
+                                                                  ', ',
+                                                              )}
+                                                    </td>
+                                                    <td>
+                                                        <div className="txn-actions">
+                                                            {anomaly.glTxnId !=
+                                                                null && (
+                                                                <button
+                                                                    type="button"
+                                                                    className="ghost-button"
+                                                                    onClick={() => {
+                                                                        if (
+                                                                            anomaly.glTxnId !=
+                                                                            null
+                                                                        )
+                                                                            onViewGlTransaction(
+                                                                                anomaly.glTxnId,
                                                                             );
-                                                                        }}
-                                                                    >
-                                                                        Dismiss
-                                                                    </button>
-                                                                    {anomaly.safeToRetire && (
+                                                                    }}
+                                                                >
+                                                                    View GL
+                                                                </button>
+                                                            )}
+                                                            <button
+                                                                type="button"
+                                                                className="ghost-button"
+                                                                disabled={
+                                                                    busyAnomalyId ===
+                                                                    anomaly.id
+                                                                }
+                                                                onClick={() => {
+                                                                    void handleReviewAnomaly(
+                                                                        anomaly.id,
+                                                                    );
+                                                                }}
+                                                            >
+                                                                Dismiss
+                                                            </button>
+                                                            {anomaly.safeToRetire && (
+                                                                <button
+                                                                    type="button"
+                                                                    className="ghost-button"
+                                                                    disabled={
+                                                                        busyAnomalyId ===
+                                                                        anomaly.id
+                                                                    }
+                                                                    onClick={() => {
+                                                                        void handleRetireAnomalySource(
+                                                                            anomaly,
+                                                                        );
+                                                                    }}
+                                                                >
+                                                                    Retire
+                                                                    source
+                                                                </button>
+                                                            )}
+                                                            {anomaly.kind ===
+                                                                'duplicate-import-repair-skipped' &&
+                                                                anomaly.evidence
+                                                                    .length >
+                                                                    0 && (
+                                                                    <>
                                                                         <button
                                                                             type="button"
                                                                             className="ghost-button"
@@ -2649,854 +2606,780 @@ export function PipelineTab({
                                                                                 anomaly.id
                                                                             }
                                                                             onClick={() => {
-                                                                                void handleRetireAnomalySource(
+                                                                                void handleCreateSourceRelationshipResolution(
                                                                                     anomaly,
+                                                                                    'same-source',
                                                                                 );
                                                                             }}
                                                                         >
-                                                                            Retire
-                                                                            source
+                                                                            Merge
                                                                         </button>
-                                                                    )}
-                                                                    {anomaly.kind ===
-                                                                        'duplicate-import-repair-skipped' &&
-                                                                        anomaly
-                                                                            .evidence
-                                                                            .length >
-                                                                            0 && (
-                                                                            <>
-                                                                                <button
-                                                                                    type="button"
-                                                                                    className="ghost-button"
-                                                                                    disabled={
-                                                                                        busyAnomalyId ===
-                                                                                        anomaly.id
-                                                                                    }
-                                                                                    onClick={() => {
-                                                                                        void handleCreateSourceRelationshipResolution(
-                                                                                            anomaly,
-                                                                                            'same-source',
-                                                                                        );
-                                                                                    }}
-                                                                                >
-                                                                                    Merge
-                                                                                </button>
-                                                                                <button
-                                                                                    type="button"
-                                                                                    className="ghost-button"
-                                                                                    disabled={
-                                                                                        busyAnomalyId ===
-                                                                                        anomaly.id
-                                                                                    }
-                                                                                    onClick={() => {
-                                                                                        void handleCreateSourceRelationshipResolution(
-                                                                                            anomaly,
-                                                                                            'not-same-source',
-                                                                                        );
-                                                                                    }}
-                                                                                >
-                                                                                    Keep
-                                                                                    separate
-                                                                                </button>
-                                                                            </>
-                                                                        )}
-                                                                </div>
-                                                            </td>
-                                                        </tr>
-                                                    ),
-                                                )}
-                                            </tbody>
-                                        </table>
-                                    </div>
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            disabled={
+                                                                                busyAnomalyId ===
+                                                                                anomaly.id
+                                                                            }
+                                                                            onClick={() => {
+                                                                                void handleCreateSourceRelationshipResolution(
+                                                                                    anomaly,
+                                                                                    'not-same-source',
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            Keep
+                                                                            separate
+                                                                        </button>
+                                                                    </>
+                                                                )}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
                                 </div>
-                            )}
-                            <div className="table-wrap">
-                                <table className="ledger-table">
-                                    <thead>
+                            </div>
+                        )}
+                        <div className="table-wrap">
+                            <table className="ledger-table">
+                                <thead>
+                                    <tr>
+                                        <th></th>
+                                        <th>Date</th>
+                                        <th>Description</th>
+                                        <th>Amount</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {accountJournalEntries.length === 0 ? (
                                         <tr>
-                                            <th></th>
-                                            <th>Date</th>
-                                            <th>Description</th>
-                                            <th>Amount</th>
-                                            <th>Status</th>
-                                            <th>Actions</th>
+                                            <td
+                                                colSpan={6}
+                                                className="table-empty"
+                                            >
+                                                No entries found.
+                                            </td>
                                         </tr>
-                                    </thead>
-                                    <tbody>
-                                        {accountJournalEntries.length === 0 ? (
-                                            <tr>
-                                                <td
-                                                    colSpan={6}
-                                                    className="table-empty"
+                                    ) : (
+                                        accountJournalEntries.map((entry) => {
+                                            const suggestion =
+                                                pipelineCategorySuggestions[
+                                                    entry.id
+                                                ];
+                                            // Local const so the narrowed
+                                            // (non-null) type survives into
+                                            // the "Always" onClick closure.
+                                            const suggestedAccount:
+                                                | string
+                                                | null =
+                                                suggestion?.suggested ?? null;
+                                            const amountChanged =
+                                                suggestion?.amountChanged ??
+                                                false;
+                                            const statusChanged =
+                                                suggestion?.statusChanged ??
+                                                false;
+                                            const needsSync =
+                                                entry.posted !== null &&
+                                                (amountChanged ||
+                                                    statusChanged);
+                                            const isUnposted =
+                                                entry.posted === null;
+                                            const transferMatch =
+                                                suggestion?.transferMatch ??
+                                                null;
+                                            // Near-miss transfer candidates
+                                            // (2+ ambiguous matches; see
+                                            // CategoryResult.transferCandidates).
+                                            const transferCandidateCount =
+                                                suggestion?.transferCandidates
+                                                    .length ?? 0;
+                                            const isBusy =
+                                                busyPostEntryId === entry.id;
+                                            const isSelected =
+                                                pipelineSelectedEntryIds.has(
+                                                    entry.id,
+                                                );
+                                            return (
+                                                <tr
+                                                    key={entry.id}
+                                                    className={
+                                                        needsSync
+                                                            ? 'row-needs-sync'
+                                                            : undefined
+                                                    }
                                                 >
-                                                    No entries found.
-                                                </td>
-                                            </tr>
-                                        ) : (
-                                            accountJournalEntries.map(
-                                                (entry) => {
-                                                    const suggestion =
-                                                        pipelineCategorySuggestions[
-                                                            entry.id
-                                                        ];
-                                                    // Local const so the narrowed
-                                                    // (non-null) type survives into
-                                                    // the "Always" onClick closure.
-                                                    const suggestedAccount:
-                                                        | string
-                                                        | null =
-                                                        suggestion?.suggested ??
-                                                        null;
-                                                    const amountChanged =
-                                                        suggestion?.amountChanged ??
-                                                        false;
-                                                    const statusChanged =
-                                                        suggestion?.statusChanged ??
-                                                        false;
-                                                    const needsSync =
-                                                        entry.posted !== null &&
-                                                        (amountChanged ||
-                                                            statusChanged);
-                                                    const isUnposted =
-                                                        entry.posted === null;
-                                                    const transferMatch =
-                                                        suggestion?.transferMatch ??
-                                                        null;
-                                                    // Near-miss transfer candidates
-                                                    // (2+ ambiguous matches; see
-                                                    // CategoryResult.transferCandidates).
-                                                    const transferCandidateCount =
-                                                        suggestion
-                                                            ?.transferCandidates
-                                                            .length ?? 0;
-                                                    const isBusy =
-                                                        busyPostEntryId ===
-                                                        entry.id;
-                                                    const isSelected =
-                                                        pipelineSelectedEntryIds.has(
-                                                            entry.id,
-                                                        );
-                                                    return (
-                                                        <tr
-                                                            key={entry.id}
-                                                            className={
-                                                                needsSync
-                                                                    ? 'row-needs-sync'
-                                                                    : undefined
-                                                            }
-                                                        >
-                                                            <td>
-                                                                {isUnposted && (
-                                                                    <input
-                                                                        type="checkbox"
-                                                                        checked={
-                                                                            isSelected
-                                                                        }
-                                                                        onChange={(
-                                                                            e,
+                                                    <td>
+                                                        {isUnposted && (
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={
+                                                                    isSelected
+                                                                }
+                                                                onChange={(
+                                                                    e,
+                                                                ) => {
+                                                                    setPipelineSelectedEntryIds(
+                                                                        (
+                                                                            current,
                                                                         ) => {
-                                                                            setPipelineSelectedEntryIds(
-                                                                                (
+                                                                            const next =
+                                                                                new Set(
                                                                                     current,
-                                                                                ) => {
-                                                                                    const next =
-                                                                                        new Set(
-                                                                                            current,
-                                                                                        );
-                                                                                    if (
-                                                                                        e
-                                                                                            .target
-                                                                                            .checked
-                                                                                    )
-                                                                                        next.add(
-                                                                                            entry.id,
-                                                                                        );
-                                                                                    else
-                                                                                        next.delete(
-                                                                                            entry.id,
-                                                                                        );
-                                                                                    return next;
-                                                                                },
+                                                                                );
+                                                                            if (
+                                                                                e
+                                                                                    .target
+                                                                                    .checked
+                                                                            )
+                                                                                next.add(
+                                                                                    entry.id,
+                                                                                );
+                                                                            else
+                                                                                next.delete(
+                                                                                    entry.id,
+                                                                                );
+                                                                            return next;
+                                                                        },
+                                                                    );
+                                                                }}
+                                                            />
+                                                        )}
+                                                    </td>
+                                                    <td className="mono">
+                                                        {entry.date}
+                                                    </td>
+                                                    <td>{entry.description}</td>
+                                                    <td className="mono">
+                                                        {entry.amount ?? '-'}
+                                                    </td>
+                                                    <td>
+                                                        <div className="transaction-bookkeeping-badges">
+                                                            {entry.bankStatus ===
+                                                            'pending' ? (
+                                                                <span className="status-chip status-chip-warning">
+                                                                    bank pending
+                                                                </span>
+                                                            ) : entry.bankStatus ===
+                                                              'posted' ? (
+                                                                <span className="status-chip status-chip-ok">
+                                                                    bank posted
+                                                                </span>
+                                                            ) : null}
+                                                            {isUnposted ? (
+                                                                <span className="status-chip">
+                                                                    unposted
+                                                                </span>
+                                                            ) : needsSync ? (
+                                                                <span className="status-chip status-chip-warning">
+                                                                    needs sync
+                                                                </span>
+                                                            ) : (
+                                                                <span className="status-chip status-chip-ok">
+                                                                    posted
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                    <td>
+                                                        <div className="pipeline-row-actions">
+                                                            {isUnposted ? (
+                                                                <>
+                                                                    <button
+                                                                        type="button"
+                                                                        className="primary-button"
+                                                                        disabled={
+                                                                            isBusy ||
+                                                                            isPipelinePosting ||
+                                                                            isPipelinePostingAllLedger ||
+                                                                            glLockStatus.locked ||
+                                                                            selectedLoginLocked
+                                                                        }
+                                                                        onClick={() => {
+                                                                            void handlePipelinePostEntry(
+                                                                                entry.id,
                                                                             );
                                                                         }}
-                                                                    />
-                                                                )}
-                                                            </td>
-                                                            <td className="mono">
-                                                                {entry.date}
-                                                            </td>
-                                                            <td>
-                                                                {
-                                                                    entry.description
-                                                                }
-                                                            </td>
-                                                            <td className="mono">
-                                                                {entry.amount ??
-                                                                    '-'}
-                                                            </td>
-                                                            <td>
-                                                                <div className="transaction-bookkeeping-badges">
-                                                                    {entry.bankStatus ===
-                                                                    'pending' ? (
-                                                                        <span className="status-chip status-chip-warning">
-                                                                            bank
-                                                                            pending
-                                                                        </span>
-                                                                    ) : entry.bankStatus ===
-                                                                      'posted' ? (
-                                                                        <span className="status-chip status-chip-ok">
-                                                                            bank
-                                                                            posted
-                                                                        </span>
-                                                                    ) : null}
-                                                                    {isUnposted ? (
-                                                                        <span className="status-chip">
-                                                                            unposted
-                                                                        </span>
-                                                                    ) : needsSync ? (
-                                                                        <span className="status-chip status-chip-warning">
-                                                                            needs
-                                                                            sync
-                                                                        </span>
-                                                                    ) : (
-                                                                        <span className="status-chip status-chip-ok">
-                                                                            posted
-                                                                        </span>
-                                                                    )}
-                                                                </div>
-                                                            </td>
-                                                            <td>
-                                                                <div className="pipeline-row-actions">
-                                                                    {isUnposted ? (
-                                                                        <>
-                                                                            <button
-                                                                                type="button"
-                                                                                className="primary-button"
-                                                                                disabled={
-                                                                                    isBusy ||
-                                                                                    isPipelinePosting ||
-                                                                                    isPipelinePostingAllLedger ||
-                                                                                    glLockStatus.locked ||
-                                                                                    selectedLoginLocked
-                                                                                }
-                                                                                onClick={() => {
-                                                                                    void handlePipelinePostEntry(
-                                                                                        entry.id,
-                                                                                    );
-                                                                                }}
-                                                                            >
-                                                                                {isBusy
-                                                                                    ? 'Posting...'
-                                                                                    : 'Post'}
-                                                                            </button>
-                                                                            <button
-                                                                                type="button"
-                                                                                className="ghost-button"
-                                                                                disabled={
-                                                                                    isBusy ||
-                                                                                    isPipelinePosting ||
-                                                                                    isPipelinePostingAllLedger ||
-                                                                                    glLockStatus.locked ||
-                                                                                    selectedLoginLocked
-                                                                                }
-                                                                                onClick={() => {
-                                                                                    setSplitDraftRows(
-                                                                                        [
-                                                                                            {
-                                                                                                account:
-                                                                                                    '',
-                                                                                                amount: '',
-                                                                                            },
-                                                                                            {
-                                                                                                account:
-                                                                                                    '',
-                                                                                                amount: '',
-                                                                                            },
-                                                                                        ],
-                                                                                    );
-                                                                                    setSplitModalEntryId(
-                                                                                        entry.id,
-                                                                                    );
-                                                                                }}
-                                                                            >
-                                                                                Split
-                                                                            </button>
-                                                                            {suggestedAccount !=
-                                                                                null && (
-                                                                                <button
-                                                                                    type="button"
-                                                                                    className="ghost-button"
-                                                                                    disabled={
-                                                                                        isBusy
-                                                                                    }
-                                                                                    title={`Always post payees like "${entry.description}" to ${suggestedAccount}`}
-                                                                                    onClick={() => {
-                                                                                        void handleCreateCategoryResolution(
-                                                                                            entry,
-                                                                                            suggestedAccount,
-                                                                                        );
-                                                                                    }}
-                                                                                >
-                                                                                    Always:{' '}
-                                                                                    {
-                                                                                        suggestedAccount
-                                                                                    }
-                                                                                </button>
-                                                                            )}
-                                                                            {(entry.isTransfer ||
-                                                                                transferMatch !==
-                                                                                    null ||
-                                                                                transferCandidateCount >=
-                                                                                    2) && (
-                                                                                <button
-                                                                                    type="button"
-                                                                                    className="ghost-button"
-                                                                                    disabled={
-                                                                                        isBusy ||
-                                                                                        isPipelinePosting ||
-                                                                                        isPipelinePostingAllLedger ||
-                                                                                        glLockStatus.locked ||
-                                                                                        selectedLoginLocked
-                                                                                    }
-                                                                                    onClick={() => {
-                                                                                        void handleOpenTransferModal(
-                                                                                            entry.id,
-                                                                                        );
-                                                                                    }}
-                                                                                >
-                                                                                    {transferCandidateCount >=
-                                                                                    2
-                                                                                        ? `Link Transfer (${transferCandidateCount} possible)`
-                                                                                        : 'Link Transfer'}
-                                                                                </button>
-                                                                            )}
-                                                                            {transferMatch !==
-                                                                                null && (
-                                                                                <button
-                                                                                    type="button"
-                                                                                    className="ghost-button"
-                                                                                    disabled={
-                                                                                        isBusy
-                                                                                    }
-                                                                                    title="Remember this pair is NOT a transfer (stops auto-matching)"
-                                                                                    onClick={() => {
-                                                                                        void handleNotATransfer(
-                                                                                            entry.id,
-                                                                                            transferMatch,
-                                                                                        );
-                                                                                    }}
-                                                                                >
-                                                                                    Not
-                                                                                    a
-                                                                                    transfer
-                                                                                </button>
-                                                                            )}
-                                                                            <button
-                                                                                type="button"
-                                                                                className="ghost-button"
-                                                                                disabled={
-                                                                                    isBusy
-                                                                                }
-                                                                                onClick={() => {
-                                                                                    void handleCreateIgnoreSourceResolution(
-                                                                                        entry,
-                                                                                    );
-                                                                                }}
-                                                                            >
-                                                                                Ignore
-                                                                                automation
-                                                                            </button>
-                                                                        </>
-                                                                    ) : (
-                                                                        <>
-                                                                            {needsSync && (
-                                                                                <button
-                                                                                    type="button"
-                                                                                    className="ghost-button"
-                                                                                    disabled={
-                                                                                        isBusy ||
-                                                                                        isPipelinePosting ||
-                                                                                        isPipelinePostingAllLedger ||
-                                                                                        glLockStatus.locked ||
-                                                                                        selectedLoginLocked
-                                                                                    }
-                                                                                    onClick={() => {
-                                                                                        void handlePipelineSyncEntry(
-                                                                                            entry.id,
-                                                                                        );
-                                                                                    }}
-                                                                                >
-                                                                                    {isBusy
-                                                                                        ? 'Syncing...'
-                                                                                        : 'Sync'}
-                                                                                </button>
-                                                                            )}
-                                                                            <button
-                                                                                type="button"
-                                                                                className="ghost-button"
-                                                                                onClick={() => {
-                                                                                    const parts =
-                                                                                        (
-                                                                                            entry.posted ??
-                                                                                            ''
-                                                                                        ).split(
-                                                                                            ':',
-                                                                                        );
-                                                                                    const glTxnId =
-                                                                                        parts[
-                                                                                            parts.length -
-                                                                                                1
-                                                                                        ] ??
-                                                                                        '';
-                                                                                    if (
-                                                                                        glTxnId
-                                                                                    ) {
-                                                                                        onViewGlTransaction(
-                                                                                            glTxnId,
-                                                                                        );
-                                                                                    }
-                                                                                }}
-                                                                            >
-                                                                                View
-                                                                            </button>
-                                                                        </>
-                                                                    )}
-                                                                </div>
-                                                            </td>
-                                                        </tr>
-                                                    );
-                                                },
-                                            )
-                                        )}
-                                    </tbody>
-                                </table>
-                            </div>
-                            {transferModalEntryId !== null && (
-                                <div
-                                    className="modal-overlay"
-                                    onClick={() => {
-                                        setTransferModalEntryId(null);
-                                    }}
-                                >
-                                    <div
-                                        className="modal-dialog"
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                        }}
-                                    >
-                                        <div className="modal-header">
-                                            <h3>Link Transfer</h3>
-                                            <button
-                                                type="button"
-                                                className="ghost-button"
-                                                onClick={() => {
-                                                    setTransferModalEntryId(
-                                                        null,
-                                                    );
-                                                }}
-                                            >
-                                                Close
-                                            </button>
-                                        </div>
-                                        <input
-                                            type="search"
-                                            placeholder="Search candidates…"
-                                            value={transferModalSearch}
-                                            onChange={(e) => {
-                                                setTransferModalSearch(
-                                                    e.target.value,
-                                                );
-                                            }}
-                                        />
-                                        {transferModalFeePrompt !== null && (
-                                            <div className="status">
-                                                <div>
-                                                    The selected entry does not
-                                                    cancel this amount; the
-                                                    difference of{' '}
-                                                    {
-                                                        transferModalFeePrompt.residual
-                                                    }{' '}
-                                                    will post to the fee account
-                                                    below.
-                                                </div>
-                                                <AccountInput
-                                                    value={
-                                                        transferModalFeeAccount
-                                                    }
-                                                    onChange={
-                                                        setTransferModalFeeAccount
-                                                    }
-                                                    accounts={ledger.accounts.map(
-                                                        (a) => a.name,
-                                                    )}
-                                                    placeholder="Fee account…"
-                                                />
-                                                {(transferModalFeeAccount
-                                                    .trim()
-                                                    .startsWith('Assets:') ||
-                                                    transferModalFeeAccount
-                                                        .trim()
-                                                        .startsWith(
-                                                            'Liabilities:',
-                                                        )) && (
-                                                    <div className="hint">
-                                                        Fee must be an
-                                                        expense/income account,
-                                                        not a balance-sheet
-                                                        account.
-                                                    </div>
-                                                )}
-                                                <button
-                                                    type="button"
-                                                    className="ghost-button"
-                                                    disabled={
-                                                        transferModalFeeAccount.trim() ===
-                                                            '' ||
-                                                        transferModalFeeAccount
-                                                            .trim()
-                                                            .startsWith(
-                                                                'Assets:',
-                                                            ) ||
-                                                        transferModalFeeAccount
-                                                            .trim()
-                                                            .startsWith(
-                                                                'Liabilities:',
-                                                            ) ||
-                                                        busyPostEntryId !== null
-                                                    }
-                                                    onClick={() => {
-                                                        void handleLinkTransferFromModal(
-                                                            transferModalFeePrompt.candidate,
-                                                            transferModalFeeAccount.trim(),
-                                                        );
-                                                    }}
-                                                >
-                                                    Link with fee
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    className="ghost-button"
-                                                    onClick={() => {
-                                                        setTransferModalFeePrompt(
-                                                            null,
-                                                        );
-                                                    }}
-                                                >
-                                                    Cancel
-                                                </button>
-                                            </div>
-                                        )}
-                                        {isLoadingTransferModal ? (
-                                            <p className="status">
-                                                Loading entries...
-                                            </p>
-                                        ) : (
-                                            <div className="table-wrap">
-                                                <table className="ledger-table">
-                                                    <thead>
-                                                        <tr>
-                                                            <th>Date</th>
-                                                            <th>Login/Label</th>
-                                                            <th>Description</th>
-                                                            <th>Amount</th>
-                                                            <th></th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        {visibleTransferResults.length ===
-                                                        0 ? (
-                                                            <tr>
-                                                                <td
-                                                                    colSpan={5}
-                                                                    className="table-empty"
-                                                                >
-                                                                    No unposted
-                                                                    entries
-                                                                    found in
-                                                                    other
-                                                                    accounts.
-                                                                </td>
-                                                            </tr>
-                                                        ) : (
-                                                            visibleTransferResults.map(
-                                                                (r) => (
-                                                                    <tr
-                                                                        key={
-                                                                            r
-                                                                                .entry
-                                                                                .id
-                                                                        }
                                                                     >
-                                                                        <td className="mono">
-                                                                            {
-                                                                                r
-                                                                                    .entry
-                                                                                    .date
+                                                                        {isBusy
+                                                                            ? 'Posting...'
+                                                                            : 'Post'}
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        className="ghost-button"
+                                                                        disabled={
+                                                                            isBusy ||
+                                                                            isPipelinePosting ||
+                                                                            isPipelinePostingAllLedger ||
+                                                                            glLockStatus.locked ||
+                                                                            selectedLoginLocked
+                                                                        }
+                                                                        onClick={() => {
+                                                                            setSplitDraftRows(
+                                                                                [
+                                                                                    {
+                                                                                        account:
+                                                                                            '',
+                                                                                        amount: '',
+                                                                                    },
+                                                                                    {
+                                                                                        account:
+                                                                                            '',
+                                                                                        amount: '',
+                                                                                    },
+                                                                                ],
+                                                                            );
+                                                                            setSplitModalEntryId(
+                                                                                entry.id,
+                                                                            );
+                                                                        }}
+                                                                    >
+                                                                        Split
+                                                                    </button>
+                                                                    {suggestedAccount !=
+                                                                        null && (
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            disabled={
+                                                                                isBusy
                                                                             }
-                                                                        </td>
-                                                                        <td>
+                                                                            title={`Always post payees like "${entry.description}" to ${suggestedAccount}`}
+                                                                            onClick={() => {
+                                                                                void handleCreateCategoryResolution(
+                                                                                    entry,
+                                                                                    suggestedAccount,
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            Always:{' '}
                                                                             {
-                                                                                r.loginName
+                                                                                suggestedAccount
                                                                             }
-                                                                            /
-                                                                            {
-                                                                                r.label
+                                                                        </button>
+                                                                    )}
+                                                                    {(entry.isTransfer ||
+                                                                        transferMatch !==
+                                                                            null ||
+                                                                        transferCandidateCount >=
+                                                                            2) && (
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            disabled={
+                                                                                isBusy ||
+                                                                                isPipelinePosting ||
+                                                                                isPipelinePostingAllLedger ||
+                                                                                glLockStatus.locked ||
+                                                                                selectedLoginLocked
                                                                             }
-                                                                        </td>
-                                                                        <td>
-                                                                            {
-                                                                                r
-                                                                                    .entry
-                                                                                    .description
+                                                                            onClick={() => {
+                                                                                void handleOpenTransferModal(
+                                                                                    entry.id,
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            {transferCandidateCount >=
+                                                                            2
+                                                                                ? `Link Transfer (${transferCandidateCount} possible)`
+                                                                                : 'Link Transfer'}
+                                                                        </button>
+                                                                    )}
+                                                                    {transferMatch !==
+                                                                        null && (
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            disabled={
+                                                                                isBusy
                                                                             }
-                                                                        </td>
-                                                                        <td className="mono">
-                                                                            {r
-                                                                                .entry
-                                                                                .amount ??
-                                                                                '-'}
-                                                                        </td>
-                                                                        <td>
-                                                                            <button
-                                                                                type="button"
-                                                                                className="primary-button"
-                                                                                disabled={
-                                                                                    busyPostEntryId !==
-                                                                                    null
-                                                                                }
-                                                                                onClick={() => {
-                                                                                    // Non-cancelling pair →
-                                                                                    // prompt for a fee
-                                                                                    // account first.
-                                                                                    const residual =
-                                                                                        transferModalResidual(
-                                                                                            r,
-                                                                                        );
-                                                                                    if (
-                                                                                        residual !==
-                                                                                        null
-                                                                                    ) {
-                                                                                        setTransferModalFeePrompt(
-                                                                                            {
-                                                                                                candidate:
-                                                                                                    r,
-                                                                                                residual,
-                                                                                            },
-                                                                                        );
-                                                                                        return;
-                                                                                    }
-                                                                                    void handleLinkTransferFromModal(
-                                                                                        r,
-                                                                                    );
-                                                                                }}
-                                                                            >
-                                                                                Link
-                                                                            </button>
-                                                                        </td>
-                                                                    </tr>
-                                                                ),
-                                                            )
-                                                        )}
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
-                            {splitModalEntryId !== null && (
-                                <div
-                                    className="modal-overlay"
-                                    onClick={() => {
-                                        setSplitModalEntryId(null);
-                                    }}
-                                >
-                                    <div
-                                        className="modal-dialog"
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                        }}
-                                    >
-                                        <div className="modal-header">
-                                            <h3>Split Transaction</h3>
-                                            <button
-                                                type="button"
-                                                className="ghost-button"
-                                                onClick={() => {
-                                                    setSplitModalEntryId(null);
-                                                }}
-                                            >
-                                                Close
-                                            </button>
-                                        </div>
-                                        <p className="status">
-                                            Assign the full amount across
-                                            counterpart accounts. Leave the last
-                                            row&apos;s amount blank to let
-                                            hledger infer the remainder.
-                                        </p>
-                                        <table className="ledger-table">
-                                            <thead>
-                                                <tr>
-                                                    <th>Account</th>
-                                                    <th>Amount</th>
-                                                    <th></th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {splitDraftRows.map(
-                                                    (row, i) => (
-                                                        <tr key={i}>
-                                                            <td>
-                                                                <input
-                                                                    type="text"
-                                                                    placeholder="Expenses:Food"
-                                                                    value={
-                                                                        row.account
-                                                                    }
-                                                                    onChange={(
-                                                                        e,
-                                                                    ) => {
-                                                                        const v =
-                                                                            e
-                                                                                .target
-                                                                                .value;
-                                                                        setSplitDraftRows(
-                                                                            (
-                                                                                cur,
-                                                                            ) =>
-                                                                                cur.map(
-                                                                                    (
-                                                                                        r,
-                                                                                        j,
-                                                                                    ) =>
-                                                                                        j ===
-                                                                                        i
-                                                                                            ? {
-                                                                                                  ...r,
-                                                                                                  account:
-                                                                                                      v,
-                                                                                              }
-                                                                                            : r,
-                                                                                ),
-                                                                        );
-                                                                    }}
-                                                                />
-                                                            </td>
-                                                            <td>
-                                                                <input
-                                                                    type="text"
-                                                                    placeholder={
-                                                                        i ===
-                                                                        splitDraftRows.length -
-                                                                            1
-                                                                            ? '(remainder)'
-                                                                            : '0.00 USD'
-                                                                    }
-                                                                    value={
-                                                                        row.amount
-                                                                    }
-                                                                    onChange={(
-                                                                        e,
-                                                                    ) => {
-                                                                        const v =
-                                                                            e
-                                                                                .target
-                                                                                .value;
-                                                                        setSplitDraftRows(
-                                                                            (
-                                                                                cur,
-                                                                            ) =>
-                                                                                cur.map(
-                                                                                    (
-                                                                                        r,
-                                                                                        j,
-                                                                                    ) =>
-                                                                                        j ===
-                                                                                        i
-                                                                                            ? {
-                                                                                                  ...r,
-                                                                                                  amount: v,
-                                                                                              }
-                                                                                            : r,
-                                                                                ),
-                                                                        );
-                                                                    }}
-                                                                />
-                                                            </td>
-                                                            <td>
-                                                                {splitDraftRows.length >
-                                                                    2 && (
+                                                                            title="Remember this pair is NOT a transfer (stops auto-matching)"
+                                                                            onClick={() => {
+                                                                                void handleNotATransfer(
+                                                                                    entry.id,
+                                                                                    transferMatch,
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            Not
+                                                                            a
+                                                                            transfer
+                                                                        </button>
+                                                                    )}
+                                                                    <button
+                                                                        type="button"
+                                                                        className="ghost-button"
+                                                                        disabled={
+                                                                            isBusy
+                                                                        }
+                                                                        onClick={() => {
+                                                                            void handleCreateIgnoreSourceResolution(
+                                                                                entry,
+                                                                            );
+                                                                        }}
+                                                                    >
+                                                                        Ignore
+                                                                        automation
+                                                                    </button>
+                                                                </>
+                                                            ) : (
+                                                                <>
+                                                                    {needsSync && (
+                                                                        <button
+                                                                            type="button"
+                                                                            className="ghost-button"
+                                                                            disabled={
+                                                                                isBusy ||
+                                                                                isPipelinePosting ||
+                                                                                isPipelinePostingAllLedger ||
+                                                                                glLockStatus.locked ||
+                                                                                selectedLoginLocked
+                                                                            }
+                                                                            onClick={() => {
+                                                                                void handlePipelineSyncEntry(
+                                                                                    entry.id,
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            {isBusy
+                                                                                ? 'Syncing...'
+                                                                                : 'Sync'}
+                                                                        </button>
+                                                                    )}
                                                                     <button
                                                                         type="button"
                                                                         className="ghost-button"
                                                                         onClick={() => {
-                                                                            setSplitDraftRows(
+                                                                            const parts =
                                                                                 (
-                                                                                    cur,
-                                                                                ) =>
-                                                                                    cur.filter(
-                                                                                        (
-                                                                                            _,
-                                                                                            j,
-                                                                                        ) =>
-                                                                                            j !==
-                                                                                            i,
-                                                                                    ),
-                                                                            );
+                                                                                    entry.posted ??
+                                                                                    ''
+                                                                                ).split(
+                                                                                    ':',
+                                                                                );
+                                                                            const glTxnId =
+                                                                                parts[
+                                                                                    parts.length -
+                                                                                        1
+                                                                                ] ??
+                                                                                '';
+                                                                            if (
+                                                                                glTxnId
+                                                                            ) {
+                                                                                onViewGlTransaction(
+                                                                                    glTxnId,
+                                                                                );
+                                                                            }
                                                                         }}
                                                                     >
-                                                                        ×
+                                                                        View
                                                                     </button>
-                                                                )}
-                                                            </td>
-                                                        </tr>
-                                                    ),
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                        {transferModalEntryId !== null && (
+                            <div
+                                className="modal-overlay"
+                                onClick={() => {
+                                    setTransferModalEntryId(null);
+                                }}
+                            >
+                                <div
+                                    className="modal-dialog"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                    }}
+                                >
+                                    <div className="modal-header">
+                                        <h3>Link Transfer</h3>
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                setTransferModalEntryId(null);
+                                            }}
+                                        >
+                                            Close
+                                        </button>
+                                    </div>
+                                    <input
+                                        type="search"
+                                        placeholder="Search candidates…"
+                                        value={transferModalSearch}
+                                        onChange={(e) => {
+                                            setTransferModalSearch(
+                                                e.target.value,
+                                            );
+                                        }}
+                                    />
+                                    {transferModalFeePrompt !== null && (
+                                        <div className="status">
+                                            <div>
+                                                The selected entry does not
+                                                cancel this amount; the
+                                                difference of{' '}
+                                                {
+                                                    transferModalFeePrompt.residual
+                                                }{' '}
+                                                will post to the fee account
+                                                below.
+                                            </div>
+                                            <AccountInput
+                                                value={transferModalFeeAccount}
+                                                onChange={
+                                                    setTransferModalFeeAccount
+                                                }
+                                                accounts={ledger.accounts.map(
+                                                    (a) => a.name,
                                                 )}
-                                            </tbody>
-                                        </table>
-                                        <div className="pipeline-row-actions">
+                                                placeholder="Fee account…"
+                                            />
+                                            {(transferModalFeeAccount
+                                                .trim()
+                                                .startsWith('Assets:') ||
+                                                transferModalFeeAccount
+                                                    .trim()
+                                                    .startsWith(
+                                                        'Liabilities:',
+                                                    )) && (
+                                                <div className="hint">
+                                                    Fee must be an
+                                                    expense/income account, not
+                                                    a balance-sheet account.
+                                                </div>
+                                            )}
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                disabled={
+                                                    transferModalFeeAccount.trim() ===
+                                                        '' ||
+                                                    transferModalFeeAccount
+                                                        .trim()
+                                                        .startsWith(
+                                                            'Assets:',
+                                                        ) ||
+                                                    transferModalFeeAccount
+                                                        .trim()
+                                                        .startsWith(
+                                                            'Liabilities:',
+                                                        ) ||
+                                                    busyPostEntryId !== null
+                                                }
+                                                onClick={() => {
+                                                    void handleLinkTransferFromModal(
+                                                        transferModalFeePrompt.candidate,
+                                                        transferModalFeeAccount.trim(),
+                                                    );
+                                                }}
+                                            >
+                                                Link with fee
+                                            </button>
                                             <button
                                                 type="button"
                                                 className="ghost-button"
                                                 onClick={() => {
-                                                    setSplitDraftRows((cur) => [
-                                                        ...cur,
-                                                        {
-                                                            account: '',
-                                                            amount: '',
-                                                        },
-                                                    ]);
-                                                }}
-                                            >
-                                                + Add row
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className="primary-button"
-                                                onClick={() => {
-                                                    void handlePipelinePostSplit(
-                                                        splitModalEntryId,
-                                                        splitDraftRows,
+                                                    setTransferModalFeePrompt(
+                                                        null,
                                                     );
                                                 }}
                                             >
-                                                Post Split
+                                                Cancel
                                             </button>
                                         </div>
+                                    )}
+                                    {isLoadingTransferModal ? (
+                                        <p className="status">
+                                            Loading entries...
+                                        </p>
+                                    ) : (
+                                        <div className="table-wrap">
+                                            <table className="ledger-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Date</th>
+                                                        <th>Login/Label</th>
+                                                        <th>Description</th>
+                                                        <th>Amount</th>
+                                                        <th></th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {visibleTransferResults.length ===
+                                                    0 ? (
+                                                        <tr>
+                                                            <td
+                                                                colSpan={5}
+                                                                className="table-empty"
+                                                            >
+                                                                No unposted
+                                                                entries found in
+                                                                other accounts.
+                                                            </td>
+                                                        </tr>
+                                                    ) : (
+                                                        visibleTransferResults.map(
+                                                            (r) => (
+                                                                <tr
+                                                                    key={
+                                                                        r.entry
+                                                                            .id
+                                                                    }
+                                                                >
+                                                                    <td className="mono">
+                                                                        {
+                                                                            r
+                                                                                .entry
+                                                                                .date
+                                                                        }
+                                                                    </td>
+                                                                    <td>
+                                                                        {
+                                                                            r.loginName
+                                                                        }
+                                                                        /
+                                                                        {
+                                                                            r.label
+                                                                        }
+                                                                    </td>
+                                                                    <td>
+                                                                        {
+                                                                            r
+                                                                                .entry
+                                                                                .description
+                                                                        }
+                                                                    </td>
+                                                                    <td className="mono">
+                                                                        {r.entry
+                                                                            .amount ??
+                                                                            '-'}
+                                                                    </td>
+                                                                    <td>
+                                                                        <button
+                                                                            type="button"
+                                                                            className="primary-button"
+                                                                            disabled={
+                                                                                busyPostEntryId !==
+                                                                                null
+                                                                            }
+                                                                            onClick={() => {
+                                                                                // Non-cancelling pair →
+                                                                                // prompt for a fee
+                                                                                // account first.
+                                                                                const residual =
+                                                                                    transferModalResidual(
+                                                                                        r,
+                                                                                    );
+                                                                                if (
+                                                                                    residual !==
+                                                                                    null
+                                                                                ) {
+                                                                                    setTransferModalFeePrompt(
+                                                                                        {
+                                                                                            candidate:
+                                                                                                r,
+                                                                                            residual,
+                                                                                        },
+                                                                                    );
+                                                                                    return;
+                                                                                }
+                                                                                void handleLinkTransferFromModal(
+                                                                                    r,
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            Link
+                                                                        </button>
+                                                                    </td>
+                                                                </tr>
+                                                            ),
+                                                        )
+                                                    )}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                        {splitModalEntryId !== null && (
+                            <div
+                                className="modal-overlay"
+                                onClick={() => {
+                                    setSplitModalEntryId(null);
+                                }}
+                            >
+                                <div
+                                    className="modal-dialog"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                    }}
+                                >
+                                    <div className="modal-header">
+                                        <h3>Split Transaction</h3>
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                setSplitModalEntryId(null);
+                                            }}
+                                        >
+                                            Close
+                                        </button>
+                                    </div>
+                                    <p className="status">
+                                        Assign the full amount across
+                                        counterpart accounts. Leave the last
+                                        row&apos;s amount blank to let hledger
+                                        infer the remainder.
+                                    </p>
+                                    <table className="ledger-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Account</th>
+                                                <th>Amount</th>
+                                                <th></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {splitDraftRows.map((row, i) => (
+                                                <tr key={i}>
+                                                    <td>
+                                                        <input
+                                                            type="text"
+                                                            placeholder="Expenses:Food"
+                                                            value={row.account}
+                                                            onChange={(e) => {
+                                                                const v =
+                                                                    e.target
+                                                                        .value;
+                                                                setSplitDraftRows(
+                                                                    (cur) =>
+                                                                        cur.map(
+                                                                            (
+                                                                                r,
+                                                                                j,
+                                                                            ) =>
+                                                                                j ===
+                                                                                i
+                                                                                    ? {
+                                                                                          ...r,
+                                                                                          account:
+                                                                                              v,
+                                                                                      }
+                                                                                    : r,
+                                                                        ),
+                                                                );
+                                                            }}
+                                                        />
+                                                    </td>
+                                                    <td>
+                                                        <input
+                                                            type="text"
+                                                            placeholder={
+                                                                i ===
+                                                                splitDraftRows.length -
+                                                                    1
+                                                                    ? '(remainder)'
+                                                                    : '0.00 USD'
+                                                            }
+                                                            value={row.amount}
+                                                            onChange={(e) => {
+                                                                const v =
+                                                                    e.target
+                                                                        .value;
+                                                                setSplitDraftRows(
+                                                                    (cur) =>
+                                                                        cur.map(
+                                                                            (
+                                                                                r,
+                                                                                j,
+                                                                            ) =>
+                                                                                j ===
+                                                                                i
+                                                                                    ? {
+                                                                                          ...r,
+                                                                                          amount: v,
+                                                                                      }
+                                                                                    : r,
+                                                                        ),
+                                                                );
+                                                            }}
+                                                        />
+                                                    </td>
+                                                    <td>
+                                                        {splitDraftRows.length >
+                                                            2 && (
+                                                            <button
+                                                                type="button"
+                                                                className="ghost-button"
+                                                                onClick={() => {
+                                                                    setSplitDraftRows(
+                                                                        (cur) =>
+                                                                            cur.filter(
+                                                                                (
+                                                                                    _,
+                                                                                    j,
+                                                                                ) =>
+                                                                                    j !==
+                                                                                    i,
+                                                                            ),
+                                                                    );
+                                                                }}
+                                                            >
+                                                                ×
+                                                            </button>
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                    <div className="pipeline-row-actions">
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                setSplitDraftRows((cur) => [
+                                                    ...cur,
+                                                    {
+                                                        account: '',
+                                                        amount: '',
+                                                    },
+                                                ]);
+                                            }}
+                                        >
+                                            + Add row
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="primary-button"
+                                            onClick={() => {
+                                                void handlePipelinePostSplit(
+                                                    splitModalEntryId,
+                                                    splitDraftRows,
+                                                );
+                                            }}
+                                        >
+                                            Post Split
+                                        </button>
                                     </div>
                                 </div>
-                            )}
-                        </div>
-                    )
-                ) : (
-                    <div className="table-wrap">
-                        <TransactionsTable
-                            transactions={pipelineGlRows}
-                            ledgerPath={ledgerPath}
-                            hideObviousAmounts={hideObviousAmounts}
-                        />
+                            </div>
+                        )}
                     </div>
                 )}
                 {pipelineStatus === null ? null : (

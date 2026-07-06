@@ -20,11 +20,7 @@ export type DraftPosting = {
 
 export type TransactionEntryMode = 'form' | 'raw';
 export type SplitDraftRow = { account: string; amount: string };
-export type PipelineSubTab =
-    | 'evidence'
-    | 'evidence-rows'
-    | 'account-rows'
-    | 'gl-rows';
+export type PipelineSubTab = 'evidence' | 'evidence-rows' | 'account-rows';
 
 export type SecretPromptState = {
     title: string;

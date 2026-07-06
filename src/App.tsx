@@ -1470,7 +1470,6 @@ function App() {
                             loginAccounts={loginAccounts}
                             loginConfigsByName={loginConfigsByName}
                             hasLoadedLoginConfigs={hasLoadedLoginConfigs}
-                            hideObviousAmounts={hideObviousAmounts}
                             onLedgerRefresh={handleLedgerRefresh}
                             onLoginConfigChanged={requestLoginConfigReload}
                             onViewGlTransaction={(id) => {
