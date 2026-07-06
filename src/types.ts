@@ -29,12 +29,6 @@ export type SecretPromptState = {
     cancelLabel: string;
 };
 
-export type LoginAccountMapping = {
-    loginName: string;
-    label: string;
-    extension: string;
-};
-
 export type LoginAccountRef = {
     loginName: string;
     label: string;

@@ -234,7 +234,6 @@ export function SettingsTab({
         if (ledgerPath === null) {
             setScrapeExtensions([]);
             setScrapeExtension('');
-            setScrapeDebugSocket(null);
             setIsLoadingScrapeExtensions(false);
             return;
         }

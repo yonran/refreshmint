@@ -24,7 +24,7 @@ export function formatScaled(mantissa: string, scale: number): string {
     return negative ? `-${digits}` : digits;
 }
 
-export function normalizeStyle(style: AmountStyleHint | null) {
+function normalizeStyle(style: AmountStyleHint | null) {
     if (style === null) {
         return { side: 'R' as const, spaced: true };
     }
