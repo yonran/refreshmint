@@ -53,7 +53,6 @@ import {
     createEmptyPipelineTabSession,
     createEmptyTransactionsTabSession,
     type SecretPromptState,
-    type LoginAccountMapping,
     type LoginAccountRef,
     type PipelineTabSession,
     type RecategorizeTab,
@@ -130,9 +129,6 @@ function App() {
     const [isSavingLoginConfig, setIsSavingLoginConfig] = useState(false);
     const [hasLoadedLoginConfigs, setHasLoadedLoginConfigs] = useState(false);
     const [loginConfigsReloadToken, setLoginConfigsReloadToken] = useState(0);
-    const [loginAccountMappings, setLoginAccountMappings] = useState<
-        Record<string, LoginAccountMapping[]>
-    >({});
     const [recategorizeTabs, setRecategorizeTabs] = useState<RecategorizeTab[]>(
         [],
     );
@@ -279,7 +275,6 @@ function App() {
             setIsSavingLoginConfig(false);
             setHasLoadedLoginConfigs(false);
             setLoginConfigsReloadToken(0);
-            setLoginAccountMappings({});
             setRecategorizeTabs([]);
             setPendingTransactionSearch(null);
             setTransactionsTabSession(createEmptyTransactionsTabSession());
@@ -584,7 +579,6 @@ function App() {
             setLoginNames([]);
             setLoginConfigsByName({});
             setSelectedLoginName('');
-            setLoginAccountMappings({});
             setIsLoadingLoginConfigs(false);
             setHasLoadedLoginConfigs(false);
             return;
@@ -605,27 +599,14 @@ function App() {
                 }
 
                 const configMap: Record<string, LoginConfig> = {};
-                const mappings: Record<string, LoginAccountMapping[]> = {};
                 const accounts: LoginAccountRef[] = [];
                 for (const { loginName, config } of configs) {
                     const normalizedConfig = normalizeLoginConfig(config);
                     configMap[loginName] = normalizedConfig;
-                    const extension = normalizedConfig.extension?.trim() ?? '';
-                    for (const [label, mapping] of Object.entries(
+                    for (const label of Object.keys(
                         normalizedConfig.accounts,
                     )) {
                         accounts.push({ loginName, label });
-                        const glAccount = mapping.glAccount?.trim() ?? '';
-                        if (glAccount.length === 0) {
-                            continue;
-                        }
-                        const next: LoginAccountMapping = {
-                            loginName,
-                            label,
-                            extension,
-                        };
-                        const current = mappings[glAccount] ?? [];
-                        mappings[glAccount] = [...current, next];
                     }
                 }
                 setLoginNames(logins);
@@ -643,7 +624,6 @@ function App() {
                     }
                     return '';
                 });
-                setLoginAccountMappings(mappings);
                 setHasLoadedLoginConfigs(true);
             })
             .catch((error: unknown) => {
@@ -651,7 +631,6 @@ function App() {
                     setLoginNames([]);
                     setLoginConfigsByName({});
                     setSelectedLoginName('');
-                    setLoginAccountMappings({});
                     setHasLoadedLoginConfigs(false);
                     setLoginConfigStatus(
                         `Failed to load login configs: ${String(error)}`,
@@ -851,7 +830,7 @@ function App() {
         label: string,
         glAccount: string,
     ) {
-        setActiveTab('scrape');
+        setActiveTab('settings');
         setSelectedLoginName(loginName);
         setEditingMappingLabel(label);
         setEditingMappingGlAccountDraft(glAccount);
@@ -884,7 +863,7 @@ function App() {
         setIsSavingLoginConfig(true);
         try {
             await setLoginAccount(ledger.path, loginName, label, null);
-            setActiveTab('scrape');
+            setActiveTab('settings');
             setSelectedLoginName(loginName);
             setEditingMappingLabel(label);
             setEditingMappingGlAccountDraft('');
@@ -1598,20 +1577,11 @@ function App() {
                         <SettingsTab
                             ledger={ledger}
                             selectedLoginName={selectedLoginName}
-                            onLedgerRefresh={handleLedgerRefresh}
-                            onSecretPrompt={promptSecretDecision}
-                            headlessScrape={headlessScrape}
-                        />
-                    ) : (
-                        <ScrapeTab
-                            ledger={ledger}
+                            onSelectedLoginNameChange={setSelectedLoginName}
                             loginNames={loginNames}
                             loginConfigsByName={loginConfigsByName}
-                            loginAccountMappings={loginAccountMappings}
                             isLoadingLoginConfigs={isLoadingLoginConfigs}
                             conflictingGlAccountSet={conflictingGlAccountSet}
-                            selectedLoginName={selectedLoginName}
-                            onSelectedLoginNameChange={setSelectedLoginName}
                             loginManagementTab={loginManagementTab}
                             onLoginManagementTabChange={setLoginManagementTab}
                             editingMappingLabel={editingMappingLabel}
@@ -1630,6 +1600,17 @@ function App() {
                             onIgnoreLoginAccountMapping={
                                 handleIgnoreLoginAccountMapping
                             }
+                            onLedgerRefresh={handleLedgerRefresh}
+                            onSecretPrompt={promptSecretDecision}
+                            headlessScrape={headlessScrape}
+                        />
+                    ) : (
+                        <ScrapeTab
+                            ledger={ledger}
+                            loginNames={loginNames}
+                            isLoadingLoginConfigs={isLoadingLoginConfigs}
+                            selectedLoginName={selectedLoginName}
+                            onSelectedLoginNameChange={setSelectedLoginName}
                             scrapeLogVersion={scrapeLogVersion}
                             onScrapeComplete={async (loginName) => {
                                 await autoEtlForLoginRef.current?.(loginName);
