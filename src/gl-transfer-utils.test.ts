@@ -223,6 +223,26 @@ describe('rankGlTransferCandidates', () => {
         expect(rankGlTransferCandidates([eur], subject, '')).toEqual([]);
     });
 
+    it('empty search includes a candidate exactly 14 days away but excludes 15', () => {
+        // Pins the inclusive `distance <= RANK_DATE_WINDOW_DAYS` boundary: subject
+        // is 2026-01-15, so 2026-01-29 is 14 days away (kept) and 2026-01-30 is 15
+        // (dropped).
+        const day14 = makeCandidate('day14', '2026-01-29', '100.00 USD');
+        const day15 = makeCandidate('day15', '2026-01-30', '100.00 USD');
+        const result = rankGlTransferCandidates([day15, day14], subject, '');
+        expect(result.map((t) => t.id)).toEqual(['day14']);
+    });
+
+    it('empty search keeps input order for two equal-distance candidates', () => {
+        // Pins the `|| a.index - b.index` tiebreak: both candidates are exactly 1
+        // day away (one before, one after the subject), so the tiebreak must
+        // preserve the input order rather than reordering them.
+        const before = makeCandidate('before', '2026-01-14', '100.00 USD');
+        const after = makeCandidate('after', '2026-01-16', '100.00 USD');
+        const result = rankGlTransferCandidates([after, before], subject, '');
+        expect(result.map((t) => t.id)).toEqual(['after', 'before']);
+    });
+
     it('search text keeps the existing filter but sorts by date proximity', () => {
         const far = makeTxn('far', {
             comment: REFRESHMINT_COMMENT,
