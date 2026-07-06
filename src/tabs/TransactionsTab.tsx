@@ -3,8 +3,6 @@ import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import {
     addTransaction,
     addTransactionText,
-    type AmountStyleHint,
-    type AmountTotal,
     type GlCategoryResult,
     type LedgerView,
     createNotTransferLinkForGlPair,
@@ -21,6 +19,7 @@ import {
     validateTransaction,
     validateTransactionText,
 } from '../tauri-commands.ts';
+import { formatTotals } from '../amount-utils.ts';
 import { categoryRulesFromBulkRows } from '../automation-utils.ts';
 import type { AcceptAllEdit } from '../categorize-utils.ts';
 import {
@@ -44,50 +43,6 @@ import {
     type TransactionsTabSession,
 } from '../types.ts';
 import { AccountInput, TransactionsTable } from './TransactionsTable.tsx';
-
-function normalizeStyle(style: AmountStyleHint | null) {
-    if (style === null) {
-        return { side: 'R' as const, spaced: true };
-    }
-    return style;
-}
-
-function formatTotal(total: AmountTotal): string {
-    let negative = false;
-    let digits = total.mantissa;
-    if (digits.startsWith('-')) {
-        negative = true;
-        digits = digits.slice(1);
-    }
-    const { side, spaced } = normalizeStyle(total.style);
-    const separator = spaced ? ' ' : '';
-    const scale = total.scale;
-    let value: string;
-    if (scale > 0) {
-        const scaleInt = Math.max(scale, 0);
-        if (digits.length <= scaleInt) {
-            const needed = scaleInt + 1 - digits.length;
-            digits = `${'0'.repeat(needed)}${digits}`;
-        }
-        const split = digits.length - scaleInt;
-        value = `${digits.slice(0, split)}.${digits.slice(split)}`;
-    } else {
-        value = digits;
-    }
-    if (negative) {
-        value = `-${value}`;
-    }
-    return side === 'L'
-        ? `${total.commodity}${separator}${value}`
-        : `${value}${separator}${total.commodity}`;
-}
-
-function formatTotals(totals: AmountTotal[] | null): string {
-    if (!totals || totals.length === 0) {
-        return 'N/A';
-    }
-    return totals.map(formatTotal).join(', ');
-}
 
 function joinQueryClauses(...clauses: string[]): string {
     return clauses

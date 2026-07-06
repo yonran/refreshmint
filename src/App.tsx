@@ -35,8 +35,6 @@ import {
     openLedger,
     runScrapeForLogin,
     type AccountRow,
-    type AmountStyleHint,
-    type AmountTotal,
     type LedgerView,
     setLoginAccount,
     recoverLedgerConsistency,
@@ -45,6 +43,7 @@ import {
     repairOrphanedGlTxn,
     type ConsistencyReport,
 } from './tauri-commands.ts';
+import { formatTotals } from './amount-utils.ts';
 import { PipelineTab } from './tabs/PipelineTab.tsx';
 import { ReportsTab } from './tabs/ReportsTab.tsx';
 import { ScrapeTab } from './tabs/ScrapeTab.tsx';
@@ -1731,50 +1730,6 @@ function App() {
             )}
         </div>
     );
-}
-
-function normalizeStyle(style: AmountStyleHint | null) {
-    if (style === null) {
-        return { side: 'R' as const, spaced: true };
-    }
-    return style;
-}
-
-function formatTotal(total: AmountTotal): string {
-    let negative = false;
-    let digits = total.mantissa;
-    if (digits.startsWith('-')) {
-        negative = true;
-        digits = digits.slice(1);
-    }
-    const { side, spaced } = normalizeStyle(total.style);
-    const separator = spaced ? ' ' : '';
-    const scale = total.scale;
-    let value: string;
-    if (scale > 0) {
-        const scaleInt = Math.max(scale, 0);
-        if (digits.length <= scaleInt) {
-            const needed = scaleInt + 1 - digits.length;
-            digits = `${'0'.repeat(needed)}${digits}`;
-        }
-        const split = digits.length - scaleInt;
-        value = `${digits.slice(0, split)}.${digits.slice(split)}`;
-    } else {
-        value = digits;
-    }
-    if (negative) {
-        value = `-${value}`;
-    }
-    return side === 'L'
-        ? `${total.commodity}${separator}${value}`
-        : `${value}${separator}${total.commodity}`;
-}
-
-function formatTotals(totals: AmountTotal[] | null): string {
-    if (!totals || totals.length === 0) {
-        return 'N/A';
-    }
-    return totals.map(formatTotal).join(', ');
 }
 
 function AccountsTable({
