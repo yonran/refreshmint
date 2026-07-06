@@ -2272,6 +2272,14 @@ export function TransactionsTab({
                               modalTxnId,
                               glTransferModalSearch,
                           );
+                    // Pre-validate the fee account (isNonBalanceSheet convention):
+                    // a fee posted to Assets:/Liabilities: would misstate a real
+                    // account, and the backend rejects it — catch it here so the
+                    // user does not lose the modal to a backend error.
+                    const feeTrimmed = glTransferFeeAccount.trim();
+                    const feeIsBalanceSheet =
+                        feeTrimmed.startsWith('Assets:') ||
+                        feeTrimmed.startsWith('Liabilities:');
                     return (
                         <div
                             className="modal-overlay"
@@ -2323,13 +2331,20 @@ export function TransactionsTab({
                                             )}
                                             placeholder="Fee account…"
                                         />
+                                        {feeIsBalanceSheet && (
+                                            <div className="hint">
+                                                Fee must be an expense/income
+                                                account, not a balance-sheet
+                                                account.
+                                            </div>
+                                        )}
                                         <button
                                             type="button"
                                             className="ghost-button"
                                             disabled={
                                                 transferActionBusy ||
-                                                glTransferFeeAccount.trim() ===
-                                                    ''
+                                                feeTrimmed === '' ||
+                                                feeIsBalanceSheet
                                             }
                                             onClick={() => {
                                                 const candidateId =

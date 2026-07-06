@@ -2149,16 +2149,6 @@ fn apply_recategorizations(
     Ok(final_content)
 }
 
-/// Merge two `Expenses:Unknown` GL transactions into a single transfer transaction.
-///
-/// Both transactions must each have exactly one `; source:` tag pointing to a
-/// login account journal entry.  The function:
-/// 1. Removes both old GL blocks
-/// 2. Appends a new two-posting transfer transaction
-/// 3. Updates each source account entry's `posted:` ref to the new ID
-/// 4. Commits all changed files
-///
-/// Returns the new GL transaction ID.
 /// Validate a user-supplied fee account for a fee-tolerant transfer: non-empty
 /// and non-balance-sheet (mirrors the frontend `isNonBalanceSheet` rule in
 /// TransactionsTable.tsx — a fee posted to Assets:/Liabilities: would misstate a
@@ -2231,6 +2221,17 @@ fn validate_transfer_legs(
     Ok(())
 }
 
+/// Merge two `Expenses:Unknown` GL transactions into a single transfer transaction.
+///
+/// Both transactions must each have exactly one `; source:` tag pointing to a
+/// login account journal entry.  The function:
+/// 1. Removes both old GL blocks
+/// 2. Appends a new transfer transaction (two postings, or three when a fee
+///    account absorbs a non-cancelling residual)
+/// 3. Updates each source account entry's `posted:` ref to the new ID
+/// 4. Commits all changed files
+///
+/// Returns the new GL transaction ID.
 pub fn merge_gl_transfer(
     ledger_dir: &Path,
     txn_id_1: &str,

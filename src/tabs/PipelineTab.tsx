@@ -68,6 +68,7 @@ import {
     suggestGlAccountName,
 } from '../types.ts';
 import { AccountInput, TransactionsTable } from './TransactionsTable.tsx';
+import { TRANSFER_CANCEL_EPSILON } from '../gl-transfer-utils.ts';
 
 interface PipelineTabProps {
     ledger: LedgerView;
@@ -1621,8 +1622,7 @@ export function PipelineTab({
         const b = Number(candidate.entry.amount ?? NaN);
         if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
         const residual = -(a + b);
-        // Mirrors the Rust cancel epsilon (post::TRANSFER_CANCEL_EPSILON).
-        if (Math.abs(residual) < 0.005) return null;
+        if (Math.abs(residual) < TRANSFER_CANCEL_EPSILON) return null;
         return residual.toFixed(2);
     }
 
@@ -3132,12 +3132,37 @@ export function PipelineTab({
                                                     )}
                                                     placeholder="Fee account…"
                                                 />
+                                                {(transferModalFeeAccount
+                                                    .trim()
+                                                    .startsWith('Assets:') ||
+                                                    transferModalFeeAccount
+                                                        .trim()
+                                                        .startsWith(
+                                                            'Liabilities:',
+                                                        )) && (
+                                                    <div className="hint">
+                                                        Fee must be an
+                                                        expense/income account,
+                                                        not a balance-sheet
+                                                        account.
+                                                    </div>
+                                                )}
                                                 <button
                                                     type="button"
                                                     className="ghost-button"
                                                     disabled={
                                                         transferModalFeeAccount.trim() ===
                                                             '' ||
+                                                        transferModalFeeAccount
+                                                            .trim()
+                                                            .startsWith(
+                                                                'Assets:',
+                                                            ) ||
+                                                        transferModalFeeAccount
+                                                            .trim()
+                                                            .startsWith(
+                                                                'Liabilities:',
+                                                            ) ||
                                                         busyPostEntryId !== null
                                                     }
                                                     onClick={() => {

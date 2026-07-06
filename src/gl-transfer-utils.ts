@@ -68,7 +68,7 @@ export function filterGlTransferCandidates(
  * Two amounts cancel below this epsilon (cents tolerance). Mirrors the Rust
  * matchers' TRANSFER_CANCEL_EPSILON (src-tauri/src/post.rs).
  */
-const TRANSFER_CANCEL_EPSILON = 0.005;
+export const TRANSFER_CANCEL_EPSILON = 0.005;
 
 /** Pre-filter window for the no-search transfer candidate ranking, in days. */
 const RANK_DATE_WINDOW_DAYS = 14;

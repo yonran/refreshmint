@@ -291,6 +291,13 @@ Still open:
 - ✅ Configurable `transferDateWindowDays` and `extraTransferPatterns` in
   `refreshmint.json`; the cancel epsilon is a shared named constant
   (`3aac617`).
+- Same-journal unpost clobbers the other leg's ref (pre-existing, verified at
+  `900caac~1`). Unposting a transfer whose two legs live in the SAME account
+  journal restores the other leg's cleared `posted` ref from a stale snapshot:
+  `post.rs` reads the triggering journal (`unpost_login_account_entry`, ~:426)
+  before `write_other_sides` clears the other side, then writes that stale copy
+  back over it, leaving a dangling ref. Fix by re-reading (or merging) the
+  triggering journal after the other-side writes when the paths coincide.
 
 ### Reports (plumbing exists; presentation missing)
 
