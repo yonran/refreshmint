@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { buildAcceptAllEdits } from './categorize-utils.ts';
+import {
+    buildAcceptAllEdits,
+    summarizeBulkRecategorize,
+} from './categorize-utils.ts';
 import type {
     GlCategoryResult,
     PostingRow,
@@ -120,5 +123,37 @@ describe('buildAcceptAllEdits', () => {
     it('returns no edits when no suggestions exist', () => {
         const rows = [simpleTxn('a', 'Expenses:Unknown')];
         expect(buildAcceptAllEdits(rows, {}, eligibility)).toHaveLength(0);
+    });
+});
+
+describe('summarizeBulkRecategorize', () => {
+    it('groups by oldAccount with counts', () => {
+        expect(
+            summarizeBulkRecategorize([
+                { oldAccount: 'Expenses:A' },
+                { oldAccount: 'Expenses:B' },
+                { oldAccount: 'Expenses:A' },
+            ]),
+        ).toEqual([
+            { oldAccount: 'Expenses:A', count: 2 },
+            { oldAccount: 'Expenses:B', count: 1 },
+        ]);
+    });
+
+    it('preserves first-seen order of accounts', () => {
+        expect(
+            summarizeBulkRecategorize([
+                { oldAccount: 'Expenses:Z' },
+                { oldAccount: 'Expenses:A' },
+                { oldAccount: 'Expenses:Z' },
+            ]),
+        ).toEqual([
+            { oldAccount: 'Expenses:Z', count: 2 },
+            { oldAccount: 'Expenses:A', count: 1 },
+        ]);
+    });
+
+    it('returns an empty array for empty input', () => {
+        expect(summarizeBulkRecategorize([])).toEqual([]);
     });
 });

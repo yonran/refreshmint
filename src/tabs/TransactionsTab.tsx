@@ -44,6 +44,7 @@ import {
 } from '../types.ts';
 import { TransactionsTable } from './TransactionsTable.tsx';
 import { AccountInput } from '../components/AccountInput.tsx';
+import { BulkRecategorizeConfirmModal } from '../components/BulkRecategorizeConfirmModal.tsx';
 
 function joinQueryClauses(...clauses: string[]): string {
     return clauses
@@ -1506,105 +1507,22 @@ export function TransactionsTab({
                                 </button>
                             </div>
                             {recategorizeBulkConfirm !== null && (
-                                <div
-                                    className="modal-overlay"
-                                    onClick={() => {
+                                <BulkRecategorizeConfirmModal
+                                    newAccount={
+                                        recategorizeBulkConfirm.newAccount
+                                    }
+                                    entries={recategorizeBulkConfirm.entries}
+                                    onCancel={() => {
                                         setRecategorizeBulkConfirm(null);
                                     }}
-                                >
-                                    <div
-                                        className="modal-dialog"
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                        }}
-                                    >
-                                        <div className="modal-header">
-                                            <h3>Confirm bulk recategorize</h3>
-                                            <button
-                                                type="button"
-                                                className="ghost-button"
-                                                onClick={() => {
-                                                    setRecategorizeBulkConfirm(
-                                                        null,
-                                                    );
-                                                }}
-                                            >
-                                                Close
-                                            </button>
-                                        </div>
-                                        <p>
-                                            The selected rows have different
-                                            current accounts. All will be
-                                            changed to{' '}
-                                            <strong>
-                                                {
-                                                    recategorizeBulkConfirm.newAccount
-                                                }
-                                            </strong>
-                                            :
-                                        </p>
-                                        <ul>
-                                            {[
-                                                ...new Map(
-                                                    recategorizeBulkConfirm.entries.map(
-                                                        (entry) => [
-                                                            entry.oldAccount,
-                                                            0,
-                                                        ],
-                                                    ),
-                                                ).keys(),
-                                            ].map((account) => {
-                                                const count =
-                                                    recategorizeBulkConfirm.entries.filter(
-                                                        (entry) =>
-                                                            entry.oldAccount ===
-                                                            account,
-                                                    ).length;
-                                                return (
-                                                    <li key={account}>
-                                                        {count} x {account}{' '}
-                                                        {'->'}{' '}
-                                                        {
-                                                            recategorizeBulkConfirm.newAccount
-                                                        }
-                                                    </li>
-                                                );
-                                            })}
-                                        </ul>
-                                        <div
-                                            style={{
-                                                display: 'flex',
-                                                gap: '0.5rem',
-                                                justifyContent: 'flex-end',
-                                            }}
-                                        >
-                                            <button
-                                                type="button"
-                                                className="ghost-button"
-                                                onClick={() => {
-                                                    setRecategorizeBulkConfirm(
-                                                        null,
-                                                    );
-                                                }}
-                                            >
-                                                Cancel
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className="ghost-button"
-                                                onClick={() => {
-                                                    void handleBulkRecategorize(
-                                                        recategorizeBulkConfirm.entries,
-                                                        recategorizeBulkConfirm.newAccount,
-                                                    );
-                                                    closeActiveRecategorizeTab();
-                                                }}
-                                            >
-                                                Confirm
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
+                                    onConfirm={() => {
+                                        void handleBulkRecategorize(
+                                            recategorizeBulkConfirm.entries,
+                                            recategorizeBulkConfirm.newAccount,
+                                        );
+                                        closeActiveRecategorizeTab();
+                                    }}
+                                />
                             )}
                         </section>
                     );

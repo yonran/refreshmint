@@ -22,6 +22,7 @@ import { formatScaled, formatTotals } from '../amount-utils.ts';
 import { AccountInput } from '../components/AccountInput.tsx';
 import { AttachmentLightbox } from '../components/AttachmentLightbox.tsx';
 import { useAttachmentLightbox } from '../components/useAttachmentLightbox.ts';
+import { BulkRecategorizeConfirmModal } from '../components/BulkRecategorizeConfirmModal.tsx';
 import {
     attachmentFilename,
     isImageAttachmentRef,
@@ -1331,91 +1332,24 @@ export function TransactionsTable({
                 onClose={lightbox.close}
             />
             {bulkConfirm !== null && (
-                <div
-                    className="modal-overlay"
-                    onClick={() => {
+                <BulkRecategorizeConfirmModal
+                    newAccount={bulkConfirm.newAccount}
+                    entries={bulkConfirm.entries}
+                    onCancel={() => {
                         setBulkConfirm(null);
                     }}
-                >
-                    <div
-                        className="modal-dialog"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                        }}
-                    >
-                        <div className="modal-header">
-                            <h3>Confirm bulk recategorize</h3>
-                            <button
-                                type="button"
-                                className="ghost-button"
-                                onClick={() => {
-                                    setBulkConfirm(null);
-                                }}
-                            >
-                                Close
-                            </button>
-                        </div>
-                        <p>
-                            The selected rows have different current accounts.
-                            All will be changed to{' '}
-                            <strong>{bulkConfirm.newAccount}</strong>:
-                        </p>
-                        <ul>
-                            {[
-                                ...new Map(
-                                    bulkConfirm.entries.map((e) => [
-                                        e.oldAccount,
-                                        0,
-                                    ]),
-                                ).entries(),
-                            ].map(([acct]) => {
-                                const count = bulkConfirm.entries.filter(
-                                    (e) => e.oldAccount === acct,
-                                ).length;
-                                return (
-                                    <li key={acct}>
-                                        {count} × {acct} →{' '}
-                                        {bulkConfirm.newAccount}
-                                    </li>
-                                );
-                            })}
-                        </ul>
-                        <div
-                            style={{
-                                display: 'flex',
-                                gap: '0.5rem',
-                                justifyContent: 'flex-end',
-                            }}
-                        >
-                            <button
-                                type="button"
-                                className="ghost-button"
-                                onClick={() => {
-                                    setBulkConfirm(null);
-                                }}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                type="button"
-                                className="ghost-button"
-                                onClick={() => {
-                                    onBulkRecategorize?.(
-                                        bulkConfirm.entries,
-                                        bulkConfirm.newAccount,
-                                        bulkConfirm.createRule,
-                                    );
-                                    updateSelectedIds(() => new Set());
-                                    setBulkDraft('');
-                                    setBulkCreateRule(false);
-                                    setBulkConfirm(null);
-                                }}
-                            >
-                                Confirm
-                            </button>
-                        </div>
-                    </div>
-                </div>
+                    onConfirm={() => {
+                        onBulkRecategorize?.(
+                            bulkConfirm.entries,
+                            bulkConfirm.newAccount,
+                            bulkConfirm.createRule,
+                        );
+                        updateSelectedIds(() => new Set());
+                        setBulkDraft('');
+                        setBulkCreateRule(false);
+                        setBulkConfirm(null);
+                    }}
+                />
             )}
             {acceptAllConfirm !== null && (
                 <div
