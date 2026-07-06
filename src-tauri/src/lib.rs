@@ -2078,6 +2078,7 @@ fn get_unposted_entries_for_transfer(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn post_login_account_transfer(
     ledger: String,
     login_name1: String,
@@ -2086,6 +2087,7 @@ fn post_login_account_transfer(
     login_name2: String,
     label2: String,
     entry_id2: String,
+    fee_account: Option<String>,
 ) -> Result<String, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let login_name1 = require_login_name_input(login_name1)?;
@@ -2103,6 +2105,7 @@ fn post_login_account_transfer(
         &login_name2,
         &label2,
         &entry_id2,
+        fee_account.as_deref(),
         "gui",
     )
     .map_err(|err| err.to_string())
@@ -2191,11 +2194,23 @@ fn recategorize_gl_transactions(
 }
 
 #[tauri::command]
-fn merge_gl_transfer(ledger: String, txn_id_1: String, txn_id_2: String) -> Result<String, String> {
+fn merge_gl_transfer(
+    ledger: String,
+    txn_id_1: String,
+    txn_id_2: String,
+    fee_account: Option<String>,
+) -> Result<String, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let txn_id_1 = require_non_empty_input("txn_id_1", txn_id_1)?;
     let txn_id_2 = require_non_empty_input("txn_id_2", txn_id_2)?;
-    post::merge_gl_transfer(&target_dir, &txn_id_1, &txn_id_2, "gui").map_err(|err| err.to_string())
+    post::merge_gl_transfer(
+        &target_dir,
+        &txn_id_1,
+        &txn_id_2,
+        fee_account.as_deref(),
+        "gui",
+    )
+    .map_err(|err| err.to_string())
 }
 
 /// Scan the ledger for referential inconsistencies (dangling posted-refs and

@@ -734,8 +734,12 @@ pub fn post_login_account_transfer(
     login_name2: &str,
     label2: &str,
     entry_id2: &str,
+    fee_account: Option<&str>,
     lock_owner: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // Optional fee-tolerant posting: a validated fee account lets non-cancelling
+    // legs post as a 3-leg block (see format_transfer_gl_transaction_with_fee).
+    let fee_account = fee_account.map(validate_fee_account).transpose()?;
     let _gl_lock =
         login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "post-login-transfer")?;
     let _login_locks = acquire_login_locks_for_names(
@@ -777,12 +781,13 @@ pub fn post_login_account_transfer(
     let gl_txn_id = uuid::Uuid::new_v4().to_string();
     let source1 = format!("logins/{login_name1}/accounts/{label1}");
     let source2 = format!("logins/{login_name2}/accounts/{label2}");
-    let gl_text = format_transfer_gl_transaction(
+    let gl_text = format_transfer_gl_transaction_with_fee(
         &entries1[idx1],
         &source1,
         &entries2[idx2],
         &source2,
         &gl_txn_id,
+        fee_account,
     );
 
     let gl_ref = format!("general.journal:{gl_txn_id}");
@@ -1168,13 +1173,64 @@ fn format_gl_split_transaction(
     )
 }
 
-/// Format a GL transaction for a transfer between two accounts.
+/// Format a GL transaction for a transfer between two accounts (no fee leg).
+/// Delegates to [`format_transfer_gl_transaction_with_fee`] with no fee account;
+/// output is byte-identical to the historical two-posting format.
 fn format_transfer_gl_transaction(
     entry1: &AccountEntry,
     source1: &str,
     entry2: &AccountEntry,
     source2: &str,
     gl_txn_id: &str,
+) -> String {
+    format_transfer_gl_transaction_with_fee(entry1, source1, entry2, source2, gl_txn_id, None)
+}
+
+/// Number of decimal places in a decimal quantity string (e.g. "-100.50" → 2).
+fn decimal_places(quantity: &str) -> usize {
+    quantity
+        .trim()
+        .rsplit_once('.')
+        .map(|(_, frac)| frac.len())
+        .unwrap_or(0)
+}
+
+/// The fee residual `-(a1 + a2)` of a transfer's two leg amounts, formatted at
+/// the legs' decimal precision — or `None` when the legs cancel (|a1+a2| <
+/// `TRANSFER_CANCEL_EPSILON`) or either quantity does not parse. Because the
+/// residual is the exact decimal negation of the legs' sum, a 3-posting block
+/// `a1 + a2 + r` balances by construction (nothing validates it with hledger).
+fn transfer_fee_residual(quantity1: &str, quantity2: &str) -> Option<String> {
+    let a1: f64 = quantity1.trim().parse().ok()?;
+    let a2: f64 = quantity2.trim().parse().ok()?;
+    let residual = -(a1 + a2);
+    if residual.abs() < TRANSFER_CANCEL_EPSILON {
+        return None;
+    }
+    let precision = decimal_places(quantity1).max(decimal_places(quantity2));
+    Some(format!("{residual:.precision$}"))
+}
+
+/// Two leg amounts cancel below this epsilon (cents tolerance). Keep in sync
+/// with the merge cancel guard in `merge_gl_transfer`.
+const TRANSFER_CANCEL_EPSILON: f64 = 0.005;
+
+/// Format a GL transaction for a transfer between two accounts.
+///
+/// With `fee_account: None` (or legs that cancel) this writes the historical
+/// two-posting shape: only entry1's amount explicit, leg 2 elided (hledger
+/// infers). With `fee_account: Some` and a non-cancelling residual it writes
+/// THREE postings with ALL amounts explicit — `real1 a1 C`, `real2 a2 C`,
+/// `fee r C` where `r = -(a1+a2)` at the legs' decimal precision — so the block
+/// balances by construction. `sync_gl_transaction` re-derives the fee account
+/// from the third posting of an existing block; keep the shapes in sync.
+fn format_transfer_gl_transaction_with_fee(
+    entry1: &AccountEntry,
+    source1: &str,
+    entry2: &AccountEntry,
+    source2: &str,
+    gl_txn_id: &str,
+    fee_account: Option<&str>,
 ) -> String {
     use crate::account_journal::EntryStatus;
     // Both cleared → GL gets * (Cleared); either pending → GL gets ! (Pending); else unmarked.
@@ -1187,10 +1243,10 @@ fn format_transfer_gl_transaction(
             ""
         };
 
-    let amount1 = entry1
-        .postings
-        .first()
-        .and_then(|p| p.amount.as_ref())
+    let simple1 = entry1.postings.first().and_then(|p| p.amount.as_ref());
+    let simple2 = entry2.postings.first().and_then(|p| p.amount.as_ref());
+
+    let amount1 = simple1
         .map(|a| format!("{} {}", a.quantity, a.commodity))
         .unwrap_or_default();
 
@@ -1216,13 +1272,34 @@ fn format_transfer_gl_transaction(
     }
     let comment_block = comment_lines.join("\n");
 
-    format!(
-        "{}  {}{}  ; id: {}\n{comment_block}\n    {real_account1}  {amount1}\n    {real_account2}\n",
-        entry1.date,
-        status_marker,
-        entry1.description,
-        gl_txn_id,
-    )
+    // Fee leg: only when requested AND the legs do not cancel (same commodity is
+    // enforced by the callers' guards).
+    let fee_leg = fee_account.and_then(|fee| {
+        let (a1, a2) = (simple1?, simple2?);
+        let residual = transfer_fee_residual(&a1.quantity, &a2.quantity)?;
+        Some((
+            fee.to_string(),
+            format!("{residual} {}", a1.commodity),
+            format!("{} {}", a2.quantity, a2.commodity),
+        ))
+    });
+
+    match fee_leg {
+        Some((fee, fee_amount, amount2)) => format!(
+            "{}  {}{}  ; id: {}\n{comment_block}\n    {real_account1}  {amount1}\n    {real_account2}  {amount2}\n    {fee}  {fee_amount}\n",
+            entry1.date,
+            status_marker,
+            entry1.description,
+            gl_txn_id,
+        ),
+        None => format!(
+            "{}  {}{}  ; id: {}\n{comment_block}\n    {real_account1}  {amount1}\n    {real_account2}\n",
+            entry1.date,
+            status_marker,
+            entry1.description,
+            gl_txn_id,
+        ),
+    }
 }
 
 fn collect_unique_evidence_refs<'a>(
@@ -1385,6 +1462,30 @@ fn extract_counterpart_from_block(block: &str) -> Option<String> {
         .map(|line| line.trim().to_string())
 }
 
+/// Extract the fee account from a 3-posting fee-transfer block: the third
+/// posting line's account (the fee leg is always written last by
+/// `format_transfer_gl_transaction_with_fee`; keep in sync). Accounts may
+/// contain single spaces, so split the trailing amount off at the two-space
+/// separator. `None` when the block does not have exactly 3 posting lines.
+fn extract_fee_account_from_transfer_block(block: &str) -> Option<String> {
+    let postings: Vec<&str> = block
+        .lines()
+        .filter(|line| {
+            let is_indented = line.starts_with(' ') || line.starts_with('\t');
+            let trimmed = line.trim();
+            is_indented && !trimmed.is_empty() && !trimmed.starts_with(';')
+        })
+        .collect();
+    let [_, _, fee_line] = postings.as_slice() else {
+        return None;
+    };
+    let trimmed = fee_line.trim();
+    let account = trimmed
+        .split_once("  ")
+        .map_or(trimmed, |(account, _)| account);
+    Some(account.trim().to_string())
+}
+
 /// Count posting lines (indented, non-empty, non-comment) in a GL block. A
 /// simple posting has two (real account + counterpart); a split has more.
 fn count_posting_lines(block: &str) -> usize {
@@ -1482,8 +1583,20 @@ pub fn sync_gl_transaction(
     // 4. Rebuild the GL block.
     let new_block = match loaded.as_slice() {
         [(loc1, _, e1), (loc2, _, e2)] => {
-            // Transfer: two sources.
-            format_transfer_gl_transaction(e1, loc1, e2, loc2, &gl_txn_id)
+            // Transfer: two sources. A 3-posting block carries a fee leg
+            // (format_transfer_gl_transaction_with_fee); carry its account over
+            // and let the formatter recompute the residual from the CURRENT
+            // entry amounts (it drops the fee leg if the legs now cancel).
+            // Without this the reformat would silently discard the fee leg.
+            let fee_account = extract_fee_account_from_transfer_block(&gl_block);
+            format_transfer_gl_transaction_with_fee(
+                e1,
+                loc1,
+                e2,
+                loc2,
+                &gl_txn_id,
+                fee_account.as_deref(),
+            )
         }
         [(loc, _, e)] => {
             // A split posting (one source, multiple counterpart legs) would be
@@ -1906,15 +2019,34 @@ fn apply_recategorizations(
 /// 4. Commits all changed files
 ///
 /// Returns the new GL transaction ID.
+/// Validate a user-supplied fee account for a fee-tolerant transfer: non-empty
+/// and non-balance-sheet (mirrors the frontend `isNonBalanceSheet` rule in
+/// TransactionsTable.tsx — a fee posted to Assets:/Liabilities: would misstate a
+/// real account). Returns the trimmed account.
+fn validate_fee_account(fee_account: &str) -> Result<&str, String> {
+    let fee = fee_account.trim();
+    if fee.is_empty() {
+        return Err("fee account must not be empty".to_string());
+    }
+    if fee.starts_with("Assets:") || fee.starts_with("Liabilities:") {
+        return Err(format!(
+            "fee account {fee} is a balance-sheet account; use an expense/income account"
+        ));
+    }
+    Ok(fee)
+}
+
 pub fn merge_gl_transfer(
     ledger_dir: &Path,
     txn_id_1: &str,
     txn_id_2: &str,
+    fee_account: Option<&str>,
     lock_owner: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     if txn_id_1 == txn_id_2 {
         return Err("cannot merge a transaction with itself".into());
     }
+    let fee_account = fee_account.map(validate_fee_account).transpose()?;
     let _gl_lock =
         login_config::acquire_gl_lock_with_metadata(ledger_dir, lock_owner, "merge-gl-transfer")?;
 
@@ -2028,10 +2160,10 @@ pub fn merge_gl_transfer(
     // 4. Generate new UUID.
     let new_uuid = uuid::Uuid::new_v4().to_string();
 
-    // Guard: the two legs must cancel in the same commodity.
-    // format_transfer_gl_transaction stores only entry1's amount+commodity and
-    // forces leg 2 to its exact negation (:1383-1384), so a pair whose amounts
-    // don't sum to ~0 — or that live in different commodities — would be
+    // Guard: the two legs must cancel in the same commodity, OR an explicit fee
+    // account must absorb the residual. The fee-less format stores only entry1's
+    // amount+commodity and forces leg 2 to its exact negation, so a pair whose
+    // amounts don't sum to ~0 — or that live in different commodities — would be
     // silently misstated in the GL. An absent/unparseable amount refuses the
     // merge outright rather than skipping the check.
     let simple1 = entries1[idx1]
@@ -2059,17 +2191,28 @@ pub fn merge_gl_transfer(
         .quantity
         .parse()
         .map_err(|_| format!("cannot merge; entry {entry_id2} has no amount"))?;
-    if (a + b).abs() >= 0.005 {
-        return Err(format!("amounts do not cancel ({a} + {b})").into());
+    // Non-cancelling legs are allowed ONLY with an explicit fee account (the
+    // residual becomes a third fee posting; see
+    // format_transfer_gl_transaction_with_fee). Cancelling legs merge as before
+    // and ignore any fee account.
+    if (a + b).abs() >= TRANSFER_CANCEL_EPSILON && fee_account.is_none() {
+        let residual = transfer_fee_residual(&simple1.quantity, &simple2.quantity)
+            .unwrap_or_else(|| format!("{}", -(a + b)));
+        return Err(format!(
+            "amounts do not cancel ({a} + {b}); residual {residual} {} — supply a fee account to merge as a fee transfer",
+            simple1.commodity
+        )
+        .into());
     }
 
     // 5. Build merged transfer GL text using the two account entries.
-    let gl_text = format_transfer_gl_transaction(
+    let gl_text = format_transfer_gl_transaction_with_fee(
         &entries1[idx1],
         &locator1,
         &entries2[idx2],
         &locator2,
         &new_uuid,
+        fee_account,
     );
 
     // 6. Compute new GL content: remove both old blocks, append merged.
@@ -2515,6 +2658,311 @@ mod tests {
     }
 
     #[test]
+    fn format_transfer_with_fee_emits_balanced_three_leg_block() {
+        // Fee-tolerant representation: all three amounts explicit, residual
+        // computed at the legs' decimal precision, block balances by construction.
+        let mut e1 = make_entry("txn-1", "2024-01-15", "Transfer", "-100.00");
+        let mut e2 = make_entry("txn-2", "2024-01-15", "Transfer", "99.75");
+        e2.postings[0].account = "Assets:Savings".to_string();
+        e1.evidence = vec!["doc-a.csv:1:1".to_string()];
+        e2.evidence = vec!["doc-b.csv:2:1".to_string()];
+        let text = format_transfer_gl_transaction_with_fee(
+            &e1,
+            "accounts/chase",
+            &e2,
+            "accounts/boa",
+            "gl-id",
+            Some("Expenses:Bank Fees"),
+        );
+        assert_eq!(
+            text,
+            "2024-01-15  * Transfer  ; id: gl-id\n\
+             \x20   ; generated-by: refreshmint-post\n\
+             \x20   ; source: accounts/chase:txn-1\n\
+             \x20   ; source: accounts/boa:txn-2\n\
+             \x20   ; evidence: doc-a.csv:1:1\n\
+             \x20   ; evidence: doc-b.csv:2:1\n\
+             \x20   Assets:Checking  -100.00 USD\n\
+             \x20   Assets:Savings  99.75 USD\n\
+             \x20   Expenses:Bank Fees  0.25 USD\n"
+        );
+    }
+
+    #[test]
+    fn format_transfer_with_fee_ignores_fee_when_legs_cancel() {
+        // When the legs cancel, the output must stay byte-identical to the
+        // fee-less formatter (fee account ignored).
+        let e1 = make_entry("txn-1", "2024-01-15", "Transfer", "-100.00");
+        let e2 = make_entry("txn-2", "2024-01-15", "Transfer", "100.00");
+        let with_fee = format_transfer_gl_transaction_with_fee(
+            &e1,
+            "accounts/chase",
+            &e2,
+            "accounts/boa",
+            "gl-id",
+            Some("Expenses:Bank Fees"),
+        );
+        let without_fee =
+            format_transfer_gl_transaction(&e1, "accounts/chase", &e2, "accounts/boa", "gl-id");
+        assert_eq!(with_fee, without_fee);
+        assert!(!with_fee.contains("Expenses:Bank Fees"));
+    }
+
+    /// Post two entries with the given amounts as separate Unknown GL txns and
+    /// return their GL ids (shared setup for the fee-merge tests).
+    fn post_pair_for_merge(root: &Path, amount1: &str, amount2: &str) -> (String, String) {
+        fs::write(root.join("general.journal"), "").unwrap();
+        let journal_path = account_journal::login_account_journal_path(root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &journal_path,
+            &[
+                make_entry("txn-1", "2024-01-15", "Transfer out", amount1),
+                make_entry("txn-2", "2024-01-15", "Transfer in", amount2),
+            ],
+        )
+        .unwrap();
+        let gl1 = post_login_account_entry(
+            root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+        let gl2 = post_login_account_entry(
+            root,
+            "chase",
+            "checking",
+            "txn-2",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+        (gl1, gl2)
+    }
+
+    #[test]
+    fn merge_with_fee_creates_three_leg_block() {
+        let root = temp_dir("merge-with-fee");
+        let (gl1, gl2) = post_pair_for_merge(&root, "-100.00", "99.75");
+
+        let merged =
+            merge_gl_transfer(&root, &gl1, &gl2, Some("Expenses:Bank Fees"), "test").unwrap();
+
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(gl.contains(&format!("id: {merged}")));
+        assert!(
+            gl.contains("    Expenses:Bank Fees  0.25 USD\n"),
+            "fee leg with residual expected, got: {gl}"
+        );
+        assert!(gl.contains("    Assets:Checking  -100.00 USD\n"));
+        assert!(gl.contains("    Assets:Checking  99.75 USD\n"));
+        // Both entries point at the merged txn.
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        let entries = account_journal::read_journal_at_path(&journal_path).unwrap();
+        let gl_ref = format!("general.journal:{merged}");
+        assert_eq!(entries[0].posted.as_deref(), Some(gl_ref.as_str()));
+        assert_eq!(entries[1].posted.as_deref(), Some(gl_ref.as_str()));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_with_fee_ignores_fee_when_legs_cancel() {
+        let root = temp_dir("merge-fee-cancelling");
+        let (gl1, gl2) = post_pair_for_merge(&root, "-100.00", "100.00");
+
+        merge_gl_transfer(&root, &gl1, &gl2, Some("Expenses:Bank Fees"), "test").unwrap();
+
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            !gl.contains("Expenses:Bank Fees"),
+            "cancelling legs must merge without a fee leg, got: {gl}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_without_fee_error_includes_residual() {
+        let root = temp_dir("merge-no-fee-residual");
+        let (gl1, gl2) = post_pair_for_merge(&root, "-100.00", "99.75");
+
+        let err = merge_gl_transfer(&root, &gl1, &gl2, None, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("do not cancel"),
+            "expected the cancel refusal, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("0.25"),
+            "error should state the residual, got: {err}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_rejects_balance_sheet_fee_account() {
+        let root = temp_dir("merge-fee-balance-sheet");
+        let (gl1, gl2) = post_pair_for_merge(&root, "-100.00", "99.75");
+
+        let err = merge_gl_transfer(&root, &gl1, &gl2, Some("Assets:Slush"), "test").unwrap_err();
+        assert!(
+            err.to_string().contains("balance-sheet"),
+            "expected fee-account validation error, got: {err}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn post_login_account_transfer_with_fee_writes_three_legs() {
+        let root = temp_dir("post-transfer-fee");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let path1 = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &path1,
+            &[make_entry("txn-a", "2024-01-15", "Transfer out", "-200.00")],
+        )
+        .unwrap();
+        let mut incoming = make_entry("txn-b", "2024-01-15", "Transfer in", "199.50");
+        incoming.postings[0].account = "Assets:Savings".to_string();
+        let path2 = account_journal::login_account_journal_path(&root, "boa", "savings");
+        account_journal::write_journal_at_path(&path2, &[incoming]).unwrap();
+
+        let gl_id = post_login_account_transfer(
+            &root,
+            "chase",
+            "checking",
+            "txn-a",
+            "boa",
+            "savings",
+            "txn-b",
+            Some("Expenses:Bank Fees"),
+            "test",
+        )
+        .unwrap();
+
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(gl.contains(&format!("id: {gl_id}")));
+        assert!(gl.contains("    Assets:Checking  -200.00 USD\n"));
+        assert!(gl.contains("    Assets:Savings  199.50 USD\n"));
+        assert!(gl.contains("    Expenses:Bank Fees  0.50 USD\n"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_preserves_fee_leg_and_recomputes_residual() {
+        let root = temp_dir("sync-fee-leg");
+        let (gl1, gl2) = post_pair_for_merge(&root, "-100.00", "99.75");
+        let merged =
+            merge_gl_transfer(&root, &gl1, &gl2, Some("Expenses:Bank Fees"), "test").unwrap();
+
+        // Drift leg 1: -100.00 → -100.50.
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        let mut entries = account_journal::read_journal_at_path(&journal_path).unwrap();
+        entries[0].postings[0].amount = Some(SimpleAmount {
+            commodity: "USD".to_string(),
+            quantity: "-100.50".to_string(),
+        });
+        account_journal::write_journal_at_path(&journal_path, &entries).unwrap();
+
+        sync_gl_transaction(&root, "chase", "checking", "txn-1", "test").unwrap();
+
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(gl.contains(&format!("id: {merged}")));
+        assert!(gl.contains("    Assets:Checking  -100.50 USD\n"));
+        assert!(
+            gl.contains("    Expenses:Bank Fees  0.75 USD\n"),
+            "fee leg should carry the recomputed residual, got: {gl}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_drops_fee_leg_when_legs_now_cancel() {
+        let root = temp_dir("sync-fee-drop");
+        let (gl1, gl2) = post_pair_for_merge(&root, "-100.00", "99.75");
+        merge_gl_transfer(&root, &gl1, &gl2, Some("Expenses:Bank Fees"), "test").unwrap();
+
+        // Drift leg 2 up to a perfect cancel: 99.75 → 100.00.
+        let journal_path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        let mut entries = account_journal::read_journal_at_path(&journal_path).unwrap();
+        entries[1].postings[0].amount = Some(SimpleAmount {
+            commodity: "USD".to_string(),
+            quantity: "100.00".to_string(),
+        });
+        account_journal::write_journal_at_path(&journal_path, &entries).unwrap();
+
+        sync_gl_transaction(&root, "chase", "checking", "txn-2", "test").unwrap();
+
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            !gl.contains("Expenses:Bank Fees"),
+            "cancelling legs should drop the fee leg, got: {gl}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unpost_fee_merge_clears_both_refs() {
+        // A 3-leg fee transfer unposts like any transfer: the source tags are
+        // unaffected by the fee leg, so both sides' refs are cleared and the
+        // whole block (fee leg included) is removed. Uses two separate journals
+        // (the canonical transfer shape).
+        let root = temp_dir("unpost-fee-merge");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let path1 = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &path1,
+            &[make_entry("txn-1", "2024-01-15", "Transfer out", "-100.00")],
+        )
+        .unwrap();
+        let path2 = account_journal::login_account_journal_path(&root, "boa", "savings");
+        account_journal::write_journal_at_path(
+            &path2,
+            &[make_entry("txn-2", "2024-01-15", "Transfer in", "99.75")],
+        )
+        .unwrap();
+        let gl1 = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+        let gl2 = post_login_account_entry(
+            &root,
+            "boa",
+            "savings",
+            "txn-2",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+        let merged =
+            merge_gl_transfer(&root, &gl1, &gl2, Some("Expenses:Bank Fees"), "test").unwrap();
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(gl.contains("Expenses:Bank Fees"), "fee leg expected: {gl}");
+
+        unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, "test").unwrap();
+
+        let entries1 = account_journal::read_journal_at_path(&path1).unwrap();
+        assert!(entries1[0].posted.is_none(), "txn-1 ref should be cleared");
+        let entries2 = account_journal::read_journal_at_path(&path2).unwrap();
+        assert!(entries2[0].posted.is_none(), "txn-2 ref should be cleared");
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            !gl.contains(&format!("id: {merged}")),
+            "the merged block should be removed"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn post_transfer_posts_both_sides() {
         // post_transfer is the legacy accounts/<name> transfer path, kept only for
         // the CLI `account-transfer` subcommand. Verify it posts both legs and
@@ -2916,7 +3364,7 @@ mod tests {
             "test",
         )
         .unwrap();
-        let merged = merge_gl_transfer(&root, &gl1, &gl2, "test").unwrap();
+        let merged = merge_gl_transfer(&root, &gl1, &gl2, None, "test").unwrap();
         let gl3 = post_login_account_entry(
             &root,
             "chase",
@@ -2928,7 +3376,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = merge_gl_transfer(&root, &merged, &gl3, "test").unwrap_err();
+        let err = merge_gl_transfer(&root, &merged, &gl3, None, "test").unwrap_err();
         assert!(
             err.to_string().contains("sources") && err.to_string().contains("cannot merge"),
             "expected multi-source refusal, got: {err}"
@@ -2984,7 +3432,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = merge_gl_transfer(&root, &gl1, &gl2, "test").unwrap_err();
+        let err = merge_gl_transfer(&root, &gl1, &gl2, None, "test").unwrap_err();
         assert!(
             err.to_string().contains("split"),
             "expected split refusal, got: {err}"
@@ -3043,7 +3491,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = merge_gl_transfer(&root, &gl1, &gl2, "test").unwrap_err();
+        let err = merge_gl_transfer(&root, &gl1, &gl2, None, "test").unwrap_err();
         assert!(
             err.to_string().contains("protected"),
             "merge of a reconciled txn must be blocked, got: {err}"
@@ -3091,7 +3539,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = merge_gl_transfer(&root, &gl1, &gl2, "test").unwrap_err();
+        let err = merge_gl_transfer(&root, &gl1, &gl2, None, "test").unwrap_err();
         assert!(
             err.to_string().contains("do not cancel"),
             "expected opposite-amount refusal, got: {err}"
@@ -3143,7 +3591,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = merge_gl_transfer(&root, &gl1, &gl2, "test").unwrap_err();
+        let err = merge_gl_transfer(&root, &gl1, &gl2, None, "test").unwrap_err();
         assert!(
             err.to_string().contains("commodities differ"),
             "expected commodity refusal, got: {err}"
@@ -3201,7 +3649,7 @@ mod tests {
             .amount = None;
         account_journal::write_journal_at_path(&journal_path, &entries).unwrap();
 
-        let err = merge_gl_transfer(&root, &gl1, &gl2, "test").unwrap_err();
+        let err = merge_gl_transfer(&root, &gl1, &gl2, None, "test").unwrap_err();
         assert!(
             err.to_string().contains("no amount"),
             "expected missing-amount refusal, got: {err}"

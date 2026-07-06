@@ -1432,6 +1432,7 @@ fn run_account_post_all_with_dir(
                             other_login,
                             other_label,
                             &tm.entry_id,
+                            None,
                             "cli",
                         )
                         .map(|_| "transfer")
@@ -2477,6 +2478,7 @@ mod tests {
             "boa",
             "savings",
             "in-1",
+            None,
             "test",
         )
         .unwrap();

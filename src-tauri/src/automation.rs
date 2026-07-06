@@ -1155,6 +1155,9 @@ fn apply_proposal(
                 &refs[1].0,
                 &refs[1].1,
                 &refs[1].2,
+                // Proposals never carry a fee account; fee-tolerant posting is a
+                // manual-modal decision (see post_login_account_transfer).
+                None,
                 "automation",
             )
         }
@@ -1206,7 +1209,7 @@ fn apply_proposal(
             if refs.len() != 2 {
                 return Err("merge-gl-transfer proposal must contain exactly two GL refs".into());
             }
-            crate::post::merge_gl_transfer(ledger_dir, &refs[0], &refs[1], "automation")
+            crate::post::merge_gl_transfer(ledger_dir, &refs[0], &refs[1], None, "automation")
         }
         AutomationProposalKind::RecategorizeGl => {
             let Some(txn_id) = proposal.subject_refs.iter().find_map(parse_gl_txn_ref) else {

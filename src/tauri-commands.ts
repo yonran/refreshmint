@@ -829,6 +829,9 @@ export async function postLoginAccountTransfer(
     loginName2: string,
     label2: string,
     entryId2: string,
+    // Optional fee account for non-cancelling legs (3-leg fee transfer).
+    // Mirrors Rust post::post_login_account_transfer.
+    feeAccount?: string | null,
 ): Promise<string> {
     return invoke('post_login_account_transfer', {
         ledger,
@@ -838,6 +841,7 @@ export async function postLoginAccountTransfer(
         loginName2,
         label2,
         entryId2,
+        feeAccount: feeAccount ?? null,
     });
 }
 
@@ -1038,8 +1042,16 @@ export async function mergeGlTransfer(
     ledger: string,
     txnId1: string,
     txnId2: string,
+    // Optional fee account for non-cancelling legs (3-leg fee transfer).
+    // Mirrors Rust post::merge_gl_transfer.
+    feeAccount?: string | null,
 ): Promise<string> {
-    return invoke('merge_gl_transfer', { ledger, txnId1, txnId2 });
+    return invoke('merge_gl_transfer', {
+        ledger,
+        txnId1,
+        txnId2,
+        feeAccount: feeAccount ?? null,
+    });
 }
 
 /**
