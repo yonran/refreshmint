@@ -1562,6 +1562,7 @@ fn run_account_unpost(
         &label,
         &entry_id,
         args.posting_index,
+        None,
         "cli",
     )
     .map_err(|err| std::io::Error::other(err.to_string()))?;
@@ -2591,6 +2592,7 @@ mod tests {
             "chase",
             "checking",
             "out-1",
+            None,
             None,
             "test",
         )

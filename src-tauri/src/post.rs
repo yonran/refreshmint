@@ -385,6 +385,12 @@ pub fn unpost_login_account_entry(
     label: &str,
     entry_id: &str,
     posting_index: Option<usize>,
+    // When Some, refuse unless the entry's CURRENT posted ref resolves to this GL
+    // txn id. Callers that resolve the entry indirectly (e.g. from an orphaned GL
+    // block's source tag; see unpost_gl_transaction) pass Some so a re-posted
+    // entry is not silently unposted from a different, live block. Read under the
+    // GL lock, so this doubles as the TOCTOU check. Entry-level callers pass None.
+    expected_gl_txn: Option<&str>,
     lock_owner: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _gl_lock =
@@ -412,6 +418,16 @@ pub fn unpost_login_account_entry(
     };
 
     let gl_txn_id = gl_ref.strip_prefix("general.journal:").unwrap_or(&gl_ref);
+    if let Some(expected) = expected_gl_txn {
+        let expected = expected
+            .strip_prefix("general.journal:")
+            .unwrap_or(expected);
+        if expected != gl_txn_id {
+            return Err(
+                format!("entry {entry_id} is posted to {gl_txn_id}, not {expected}").into(),
+            );
+        }
+    }
     let source_locator = format!("logins/{login_name}/accounts/{label}");
     let gl_block = find_gl_block(ledger_dir, gl_txn_id)?
         .ok_or_else(|| format!("GL transaction not found: {gl_txn_id}"))?;
@@ -551,7 +567,15 @@ pub fn unpost_gl_transaction(
         })?;
     let (login_name, label) = locator_to_login_label(&locator)
         .ok_or_else(|| format!("GL transaction {gl_txn_id} has a non-login source: {locator}"))?;
-    unpost_login_account_entry(ledger_dir, login_name, label, &entry_id, None, lock_owner)
+    unpost_login_account_entry(
+        ledger_dir,
+        login_name,
+        label,
+        &entry_id,
+        None,
+        Some(gl_txn_id),
+        lock_owner,
+    )
 }
 
 /// Record NotTransferLink negative memory for a pair of generated GL txns
@@ -3011,7 +3035,8 @@ mod tests {
         let gl = fs::read_to_string(root.join("general.journal")).unwrap();
         assert!(gl.contains("Expenses:Bank Fees"), "fee leg expected: {gl}");
 
-        unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, "test").unwrap();
+        unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, None, "test")
+            .unwrap();
 
         let entries1 = account_journal::read_journal_at_path(&path1).unwrap();
         assert!(entries1[0].posted.is_none(), "txn-1 ref should be cleared");
@@ -3065,6 +3090,60 @@ mod tests {
                     && r.status == crate::automation::ResolutionStatus::Active
             }),
             "unmerge should record a NotTransferLink"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unpost_gl_transaction_refuses_when_entry_posted_elsewhere() {
+        // Orphaned GL block O (an interrupted op left it behind) still carries a
+        // `; source:` tag pointing at txn-1, but txn-1's LIVE posted ref points at
+        // the real block N. "Unmerge" on O must refuse rather than silently remove
+        // N, and must record no negative memory.
+        let root = temp_dir("unpost-gl-wrong-txn");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let path = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &path,
+            &[make_entry("txn-1", "2024-01-15", "Transfer out", "-100.00")],
+        )
+        .unwrap();
+        let gl_n = post_login_account_entry(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "Expenses:Unknown",
+            None,
+            "test",
+        )
+        .unwrap();
+        // Append an orphaned block O whose source tag also resolves to txn-1.
+        let orphan = "\n2024-01-15  *Transfer out  ; id: orphan-o\n    ; generated-by: refreshmint-post\n    ; source: logins/chase/accounts/checking:txn-1\n    Assets:Checking  -100.00 USD\n    Expenses:Unknown\n";
+        let gl_path = root.join("general.journal");
+        let existing = fs::read_to_string(&gl_path).unwrap();
+        fs::write(&gl_path, format!("{existing}{orphan}")).unwrap();
+
+        let err = unpost_gl_transaction(&root, "orphan-o", "test").unwrap_err();
+        assert!(
+            err.to_string().contains("txn-1") && err.to_string().contains("orphan-o"),
+            "expected posted-elsewhere refusal, got: {err}"
+        );
+        let gl = fs::read_to_string(&gl_path).unwrap();
+        assert!(
+            gl.contains(&format!("id: {gl_n}")),
+            "real block N must survive the refused unpost"
+        );
+        let entries = account_journal::read_journal_at_path(&path).unwrap();
+        assert_eq!(
+            entries[0].posted.as_deref(),
+            Some(format!("general.journal:{gl_n}").as_str()),
+            "txn-1 must remain posted to N"
+        );
+        let resolutions = crate::automation::list_resolutions(&root).unwrap();
+        assert!(
+            resolutions.is_empty(),
+            "no negative memory should be recorded on a refused unpost"
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -3189,7 +3268,8 @@ mod tests {
         )
         .unwrap();
         let before = head_commit_count(&root);
-        unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, "test").unwrap();
+        unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, None, "test")
+            .unwrap();
         assert!(
             head_commit_count(&root) > before,
             "unpost must create a git commit"
@@ -3220,7 +3300,8 @@ mod tests {
         );
 
         // retire commits (unpost first so the entry is retirable).
-        unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, "test").unwrap();
+        unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, None, "test")
+            .unwrap();
         let before = head_commit_count(&root);
         retire_login_account_entry(&root, "chase", "checking", "txn-1", "test reason", "test")
             .unwrap();
@@ -3379,8 +3460,9 @@ mod tests {
         )
         .unwrap();
 
-        let err = unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, "test")
-            .unwrap_err();
+        let err =
+            unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, None, "test")
+                .unwrap_err();
         assert!(
             err.to_string().contains("protected"),
             "unpost of a reconciled GL txn must be blocked, got: {err}"

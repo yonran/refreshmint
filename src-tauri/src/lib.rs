@@ -2015,6 +2015,7 @@ fn unpost_login_account_entry(
         &label,
         &entry_id,
         posting_index,
+        None,
         "gui",
     )
     .map_err(|err| err.to_string())
