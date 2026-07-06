@@ -1050,10 +1050,10 @@ function App() {
                         Open...
                     </button>
                 </div>
-                {ledger === null && createStatus !== null ? (
+                {createStatus !== null ? (
                     <p className="status">{createStatus}</p>
                 ) : null}
-                {ledger === null && openStatus !== null ? (
+                {openStatus !== null ? (
                     <p className="status">{openStatus}</p>
                 ) : null}
             </header>
