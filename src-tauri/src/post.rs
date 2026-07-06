@@ -589,6 +589,9 @@ pub fn create_not_transfer_link_for_gl_pair(
     txn_id_1: &str,
     txn_id_2: &str,
 ) -> Result<crate::automation::Resolution, Box<dyn std::error::Error + Send + Sync>> {
+    if txn_id_1 == txn_id_2 {
+        return Err("cannot record not-a-transfer for a transaction with itself".into());
+    }
     let mut sides = Vec::new();
     for txn_id in [txn_id_1, txn_id_2] {
         let block = find_gl_block(ledger_dir, txn_id)?
@@ -609,6 +612,16 @@ pub fn create_not_transfer_link_for_gl_pair(
     let [a, b] = sides.as_slice() else {
         unreachable!("two txn ids produce two sides");
     };
+    // Two distinct GL txns whose first source tags resolve to the SAME account
+    // entry (e.g. an orphaned duplicate block) would block the entry against
+    // itself. Refuse.
+    if a == b {
+        return Err(format!(
+            "cannot record not-a-transfer; both transactions resolve to the same source entry {}/{}:{}",
+            a.0, a.1, a.2
+        )
+        .into());
+    }
     Ok(crate::automation::create_not_transfer_link(
         ledger_dir,
         (&a.0, &a.1, &a.2),
@@ -3284,6 +3297,38 @@ mod tests {
         assert!(
             err.to_string().contains("source"),
             "expected a no-source-tag error, got: {err}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn not_transfer_link_for_gl_pair_rejects_self_id() {
+        let root = temp_dir("ntl-gl-self-id");
+        let (gl1, _gl2) = post_pair_for_merge(&root, "-100.00", "100.00");
+        let err = create_not_transfer_link_for_gl_pair(&root, &gl1, &gl1).unwrap_err();
+        assert!(
+            err.to_string().contains("itself"),
+            "expected a self-pair refusal, got: {err}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn not_transfer_link_for_gl_pair_rejects_same_source_entry() {
+        // Two DIFFERENT GL txn ids whose first source tags resolve to the SAME
+        // account entry: recording them as not-a-transfer would block the entry
+        // against itself. Refuse.
+        let root = temp_dir("ntl-gl-same-source");
+        let (gl1, _gl2) = post_pair_for_merge(&root, "-100.00", "100.00");
+        append_to_journal(
+            &root.join("general.journal"),
+            "2024-01-15  *Dup  ; id: dup-1\n    ; generated-by: refreshmint-post\n    ; source: logins/chase/accounts/checking:txn-1\n    Assets:Checking  -100.00 USD\n    Expenses:Unknown\n",
+        )
+        .unwrap();
+        let err = create_not_transfer_link_for_gl_pair(&root, &gl1, "dup-1").unwrap_err();
+        assert!(
+            err.to_string().contains("same source entry"),
+            "expected a same-source-entry refusal, got: {err}"
         );
         let _ = fs::remove_dir_all(&root);
     }
