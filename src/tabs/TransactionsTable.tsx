@@ -7,24 +7,20 @@ import {
     useState,
 } from 'react';
 import {
-    type AccountRow,
     type GlCategoryResult,
     type PostingRow,
     type TransactionRow,
     UNCATEGORIZED_GL_ACCOUNT,
     readAttachmentDataUrl,
 } from '../tauri-commands.ts';
-import {
-    checkAccountTypeChange,
-    getAccountSuggestions,
-    quoteHledgerValue,
-} from '../search-utils.ts';
+import { quoteHledgerValue } from '../search-utils.ts';
 import type { SimilarRecategorizeSeed } from '../types.ts';
 import {
     type AcceptAllEdit,
     buildAcceptAllEdits,
 } from '../categorize-utils.ts';
 import { formatScaled, formatTotals } from '../amount-utils.ts';
+import { AccountInput } from '../components/AccountInput.tsx';
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
 
@@ -127,122 +123,6 @@ function bookkeepingBadges(txn: TransactionRow): string[] {
     return badges;
 }
 
-export function AccountInput({
-    value,
-    onChange,
-    onKeyDown,
-    accounts,
-    oldAccount,
-    autoFocus,
-    placeholder = 'Account name…',
-}: {
-    value: string;
-    onChange: (value: string) => void;
-    onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
-    accounts: string[];
-    /** Old account(s) being replaced — used to filter suggestions and show type-change warning. */
-    oldAccount?: string | string[];
-    autoFocus?: boolean;
-    placeholder?: string;
-}) {
-    const [suggestions, setSuggestions] = useState<string[]>([]);
-    const [activeIndex, setActiveIndex] = useState(-1);
-
-    const warning =
-        value.trim() !== ''
-            ? checkAccountTypeChange(oldAccount ?? [], value.trim())
-            : null;
-
-    function computeSuggestions(draft: string) {
-        setSuggestions(getAccountSuggestions(draft, accounts, oldAccount));
-        setActiveIndex(-1);
-    }
-
-    function applyCompletion(sug: string) {
-        onChange(sug);
-        // Re-compute for the chosen value (e.g. "Expenses:" → show sub-accounts)
-        const next = getAccountSuggestions(sug, accounts, oldAccount);
-        setSuggestions(next);
-        setActiveIndex(-1);
-    }
-
-    // ArrowDown/Up navigate, Enter/Tab (with active item) select, Escape dismisses.
-    // Unhandled keys pass through to onKeyDown so the parent's Enter (commit)
-    // and Escape (cancel editing) still fire when no suggestion is active.
-    function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-        if (suggestions.length === 0) {
-            onKeyDown?.(e);
-            return;
-        }
-        if (e.key === 'ArrowDown') {
-            e.preventDefault();
-            setActiveIndex((i) => Math.min(i + 1, suggestions.length - 1));
-        } else if (e.key === 'ArrowUp') {
-            e.preventDefault();
-            setActiveIndex((i) => Math.max(i - 1, 0));
-        } else if ((e.key === 'Enter' || e.key === 'Tab') && activeIndex >= 0) {
-            e.preventDefault();
-            const sug = suggestions[activeIndex];
-            if (sug !== undefined) applyCompletion(sug);
-        } else if (e.key === 'Escape') {
-            // First Escape dismisses suggestions; second Escape reaches parent.
-            setSuggestions([]);
-            setActiveIndex(-1);
-        } else {
-            onKeyDown?.(e);
-        }
-    }
-
-    return (
-        <div className="account-input-wrap">
-            <input
-                type="text"
-                value={value}
-                placeholder={placeholder}
-                autoFocus={autoFocus}
-                onFocus={(e) => {
-                    e.target.select();
-                    computeSuggestions(e.target.value);
-                }}
-                onChange={(e) => {
-                    onChange(e.target.value);
-                    computeSuggestions(e.target.value);
-                }}
-                onKeyDown={handleKeyDown}
-                onBlur={() => {
-                    // Allow mousedown on a suggestion item to fire before blur
-                    // closes the list.
-                    setTimeout(() => {
-                        setSuggestions([]);
-                        setActiveIndex(-1);
-                    }, 150);
-                }}
-            />
-            {suggestions.length > 0 && (
-                <div className="account-suggestions" role="listbox">
-                    {suggestions.map((sug, i) => (
-                        <div
-                            key={sug}
-                            className={`ac-item${i === activeIndex ? ' active' : ''}`}
-                            role="option"
-                            aria-selected={i === activeIndex}
-                            onMouseDown={(e) => {
-                                e.preventDefault(); // keep input focus
-                                applyCompletion(sug);
-                            }}
-                        >
-                            {sug}
-                        </div>
-                    ))}
-                </div>
-            )}
-            {warning != null && warning !== '' && (
-                <div className="account-warning">{warning}</div>
-            )}
-        </div>
-    );
-}
-
 export function PostingsList({
     postings,
     hideAmounts = false,
@@ -263,64 +143,6 @@ export function PostingsList({
                 </div>
             ))}
         </div>
-    );
-}
-
-export function AccountsTable({
-    accounts,
-    onSelectAccount,
-}: {
-    accounts: AccountRow[];
-    onSelectAccount: (name: string) => void;
-}) {
-    return (
-        <table className="ledger-table">
-            <thead>
-                <tr>
-                    <th>Account</th>
-                    <th>Balance</th>
-                    <th>Extraction</th>
-                </tr>
-            </thead>
-            <tbody>
-                {accounts.length === 0 ? (
-                    <tr>
-                        <td colSpan={3} className="table-empty">
-                            No accounts found.
-                        </td>
-                    </tr>
-                ) : (
-                    accounts.map((account) => (
-                        <tr key={account.name}>
-                            <td>
-                                <button
-                                    className="link-button mono"
-                                    onClick={() => {
-                                        onSelectAccount(account.name);
-                                    }}
-                                >
-                                    {account.name}
-                                </button>
-                            </td>
-                            <td className="amount">
-                                {formatTotals(account.totals)}
-                            </td>
-                            <td>
-                                {account.unpostedCount > 0 ? (
-                                    <span className="secret-chip warning">
-                                        {account.unpostedCount} unposted
-                                    </span>
-                                ) : (
-                                    <span className="status-dim">
-                                        up to date
-                                    </span>
-                                )}
-                            </td>
-                        </tr>
-                    ))
-                )}
-            </tbody>
-        </table>
     );
 }
 

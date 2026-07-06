@@ -39,6 +39,7 @@ import {
     normalizeLoginConfig,
 } from '../types.ts';
 import { type ScrapeLogEntry } from '../scrapeLog.ts';
+import { AccountInput } from '../components/AccountInput.tsx';
 
 interface ScrapeTabProps {
     ledger: LedgerView | null;
@@ -1714,37 +1715,25 @@ export function ScrapeTab({
                                             </label>
                                             <label className="field">
                                                 <span>GL account</span>
-                                                <input
-                                                    type="text"
+                                                <AccountInput
                                                     value={
                                                         editingMappingGlAccountDraft
                                                     }
-                                                    placeholder="Assets:Bank:Checking (blank = ignored)"
-                                                    list="scrape-account-options"
-                                                    onChange={(event) => {
+                                                    onChange={(next) => {
                                                         onEditingMappingGlAccountDraftChange(
-                                                            event.target.value,
+                                                            next,
                                                         );
                                                         onLoginConfigStatusChange(
                                                             null,
                                                         );
                                                     }}
-                                                    disabled={
-                                                        isSavingLoginConfig
+                                                    accounts={
+                                                        scrapeAccountOptions
                                                     }
+                                                    placeholder="Assets:Bank:Checking (blank = ignored)"
                                                 />
                                             </label>
                                         </div>
-                                        <datalist id="scrape-account-options">
-                                            {scrapeAccountOptions.map(
-                                                (name) => (
-                                                    <option
-                                                        key={name}
-                                                        value={name}
-                                                    />
-                                                ),
-                                            )}
-                                        </datalist>
                                         <div className="pipeline-actions">
                                             <button
                                                 type="button"

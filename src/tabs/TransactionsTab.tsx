@@ -42,7 +42,8 @@ import {
     type TransactionEntryMode,
     type TransactionsTabSession,
 } from '../types.ts';
-import { AccountInput, TransactionsTable } from './TransactionsTable.tsx';
+import { TransactionsTable } from './TransactionsTable.tsx';
+import { AccountInput } from '../components/AccountInput.tsx';
 
 function joinQueryClauses(...clauses: string[]): string {
     return clauses

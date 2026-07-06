@@ -34,7 +34,6 @@ import {
     type CategoryResult,
     openLedger,
     runScrapeForLogin,
-    type AccountRow,
     type LedgerView,
     setLoginAccount,
     recoverLedgerConsistency,
@@ -43,7 +42,7 @@ import {
     repairOrphanedGlTxn,
     type ConsistencyReport,
 } from './tauri-commands.ts';
-import { formatTotals } from './amount-utils.ts';
+import { AccountsTable } from './components/AccountsTable.tsx';
 import { PipelineTab } from './tabs/PipelineTab.tsx';
 import { ReportsTab } from './tabs/ReportsTab.tsx';
 import { ScrapeTab } from './tabs/ScrapeTab.tsx';
@@ -1729,64 +1728,6 @@ function App() {
                 </div>
             )}
         </div>
-    );
-}
-
-function AccountsTable({
-    accounts,
-    onSelectAccount,
-}: {
-    accounts: AccountRow[];
-    onSelectAccount: (name: string) => void;
-}) {
-    return (
-        <table className="ledger-table">
-            <thead>
-                <tr>
-                    <th>Account</th>
-                    <th>Balance</th>
-                    <th>Extraction</th>
-                </tr>
-            </thead>
-            <tbody>
-                {accounts.length === 0 ? (
-                    <tr>
-                        <td colSpan={3} className="table-empty">
-                            No accounts found.
-                        </td>
-                    </tr>
-                ) : (
-                    accounts.map((account) => (
-                        <tr key={account.name}>
-                            <td>
-                                <button
-                                    className="link-button mono"
-                                    onClick={() => {
-                                        onSelectAccount(account.name);
-                                    }}
-                                >
-                                    {account.name}
-                                </button>
-                            </td>
-                            <td className="amount">
-                                {formatTotals(account.totals)}
-                            </td>
-                            <td>
-                                {account.unpostedCount > 0 ? (
-                                    <span className="secret-chip warning">
-                                        {account.unpostedCount} unposted
-                                    </span>
-                                ) : (
-                                    <span className="status-dim">
-                                        up to date
-                                    </span>
-                                )}
-                            </td>
-                        </tr>
-                    ))
-                )}
-            </tbody>
-        </table>
     );
 }
 

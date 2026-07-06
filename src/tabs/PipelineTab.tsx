@@ -67,7 +67,7 @@ import {
     normalizeLoginConfig,
     suggestGlAccountName,
 } from '../types.ts';
-import { AccountInput } from './TransactionsTable.tsx';
+import { AccountInput } from '../components/AccountInput.tsx';
 import { TRANSFER_CANCEL_EPSILON } from '../gl-transfer-utils.ts';
 
 interface PipelineTabProps {
