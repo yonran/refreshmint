@@ -1055,6 +1055,36 @@ export async function mergeGlTransfer(
 }
 
 /**
+ * Unmerge/unpost a generated GL transaction by GL txn id (Transactions
+ * "Unmerge transfer"). The backend resolves the block's source tags and clears
+ * every side's posted ref; unposting a 2-source transfer also records
+ * not-a-transfer negative memory. Mirrors Rust post::unpost_gl_transaction.
+ */
+export async function unpostGlTransaction(
+    ledger: string,
+    glTxnId: string,
+): Promise<void> {
+    return invoke('unpost_gl_transaction', { ledger, glTxnId });
+}
+
+/**
+ * Record not-a-transfer negative memory for two generated GL transactions
+ * (Transactions "Not a transfer"). Errors if either txn lacks a source tag.
+ * Mirrors Rust post::create_not_transfer_link_for_gl_pair.
+ */
+export async function createNotTransferLinkForGlPair(
+    ledger: string,
+    txnId1: string,
+    txnId2: string,
+): Promise<Resolution> {
+    return invoke('create_not_transfer_link_for_gl_pair', {
+        ledger,
+        txnId1,
+        txnId2,
+    });
+}
+
+/**
  * An account entry that claims to be posted to a GL transaction that no longer
  * exists. Mirrors `consistency::DanglingRef` in the backend.
  */

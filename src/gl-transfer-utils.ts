@@ -154,6 +154,26 @@ export function rankGlTransferCandidates(
         .map(({ t }) => t);
 }
 
+/**
+ * The fee residual left when linking `candidate` as `subject`'s transfer
+ * counterpart: `-(a1 + a2)` of their explicit posting amounts. `null` when the
+ * legs cancel (no fee prompt needed) or when either amount is missing or the
+ * commodities differ (the backend merge guard reports those). Drives the fee
+ * prompt in the Link Transfer modals; mirrors Rust
+ * post::transfer_fee_residual.
+ */
+export function glTransferResidual(
+    subject: TransactionRow,
+    candidate: TransactionRow,
+): { residual: number; commodity: string } | null {
+    const a = explicitPostingAmount(subject);
+    const b = explicitPostingAmount(candidate);
+    if (a === null || b === null || a.commodity !== b.commodity) return null;
+    const residual = -(a.value + b.value);
+    if (Math.abs(residual) < TRANSFER_CANCEL_EPSILON) return null;
+    return { residual, commodity: a.commodity };
+}
+
 export function filterTransactionsByBookkeepingState(
     transactions: TransactionRow[],
     filter: BookkeepingFilter,

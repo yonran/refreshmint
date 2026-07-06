@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
     filterGlTransferCandidates,
     filterTransactionsByBookkeepingState,
+    glTransferResidual,
     rankGlTransferCandidates,
 } from './gl-transfer-utils.ts';
 import type { TransactionRow } from './tauri-commands.ts';
@@ -293,5 +294,53 @@ describe('filterTransactionsByBookkeepingState', () => {
         expect(
             filterTransactionsByBookkeepingState([linked, settled], 'settled'),
         ).toEqual([settled]);
+    });
+});
+
+describe('glTransferResidual', () => {
+    function makeAmountTxn(id: string, amount: string): TransactionRow {
+        return makeTxn(id, {
+            postings: [
+                {
+                    account: 'Assets:Checking',
+                    amount,
+                    comment: '',
+                    totals: null,
+                },
+                {
+                    account: 'Expenses:Unknown',
+                    amount: null,
+                    comment: '',
+                    totals: null,
+                },
+            ],
+        });
+    }
+
+    it('returns the residual for non-cancelling legs', () => {
+        const result = glTransferResidual(
+            makeAmountTxn('a', '-100.00 USD'),
+            makeAmountTxn('b', '99.75 USD'),
+        );
+        expect(result?.commodity).toBe('USD');
+        expect(result?.residual).toBeCloseTo(0.25, 6);
+    });
+
+    it('returns null when the legs cancel', () => {
+        expect(
+            glTransferResidual(
+                makeAmountTxn('a', '-100.00 USD'),
+                makeAmountTxn('b', '100.00 USD'),
+            ),
+        ).toBeNull();
+    });
+
+    it('returns null across commodities', () => {
+        expect(
+            glTransferResidual(
+                makeAmountTxn('a', '-100.00 USD'),
+                makeAmountTxn('b', '99.75 EUR'),
+            ),
+        ).toBeNull();
     });
 });

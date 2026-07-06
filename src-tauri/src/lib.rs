@@ -188,6 +188,8 @@ pub fn run_with_context(
             recategorize_gl_transaction,
             recategorize_gl_transactions,
             merge_gl_transfer,
+            unpost_gl_transaction,
+            create_not_transfer_link_for_gl_pair,
             get_account_config,
             set_account_extension,
             list_logins,
@@ -2211,6 +2213,31 @@ fn merge_gl_transfer(
         "gui",
     )
     .map_err(|err| err.to_string())
+}
+
+/// Unmerge/unpost a generated GL transaction by GL txn id (Transactions tab
+/// "Unmerge transfer"). See post::unpost_gl_transaction.
+#[tauri::command]
+fn unpost_gl_transaction(ledger: String, gl_txn_id: String) -> Result<(), String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let gl_txn_id = require_non_empty_input("gl_txn_id", gl_txn_id)?;
+    post::unpost_gl_transaction(&target_dir, &gl_txn_id, "gui").map_err(|err| err.to_string())
+}
+
+/// Record not-a-transfer negative memory for two generated GL txns
+/// (Transactions tab "Not a transfer"). See
+/// post::create_not_transfer_link_for_gl_pair.
+#[tauri::command]
+fn create_not_transfer_link_for_gl_pair(
+    ledger: String,
+    txn_id_1: String,
+    txn_id_2: String,
+) -> Result<automation::Resolution, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    let txn_id_1 = require_non_empty_input("txn_id_1", txn_id_1)?;
+    let txn_id_2 = require_non_empty_input("txn_id_2", txn_id_2)?;
+    post::create_not_transfer_link_for_gl_pair(&target_dir, &txn_id_1, &txn_id_2)
+        .map_err(|err| err.to_string())
 }
 
 /// Scan the ledger for referential inconsistencies (dangling posted-refs and

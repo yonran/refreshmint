@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import {
     addTransaction,
     addTransactionText,
@@ -6,6 +7,7 @@ import {
     type AmountTotal,
     type GlCategoryResult,
     type LedgerView,
+    createNotTransferLinkForGlPair,
     createResolution,
     mergeGlTransfer,
     type NewTransactionInput,
@@ -15,6 +17,7 @@ import {
     recategorizeGlTransactions,
     suggestGlCategories,
     type TransactionRow,
+    unpostGlTransaction,
     validateTransaction,
     validateTransactionText,
 } from '../tauri-commands.ts';
@@ -28,6 +31,7 @@ import {
 import {
     filterGlTransferCandidates,
     filterTransactionsByBookkeepingState,
+    glTransferResidual,
     hasStagingPosting,
     rankGlTransferCandidates,
     type BookkeepingFilter,
@@ -349,6 +353,17 @@ export function TransactionsTab({
     const [glTransferModalSearch, setGlTransferModalSearch] = useState(
         session.glTransferModalSearch,
     );
+    // Fee prompt inside the Link Transfer modal: set when the picked candidate
+    // does not cancel the subject amount (see glTransferResidual). The merge is
+    // held until the user confirms a fee account.
+    const [glTransferFeePrompt, setGlTransferFeePrompt] = useState<{
+        candidateId: string;
+        residual: string;
+    } | null>(null);
+    const [glTransferFeeAccount, setGlTransferFeeAccount] =
+        useState('Expenses:Bank Fees');
+    // In-flight guard for unmerge / not-a-transfer / merge-with-fee actions.
+    const [transferActionBusy, setTransferActionBusy] = useState(false);
     const [recategorizeBulkConfirm, setRecategorizeBulkConfirm] = useState<{
         entries: RecategorizeSelectionEntry[];
         newAccount: string;
@@ -746,15 +761,64 @@ export function TransactionsTab({
         }
     }
 
-    async function handleMergeGlTransfer(txnId1: string, txnId2: string) {
+    async function handleMergeGlTransfer(
+        txnId1: string,
+        txnId2: string,
+        feeAccount?: string,
+    ) {
+        setBulkRecategorizeError(null);
+        setTransferActionBusy(true);
         try {
-            await mergeGlTransfer(ledgerPath, txnId1, txnId2);
+            await mergeGlTransfer(ledgerPath, txnId1, txnId2, feeAccount);
             onLedgerRefresh();
             // Both originals are consumed by the merge; the new transfer needs
             // no Unknown suggestion.
             dropGlCategorySuggestions([txnId1, txnId2]);
         } catch (error) {
             console.error('merge transfer failed:', error);
+            setBulkRecategorizeError(`Merge transfer failed: ${String(error)}`);
+        } finally {
+            setTransferActionBusy(false);
+        }
+    }
+
+    // Transactions "Unmerge transfer" context action: unpost a generated
+    // multi-source GL txn back to its account entries. The backend also records
+    // not-a-transfer negative memory (post::unpost_gl_transaction).
+    async function handleUnmergeTransfer(txnId: string) {
+        if (transferActionBusy) return;
+        const confirmed = await confirmDialog(
+            'Unmerge this transfer? Both source entries return to unposted, ' +
+                'and the pair is remembered as not-a-transfer.',
+            { title: 'Unmerge transfer', kind: 'warning' },
+        );
+        if (!confirmed) return;
+        setBulkRecategorizeError(null);
+        setTransferActionBusy(true);
+        try {
+            await unpostGlTransaction(ledgerPath, txnId);
+            onLedgerRefresh();
+            dropGlCategorySuggestions([txnId]);
+        } catch (error) {
+            setBulkRecategorizeError(`Unmerge failed: ${String(error)}`);
+        } finally {
+            setTransferActionBusy(false);
+        }
+    }
+
+    // Transactions "Not a transfer" context action: record negative memory for
+    // (txn, suggested counterpart) and refresh suggestions so the chip drops.
+    async function handleNotATransfer(txnId1: string, txnId2: string) {
+        if (transferActionBusy) return;
+        setBulkRecategorizeError(null);
+        setTransferActionBusy(true);
+        try {
+            await createNotTransferLinkForGlPair(ledgerPath, txnId1, txnId2);
+            setGlCategorySuggestions(await suggestGlCategories(ledgerPath));
+        } catch (error) {
+            setBulkRecategorizeError(`Not-a-transfer failed: ${String(error)}`);
+        } finally {
+            setTransferActionBusy(false);
         }
     }
 
@@ -2159,7 +2223,14 @@ export function TransactionsTab({
                 }}
                 onOpenLinkTransfer={(txnId) => {
                     setGlTransferModalSearch('');
+                    setGlTransferFeePrompt(null);
                     setGlTransferModalTxnId(txnId);
+                }}
+                onUnmergeTransfer={(txnId) => {
+                    void handleUnmergeTransfer(txnId);
+                }}
+                onNotATransfer={(txnId1, txnId2) => {
+                    void handleNotATransfer(txnId1, txnId2);
                 }}
                 onBulkRecategorize={(entries, newAccount, createRule) => {
                     void handleBulkRecategorize(
@@ -2230,6 +2301,55 @@ export function TransactionsTab({
                                         );
                                     }}
                                 />
+                                {glTransferFeePrompt !== null && (
+                                    <div className="status">
+                                        <div>
+                                            The selected transaction does not
+                                            cancel this amount; the difference
+                                            of {glTransferFeePrompt.residual}{' '}
+                                            will post to the fee account below.
+                                        </div>
+                                        <AccountInput
+                                            value={glTransferFeeAccount}
+                                            onChange={setGlTransferFeeAccount}
+                                            accounts={ledger.accounts.map(
+                                                (a) => a.name,
+                                            )}
+                                            placeholder="Fee account…"
+                                        />
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            disabled={
+                                                transferActionBusy ||
+                                                glTransferFeeAccount.trim() ===
+                                                    ''
+                                            }
+                                            onClick={() => {
+                                                const candidateId =
+                                                    glTransferFeePrompt.candidateId;
+                                                setGlTransferFeePrompt(null);
+                                                setGlTransferModalTxnId(null);
+                                                void handleMergeGlTransfer(
+                                                    modalTxnId,
+                                                    candidateId,
+                                                    glTransferFeeAccount.trim(),
+                                                );
+                                            }}
+                                        >
+                                            Link with fee
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                setGlTransferFeePrompt(null);
+                                            }}
+                                        >
+                                            Cancel
+                                        </button>
+                                    </div>
+                                )}
                                 <div className="table-wrap">
                                     <table className="ledger-table">
                                         <thead>
@@ -2267,7 +2387,33 @@ export function TransactionsTab({
                                                             <button
                                                                 type="button"
                                                                 className="ghost-button"
+                                                                disabled={
+                                                                    transferActionBusy
+                                                                }
                                                                 onClick={() => {
+                                                                    // Non-cancelling pair → prompt for a
+                                                                    // fee account instead of merging
+                                                                    // (backend would refuse anyway).
+                                                                    const residual =
+                                                                        subject
+                                                                            ? glTransferResidual(
+                                                                                  subject,
+                                                                                  t,
+                                                                              )
+                                                                            : null;
+                                                                    if (
+                                                                        residual !==
+                                                                        null
+                                                                    ) {
+                                                                        setGlTransferFeePrompt(
+                                                                            {
+                                                                                candidateId:
+                                                                                    t.id,
+                                                                                residual: `${residual.residual.toFixed(2)} ${residual.commodity}`,
+                                                                            },
+                                                                        );
+                                                                        return;
+                                                                    }
                                                                     void handleMergeGlTransfer(
                                                                         modalTxnId,
                                                                         t.id,

@@ -380,6 +380,8 @@ export function TransactionsTable({
     onRecategorize,
     onMergeTransfer,
     onOpenLinkTransfer,
+    onUnmergeTransfer,
+    onNotATransfer,
     onBulkRecategorize,
     onAcceptSuggestions,
     acceptSuggestionsBusy = false,
@@ -402,6 +404,12 @@ export function TransactionsTable({
     ) => void;
     onMergeTransfer?: (txnId1: string, txnId2: string) => void;
     onOpenLinkTransfer?: (txnId: string) => void;
+    // Unpost a generated multi-source (transfer) txn back to its account
+    // entries (context menu "Unmerge transfer").
+    onUnmergeTransfer?: (txnId: string) => void;
+    // Record not-a-transfer negative memory for (txn, its transferMatch)
+    // (context menu "Not a transfer").
+    onNotATransfer?: (txnId1: string, txnId2: string) => void;
     onBulkRecategorize?: (
         entries: Array<{
             txnId: string;
@@ -1048,6 +1056,51 @@ export function TransactionsTable({
                                                                         action: () => {
                                                                             onOpenLinkTransfer(
                                                                                 txn.id,
+                                                                            );
+                                                                        },
+                                                                    },
+                                                                );
+                                                            }
+                                                            // A generated txn with 2+ source tags is a merged
+                                                            // transfer; offer server-side unmerge (see
+                                                            // post::unpost_gl_transaction).
+                                                            if (
+                                                                onUnmergeTransfer !==
+                                                                    undefined &&
+                                                                txn.bookkeeping
+                                                                    .generated &&
+                                                                (
+                                                                    txn.comment.match(
+                                                                        /; source:/g,
+                                                                    ) ?? []
+                                                                ).length >= 2
+                                                            ) {
+                                                                postingMenuItems.push(
+                                                                    {
+                                                                        label: 'Unmerge transfer',
+                                                                        action: () => {
+                                                                            onUnmergeTransfer(
+                                                                                txn.id,
+                                                                            );
+                                                                        },
+                                                                    },
+                                                                );
+                                                            }
+                                                            // Negative memory for a suggested (not yet merged)
+                                                            // transfer pair; drops the ↔ chip.
+                                                            if (
+                                                                onNotATransfer !==
+                                                                    undefined &&
+                                                                transferMatch !==
+                                                                    null
+                                                            ) {
+                                                                postingMenuItems.push(
+                                                                    {
+                                                                        label: 'Not a transfer',
+                                                                        action: () => {
+                                                                            onNotATransfer(
+                                                                                txn.id,
+                                                                                transferMatch.txnId,
                                                                             );
                                                                         },
                                                                     },

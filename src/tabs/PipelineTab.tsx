@@ -67,7 +67,7 @@ import {
     normalizeLoginConfig,
     suggestGlAccountName,
 } from '../types.ts';
-import { TransactionsTable } from './TransactionsTable.tsx';
+import { AccountInput, TransactionsTable } from './TransactionsTable.tsx';
 
 interface PipelineTabProps {
     ledger: LedgerView;
@@ -240,6 +240,15 @@ export function PipelineTab({
     const [transferModalSearch, setTransferModalSearch] = useState(
         session.transferModalSearch,
     );
+    // Fee prompt inside the Link Transfer modal: set when the picked candidate
+    // does not cancel the subject amount. The post is held until the user
+    // confirms a fee account. Mirrors the Transactions modal fee prompt.
+    const [transferModalFeePrompt, setTransferModalFeePrompt] = useState<{
+        candidate: UnpostedTransferResult;
+        residual: string;
+    } | null>(null);
+    const [transferModalFeeAccount, setTransferModalFeeAccount] =
+        useState('Expenses:Bank Fees');
 
     const suggestRequestId = useRef(0);
     const hasSeenSelectedLoginAccountRef = useRef(false);
@@ -1577,6 +1586,7 @@ export function PipelineTab({
         const { loginName, label } = selectedLoginAccount;
         setTransferModalEntryId(entryId);
         setTransferModalSearch('');
+        setTransferModalFeePrompt(null);
         setIsLoadingTransferModal(true);
         try {
             const results = await getUnpostedEntriesForTransfer(
@@ -1596,11 +1606,35 @@ export function PipelineTab({
         }
     }
 
-    async function handleLinkTransferFromModal(other: UnpostedTransferResult) {
+    /**
+     * The fee residual `-(a1+a2)` between the modal's subject entry and a
+     * candidate, or null when the amounts cancel / are unparseable. Amounts are
+     * plain quantities (no commodity); the backend guards commodity mismatches.
+     */
+    function transferModalResidual(
+        candidate: UnpostedTransferResult,
+    ): string | null {
+        const subject = accountJournalEntries.find(
+            (e) => e.id === transferModalEntryId,
+        );
+        const a = Number(subject?.amount ?? NaN);
+        const b = Number(candidate.entry.amount ?? NaN);
+        if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+        const residual = -(a + b);
+        // Mirrors the Rust cancel epsilon (post::TRANSFER_CANCEL_EPSILON).
+        if (Math.abs(residual) < 0.005) return null;
+        return residual.toFixed(2);
+    }
+
+    async function handleLinkTransferFromModal(
+        other: UnpostedTransferResult,
+        feeAccount?: string,
+    ) {
         if (!selectedLoginAccount || transferModalEntryId === null) return;
         const { loginName, label } = selectedLoginAccount;
         setBusyPostEntryId(transferModalEntryId);
         setTransferModalEntryId(null);
+        setTransferModalFeePrompt(null);
         try {
             await createTransferLinkResolution(
                 ledgerPath,
@@ -1623,6 +1657,7 @@ export function PipelineTab({
                 other.loginName,
                 other.label,
                 other.entry.id,
+                feeAccount,
             );
             await refreshPipelineLoginAccountData();
             setPipelineStatus(
@@ -1630,6 +1665,50 @@ export function PipelineTab({
             );
         } catch (error) {
             setPipelineStatus(`Transfer post failed: ${String(error)}`);
+        } finally {
+            setBusyPostEntryId(null);
+        }
+    }
+
+    /**
+     * "Not a transfer" for an entry whose suggestion has a transferMatch:
+     * record NotTransferLink negative memory for the pair (the matchers stop
+     * proposing it; see automation::TransferPolicy) and refresh suggestions.
+     */
+    async function handleNotATransfer(
+        entryId: string,
+        transferMatch: { accountLocator: string; entryId: string },
+    ) {
+        if (!selectedLoginAccount) return;
+        const { loginName, label } = selectedLoginAccount;
+        const parts = transferMatch.accountLocator.split('/');
+        const otherLogin = parts[1] ?? '';
+        const otherLabel = parts[3] ?? '';
+        if (!otherLogin || !otherLabel) {
+            setPipelineStatus(
+                `Not-a-transfer: could not parse locator: ${transferMatch.accountLocator}`,
+            );
+            return;
+        }
+        setBusyPostEntryId(entryId);
+        try {
+            await createResolution(ledgerPath, {
+                kind: 'not-transfer-link',
+                subjectRefs: [
+                    loginEntryRef(loginName, label, entryId),
+                    loginEntryRef(
+                        otherLogin,
+                        otherLabel,
+                        transferMatch.entryId,
+                    ),
+                ],
+                parts: [],
+                notes: 'Marked not-a-transfer from Pipeline',
+            });
+            await refreshPipelineLoginAccountData();
+            setPipelineStatus(`Marked ${entryId} as not a transfer.`);
+        } catch (error) {
+            setPipelineStatus(`Not-a-transfer failed: ${String(error)}`);
         } finally {
             setBusyPostEntryId(null);
         }
@@ -2887,6 +2966,27 @@ export function PipelineTab({
                                                                                         : 'Link Transfer'}
                                                                                 </button>
                                                                             )}
+                                                                            {transferMatch !==
+                                                                                null && (
+                                                                                <button
+                                                                                    type="button"
+                                                                                    className="ghost-button"
+                                                                                    disabled={
+                                                                                        isBusy
+                                                                                    }
+                                                                                    title="Remember this pair is NOT a transfer (stops auto-matching)"
+                                                                                    onClick={() => {
+                                                                                        void handleNotATransfer(
+                                                                                            entry.id,
+                                                                                            transferMatch,
+                                                                                        );
+                                                                                    }}
+                                                                                >
+                                                                                    Not
+                                                                                    a
+                                                                                    transfer
+                                                                                </button>
+                                                                            )}
                                                                             <button
                                                                                 type="button"
                                                                                 className="ghost-button"
@@ -3004,6 +3104,59 @@ export function PipelineTab({
                                                 );
                                             }}
                                         />
+                                        {transferModalFeePrompt !== null && (
+                                            <div className="status">
+                                                <div>
+                                                    The selected entry does not
+                                                    cancel this amount; the
+                                                    difference of{' '}
+                                                    {
+                                                        transferModalFeePrompt.residual
+                                                    }{' '}
+                                                    will post to the fee account
+                                                    below.
+                                                </div>
+                                                <AccountInput
+                                                    value={
+                                                        transferModalFeeAccount
+                                                    }
+                                                    onChange={
+                                                        setTransferModalFeeAccount
+                                                    }
+                                                    accounts={ledger.accounts.map(
+                                                        (a) => a.name,
+                                                    )}
+                                                    placeholder="Fee account…"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    className="ghost-button"
+                                                    disabled={
+                                                        transferModalFeeAccount.trim() ===
+                                                        ''
+                                                    }
+                                                    onClick={() => {
+                                                        void handleLinkTransferFromModal(
+                                                            transferModalFeePrompt.candidate,
+                                                            transferModalFeeAccount.trim(),
+                                                        );
+                                                    }}
+                                                >
+                                                    Link with fee
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="ghost-button"
+                                                    onClick={() => {
+                                                        setTransferModalFeePrompt(
+                                                            null,
+                                                        );
+                                                    }}
+                                                >
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                        )}
                                         {isLoadingTransferModal ? (
                                             <p className="status">
                                                 Loading entries...
@@ -3079,6 +3232,26 @@ export function PipelineTab({
                                                                                 type="button"
                                                                                 className="primary-button"
                                                                                 onClick={() => {
+                                                                                    // Non-cancelling pair →
+                                                                                    // prompt for a fee
+                                                                                    // account first.
+                                                                                    const residual =
+                                                                                        transferModalResidual(
+                                                                                            r,
+                                                                                        );
+                                                                                    if (
+                                                                                        residual !==
+                                                                                        null
+                                                                                    ) {
+                                                                                        setTransferModalFeePrompt(
+                                                                                            {
+                                                                                                candidate:
+                                                                                                    r,
+                                                                                                residual,
+                                                                                            },
+                                                                                        );
+                                                                                        return;
+                                                                                    }
                                                                                     void handleLinkTransferFromModal(
                                                                                         r,
                                                                                     );

@@ -531,6 +531,67 @@ pub fn unpost_login_account_entry(
     Ok(())
 }
 
+/// Unpost a generated GL transaction by its GL txn id (server-side identity
+/// resolution for the Transactions tab "Unmerge transfer" action): parse the
+/// block's FIRST `; source:` tag into (login, label, entry_id) and delegate to
+/// [`unpost_login_account_entry`], which clears every side's `posted` ref and,
+/// for a 2-source transfer, records the NotTransferLink negative memory.
+pub fn unpost_gl_transaction(
+    ledger_dir: &Path,
+    gl_txn_id: &str,
+    lock_owner: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let block = find_gl_block(ledger_dir, gl_txn_id)?
+        .ok_or_else(|| format!("GL transaction not found: {gl_txn_id}"))?;
+    let (locator, entry_id) = parse_sources_from_block(&block)
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            format!("GL transaction {gl_txn_id} has no source tag; cannot unpost by GL id")
+        })?;
+    let (login_name, label) = locator_to_login_label(&locator)
+        .ok_or_else(|| format!("GL transaction {gl_txn_id} has a non-login source: {locator}"))?;
+    unpost_login_account_entry(ledger_dir, login_name, label, &entry_id, None, lock_owner)
+}
+
+/// Record NotTransferLink negative memory for a pair of generated GL txns
+/// (the Transactions tab "Not a transfer" action): parse BOTH txns' first
+/// `; source:` tag into source entries and create the resolution on that pair —
+/// GL txn ids are not durable across merges/unposts, source entries are. Errors
+/// when either txn lacks a source tag (manual GL txns can't carry negative
+/// memory; documented limitation).
+pub fn create_not_transfer_link_for_gl_pair(
+    ledger_dir: &Path,
+    txn_id_1: &str,
+    txn_id_2: &str,
+) -> Result<crate::automation::Resolution, Box<dyn std::error::Error + Send + Sync>> {
+    let mut sides = Vec::new();
+    for txn_id in [txn_id_1, txn_id_2] {
+        let block = find_gl_block(ledger_dir, txn_id)?
+            .ok_or_else(|| format!("GL transaction not found: {txn_id}"))?;
+        let (locator, entry_id) = parse_sources_from_block(&block)
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                format!(
+                    "GL transaction {txn_id} has no source tag; cannot record not-a-transfer for a manual transaction"
+                )
+            })?;
+        let (login_name, label) = locator_to_login_label(&locator)
+            .map(|(login, label)| (login.to_string(), label.to_string()))
+            .ok_or_else(|| format!("GL transaction {txn_id} has a non-login source: {locator}"))?;
+        sides.push((login_name, label, entry_id));
+    }
+    let [a, b] = sides.as_slice() else {
+        unreachable!("two txn ids produce two sides");
+    };
+    Ok(crate::automation::create_not_transfer_link(
+        ledger_dir,
+        (&a.0, &a.1, &a.2),
+        (&b.0, &b.1, &b.2),
+    )?)
+}
+
 /// Repair a dangling `posted:` ref: an account entry claims it is posted to a GL
 /// transaction that no longer exists (see [crate::consistency]). Clears only the
 /// account-side ref so the entry shows as unposted again and can be re-posted;
@@ -2958,6 +3019,110 @@ mod tests {
         assert!(
             !gl.contains(&format!("id: {merged}")),
             "the merged block should be removed"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unpost_gl_transaction_unmerges_transfer_by_gl_id() {
+        // GL-side unmerge: resolve the txn's first source tag server-side and
+        // route through unpost_login_account_entry (clears all sides and records
+        // the NotTransferLink negative memory).
+        let root = temp_dir("unpost-gl-txn");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let path1 = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &path1,
+            &[make_entry("txn-1", "2024-01-15", "Transfer out", "-100.00")],
+        )
+        .unwrap();
+        let path2 = account_journal::login_account_journal_path(&root, "boa", "savings");
+        account_journal::write_journal_at_path(
+            &path2,
+            &[make_entry("txn-2", "2024-01-15", "Transfer in", "100.00")],
+        )
+        .unwrap();
+        let gl_id = post_login_account_transfer(
+            &root, "chase", "checking", "txn-1", "boa", "savings", "txn-2", None, "test",
+        )
+        .unwrap();
+
+        unpost_gl_transaction(&root, &gl_id, "test").unwrap();
+
+        let entries1 = account_journal::read_journal_at_path(&path1).unwrap();
+        assert!(entries1[0].posted.is_none(), "txn-1 ref should be cleared");
+        let entries2 = account_journal::read_journal_at_path(&path2).unwrap();
+        assert!(entries2[0].posted.is_none(), "txn-2 ref should be cleared");
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(!gl.contains(&format!("id: {gl_id}")), "block removed");
+        // Negative memory recorded by the underlying unpost.
+        let resolutions = crate::automation::list_resolutions(&root).unwrap();
+        assert!(
+            resolutions.iter().any(|r| {
+                r.kind == crate::automation::ResolutionKind::NotTransferLink
+                    && r.status == crate::automation::ResolutionStatus::Active
+            }),
+            "unmerge should record a NotTransferLink"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unpost_gl_transaction_errors_without_source_tag() {
+        let root = temp_dir("unpost-gl-no-source");
+        fs::write(
+            root.join("general.journal"),
+            "2024-01-15 Manual  ; id: manual-1\n    Assets:A  1 USD\n    Income:B\n",
+        )
+        .unwrap();
+        let err = unpost_gl_transaction(&root, "manual-1", "test").unwrap_err();
+        assert!(
+            err.to_string().contains("source"),
+            "expected a no-source-tag error, got: {err}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn not_transfer_link_for_gl_pair_creates_resolution() {
+        let root = temp_dir("ntl-gl-pair");
+        let (gl1, gl2) = post_pair_for_merge(&root, "-100.00", "100.00");
+
+        let resolution = create_not_transfer_link_for_gl_pair(&root, &gl1, &gl2).unwrap();
+        assert_eq!(
+            resolution.kind,
+            crate::automation::ResolutionKind::NotTransferLink
+        );
+        assert_eq!(
+            resolution.status,
+            crate::automation::ResolutionStatus::Active
+        );
+        assert_eq!(resolution.subject_refs.len(), 2);
+        // The subjects are the SOURCE entries (survive merges/unposts), not the
+        // GL txn ids.
+        assert!(resolution
+            .subject_refs
+            .iter()
+            .all(|r| r.entry_id.as_deref() == Some("txn-1")
+                || r.entry_id.as_deref() == Some("txn-2")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn not_transfer_link_for_gl_pair_errors_without_source_tag() {
+        let root = temp_dir("ntl-gl-pair-no-source");
+        let (gl1, _) = post_pair_for_merge(&root, "-100.00", "100.00");
+        // Append a manual txn with no source tag.
+        append_to_journal(
+            &root.join("general.journal"),
+            "2024-01-15 Manual  ; id: manual-1\n    Assets:A  1 USD\n    Income:B\n",
+        )
+        .unwrap();
+
+        let err = create_not_transfer_link_for_gl_pair(&root, &gl1, "manual-1").unwrap_err();
+        assert!(
+            err.to_string().contains("source"),
+            "expected a no-source-tag error, got: {err}"
         );
         let _ = fs::remove_dir_all(&root);
     }
