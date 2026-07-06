@@ -9,6 +9,7 @@ export type ActiveTab =
     | 'bookkeeping'
     | 'transactions'
     | 'scrape'
+    | 'settings'
     | 'pipeline'
     | 'reports'
     | 'preferences';
@@ -77,6 +78,7 @@ export async function getLastActiveTab(): Promise<ActiveTab | null> {
         value === 'bookkeeping' ||
         value === 'transactions' ||
         value === 'scrape' ||
+        value === 'settings' ||
         value === 'pipeline' ||
         value === 'reports' ||
         value === 'preferences'

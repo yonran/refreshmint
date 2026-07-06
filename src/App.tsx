@@ -46,6 +46,7 @@ import { AccountsTable } from './components/AccountsTable.tsx';
 import { PipelineTab } from './tabs/PipelineTab.tsx';
 import { ReportsTab } from './tabs/ReportsTab.tsx';
 import { ScrapeTab } from './tabs/ScrapeTab.tsx';
+import { SettingsTab } from './tabs/SettingsTab.tsx';
 import { BookkeepingTab } from './tabs/BookkeepingTab.tsx';
 import { TransactionsTab } from './tabs/TransactionsTab.tsx';
 import {
@@ -734,6 +735,7 @@ function App() {
             activeTab === 'bookkeeping' ||
             activeTab === 'transactions' ||
             activeTab === 'scrape' ||
+            activeTab === 'settings' ||
             activeTab === 'pipeline' ||
             activeTab === 'reports' ||
             activeTab === 'preferences'
@@ -1272,6 +1274,17 @@ function App() {
                         >
                             Scraping
                         </button>
+                        <button
+                            className={
+                                activeTab === 'settings' ? 'tab active' : 'tab'
+                            }
+                            onClick={() => {
+                                setActiveTab('settings');
+                            }}
+                            type="button"
+                        >
+                            Settings
+                        </button>
                     </div>
 
                     {autoScrapeActive !== null && (
@@ -1581,6 +1594,14 @@ function App() {
                                 </label>
                             </section>
                         </div>
+                    ) : activeTab === 'settings' ? (
+                        <SettingsTab
+                            ledger={ledger}
+                            selectedLoginName={selectedLoginName}
+                            onLedgerRefresh={handleLedgerRefresh}
+                            onSecretPrompt={promptSecretDecision}
+                            headlessScrape={headlessScrape}
+                        />
                     ) : (
                         <ScrapeTab
                             ledger={ledger}
@@ -1606,8 +1627,6 @@ function App() {
                             isSavingLoginConfig={isSavingLoginConfig}
                             onIsSavingLoginConfigChange={setIsSavingLoginConfig}
                             onLoginConfigChanged={requestLoginConfigReload}
-                            onLedgerRefresh={handleLedgerRefresh}
-                            onSecretPrompt={promptSecretDecision}
                             onIgnoreLoginAccountMapping={
                                 handleIgnoreLoginAccountMapping
                             }
