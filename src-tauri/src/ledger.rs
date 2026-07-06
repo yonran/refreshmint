@@ -8,9 +8,22 @@ pub(crate) const GIT_USER_NAME: &str = "Refreshmint";
 pub(crate) const GIT_USER_EMAIL: &str = "refreshmint@noreply.example.com";
 pub(crate) const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
+// On-disk format of refreshmint.json (documented in docs/bookkeeping-state-model.md).
+// camelCase field names; new fields are optional so pre-existing files parse and
+// omitted when unset so new ledgers' files stay minimal.
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct RefreshmintConfig {
     pub(crate) version: String,
+    /// Transfer matching date window in days (±), default 3. Consumed by
+    /// `categorize::TransferSettings`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transfer_date_window_days: Option<u32>,
+    /// Additional case-insensitive substring patterns for
+    /// `transfer_detector::is_probable_transfer_with_extra`, default empty.
+    /// Consumed by `categorize::TransferSettings`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) extra_transfer_patterns: Vec<String>,
 }
 
 pub fn default_ledger_dir_from_documents(documents_dir: PathBuf) -> PathBuf {
@@ -151,6 +164,8 @@ fn write_refreshmint_json(dir: &Path) -> io::Result<()> {
     let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
     let config = RefreshmintConfig {
         version: crate::version::APP_VERSION.to_string(),
+        transfer_date_window_days: None,
+        extra_transfer_patterns: Vec::new(),
     };
     serde_json::to_writer(&mut file, &config).map_err(io::Error::other)?;
     file.write_all(b"\n")?;

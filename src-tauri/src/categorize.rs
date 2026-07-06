@@ -94,6 +94,48 @@ pub struct GlTransferMatch {
 /// Class probability threshold below which the classifier abstains.
 const CONFIDENCE_THRESHOLD: f64 = 0.5;
 
+/// Default transfer matching date window (± days) when refreshmint.json does
+/// not set `transferDateWindowDays`.
+const DEFAULT_TRANSFER_DATE_WINDOW_DAYS: i64 = 3;
+
+/// Ledger-configurable transfer matching settings, loaded from refreshmint.json
+/// (`ledger::RefreshmintConfig`: `transferDateWindowDays`,
+/// `extraTransferPatterns`). Threaded into both matchers by
+/// suggest_categories / suggest_gl_categories.
+pub struct TransferSettings {
+    /// Date window (± days) for opposite-amount matching (default 3).
+    pub date_window_days: i64,
+    /// Additional case-insensitive substring patterns for the
+    /// `is_probable_transfer` gate (default empty).
+    pub extra_patterns: Vec<String>,
+}
+
+impl Default for TransferSettings {
+    fn default() -> Self {
+        Self {
+            date_window_days: DEFAULT_TRANSFER_DATE_WINDOW_DAYS,
+            extra_patterns: Vec::new(),
+        }
+    }
+}
+
+impl TransferSettings {
+    /// Load from the ledger's refreshmint.json; a missing/unreadable file (or
+    /// unset fields) yields the defaults.
+    fn from_ledger(ledger_dir: &Path) -> Self {
+        match crate::ledger::read_refreshmint_config(ledger_dir) {
+            Ok(config) => Self {
+                date_window_days: config
+                    .transfer_date_window_days
+                    .map(i64::from)
+                    .unwrap_or(DEFAULT_TRANSFER_DATE_WINDOW_DAYS),
+                extra_patterns: config.extra_transfer_patterns,
+            },
+            Err(_) => Self::default(),
+        }
+    }
+}
+
 /// Number of per-account training examples at which per-account weight = 1.0.
 const ACCOUNT_WARMUP_SIZE: f64 = 20.0;
 
@@ -149,6 +191,9 @@ pub fn suggest_categories(
     // candidates inside find_transfer_matches. See automation::TransferPolicy.
     let transfer_policy = crate::automation::TransferPolicy::from_resolutions(ledger_dir)?;
 
+    // Ledger-configured transfer window/patterns (refreshmint.json).
+    let transfer_settings = TransferSettings::from_ledger(ledger_dir);
+
     // Active category rules that apply to this login/account (global + scoped),
     // in newest-first match order. See automation::matching_rule_account.
     let rules =
@@ -168,6 +213,7 @@ pub fn suggest_categories(
             account_sample_count,
             &transfer_candidates,
             &transfer_policy,
+            &transfer_settings,
             &rules,
         );
         results.insert(entry.id.clone(), result);
@@ -214,6 +260,10 @@ pub fn suggest_gl_categories(
     // candidates inside find_gl_transfer_matches. See automation::TransferPolicy.
     let transfer_policy = crate::automation::TransferPolicy::from_resolutions(ledger_dir)?;
 
+    // Ledger-configured transfer window (refreshmint.json). The GL matcher has
+    // no description gate, so extra_patterns are unused here.
+    let transfer_settings = TransferSettings::from_ledger(ledger_dir);
+
     // Global category rules apply to GL txns; per-txn scoping is refined below
     // from the txn's `source` tag when present. See automation::matching_rule_account
     // and CategoryResult::rule_account (kept in sync).
@@ -230,9 +280,14 @@ pub fn suggest_gl_categories(
         };
 
         // Transfer detection has priority over ML suggestion.
-        let (transfer_match, near_miss_candidates) = unique_or_candidates(
-            find_gl_transfer_matches(txn, &txn_id, &transfer_candidates, &transfer_policy),
-        );
+        let (transfer_match, near_miss_candidates) =
+            unique_or_candidates(find_gl_transfer_matches(
+                txn,
+                &txn_id,
+                &transfer_candidates,
+                &transfer_policy,
+                &transfer_settings,
+            ));
 
         let suggested = if transfer_match.is_some() {
             None
@@ -422,6 +477,7 @@ fn find_gl_transfer_matches(
     txn_id: &str,
     candidates: &[GlTransferCandidate],
     policy: &crate::automation::TransferPolicy,
+    settings: &TransferSettings,
 ) -> Vec<GlTransferMatch> {
     // Get this transaction's explicit posting amount.
     let Some(posting) = txn
@@ -452,8 +508,8 @@ fn find_gl_transfer_matches(
             (c.txn_id != txn_id
                 && c.commodity == amount.acommodity
                 && !c.amount_f64.is_nan()
-                && (amount_f64 + c.amount_f64).abs() < 0.005
-                && day_distance <= 3
+                && (amount_f64 + c.amount_f64).abs() < crate::post::TRANSFER_CANCEL_EPSILON
+                && day_distance <= settings.date_window_days
                 // A candidate from the SAME login account is never a transfer leg
                 // (mirrors the account-level cross-account rule: refund/charge
                 // pairs must not collapse into self-transfers). Candidates without
@@ -735,6 +791,7 @@ fn find_transfer_matches(
     subject_label: &str,
     candidates: &[TransferCandidate],
     policy: &crate::automation::TransferPolicy,
+    settings: &TransferSettings,
 ) -> Vec<TransferMatch> {
     let Some(first_posting) = entry.postings.first() else {
         return Vec::new();
@@ -761,8 +818,8 @@ fn find_transfer_matches(
             let day_distance = parse_date(&c.date).map(|cd| (entry_date - cd).num_days().abs())?;
             (c.commodity == amt.commodity
                 && !c.amount_f64.is_nan()
-                && (entry_amount + c.amount_f64).abs() < 0.005
-                && day_distance <= 3
+                && (entry_amount + c.amount_f64).abs() < crate::post::TRANSFER_CANCEL_EPSILON
+                && day_distance <= settings.date_window_days
                 && !candidate_is_blocked(policy, &subject, &c.locator, &c.entry_id))
             .then_some((day_distance, c))
         })
@@ -873,6 +930,7 @@ fn process_entry(
     account_sample_count: usize,
     transfer_candidates: &[TransferCandidate],
     transfer_policy: &crate::automation::TransferPolicy,
+    transfer_settings: &TransferSettings,
     rules: &[crate::automation::Resolution],
 ) -> CategoryResult {
     // --- Amount / status drift (posted entries only) ---
@@ -916,11 +974,13 @@ fn process_entry(
 
     // --- Transfer detection + category suggestion (unposted entries only) ---
     let (transfer_match, near_miss_candidates, suggested) = if entry.posted.is_none() {
-        let is_probable_transfer = transfer_detector::is_probable_transfer(&entry.description)
-            || entry
-                .tags
-                .iter()
-                .any(|(k, v)| k == "isTransfer" && v == "true");
+        let is_probable_transfer = transfer_detector::is_probable_transfer_with_extra(
+            &entry.description,
+            &transfer_settings.extra_patterns,
+        ) || entry
+            .tags
+            .iter()
+            .any(|(k, v)| k == "isTransfer" && v == "true");
 
         let (transfer_match, near_miss_candidates) = if is_probable_transfer {
             unique_or_candidates(find_transfer_matches(
@@ -929,6 +989,7 @@ fn process_entry(
                 label,
                 transfer_candidates,
                 transfer_policy,
+                transfer_settings,
             ))
         } else {
             (None, Vec::new())
@@ -1279,6 +1340,7 @@ mod tests {
             subject_label,
             candidates,
             policy,
+            &TransferSettings::default(),
         ))
         .0
     }
@@ -1645,6 +1707,102 @@ mod tests {
             Some("Expenses:Groceries")
         );
         assert!(results["e-other"].rule_account.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two logins whose single entries form an opposite-amount pair, `days`
+    /// apart, with the given subject description (shared setup for the
+    /// configurable window/pattern tests).
+    fn write_transfer_pair_ledger(
+        prefix: &str,
+        subject_desc: &str,
+        days: u32,
+    ) -> std::path::PathBuf {
+        let dir = categorize_temp_dir(prefix);
+        for (login, label) in [("chase", "checking"), ("boa", "savings")] {
+            let mut cfg = login_config::LoginConfig::default();
+            cfg.accounts.insert(
+                label.to_string(),
+                login_config::LoginAccountConfig { gl_account: None },
+            );
+            login_config::write_login_config(&dir, login, &cfg).unwrap();
+        }
+        // Subject: -21.32 on 2024-01-15 (make_entry defaults).
+        account_journal::write_journal_at_path(
+            &account_journal::login_account_journal_path(&dir, "chase", "checking"),
+            &[make_entry("e-out", subject_desc, vec![])],
+        )
+        .unwrap();
+        let mut other = make_entry("e-in", "Transfer in", vec![]);
+        other.date = format!("2024-01-{:02}", 15 + days);
+        other.postings[0].amount = Some(SimpleAmount {
+            commodity: "USD".to_string(),
+            quantity: "21.32".to_string(),
+        });
+        account_journal::write_journal_at_path(
+            &account_journal::login_account_journal_path(&dir, "boa", "savings"),
+            &[other],
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn configured_date_window_admits_wider_match() {
+        // 5 days apart: outside the default ±3 window, inside a configured 7.
+        let dir = write_transfer_pair_ledger("window-config", "Transfer to savings", 5);
+
+        let default_results = suggest_categories(&dir, "chase", "checking").unwrap();
+        assert!(
+            default_results["e-out"].transfer_match.is_none(),
+            "5-day match must be outside the default window"
+        );
+
+        std::fs::write(
+            dir.join("refreshmint.json"),
+            r#"{"version":"0.0.0-test","transferDateWindowDays":7}"#,
+        )
+        .unwrap();
+        let widened = suggest_categories(&dir, "chase", "checking").unwrap();
+        assert_eq!(
+            widened["e-out"]
+                .transfer_match
+                .as_ref()
+                .map(|m| m.entry_id.as_str()),
+            Some("e-in"),
+            "transferDateWindowDays: 7 should admit the 5-day match"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn configured_extra_pattern_gates_custom_description() {
+        // "MOVE MONEY 123" matches no built-in pattern; an extraTransferPatterns
+        // entry (matched case-insensitively) turns on the transfer gate.
+        let dir = write_transfer_pair_ledger("pattern-config", "Move Money 123", 0);
+
+        let default_results = suggest_categories(&dir, "chase", "checking").unwrap();
+        assert!(
+            default_results["e-out"].transfer_match.is_none(),
+            "custom description must not match built-in patterns"
+        );
+
+        std::fs::write(
+            dir.join("refreshmint.json"),
+            r#"{"version":"0.0.0-test","extraTransferPatterns":["move money"]}"#,
+        )
+        .unwrap();
+        let gated = suggest_categories(&dir, "chase", "checking").unwrap();
+        assert_eq!(
+            gated["e-out"]
+                .transfer_match
+                .as_ref()
+                .map(|m| m.entry_id.as_str()),
+            Some("e-in"),
+            "extraTransferPatterns should gate the custom description"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

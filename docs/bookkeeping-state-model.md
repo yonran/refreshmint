@@ -178,6 +178,20 @@ Current source-of-truth split:
 - source posting refs live in account journals
 - reconciliation membership, links, and close state live in `bookkeeping/`
 
+## Ledger Configuration (`refreshmint.json`)
+
+`<ledger>.refreshmint/refreshmint.json` stores ledger-wide configuration
+(`ledger::RefreshmintConfig` in `src-tauri/src/ledger.rs`). Fields:
+
+- `version` (string, required): app version that created the ledger.
+- `transferDateWindowDays` (number, optional, default 3): the ± day window the
+  transfer matchers use when pairing opposite-amount entries or GL
+  transactions.
+- `extraTransferPatterns` (array of strings, optional, default empty):
+  additional case-insensitive substring patterns that mark a description as a
+  probable transfer, on top of the built-in list in
+  `src-tauri/src/transfer_detector.rs`.
+
 ## Row-Level Factual Propositions
 
 This section defines what each durable row or object asserts. The distinction

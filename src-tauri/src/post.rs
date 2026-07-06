@@ -1272,9 +1272,11 @@ fn transfer_fee_residual(quantity1: &str, quantity2: &str) -> Option<String> {
     Some(format!("{residual:.precision$}"))
 }
 
-/// Two leg amounts cancel below this epsilon (cents tolerance). Keep in sync
-/// with the merge cancel guard in `merge_gl_transfer`.
-const TRANSFER_CANCEL_EPSILON: f64 = 0.005;
+/// Two leg amounts cancel below this epsilon (cents tolerance). Shared with the
+/// merge cancel guard in `merge_gl_transfer` and the transfer matchers in
+/// `categorize` (find_transfer_matches / find_gl_transfer_matches); the frontend
+/// mirrors it in gl-transfer-utils.ts.
+pub(crate) const TRANSFER_CANCEL_EPSILON: f64 = 0.005;
 
 /// Format a GL transaction for a transfer between two accounts.
 ///

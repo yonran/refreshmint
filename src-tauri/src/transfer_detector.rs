@@ -3,10 +3,24 @@
 /// Analyzes transaction descriptions to flag probable transfers between accounts.
 /// Check if a transaction description looks like an inter-account transfer.
 pub fn is_probable_transfer(description: &str) -> bool {
+    is_probable_transfer_with_extra(description, &[])
+}
+
+/// Like [`is_probable_transfer`], with additional user-configured substring
+/// patterns (`extraTransferPatterns` in refreshmint.json — see
+/// `ledger::RefreshmintConfig`). Extra patterns are matched case-insensitively
+/// (uppercased here, like the built-ins).
+pub fn is_probable_transfer_with_extra(description: &str, extra_patterns: &[String]) -> bool {
     let upper = description.to_ascii_uppercase();
 
     for pattern in TRANSFER_PATTERNS {
         if upper.contains(pattern) {
+            return true;
+        }
+    }
+    for pattern in extra_patterns {
+        let pattern = pattern.trim().to_ascii_uppercase();
+        if !pattern.is_empty() && upper.contains(&pattern) {
             return true;
         }
     }
