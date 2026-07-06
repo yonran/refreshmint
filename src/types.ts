@@ -227,7 +227,7 @@ export function createEmptyPipelineTabSession(): PipelineTabSession {
     return {
         selectedLoginAccount: null,
         pipelineStatus: null,
-        pipelineSubTab: 'evidence',
+        pipelineSubTab: 'account-rows',
         evidenceRowsDocument: '',
         pipelineSelectedEntryIds: [],
         pipelineGlAccountDraft: '',
