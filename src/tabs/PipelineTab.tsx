@@ -35,7 +35,6 @@ import {
     type DocumentWithInfo,
     type LedgerView,
     postLoginAccountEntry,
-    readAttachmentDataUrl,
     readLoginAccountDocumentRows,
     readLoginAccountDocumentText,
     postLoginAccountEntrySplit,
@@ -68,6 +67,13 @@ import {
     suggestGlAccountName,
 } from '../types.ts';
 import { AccountInput } from '../components/AccountInput.tsx';
+import { AttachmentLightbox } from '../components/AttachmentLightbox.tsx';
+import { useAttachmentLightbox } from '../components/useAttachmentLightbox.ts';
+import {
+    isCsvDocument,
+    isImageFilename,
+    isPdfDocument,
+} from '../attachment-utils.ts';
 import { TRANSFER_CANCEL_EPSILON } from '../gl-transfer-utils.ts';
 
 interface PipelineTabProps {
@@ -176,12 +182,7 @@ export function PipelineTab({
     const [documentRows, setDocumentRows] = useState<string[][]>([]);
     const [isLoadingDocumentRows, setIsLoadingDocumentRows] = useState(false);
     const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
-    const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
-    const [lightboxFilename, setLightboxFilename] = useState<string | null>(
-        null,
-    );
-    const [lightboxLoading, setLightboxLoading] = useState(false);
-    const [lightboxError, setLightboxError] = useState<string | null>(null);
+    const lightbox = useAttachmentLightbox(ledgerPath);
     const [textViewContent, setTextViewContent] = useState<string | null>(null);
     const [textViewFilename, setTextViewFilename] = useState<string | null>(
         null,
@@ -710,43 +711,9 @@ export function PipelineTab({
 
     // --- Handlers ---
 
-    // Same fixed set as TransactionsTable.tsx — must stay in sync with
-    // read_attachment_data_url in src-tauri/src/extract.rs:image_mime_type().
-    const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
-    function isImageDocument(filename: string): boolean {
-        return IMAGE_EXTENSIONS.some((ext) =>
-            filename.toLowerCase().endsWith(ext),
-        );
-    }
-    function isCsvDocument(filename: string): boolean {
-        return filename.toLowerCase().endsWith('.csv');
-    }
-    function isPdfDocument(filename: string): boolean {
-        return filename.toLowerCase().endsWith('.pdf');
-    }
-    function closeLightbox() {
-        setLightboxSrc(null);
-        setLightboxFilename(null);
-        setLightboxLoading(false);
-        setLightboxError(null);
-    }
     async function handleDocumentView(doc: DocumentWithInfo) {
-        if (isImageDocument(doc.filename)) {
-            setLightboxFilename(doc.filename);
-            setLightboxSrc(null);
-            setLightboxError(null);
-            setLightboxLoading(true);
-            try {
-                const src = await readAttachmentDataUrl(
-                    ledgerPath,
-                    doc.filename,
-                );
-                setLightboxSrc(src);
-            } catch (e) {
-                setLightboxError(String(e));
-            } finally {
-                setLightboxLoading(false);
-            }
+        if (isImageFilename(doc.filename)) {
+            await lightbox.openImage(doc.filename);
         } else if (isCsvDocument(doc.filename)) {
             await handleLoadDocumentRows(doc.filename);
             setPipelineSubTab('evidence-rows');
@@ -3386,46 +3353,13 @@ export function PipelineTab({
                     <p className="status">{pipelineStatus}</p>
                 )}
             </section>
-            {(lightboxLoading ||
-                lightboxSrc !== null ||
-                lightboxError !== null) && (
-                <div
-                    className="modal-overlay"
-                    onClick={closeLightbox}
-                    role="dialog"
-                    aria-modal="true"
-                    aria-label={lightboxFilename ?? 'Attachment'}
-                >
-                    <div
-                        className="modal-dialog attachment-lightbox"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                        }}
-                    >
-                        <div className="modal-header">
-                            <h3>{lightboxFilename}</h3>
-                            <button
-                                type="button"
-                                onClick={closeLightbox}
-                                className="ghost-button"
-                            >
-                                Close
-                            </button>
-                        </div>
-                        {lightboxLoading ? (
-                            <p className="status">Loading…</p>
-                        ) : lightboxError !== null ? (
-                            <p className="status">{lightboxError}</p>
-                        ) : lightboxSrc !== null ? (
-                            <img
-                                src={lightboxSrc}
-                                alt={lightboxFilename ?? 'attachment'}
-                                className="attachment-image"
-                            />
-                        ) : null}
-                    </div>
-                </div>
-            )}
+            <AttachmentLightbox
+                filename={lightbox.filename}
+                src={lightbox.src}
+                loading={lightbox.loading}
+                error={lightbox.error}
+                onClose={lightbox.close}
+            />
             {textViewContent !== null && (
                 <div
                     className="modal-overlay"

@@ -11,7 +11,6 @@ import {
     type PostingRow,
     type TransactionRow,
     UNCATEGORIZED_GL_ACCOUNT,
-    readAttachmentDataUrl,
 } from '../tauri-commands.ts';
 import { quoteHledgerValue } from '../search-utils.ts';
 import type { SimilarRecategorizeSeed } from '../types.ts';
@@ -21,20 +20,12 @@ import {
 } from '../categorize-utils.ts';
 import { formatScaled, formatTotals } from '../amount-utils.ts';
 import { AccountInput } from '../components/AccountInput.tsx';
-
-const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
-
-function isImageAttachmentRef(ref: string): boolean {
-    if (!ref.endsWith('#attachment')) return false;
-    const filename = ref.slice(0, -'#attachment'.length);
-    return IMAGE_EXTENSIONS.some((ext) => filename.toLowerCase().endsWith(ext));
-}
-
-function attachmentFilename(ref: string): string {
-    return ref.endsWith('#attachment')
-        ? ref.slice(0, -'#attachment'.length)
-        : ref;
-}
+import { AttachmentLightbox } from '../components/AttachmentLightbox.tsx';
+import { useAttachmentLightbox } from '../components/useAttachmentLightbox.ts';
+import {
+    attachmentFilename,
+    isImageAttachmentRef,
+} from '../attachment-utils.ts';
 
 // A transaction's posting amounts are "obvious" — and therefore redundant to
 // display — when there are exactly 2 postings and exactly 1 is a balance-sheet
@@ -211,12 +202,7 @@ export function TransactionsTable({
     hideObviousAmounts?: boolean;
     onAddSearchTerm?: (term: string) => void;
 }) {
-    const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
-    const [lightboxFilename, setLightboxFilename] = useState<string | null>(
-        null,
-    );
-    const [lightboxLoading, setLightboxLoading] = useState(false);
-    const [lightboxError, setLightboxError] = useState<string | null>(null);
+    const lightbox = useAttachmentLightbox(ledgerPath);
     const [expandedEvidenceIds, setExpandedEvidenceIds] = useState<
         ReadonlySet<string>
     >(new Set());
@@ -287,29 +273,6 @@ export function TransactionsTable({
         };
     }, [contextMenu]);
 
-    async function handleAttachmentClick(filename: string) {
-        if (ledgerPath === null) return;
-        setLightboxFilename(filename);
-        setLightboxSrc(null);
-        setLightboxError(null);
-        setLightboxLoading(true);
-        try {
-            const src = await readAttachmentDataUrl(ledgerPath, filename);
-            setLightboxSrc(src);
-        } catch (e) {
-            setLightboxError(String(e));
-        } finally {
-            setLightboxLoading(false);
-        }
-    }
-
-    function closeLightbox() {
-        setLightboxSrc(null);
-        setLightboxFilename(null);
-        setLightboxError(null);
-        setLightboxLoading(false);
-    }
-
     const hasActions =
         onRecategorize !== undefined ||
         onMergeTransfer !== undefined ||
@@ -360,6 +323,10 @@ export function TransactionsTable({
         if (nextSelectedIds.length === selectedIds.size) {
             return;
         }
+        // Pre-existing derived-state sync (prune selection to visible rows);
+        // surfaced by the React Compiler lint once this component became
+        // simpler to analyze. Behavior unchanged.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         updateSelectedIds(() => new Set(nextSelectedIds));
     }, [selectedIds, transactions, updateSelectedIds]);
 
@@ -372,6 +339,9 @@ export function TransactionsTable({
         }
         if (tally.size === 0) return;
         const best = [...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+        // Pre-existing derived-state sync (seed bulk draft from suggestions);
+        // surfaced by the React Compiler lint. Behavior unchanged.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         if (best !== undefined) setBulkDraft(best);
     }, [selectedIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1265,7 +1235,7 @@ export function TransactionsTable({
                                                                         className="evidence-chip evidence-chip-image"
                                                                         type="button"
                                                                         onClick={() => {
-                                                                            void handleAttachmentClick(
+                                                                            void lightbox.openImage(
                                                                                 attachmentFilename(
                                                                                     evidenceRef,
                                                                                 ),
@@ -1353,46 +1323,13 @@ export function TransactionsTable({
                     </tbody>
                 </table>
             </div>
-            {(lightboxLoading ||
-                lightboxSrc !== null ||
-                lightboxError !== null) && (
-                <div
-                    className="modal-overlay"
-                    onClick={closeLightbox}
-                    role="dialog"
-                    aria-modal="true"
-                    aria-label={lightboxFilename ?? 'Attachment'}
-                >
-                    <div
-                        className="modal-dialog attachment-lightbox"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                        }}
-                    >
-                        <div className="modal-header">
-                            <h3>{lightboxFilename}</h3>
-                            <button
-                                type="button"
-                                onClick={closeLightbox}
-                                className="ghost-button"
-                            >
-                                Close
-                            </button>
-                        </div>
-                        {lightboxLoading ? (
-                            <p className="status">Loading…</p>
-                        ) : lightboxError !== null ? (
-                            <p className="status">{lightboxError}</p>
-                        ) : lightboxSrc !== null ? (
-                            <img
-                                src={lightboxSrc}
-                                alt={lightboxFilename ?? 'attachment'}
-                                className="attachment-image"
-                            />
-                        ) : null}
-                    </div>
-                </div>
-            )}
+            <AttachmentLightbox
+                filename={lightbox.filename}
+                src={lightbox.src}
+                loading={lightbox.loading}
+                error={lightbox.error}
+                onClose={lightbox.close}
+            />
             {bulkConfirm !== null && (
                 <div
                     className="modal-overlay"
