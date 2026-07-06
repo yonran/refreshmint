@@ -335,15 +335,18 @@ Still open:
 
 ### GUI cleanup
 
-- Delete the ScrapeTab legacy pipeline (~450 lines: documents table + Run
+- ~~Delete the ScrapeTab legacy pipeline (~450 lines: documents table + Run
   extraction, posting queue, Use as A/B transfer form, unpost-by-typed-ID) —
   superseded by the Pipeline tab; keep the Tauri commands for the CLI. Also
   delete Pipeline's "GL Rows" sub-tab (renders the same `TransactionsTable` as
-  the Transactions tab).
-- Split ScrapeTab into a slim run-and-observe screen and a
+  the Transactions tab).~~ Done: legacy pipeline `a9eb96e`, GL Rows sub-tab
+  `e193498`.
+- ~~Split ScrapeTab into a slim run-and-observe screen and a
   Settings/Connections screen (login CRUD, extensions, GL mappings, secrets,
-  migrations); developer tools (debug socket, Load unpacked) behind a dev-mode
-  pref.
+  migrations).~~ Done: Settings shell (Extensions/Migrations/Secrets/Developer)
+  `6e08353`, Connections + slim Scrape `ea09f82`. Still TODO: put developer
+  tools (debug socket, Load unpacked) behind a dev-mode pref — they currently
+  live in a "Developer tools" disclosure on the Settings tab.
 - Surface silent failures: recategorize / merge transfer / bulk recategorize
   swallow errors into `console.error` with no busy state — the most-used
   actions in the app are the only silent ones. One shared status/banner
@@ -356,10 +359,12 @@ Still open:
   overlay blocks the entire app from a background timer.
 - Make "Post" name its destination ("Record N as Uncategorized"); rename one
   of the two same-label different-scope "Post All (N)" buttons on the Pipeline
-  tab; Pipeline default sub-tab should be the review queue, not Evidence; drop
-  the redundant account dropdown (the status table already selects).
-- Collapse the permanent "Ledger workspace" onboarding header to a one-line
-  title bar once a ledger is open; clear the stale `openStatus` line.
+  tab; ~~Pipeline default sub-tab should be the review queue, not Evidence~~
+  (done `3f497c5`); drop the redundant account dropdown (the status table
+  already selects).
+- ~~Collapse the permanent "Ledger workspace" onboarding header to a one-line
+  title bar once a ledger is open; clear the stale `openStatus` line.~~ Done
+  `45ea73f`.
 - Ledger-wide "needs review" inbox (proposals + anomalies + unposted across
   all accounts) instead of one-account-at-a-time Pipeline review; hoist
   `refreshPipelineLoginAccountData` out of the per-entry Post All loop.
