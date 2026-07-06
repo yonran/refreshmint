@@ -863,6 +863,19 @@ pub fn post_login_account_transfer(
         );
     }
 
+    // Same invariants merge_gl_transfer enforces: matching commodities, parseable
+    // amounts, and an explicit fee account whenever the legs do not cancel. The
+    // Pipeline modal lists unposted entries in any commodity, so without this a
+    // cross-currency or non-cancelling pick would be silently misstated.
+    validate_transfer_legs(
+        "post",
+        &entries1[idx1],
+        entry_id1,
+        &entries2[idx2],
+        entry_id2,
+        fee_account,
+    )?;
+
     let gl_txn_id = uuid::Uuid::new_v4().to_string();
     let source1 = format!("logins/{login_name1}/accounts/{label1}");
     let source2 = format!("logins/{login_name2}/accounts/{label2}");
@@ -2123,6 +2136,61 @@ fn validate_fee_account(fee_account: &str) -> Result<&str, String> {
     Ok(fee)
 }
 
+/// Validate that two transfer legs are safe to encode with
+/// [`format_transfer_gl_transaction_with_fee`]: both must carry a parseable
+/// amount, the commodities must match, and non-cancelling legs
+/// (|a1+a2| ≥ [`TRANSFER_CANCEL_EPSILON`]) require an explicit fee account
+/// (cancelling legs ignore any fee). Shared by [`merge_gl_transfer`] and
+/// [`post_login_account_transfer`] so both encode identical invariants — the
+/// fee-less format stores only leg 1's amount+commodity and forces leg 2 to its
+/// exact negation, silently misstating a mismatched pair otherwise. `verb`
+/// selects the wording ("merge"/"post") in the error messages.
+fn validate_transfer_legs(
+    verb: &str,
+    entry1: &account_journal::AccountEntry,
+    entry_id1: &str,
+    entry2: &account_journal::AccountEntry,
+    entry_id2: &str,
+    fee_account: Option<&str>,
+) -> Result<(), String> {
+    let simple1 = entry1
+        .postings
+        .first()
+        .and_then(|p| p.amount.as_ref())
+        .ok_or_else(|| format!("cannot {verb}; entry {entry_id1} has no amount"))?;
+    let simple2 = entry2
+        .postings
+        .first()
+        .and_then(|p| p.amount.as_ref())
+        .ok_or_else(|| format!("cannot {verb}; entry {entry_id2} has no amount"))?;
+    if simple1.commodity != simple2.commodity {
+        return Err(format!(
+            "cannot {verb}; commodities differ ({} vs {})",
+            simple1.commodity, simple2.commodity
+        ));
+    }
+    let a: f64 = simple1
+        .quantity
+        .parse()
+        .map_err(|_| format!("cannot {verb}; entry {entry_id1} has no amount"))?;
+    let b: f64 = simple2
+        .quantity
+        .parse()
+        .map_err(|_| format!("cannot {verb}; entry {entry_id2} has no amount"))?;
+    // Non-cancelling legs are allowed ONLY with an explicit fee account (the
+    // residual becomes a third fee posting; see
+    // format_transfer_gl_transaction_with_fee). Cancelling legs ignore any fee.
+    if (a + b).abs() >= TRANSFER_CANCEL_EPSILON && fee_account.is_none() {
+        let residual = transfer_fee_residual(&simple1.quantity, &simple2.quantity)
+            .unwrap_or_else(|| format!("{}", -(a + b)));
+        return Err(format!(
+            "amounts do not cancel ({a} + {b}); residual {residual} {} — supply a fee account to {verb} as a fee transfer",
+            simple1.commodity
+        ));
+    }
+    Ok(())
+}
+
 pub fn merge_gl_transfer(
     ledger_dir: &Path,
     txn_id_1: &str,
@@ -2247,50 +2315,14 @@ pub fn merge_gl_transfer(
     // 4. Generate new UUID.
     let new_uuid = uuid::Uuid::new_v4().to_string();
 
-    // Guard: the two legs must cancel in the same commodity, OR an explicit fee
-    // account must absorb the residual. The fee-less format stores only entry1's
-    // amount+commodity and forces leg 2 to its exact negation, so a pair whose
-    // amounts don't sum to ~0 — or that live in different commodities — would be
-    // silently misstated in the GL. An absent/unparseable amount refuses the
-    // merge outright rather than skipping the check.
-    let simple1 = entries1[idx1]
-        .postings
-        .first()
-        .and_then(|p| p.amount.as_ref())
-        .ok_or_else(|| format!("cannot merge; entry {entry_id1} has no amount"))?;
-    let simple2 = entries2[idx2]
-        .postings
-        .first()
-        .and_then(|p| p.amount.as_ref())
-        .ok_or_else(|| format!("cannot merge; entry {entry_id2} has no amount"))?;
-    if simple1.commodity != simple2.commodity {
-        return Err(format!(
-            "cannot merge; commodities differ ({} vs {})",
-            simple1.commodity, simple2.commodity
-        )
-        .into());
-    }
-    let a: f64 = simple1
-        .quantity
-        .parse()
-        .map_err(|_| format!("cannot merge; entry {entry_id1} has no amount"))?;
-    let b: f64 = simple2
-        .quantity
-        .parse()
-        .map_err(|_| format!("cannot merge; entry {entry_id2} has no amount"))?;
-    // Non-cancelling legs are allowed ONLY with an explicit fee account (the
-    // residual becomes a third fee posting; see
-    // format_transfer_gl_transaction_with_fee). Cancelling legs merge as before
-    // and ignore any fee account.
-    if (a + b).abs() >= TRANSFER_CANCEL_EPSILON && fee_account.is_none() {
-        let residual = transfer_fee_residual(&simple1.quantity, &simple2.quantity)
-            .unwrap_or_else(|| format!("{}", -(a + b)));
-        return Err(format!(
-            "amounts do not cancel ({a} + {b}); residual {residual} {} — supply a fee account to merge as a fee transfer",
-            simple1.commodity
-        )
-        .into());
-    }
+    validate_transfer_legs(
+        "merge",
+        &entries1[idx1],
+        &entry_id1,
+        &entries2[idx2],
+        &entry_id2,
+        fee_account,
+    )?;
 
     // 5. Build merged transfer GL text using the two account entries.
     let gl_text = format_transfer_gl_transaction_with_fee(
@@ -3907,6 +3939,122 @@ mod tests {
         assert!(
             gl.contains(&format!("id: {gl1}")) && gl.contains(&format!("id: {gl2}")),
             "both GL txns must survive the refused merge"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn post_transfer_refuses_different_commodities() {
+        // The Pipeline modal lists unposted entries in any commodity, so a
+        // cross-currency pick must be refused rather than encoded as an implicit
+        // FX conversion. Mirrors merge_refuses_different_commodities.
+        let root = temp_dir("post-transfer-diff-commodity");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let path1 = account_journal::login_account_journal_path(&root, "chase", "checking");
+        let mut eur = make_entry("txn-1", "2024-01-15", "Wire out", "-100.00");
+        eur.postings[0].amount.as_mut().unwrap().commodity = "EUR".to_string();
+        account_journal::write_journal_at_path(&path1, &[eur]).unwrap();
+        let path2 = account_journal::login_account_journal_path(&root, "boa", "savings");
+        account_journal::write_journal_at_path(
+            &path2,
+            &[make_entry("txn-2", "2024-01-15", "Wire in", "100.00")],
+        )
+        .unwrap();
+
+        let err = post_login_account_transfer(
+            &root, "chase", "checking", "txn-1", "boa", "savings", "txn-2", None, "test",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("commodities differ"),
+            "expected commodity refusal, got: {err}"
+        );
+        assert!(
+            account_journal::read_journal_at_path(&path1).unwrap()[0]
+                .posted
+                .is_none(),
+            "no leg should be posted on a refused transfer"
+        );
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(gl.trim().is_empty(), "no GL block on refused post: {gl}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn post_transfer_refuses_missing_amount() {
+        // An absent/unparseable amount must refuse rather than silently fall back
+        // to the fee-less shape (leg 2 forced to -leg1). Mirrors
+        // merge_refuses_missing_amount.
+        let root = temp_dir("post-transfer-missing-amount");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let path1 = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &path1,
+            &[make_entry("txn-1", "2024-01-15", "Transfer out", "-100.00")],
+        )
+        .unwrap();
+        let path2 = account_journal::login_account_journal_path(&root, "boa", "savings");
+        let mut in_entry = make_entry("txn-2", "2024-01-15", "Transfer in", "100.00");
+        in_entry.postings[0].amount = None;
+        account_journal::write_journal_at_path(&path2, &[in_entry]).unwrap();
+
+        let err = post_login_account_transfer(
+            &root, "chase", "checking", "txn-1", "boa", "savings", "txn-2", None, "test",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no amount"),
+            "expected missing-amount refusal, got: {err}"
+        );
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(gl.trim().is_empty(), "no GL block on refused post: {gl}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn post_transfer_requires_fee_when_legs_do_not_cancel() {
+        // Non-cancelling legs without a fee account would be misstated (leg 2
+        // forced to -leg1). Mirrors merge_refuses_non_opposite_amounts.
+        let root = temp_dir("post-transfer-no-fee");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let path1 = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &path1,
+            &[make_entry("txn-1", "2024-01-15", "Transfer out", "-100.00")],
+        )
+        .unwrap();
+        let path2 = account_journal::login_account_journal_path(&root, "boa", "savings");
+        account_journal::write_journal_at_path(
+            &path2,
+            &[make_entry("txn-2", "2024-01-15", "Transfer in", "90.00")],
+        )
+        .unwrap();
+
+        let err = post_login_account_transfer(
+            &root, "chase", "checking", "txn-1", "boa", "savings", "txn-2", None, "test",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("do not cancel"),
+            "expected non-cancelling refusal, got: {err}"
+        );
+        // But a fee account makes the same pick succeed as a 3-leg block.
+        post_login_account_transfer(
+            &root,
+            "chase",
+            "checking",
+            "txn-1",
+            "boa",
+            "savings",
+            "txn-2",
+            Some("Expenses:Bank Fees"),
+            "test",
+        )
+        .unwrap();
+        let gl = fs::read_to_string(root.join("general.journal")).unwrap();
+        assert!(
+            gl.contains("Expenses:Bank Fees"),
+            "fee leg expected on the accepted post: {gl}"
         );
         let _ = fs::remove_dir_all(&root);
     }
