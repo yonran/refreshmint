@@ -272,9 +272,12 @@ pub fn append_scrape_log_entry(ledger_dir: &Path, entry: &ScrapeLogEntry) -> io:
     append_jsonl(&login_scrape_log_path(ledger_dir, &entry.login_name), entry)
 }
 
-/// Read all scrape log entries for a login (oldest-first).
+/// Read all scrape log entries for a login (oldest-first). Malformed lines are
+/// skipped rather than failing the whole read: the scheduler derives staleness
+/// from the last success here, so one corrupt line must not blank the summary
+/// and make it re-scrape the login forever.
 pub fn read_scrape_log(ledger_dir: &Path, login_name: &str) -> io::Result<Vec<ScrapeLogEntry>> {
-    read_jsonl(&login_scrape_log_path(ledger_dir, login_name))
+    read_jsonl_lenient(&login_scrape_log_path(ledger_dir, login_name))
 }
 
 /// A structured console log line emitted by an extractor script.
@@ -382,6 +385,39 @@ fn read_jsonl<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<Vec<T>> {
     }
 
     Ok(operations)
+}
+
+/// Like `read_jsonl` but skips malformed lines instead of failing the whole
+/// read. Used for logs where a single corrupt line must not discard every valid
+/// entry (see `read_scrape_log`). Skipped lines are logged, not returned.
+fn read_jsonl_lenient<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<Vec<T>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = fs::File::open(path)?;
+    let reader = io::BufReader::new(file);
+    let mut items = Vec::new();
+
+    for (line_num, line) in reader.lines().enumerate() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        match serde_json::from_str::<T>(trimmed) {
+            Ok(item) => items.push(item),
+            Err(e) => {
+                log::warn!(
+                    "{}:{}: skipping malformed log line: {e}",
+                    path.display(),
+                    line_num + 1
+                );
+            }
+        }
+    }
+
+    Ok(items)
 }
 
 #[cfg(test)]
@@ -528,6 +564,46 @@ mod tests {
         assert_eq!(entries[1].source, "manual");
         // A successful run omits the field entirely (skip_serializing_if).
         assert!(entries[1].artifacts_dir.is_none());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_scrape_log_skips_malformed_lines() {
+        // A corrupt line in the middle must not discard the valid entries: the
+        // scheduler derives staleness from the last success, so blanking the log
+        // would make it re-scrape the login forever.
+        let root = temp_dir("scrape-log-corrupt");
+        let e1 = ScrapeLogEntry {
+            login_name: "chase".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            success: true,
+            error: None,
+            source: "manual".to_string(),
+            artifacts_dir: None,
+        };
+        let e2 = ScrapeLogEntry {
+            login_name: "chase".to_string(),
+            timestamp: "2026-01-02T00:00:00Z".to_string(),
+            success: false,
+            error: Some("boom".to_string()),
+            source: "auto".to_string(),
+            artifacts_dir: None,
+        };
+        fs::create_dir_all(root.join("logins").join("chase")).unwrap();
+        append_scrape_log_entry(&root, &e1).unwrap();
+        // Inject a malformed line between the two valid entries.
+        {
+            let path = login_scrape_log_path(&root, "chase");
+            let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(b"{ this is not valid json\n").unwrap();
+        }
+        append_scrape_log_entry(&root, &e2).unwrap();
+
+        let entries = read_scrape_log(&root, "chase").unwrap();
+        assert_eq!(entries.len(), 2, "the two valid entries survive");
+        assert!(entries[0].success);
+        assert_eq!(entries[1].timestamp, "2026-01-02T00:00:00Z");
 
         let _ = fs::remove_dir_all(&root);
     }

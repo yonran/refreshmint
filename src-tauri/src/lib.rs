@@ -761,6 +761,19 @@ fn scrape_output_payload(
 /// Default MFA-prompt timeout (5 minutes) when the caller does not specify one.
 const DEFAULT_PROMPT_TIMEOUT_SECS: u64 = 300;
 
+/// Floor on the MFA-prompt timeout. A backend caller passing 0 (or a tiny value)
+/// would otherwise make every prompt time out before the user can answer.
+const MIN_PROMPT_TIMEOUT_SECS: u64 = 10;
+
+/// Resolve the effective prompt timeout in seconds: the caller's value (or the
+/// default when unset), floored at `MIN_PROMPT_TIMEOUT_SECS`. Extracted so the
+/// floor is unit-testable.
+fn resolve_prompt_timeout_secs(prompt_timeout_secs: Option<u64>) -> u64 {
+    prompt_timeout_secs
+        .unwrap_or(DEFAULT_PROMPT_TIMEOUT_SECS)
+        .max(MIN_PROMPT_TIMEOUT_SECS)
+}
+
 #[tauri::command]
 async fn run_scrape_for_login(
     app_handle: tauri::AppHandle,
@@ -772,7 +785,7 @@ async fn run_scrape_for_login(
 ) -> Result<(), String> {
     let login_name = require_login_name_input(login_name)?;
     let prompt_timeout =
-        std::time::Duration::from_secs(prompt_timeout_secs.unwrap_or(DEFAULT_PROMPT_TIMEOUT_SECS));
+        std::time::Duration::from_secs(resolve_prompt_timeout_secs(prompt_timeout_secs));
 
     let target_dir = std::path::PathBuf::from(&ledger);
     // Validate ledger and login BEFORE any logging: append_jsonl creates
@@ -999,12 +1012,25 @@ fn validate_artifact_filename(name: &str) -> Result<(), String> {
 }
 
 /// Resolve a ledger-relative failure-artifacts directory to an absolute path,
-/// rejecting absolute paths and any `..` traversal.
+/// rejecting absolute paths, any `..` traversal, and any path that is not under
+/// `logins/<login>/scrape-failures/`. Constraining the shape (not just blocking
+/// traversal) keeps this command from reading arbitrary other ledger files.
 fn resolve_artifact_dir(ledger: &str, artifacts_dir: &str) -> Result<std::path::PathBuf, String> {
     let ledger_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&ledger_dir).map_err(|err| err.to_string())?;
     let rel = std::path::Path::new(artifacts_dir);
     if artifacts_dir.is_empty() || rel.is_absolute() || artifacts_dir.contains("..") {
+        return Err(format!("invalid artifacts directory: {artifacts_dir}"));
+    }
+    // Require the canonical shape logins/<login>/scrape-failures/<timestamp...>.
+    // Keep aligned with scrape::scrape_failure_dir_relative.
+    use std::path::Component;
+    let mut components = rel.components();
+    let shape_ok = matches!(components.next(), Some(Component::Normal(c)) if c == "logins")
+        && matches!(components.next(), Some(Component::Normal(_)))
+        && matches!(components.next(), Some(Component::Normal(c)) if c == "scrape-failures")
+        && components.next().is_some();
+    if !shape_ok {
         return Err(format!("invalid artifacts directory: {artifacts_dir}"));
     }
     Ok(ledger_dir.join(rel))
@@ -2693,13 +2719,17 @@ fn map_account_journal_entries(
 /// Sends `Some(answer)` for Submit or `None` for Cancel.
 fn send_prompt_answer(answer: Option<String>, state: &PromptAnswerState) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    // Clear the pending prompt and sender together so the frontend's re-open
+    // Nothing is waiting: report it instead of silently succeeding, so a stray
+    // submit (e.g. a double-click after the prompt already resolved or timed
+    // out) surfaces rather than looking like it delivered an answer.
+    let Some(sender) = guard.sender.take() else {
+        return Err("no prompt pending".to_string());
+    };
+    // Clear the pending prompt alongside the sender so the frontend's re-open
     // pill disappears once an answer (or cancel) is delivered.
     guard.pending = None;
-    if let Some(sender) = guard.sender.take() {
-        // Ignore send errors: the scrape thread may have already timed out.
-        let _ = sender.send(answer);
-    }
+    // Ignore send errors: the scrape thread may have already timed out.
+    let _ = sender.send(answer);
     Ok(())
 }
 
@@ -2856,10 +2886,10 @@ mod tests {
         cancel_prompt_for_login, delete_login_account, evidence_ref_matches_document,
         inspect_login_extraction_support, register_scrape_cancel, require_existing_login,
         require_label_input, require_login_name_input, require_non_empty_input,
-        resolve_artifact_dir, run_login_account_extraction_blocking, scrape_output_payload,
-        send_prompt_answer, summarize_scrape_log, trigger_scrape_cancel, unregister_scrape_cancel,
-        validate_artifact_filename, wait_for_prompt_answer, PendingPrompt, PromptAnswerInner,
-        PromptAnswerState, PromptWaitOutcome, ScrapeCancelState,
+        resolve_artifact_dir, resolve_prompt_timeout_secs, run_login_account_extraction_blocking,
+        scrape_output_payload, send_prompt_answer, summarize_scrape_log, trigger_scrape_cancel,
+        unregister_scrape_cancel, validate_artifact_filename, wait_for_prompt_answer,
+        PendingPrompt, PromptAnswerInner, PromptAnswerState, PromptWaitOutcome, ScrapeCancelState,
     };
     use crate::operations::ScrapeLogEntry;
     use crate::scrape::js_api::{DebugOutputEvent, DebugOutputStream};
@@ -2921,6 +2951,13 @@ mod tests {
         assert!(resolve_artifact_dir(&ledger, "../etc").is_err());
         assert!(resolve_artifact_dir(&ledger, "/etc/passwd").is_err());
         assert!(resolve_artifact_dir(&ledger, "").is_err());
+        // A traversal-free but non-scrape-failures ledger path is also rejected.
+        assert!(resolve_artifact_dir(&ledger, "logins/chase/documents/x").is_err());
+        assert!(resolve_artifact_dir(&ledger, "general.journal").is_err());
+        assert!(
+            resolve_artifact_dir(&ledger, "logins/chase/scrape-failures").is_err(),
+            "the directory itself (no timestamp component) is rejected"
+        );
         // A well-formed relative path under the ledger resolves.
         let ok = resolve_artifact_dir(&ledger, "logins/chase/scrape-failures/t")
             .unwrap_or_else(|err| panic!("expected valid artifacts dir, got {err}"));
@@ -3136,6 +3173,26 @@ mod tests {
         let guard = state.0.lock().unwrap_or_else(|err| panic!("lock: {err}"));
         assert!(guard.pending.is_none());
         assert!(guard.sender.is_none());
+    }
+
+    #[test]
+    fn send_prompt_answer_with_no_pending_prompt_errors() {
+        // A submit with nothing waiting must surface an error, not silently Ok.
+        let state = PromptAnswerState::default();
+        let err = send_prompt_answer(Some("123".to_string()), &state)
+            .expect_err("expected an error when no prompt is pending");
+        assert_eq!(err, "no prompt pending");
+    }
+
+    #[test]
+    fn resolve_prompt_timeout_secs_floors_and_defaults() {
+        // Unset -> default.
+        assert_eq!(resolve_prompt_timeout_secs(None), 300);
+        // A tiny/zero value is floored so prompts don't instantly time out.
+        assert_eq!(resolve_prompt_timeout_secs(Some(0)), 10);
+        assert_eq!(resolve_prompt_timeout_secs(Some(3)), 10);
+        // A sane value passes through.
+        assert_eq!(resolve_prompt_timeout_secs(Some(120)), 120);
     }
 
     #[test]

@@ -1,5 +1,20 @@
 # TODO
 
+## Scraping UX (deferred from the 2026-07-07 review-fixes batch)
+
+- Scrape-output buffering while ScrapeTab is unmounted: the live console listener
+  is torn down when the tab unmounts, so driver lines emitted while the user is
+  on another tab are lost. The running/status state now survives the unmount, but
+  buffering the output stream (e.g. at the App level, or via a backend replay)
+  would let the console catch up on remount.
+- Evidence / artifact click-through silent error paths: several artifact and
+  evidence actions swallow errors into a status string or nothing; surface them
+  as a toast instead.
+- `resolve_artifact_dir` `..` over-rejection: the guard rejects any path
+  containing `..` as a substring, which would also reject a legitimately-named
+  component that merely contains `..`. Tighten to reject only true parent
+  (`ParentDir`) components once such names are actually needed.
+
 ## Receipts And Retail Attachments
 
 ### Product model
