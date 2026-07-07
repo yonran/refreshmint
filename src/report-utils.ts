@@ -1,0 +1,189 @@
+// Pure helpers for the Reports tab. Types and buildReportArgs are extracted from
+// ReportsTab.tsx so they can be unit-tested and reused (canned reports, presets,
+// stale-result detection). Keep buildReportArgs behavior identical to the
+// original ReportsTab.buildArgs — the report-utils.test.ts suite pins it.
+
+export type ReportCommand =
+    | 'balance'
+    | 'balancesheet'
+    | 'balancesheetequity'
+    | 'cashflow'
+    | 'incomestatement'
+    | 'register'
+    | 'aregister'
+    | 'activity'
+    | 'stats';
+
+export type Interval = '' | '-D' | '-W' | '-M' | '-Q' | '-Y';
+
+export type BalanceMode = '' | '--valuechange' | '--gain' | '--count';
+export type Accumulation = '' | '--cumulative' | '-H';
+export type BalanceView = '' | '-l' | '-t';
+
+export type RegisterAccumulation = '' | '--cumulative' | '-H';
+
+export const BALANCE_FAMILY: ReportCommand[] = [
+    'balance',
+    'balancesheet',
+    'balancesheetequity',
+    'cashflow',
+    'incomestatement',
+];
+
+export const REGISTER_FAMILY: ReportCommand[] = ['register', 'aregister'];
+
+/**
+ * The full set of report options, one field per useState atom that previously
+ * lived in ReportsTab. Autocomplete/results/running state stay local to the
+ * component; only the request-shaping fields live here.
+ */
+export interface ReportConfig {
+    command: ReportCommand;
+
+    // Period
+    beginDate: string;
+    endDate: string;
+    interval: Interval;
+
+    // Filter
+    statusCleared: boolean;
+    statusPending: boolean;
+    statusUnmarked: boolean;
+    realOnly: boolean;
+    showEmpty: boolean;
+    depth: string;
+
+    // Valuation
+    valueCost: boolean;
+    valueMarket: boolean;
+    exchangeCommodity: string;
+
+    // Balance-family options
+    balanceMode: BalanceMode;
+    accumulation: Accumulation;
+    balanceView: BalanceView;
+    showAverage: boolean;
+    showRowTotal: boolean;
+    summaryOnly: boolean;
+    noTotal: boolean;
+    sortAmount: boolean;
+    percent: boolean;
+    invert: boolean;
+    transpose: boolean;
+    drop: string;
+
+    // Register-family options
+    regAccumulation: RegisterAccumulation;
+    regAverage: boolean;
+    regRelated: boolean;
+    regInvert: boolean;
+
+    // Query input
+    queryInput: string;
+}
+
+export function createDefaultReportConfig(): ReportConfig {
+    return {
+        command: 'balance',
+        beginDate: '',
+        endDate: '',
+        interval: '',
+        statusCleared: false,
+        statusPending: false,
+        statusUnmarked: false,
+        realOnly: false,
+        showEmpty: false,
+        depth: '',
+        valueCost: false,
+        valueMarket: false,
+        exchangeCommodity: '',
+        balanceMode: '',
+        accumulation: '',
+        balanceView: '',
+        showAverage: false,
+        showRowTotal: false,
+        summaryOnly: false,
+        noTotal: false,
+        sortAmount: false,
+        percent: false,
+        invert: false,
+        transpose: false,
+        drop: '',
+        regAccumulation: '',
+        regAverage: false,
+        regRelated: false,
+        regInvert: false,
+        queryInput: '',
+    };
+}
+
+/**
+ * Verbatim port of the original ReportsTab.buildArgs(). Assembles the hledger
+ * CLI arguments (excluding the command itself and the -f journal path, which the
+ * backend supplies) from a ReportConfig.
+ */
+export function buildReportArgs(config: ReportConfig): string[] {
+    const args: string[] = [];
+
+    if (config.beginDate.trim()) {
+        args.push('-b', config.beginDate.trim());
+    }
+    if (config.endDate.trim()) {
+        args.push('-e', config.endDate.trim());
+    }
+    if (config.interval) {
+        args.push(config.interval);
+    }
+
+    // Status filters
+    if (config.statusCleared) args.push('-C');
+    if (config.statusPending) args.push('-P');
+    if (config.statusUnmarked) args.push('-U');
+    if (config.realOnly) args.push('-R');
+    if (config.showEmpty) args.push('-E');
+    if (config.depth.trim()) args.push(`--depth=${config.depth.trim()}`);
+
+    // Valuation
+    if (config.valueCost) args.push('-B');
+    if (config.valueMarket) args.push('-V');
+    if (config.exchangeCommodity.trim()) {
+        args.push('-X', config.exchangeCommodity.trim());
+    }
+
+    const isBalanceFamily = BALANCE_FAMILY.includes(config.command);
+    const isRegisterFamily = REGISTER_FAMILY.includes(config.command);
+
+    if (isBalanceFamily) {
+        if (config.balanceMode) args.push(config.balanceMode);
+        if (config.accumulation) args.push(config.accumulation);
+        if (config.balanceView) args.push(config.balanceView);
+        if (config.showAverage) args.push('-A');
+        if (config.showRowTotal) args.push('-T');
+        if (config.summaryOnly) args.push('--summary-only');
+        if (config.noTotal) args.push('-N');
+        if (config.sortAmount) args.push('-S');
+        if (config.percent) args.push('-%');
+        if (config.command === 'balance' && config.invert)
+            args.push('--invert');
+        if (config.command === 'balance' && config.transpose)
+            args.push('--transpose');
+        if (config.drop.trim()) args.push(`--drop=${config.drop.trim()}`);
+    }
+
+    if (isRegisterFamily) {
+        if (config.regAccumulation) args.push(config.regAccumulation);
+        if (config.command !== 'aregister' && config.regAverage)
+            args.push('-A');
+        if (config.command !== 'aregister' && config.regRelated)
+            args.push('-r');
+        if (config.regInvert) args.push('--invert');
+    }
+
+    // Query tokens
+    const trimmed = config.queryInput.trim();
+    if (trimmed) {
+        args.push(...trimmed.split(/\s+/));
+    }
+
+    return args;
+}

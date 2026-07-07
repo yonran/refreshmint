@@ -6,35 +6,19 @@ import {
     type HledgerReportResult,
     runHledgerReport,
 } from '../tauri-commands.ts';
-
-type ReportCommand =
-    | 'balance'
-    | 'balancesheet'
-    | 'balancesheetequity'
-    | 'cashflow'
-    | 'incomestatement'
-    | 'register'
-    | 'aregister'
-    | 'activity'
-    | 'stats';
-
-type Interval = '' | '-D' | '-W' | '-M' | '-Q' | '-Y';
-
-type BalanceMode = '' | '--valuechange' | '--gain' | '--count';
-type Accumulation = '' | '--cumulative' | '-H';
-type BalanceView = '' | '-l' | '-t';
-
-type RegisterAccumulation = '' | '--cumulative' | '-H';
-
-const BALANCE_FAMILY: ReportCommand[] = [
-    'balance',
-    'balancesheet',
-    'balancesheetequity',
-    'cashflow',
-    'incomestatement',
-];
-
-const REGISTER_FAMILY: ReportCommand[] = ['register', 'aregister'];
+import {
+    BALANCE_FAMILY,
+    REGISTER_FAMILY,
+    buildReportArgs,
+    createDefaultReportConfig,
+    type Accumulation,
+    type BalanceMode,
+    type BalanceView,
+    type Interval,
+    type ReportCommand,
+    type ReportConfig,
+    type RegisterAccumulation,
+} from '../report-utils.ts';
 
 interface Props {
     ledger: string;
@@ -42,49 +26,15 @@ interface Props {
 }
 
 export function ReportsTab({ ledger, accounts }: Props) {
-    const [command, setCommand] = useState<ReportCommand>('balance');
+    const [config, setConfig] = useState<ReportConfig>(
+        createDefaultReportConfig,
+    );
+    // Shallow-merge a partial update into the single config atom.
+    const patch = useCallback((partial: Partial<ReportConfig>) => {
+        setConfig((current) => ({ ...current, ...partial }));
+    }, []);
 
-    // Period
-    const [beginDate, setBeginDate] = useState('');
-    const [endDate, setEndDate] = useState('');
-    const [interval, setInterval] = useState<Interval>('');
-
-    // Filter
-    const [statusCleared, setStatusCleared] = useState(false);
-    const [statusPending, setStatusPending] = useState(false);
-    const [statusUnmarked, setStatusUnmarked] = useState(false);
-    const [realOnly, setRealOnly] = useState(false);
-    const [showEmpty, setShowEmpty] = useState(false);
-    const [depth, setDepth] = useState('');
-
-    // Valuation
-    const [valueCost, setValueCost] = useState(false);
-    const [valueMarket, setValueMarket] = useState(false);
-    const [exchangeCommodity, setExchangeCommodity] = useState('');
-
-    // Balance-family options
-    const [balanceMode, setBalanceMode] = useState<BalanceMode>('');
-    const [accumulation, setAccumulation] = useState<Accumulation>('');
-    const [balanceView, setBalanceView] = useState<BalanceView>('');
-    const [showAverage, setShowAverage] = useState(false);
-    const [showRowTotal, setShowRowTotal] = useState(false);
-    const [summaryOnly, setSummaryOnly] = useState(false);
-    const [noTotal, setNoTotal] = useState(false);
-    const [sortAmount, setSortAmount] = useState(false);
-    const [percent, setPercent] = useState(false);
-    const [invert, setInvert] = useState(false);
-    const [transpose, setTranspose] = useState(false);
-    const [drop, setDrop] = useState('');
-
-    // Register-family options
-    const [regAccumulation, setRegAccumulation] =
-        useState<RegisterAccumulation>('');
-    const [regAverage, setRegAverage] = useState(false);
-    const [regRelated, setRegRelated] = useState(false);
-    const [regInvert, setRegInvert] = useState(false);
-
-    // Query input
-    const [queryInput, setQueryInput] = useState('');
+    // Autocomplete state (view-only, not part of the report request).
     const [acSuggestions, setAcSuggestions] = useState<string[]>([]);
     const [acActiveIndex, setAcActiveIndex] = useState(-1);
     const queryInputRef = useRef<HTMLInputElement>(null);
@@ -94,18 +44,21 @@ export function ReportsTab({ ledger, accounts }: Props) {
     const [error, setError] = useState<string | null>(null);
     const [running, setRunning] = useState(false);
 
+    const { command, interval, queryInput } = config;
+
     const applyQueryCompletion = useCallback(
         (suggestion: string) => {
             const input = queryInputRef.current;
             if (!input) return;
-            const cursorPos = input.selectionStart ?? queryInput.length;
-            const { start, end } = getCurrentToken(queryInput, cursorPos);
+            const currentQuery = input.value;
+            const cursorPos = input.selectionStart ?? currentQuery.length;
+            const { start, end } = getCurrentToken(currentQuery, cursorPos);
             const newValue =
-                queryInput.substring(0, start) +
+                currentQuery.substring(0, start) +
                 suggestion +
                 ' ' +
-                queryInput.substring(end);
-            setQueryInput(newValue);
+                currentQuery.substring(end);
+            patch({ queryInput: newValue });
             setAcSuggestions([]);
             setAcActiveIndex(-1);
             // Move cursor after the inserted suggestion
@@ -114,116 +67,23 @@ export function ReportsTab({ ledger, accounts }: Props) {
                 input.setSelectionRange(newCursorPos, newCursorPos);
             });
         },
-        [queryInput],
+        [patch],
     );
-
-    const buildArgs = useCallback((): string[] => {
-        const args: string[] = [];
-
-        if (beginDate.trim()) {
-            args.push('-b', beginDate.trim());
-        }
-        if (endDate.trim()) {
-            args.push('-e', endDate.trim());
-        }
-        if (interval) {
-            args.push(interval);
-        }
-
-        // Status filters
-        if (statusCleared) args.push('-C');
-        if (statusPending) args.push('-P');
-        if (statusUnmarked) args.push('-U');
-        if (realOnly) args.push('-R');
-        if (showEmpty) args.push('-E');
-        if (depth.trim()) args.push(`--depth=${depth.trim()}`);
-
-        // Valuation
-        if (valueCost) args.push('-B');
-        if (valueMarket) args.push('-V');
-        if (exchangeCommodity.trim()) {
-            args.push('-X', exchangeCommodity.trim());
-        }
-
-        const isBalanceFamily = BALANCE_FAMILY.includes(command);
-        const isRegisterFamily = REGISTER_FAMILY.includes(command);
-
-        if (isBalanceFamily) {
-            if (balanceMode) args.push(balanceMode);
-            if (accumulation) args.push(accumulation);
-            if (balanceView) args.push(balanceView);
-            if (showAverage) args.push('-A');
-            if (showRowTotal) args.push('-T');
-            if (summaryOnly) args.push('--summary-only');
-            if (noTotal) args.push('-N');
-            if (sortAmount) args.push('-S');
-            if (percent) args.push('-%');
-            if (command === 'balance' && invert) args.push('--invert');
-            if (command === 'balance' && transpose) args.push('--transpose');
-            if (drop.trim()) args.push(`--drop=${drop.trim()}`);
-        }
-
-        if (isRegisterFamily) {
-            if (regAccumulation) args.push(regAccumulation);
-            if (command !== 'aregister' && regAverage) args.push('-A');
-            if (command !== 'aregister' && regRelated) args.push('-r');
-            if (regInvert) args.push('--invert');
-        }
-
-        // Query tokens
-        const trimmed = queryInput.trim();
-        if (trimmed) {
-            args.push(...trimmed.split(/\s+/));
-        }
-
-        return args;
-    }, [
-        beginDate,
-        endDate,
-        interval,
-        statusCleared,
-        statusPending,
-        statusUnmarked,
-        realOnly,
-        showEmpty,
-        depth,
-        valueCost,
-        valueMarket,
-        exchangeCommodity,
-        command,
-        balanceMode,
-        accumulation,
-        balanceView,
-        showAverage,
-        showRowTotal,
-        summaryOnly,
-        noTotal,
-        sortAmount,
-        percent,
-        invert,
-        transpose,
-        drop,
-        regAccumulation,
-        regAverage,
-        regRelated,
-        regInvert,
-        queryInput,
-    ]);
 
     const handleRun = useCallback(async () => {
         setRunning(true);
         setError(null);
         setResult(null);
         try {
-            const args = buildArgs();
-            const res = await runHledgerReport(ledger, command, args);
+            const args = buildReportArgs(config);
+            const res = await runHledgerReport(ledger, config.command, args);
             setResult(res);
         } catch (e) {
             setError(String(e));
         } finally {
             setRunning(false);
         }
-    }, [ledger, command, buildArgs]);
+    }, [ledger, config]);
 
     const isBalanceFamily = BALANCE_FAMILY.includes(command);
     const isRegisterFamily = REGISTER_FAMILY.includes(command);
@@ -269,7 +129,7 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                     command === cmd ? 'tab active' : 'tab'
                                 }
                                 onClick={() => {
-                                    setCommand(cmd);
+                                    patch({ command: cmd });
                                 }}
                             >
                                 {label}
@@ -287,9 +147,9 @@ export function ReportsTab({ ledger, accounts }: Props) {
                             type="text"
                             className="date-input"
                             placeholder="YYYY-MM-DD"
-                            value={beginDate}
+                            value={config.beginDate}
                             onChange={(e) => {
-                                setBeginDate(e.target.value);
+                                patch({ beginDate: e.target.value });
                             }}
                         />
                         <label className="field-label-sm">End</label>
@@ -297,9 +157,9 @@ export function ReportsTab({ ledger, accounts }: Props) {
                             type="text"
                             className="date-input"
                             placeholder="YYYY-MM-DD"
-                            value={endDate}
+                            value={config.endDate}
                             onChange={(e) => {
-                                setEndDate(e.target.value);
+                                patch({ endDate: e.target.value });
                             }}
                         />
                     </div>
@@ -323,7 +183,7 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                         interval === flag ? 'tab active' : 'tab'
                                     }
                                     onClick={() => {
-                                        setInterval(flag);
+                                        patch({ interval: flag });
                                     }}
                                 >
                                     {label}
@@ -344,7 +204,7 @@ export function ReportsTab({ ledger, accounts }: Props) {
                             value={queryInput}
                             onChange={(e) => {
                                 const val = e.target.value;
-                                setQueryInput(val);
+                                patch({ queryInput: val });
                                 const cursorPos =
                                     e.target.selectionStart ?? val.length;
                                 const { token, start } = getCurrentToken(
@@ -437,9 +297,11 @@ export function ReportsTab({ ledger, accounts }: Props) {
                             <label className="checkbox-field">
                                 <input
                                     type="checkbox"
-                                    checked={statusCleared}
+                                    checked={config.statusCleared}
                                     onChange={(e) => {
-                                        setStatusCleared(e.target.checked);
+                                        patch({
+                                            statusCleared: e.target.checked,
+                                        });
                                     }}
                                 />
                                 <span>Cleared (-C, hledger status)</span>
@@ -447,9 +309,11 @@ export function ReportsTab({ ledger, accounts }: Props) {
                             <label className="checkbox-field">
                                 <input
                                     type="checkbox"
-                                    checked={statusPending}
+                                    checked={config.statusPending}
                                     onChange={(e) => {
-                                        setStatusPending(e.target.checked);
+                                        patch({
+                                            statusPending: e.target.checked,
+                                        });
                                     }}
                                 />
                                 <span>Pending (-P, hledger status)</span>
@@ -457,9 +321,11 @@ export function ReportsTab({ ledger, accounts }: Props) {
                             <label className="checkbox-field">
                                 <input
                                     type="checkbox"
-                                    checked={statusUnmarked}
+                                    checked={config.statusUnmarked}
                                     onChange={(e) => {
-                                        setStatusUnmarked(e.target.checked);
+                                        patch({
+                                            statusUnmarked: e.target.checked,
+                                        });
                                     }}
                                 />
                                 <span>Unmarked (-U, hledger status)</span>
@@ -467,9 +333,9 @@ export function ReportsTab({ ledger, accounts }: Props) {
                             <label className="checkbox-field">
                                 <input
                                     type="checkbox"
-                                    checked={realOnly}
+                                    checked={config.realOnly}
                                     onChange={(e) => {
-                                        setRealOnly(e.target.checked);
+                                        patch({ realOnly: e.target.checked });
                                     }}
                                 />
                                 <span>Real only (-R)</span>
@@ -477,9 +343,9 @@ export function ReportsTab({ ledger, accounts }: Props) {
                             <label className="checkbox-field">
                                 <input
                                     type="checkbox"
-                                    checked={showEmpty}
+                                    checked={config.showEmpty}
                                     onChange={(e) => {
-                                        setShowEmpty(e.target.checked);
+                                        patch({ showEmpty: e.target.checked });
                                     }}
                                 />
                                 <span>Show empty (-E)</span>
@@ -490,9 +356,9 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                     type="number"
                                     className="small-number-input"
                                     min="1"
-                                    value={depth}
+                                    value={config.depth}
                                     onChange={(e) => {
-                                        setDepth(e.target.value);
+                                        patch({ depth: e.target.value });
                                     }}
                                     placeholder="N"
                                 />
@@ -507,9 +373,9 @@ export function ReportsTab({ ledger, accounts }: Props) {
                             <label className="checkbox-field">
                                 <input
                                     type="checkbox"
-                                    checked={valueCost}
+                                    checked={config.valueCost}
                                     onChange={(e) => {
-                                        setValueCost(e.target.checked);
+                                        patch({ valueCost: e.target.checked });
                                     }}
                                 />
                                 <span>Cost basis (-B)</span>
@@ -517,9 +383,11 @@ export function ReportsTab({ ledger, accounts }: Props) {
                             <label className="checkbox-field">
                                 <input
                                     type="checkbox"
-                                    checked={valueMarket}
+                                    checked={config.valueMarket}
                                     onChange={(e) => {
-                                        setValueMarket(e.target.checked);
+                                        patch({
+                                            valueMarket: e.target.checked,
+                                        });
                                     }}
                                 />
                                 <span>Market value (-V)</span>
@@ -530,9 +398,11 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                     type="text"
                                     className="small-text-input"
                                     placeholder="COMM"
-                                    value={exchangeCommodity}
+                                    value={config.exchangeCommodity}
                                     onChange={(e) => {
-                                        setExchangeCommodity(e.target.value);
+                                        patch({
+                                            exchangeCommodity: e.target.value,
+                                        });
                                     }}
                                 />
                             </label>
@@ -563,12 +433,14 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                                 key={flag || 'sum'}
                                                 type="button"
                                                 className={
-                                                    balanceMode === flag
+                                                    config.balanceMode === flag
                                                         ? 'tab active'
                                                         : 'tab'
                                                 }
                                                 onClick={() => {
-                                                    setBalanceMode(flag);
+                                                    patch({
+                                                        balanceMode: flag,
+                                                    });
                                                 }}
                                             >
                                                 {label}
@@ -594,12 +466,14 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                                 key={flag || 'change'}
                                                 type="button"
                                                 className={
-                                                    accumulation === flag
+                                                    config.accumulation === flag
                                                         ? 'tab active'
                                                         : 'tab'
                                                 }
                                                 onClick={() => {
-                                                    setAccumulation(flag);
+                                                    patch({
+                                                        accumulation: flag,
+                                                    });
                                                 }}
                                             >
                                                 {label}
@@ -623,12 +497,14 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                                 key={flag || 'default'}
                                                 type="button"
                                                 className={
-                                                    balanceView === flag
+                                                    config.balanceView === flag
                                                         ? 'tab active'
                                                         : 'tab'
                                                 }
                                                 onClick={() => {
-                                                    setBalanceView(flag);
+                                                    patch({
+                                                        balanceView: flag,
+                                                    });
                                                 }}
                                             >
                                                 {label}
@@ -645,11 +521,12 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                     <label className="checkbox-field">
                                         <input
                                             type="checkbox"
-                                            checked={showAverage}
+                                            checked={config.showAverage}
                                             onChange={(e) => {
-                                                setShowAverage(
-                                                    e.target.checked,
-                                                );
+                                                patch({
+                                                    showAverage:
+                                                        e.target.checked,
+                                                });
                                             }}
                                         />
                                         <span>Average (-A)</span>
@@ -657,11 +534,12 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                     <label className="checkbox-field">
                                         <input
                                             type="checkbox"
-                                            checked={showRowTotal}
+                                            checked={config.showRowTotal}
                                             onChange={(e) => {
-                                                setShowRowTotal(
-                                                    e.target.checked,
-                                                );
+                                                patch({
+                                                    showRowTotal:
+                                                        e.target.checked,
+                                                });
                                             }}
                                         />
                                         <span>Row total (-T)</span>
@@ -669,11 +547,12 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                     <label className="checkbox-field">
                                         <input
                                             type="checkbox"
-                                            checked={summaryOnly}
+                                            checked={config.summaryOnly}
                                             onChange={(e) => {
-                                                setSummaryOnly(
-                                                    e.target.checked,
-                                                );
+                                                patch({
+                                                    summaryOnly:
+                                                        e.target.checked,
+                                                });
                                             }}
                                         />
                                         <span>Summary only</span>
@@ -681,9 +560,11 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                     <label className="checkbox-field">
                                         <input
                                             type="checkbox"
-                                            checked={noTotal}
+                                            checked={config.noTotal}
                                             onChange={(e) => {
-                                                setNoTotal(e.target.checked);
+                                                patch({
+                                                    noTotal: e.target.checked,
+                                                });
                                             }}
                                         />
                                         <span>No total (-N)</span>
@@ -691,9 +572,12 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                     <label className="checkbox-field">
                                         <input
                                             type="checkbox"
-                                            checked={sortAmount}
+                                            checked={config.sortAmount}
                                             onChange={(e) => {
-                                                setSortAmount(e.target.checked);
+                                                patch({
+                                                    sortAmount:
+                                                        e.target.checked,
+                                                });
                                             }}
                                         />
                                         <span>Sort by amount (-S)</span>
@@ -701,9 +585,11 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                     <label className="checkbox-field">
                                         <input
                                             type="checkbox"
-                                            checked={percent}
+                                            checked={config.percent}
                                             onChange={(e) => {
-                                                setPercent(e.target.checked);
+                                                patch({
+                                                    percent: e.target.checked,
+                                                });
                                             }}
                                         />
                                         <span>Percent (-%)</span>
@@ -712,9 +598,12 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                         <label className="checkbox-field">
                                             <input
                                                 type="checkbox"
-                                                checked={invert}
+                                                checked={config.invert}
                                                 onChange={(e) => {
-                                                    setInvert(e.target.checked);
+                                                    patch({
+                                                        invert: e.target
+                                                            .checked,
+                                                    });
                                                 }}
                                             />
                                             <span>Invert</span>
@@ -724,11 +613,12 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                         <label className="checkbox-field">
                                             <input
                                                 type="checkbox"
-                                                checked={transpose}
+                                                checked={config.transpose}
                                                 onChange={(e) => {
-                                                    setTranspose(
-                                                        e.target.checked,
-                                                    );
+                                                    patch({
+                                                        transpose:
+                                                            e.target.checked,
+                                                    });
                                                 }}
                                             />
                                             <span>Transpose</span>
@@ -740,9 +630,9 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                             type="number"
                                             className="small-number-input"
                                             min="0"
-                                            value={drop}
+                                            value={config.drop}
                                             onChange={(e) => {
-                                                setDrop(e.target.value);
+                                                patch({ drop: e.target.value });
                                             }}
                                             placeholder="N"
                                         />
@@ -771,12 +661,14 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                             key={flag || 'change'}
                                             type="button"
                                             className={
-                                                regAccumulation === flag
+                                                config.regAccumulation === flag
                                                     ? 'tab active'
                                                     : 'tab'
                                             }
                                             onClick={() => {
-                                                setRegAccumulation(flag);
+                                                patch({
+                                                    regAccumulation: flag,
+                                                });
                                             }}
                                         >
                                             {label}
@@ -789,9 +681,12 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                     <label className="checkbox-field">
                                         <input
                                             type="checkbox"
-                                            checked={regAverage}
+                                            checked={config.regAverage}
                                             onChange={(e) => {
-                                                setRegAverage(e.target.checked);
+                                                patch({
+                                                    regAverage:
+                                                        e.target.checked,
+                                                });
                                             }}
                                         />
                                         <span>Average (-A)</span>
@@ -801,9 +696,12 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                     <label className="checkbox-field">
                                         <input
                                             type="checkbox"
-                                            checked={regRelated}
+                                            checked={config.regRelated}
                                             onChange={(e) => {
-                                                setRegRelated(e.target.checked);
+                                                patch({
+                                                    regRelated:
+                                                        e.target.checked,
+                                                });
                                             }}
                                         />
                                         <span>Related (-r)</span>
@@ -812,9 +710,11 @@ export function ReportsTab({ ledger, accounts }: Props) {
                                 <label className="checkbox-field">
                                     <input
                                         type="checkbox"
-                                        checked={regInvert}
+                                        checked={config.regInvert}
                                         onChange={(e) => {
-                                            setRegInvert(e.target.checked);
+                                            patch({
+                                                regInvert: e.target.checked,
+                                            });
                                         }}
                                     />
                                     <span>Invert</span>
