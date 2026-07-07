@@ -96,6 +96,22 @@
     border-color: #f5b3b3;
 }
 
+.prompt-pending-pill {
+    position: fixed;
+    right: 1rem;
+    bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    background: #fff6e0;
+    border: 1px solid #e6c650;
+    border-radius: 999px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    font-size: 0.85rem;
+    z-index: 50;
+}
+
 .auto-scrape-queue {
     display: flex;
     flex-wrap: wrap;

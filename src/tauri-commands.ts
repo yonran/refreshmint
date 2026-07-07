@@ -1327,13 +1327,27 @@ export async function runScrapeForLogin(
     loginName: string,
     source: 'manual' | 'auto' = 'manual',
     headless = false,
+    promptTimeoutSecs?: number,
 ): Promise<void> {
     await invoke('run_scrape_for_login', {
         ledger,
         loginName,
         source,
         headless,
+        promptTimeoutSecs,
     });
+}
+
+/** Details of a scraper prompt currently awaiting an answer. */
+export interface PendingPrompt {
+    loginName: string;
+    message: string;
+    choices: string[] | null;
+}
+
+/** Fetch the currently-pending scraper prompt, if any (for re-open on mount). */
+export async function getPendingPrompt(): Promise<PendingPrompt | null> {
+    return invoke('get_pending_prompt');
 }
 
 export async function getScrapeLog(

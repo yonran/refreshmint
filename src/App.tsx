@@ -11,6 +11,7 @@ import {
 } from '@tauri-apps/plugin-dialog';
 import './App.css';
 import { createTransferLinkResolution } from './automation-utils.ts';
+import { clampPromptTimeoutMinutes } from './scrape-console-utils.ts';
 import {
     type ActiveTab,
     addRecentLedger,
@@ -35,6 +36,7 @@ import {
     openLedger,
     runScrapeForLogin,
     cancelScrape,
+    getPendingPrompt,
     type LedgerView,
     setLoginAccount,
     recoverLedgerConsistency,
@@ -84,6 +86,11 @@ function App() {
     const [headlessScrape, setHeadlessScrape] = useState(
         () => localStorage.getItem('pref:headlessScrape') === 'true',
     );
+    const [mfaPromptTimeoutMinutes, setMfaPromptTimeoutMinutes] = useState(() =>
+        clampPromptTimeoutMinutes(
+            Number(localStorage.getItem('pref:mfaPromptTimeoutMinutes') ?? '5'),
+        ),
+    );
     const [autoScrapeQueue, setAutoScrapeQueue] = useState<string[]>([]);
     const [autoScrapeActive, setAutoScrapeActive] = useState<string | null>(
         null,
@@ -101,9 +108,23 @@ function App() {
         // with `promptChoice`/`request_prompt_answer` on the Rust side.
         choices: string[] | null;
     } | null>(null);
+    // A prompt that is still awaiting an answer but whose modal the user hid.
+    // Kept so the "Reopen" pill can restore it; cleared on answer/cancel/timeout.
+    const [promptPending, setPromptPending] = useState<{
+        loginName: string;
+        message: string;
+        choices: string[] | null;
+    } | null>(null);
     const [scrapeLogVersion, setScrapeLogVersion] = useState(0);
     const [loginAccounts, setLoginAccounts] = useState<LoginAccountRef[]>([]);
 
+    // Deliver a scraper prompt answer (or cancel with null) and clear both the
+    // shown modal and the pending record.
+    function answerPrompt(answer: string | null) {
+        setPromptRequest(null);
+        setPromptPending(null);
+        void invoke('submit_prompt_answer', { answer });
+    }
     function handleSelectAccount(accountName: string) {
         setTransactionsTabSession((current) => ({
             ...current,
@@ -381,18 +402,22 @@ function App() {
     }, [autoScrapeActive]);
 
     // Listen for prompt requests from the Rust scrape driver and surface them
-    // as a blocking modal so the user can supply MFA codes etc.
+    // as a blocking modal so the user can supply MFA codes etc. Both the shown
+    // modal and the persistent "pending" record are set, so hiding the modal
+    // leaves a re-openable prompt.
     useEffect(() => {
         const unlisten = listen<{
             login_name: string;
             message: string;
             choices: string[] | null;
         }>('refreshmint://prompt-requested', (event) => {
-            setPromptRequest({
+            const prompt = {
                 loginName: event.payload.login_name,
                 message: event.payload.message,
                 choices: event.payload.choices ?? null,
-            });
+            };
+            setPromptRequest(prompt);
+            setPromptPending(prompt);
         });
         return () => {
             unlisten
@@ -401,6 +426,35 @@ function App() {
                 })
                 .catch(() => {});
         };
+    }, []);
+
+    // Clear a pending/hidden prompt when the backend closes it (e.g. on
+    // timeout), so a stale "Reopen" pill or modal cannot linger.
+    useEffect(() => {
+        const unlisten = listen<{ loginName: string }>(
+            'refreshmint://prompt-closed',
+            () => {
+                setPromptRequest(null);
+                setPromptPending(null);
+            },
+        );
+        return () => {
+            unlisten
+                .then((fn) => {
+                    fn();
+                })
+                .catch(() => {});
+        };
+    }, []);
+
+    // On mount, restore any prompt that was already pending (e.g. after a
+    // reload while a scrape waits for MFA input).
+    useEffect(() => {
+        getPendingPrompt()
+            .then((pending) => {
+                if (pending !== null) setPromptPending(pending);
+            })
+            .catch(() => {});
     }, []);
 
     // Keep autoEtlForLoginRef current so Effect 2's async chain always sees
@@ -579,7 +633,13 @@ function App() {
         setAutoScrapeActive(loginName);
         setAutoScrapeQueue(rest);
         const timestamp = new Date().toISOString();
-        void runScrapeForLogin(ledger.path, loginName, 'auto', headlessScrape)
+        void runScrapeForLogin(
+            ledger.path,
+            loginName,
+            'auto',
+            headlessScrape,
+            mfaPromptTimeoutMinutes * 60,
+        )
             .then(async () => {
                 localStorage.setItem(`lastScrape:${loginName}`, timestamp);
                 await autoEtlForLoginRef.current?.(loginName);
@@ -593,7 +653,13 @@ function App() {
                 setAutoEtlStatus(null);
                 setScrapeLogVersion((v) => v + 1);
             });
-    }, [ledger, autoScrapeQueue, autoScrapeActive, headlessScrape]);
+    }, [
+        ledger,
+        autoScrapeQueue,
+        autoScrapeActive,
+        headlessScrape,
+        mfaPromptTimeoutMinutes,
+    ]);
 
     useEffect(() => {
         if (ledgerPath === null) {
@@ -1614,6 +1680,25 @@ function App() {
                                         }}
                                     />
                                 </label>
+                                <label className="checkbox-field">
+                                    <span>MFA prompt timeout (minutes):</span>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        max="60"
+                                        value={mfaPromptTimeoutMinutes}
+                                        onChange={(e) => {
+                                            const v = clampPromptTimeoutMinutes(
+                                                Number(e.target.value),
+                                            );
+                                            setMfaPromptTimeoutMinutes(v);
+                                            localStorage.setItem(
+                                                'pref:mfaPromptTimeoutMinutes',
+                                                String(v),
+                                            );
+                                        }}
+                                    />
+                                </label>
                             </section>
                             <section className="preferences-section">
                                 <h3>Browser</h3>
@@ -1682,6 +1767,7 @@ function App() {
                             onScrapeAll={handleScrapeAll}
                             autoScrapeActive={autoScrapeActive}
                             headlessScrape={headlessScrape}
+                            promptTimeoutSecs={mfaPromptTimeoutMinutes * 60}
                         />
                     )}
                 </section>
@@ -1706,14 +1792,11 @@ function App() {
                                 defaultValue={promptRequest.choices[0]}
                                 onKeyDown={(e) => {
                                     if (e.key === 'Enter') {
-                                        const val =
+                                        answerPrompt(
                                             promptSelectRef.current?.value ??
-                                            promptRequest.choices?.[0] ??
-                                            '';
-                                        setPromptRequest(null);
-                                        void invoke('submit_prompt_answer', {
-                                            answer: val,
-                                        });
+                                                promptRequest.choices?.[0] ??
+                                                '',
+                                        );
                                     }
                                 }}
                             >
@@ -1730,12 +1813,9 @@ function App() {
                                 autoFocus
                                 onKeyDown={(e) => {
                                     if (e.key === 'Enter') {
-                                        const val =
-                                            promptInputRef.current?.value ?? '';
-                                        setPromptRequest(null);
-                                        void invoke('submit_prompt_answer', {
-                                            answer: val,
-                                        });
+                                        answerPrompt(
+                                            promptInputRef.current?.value ?? '',
+                                        );
                                     }
                                 }}
                             />
@@ -1745,15 +1825,14 @@ function App() {
                                 type="button"
                                 className="primary-button"
                                 onClick={() => {
-                                    const val = promptRequest.choices
-                                        ? (promptSelectRef.current?.value ??
-                                          promptRequest.choices[0] ??
-                                          '')
-                                        : (promptInputRef.current?.value ?? '');
-                                    setPromptRequest(null);
-                                    void invoke('submit_prompt_answer', {
-                                        answer: val,
-                                    });
+                                    answerPrompt(
+                                        promptRequest.choices
+                                            ? (promptSelectRef.current?.value ??
+                                                  promptRequest.choices[0] ??
+                                                  '')
+                                            : (promptInputRef.current?.value ??
+                                                  ''),
+                                    );
                                 }}
                             >
                                 Submit
@@ -1762,16 +1841,40 @@ function App() {
                                 type="button"
                                 className="ghost-button"
                                 onClick={() => {
+                                    // Hide the modal but leave the prompt
+                                    // pending so it can be reopened.
                                     setPromptRequest(null);
-                                    void invoke('submit_prompt_answer', {
-                                        answer: null,
-                                    });
+                                }}
+                            >
+                                Hide
+                            </button>
+                            <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => {
+                                    answerPrompt(null);
                                 }}
                             >
                                 Cancel
                             </button>
                         </div>
                     </div>
+                </div>
+            )}
+            {promptRequest === null && promptPending !== null && (
+                <div className="prompt-pending-pill">
+                    <span>
+                        MFA prompt pending for {promptPending.loginName}
+                    </span>
+                    <button
+                        type="button"
+                        className="link-button"
+                        onClick={() => {
+                            setPromptRequest(promptPending);
+                        }}
+                    >
+                        Reopen
+                    </button>
                 </div>
             )}
             {secretPrompt === null ? null : (

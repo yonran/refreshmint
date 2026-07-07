@@ -1,9 +1,28 @@
 import { describe, it, expect } from 'vitest';
 import {
     appendLogLine,
+    clampPromptTimeoutMinutes,
     formatScrapeOutputLine,
     partitionArtifacts,
 } from './scrape-console-utils.ts';
+
+describe('clampPromptTimeoutMinutes', () => {
+    it('falls back to the default for non-finite input', () => {
+        expect(clampPromptTimeoutMinutes(NaN)).toBe(5);
+        expect(clampPromptTimeoutMinutes(Infinity)).toBe(5);
+    });
+
+    it('clamps below 1 up to 1 and floors fractional values', () => {
+        expect(clampPromptTimeoutMinutes(0)).toBe(1);
+        expect(clampPromptTimeoutMinutes(-3)).toBe(1);
+        expect(clampPromptTimeoutMinutes(2.7)).toBe(2);
+    });
+
+    it('clamps above the max down to the max', () => {
+        expect(clampPromptTimeoutMinutes(100)).toBe(60);
+        expect(clampPromptTimeoutMinutes(7)).toBe(7);
+    });
+});
 
 describe('partitionArtifacts', () => {
     it('separates the png screenshot from text artifacts', () => {

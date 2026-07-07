@@ -29,6 +29,7 @@ interface ScrapeTabProps {
     onScrapeAll: () => void;
     autoScrapeActive: string | null;
     headlessScrape: boolean;
+    promptTimeoutSecs: number;
 }
 
 export function ScrapeTab({
@@ -42,6 +43,7 @@ export function ScrapeTab({
     onScrapeAll,
     autoScrapeActive,
     headlessScrape,
+    promptTimeoutSecs,
 }: ScrapeTabProps) {
     const [scrapeExtensions, setScrapeExtensions] = useState<string[]>([]);
     const [scrapeStatus, setScrapeStatus] = useState<string | null>(null);
@@ -191,6 +193,7 @@ export function ScrapeTab({
                 loginName,
                 'manual',
                 headlessScrape,
+                promptTimeoutSecs,
             );
             localStorage.setItem(`lastScrape:${loginName}`, timestamp);
             setScrapeStatus(`Scrape completed for ${loginName}.`);

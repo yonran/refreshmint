@@ -20,6 +20,24 @@ export function formatScrapeOutputLine(entry: ScrapeOutputLine): string {
     return entry.stream === 'stderr' ? `[stderr] ${entry.line}` : entry.line;
 }
 
+/** Default MFA-prompt timeout in minutes (matches DEFAULT_PROMPT_TIMEOUT_SECS / 60 on the Rust side). */
+export const DEFAULT_MFA_PROMPT_TIMEOUT_MINUTES = 5;
+/** Upper bound on the configurable MFA-prompt timeout. */
+export const MAX_MFA_PROMPT_TIMEOUT_MINUTES = 60;
+
+/**
+ * Clamp a user-entered MFA-prompt timeout (minutes) into a sane whole-minute
+ * range, falling back to the default for non-finite input.
+ */
+export function clampPromptTimeoutMinutes(value: number): number {
+    if (!Number.isFinite(value)) return DEFAULT_MFA_PROMPT_TIMEOUT_MINUTES;
+    const rounded = Math.floor(value);
+    if (rounded < 1) return 1;
+    if (rounded > MAX_MFA_PROMPT_TIMEOUT_MINUTES)
+        return MAX_MFA_PROMPT_TIMEOUT_MINUTES;
+    return rounded;
+}
+
 export interface PartitionedArtifacts {
     /** The screenshot artifact (a `.png`), if present. */
     imageName: string | null;
