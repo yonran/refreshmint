@@ -32,6 +32,10 @@ pub struct ScrapeConfig {
     /// `run_scrape_async`, which attaches an mpsc sink that would otherwise
     /// silence the stderr fallback in `js_api::emit_debug_output`).
     pub log_listener: Option<ScrapeLogListener>,
+    /// When set, a `true` value on this watch channel aborts the in-flight
+    /// driver future (finalize + browser close still run). Same proven-safe
+    /// semantic as the debug-exec cancel path.
+    pub cancel: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 /// A listener invoked once per driver log line as it is emitted during a scrape.
@@ -87,6 +91,50 @@ impl ScrapeLogTail {
 impl Default for ScrapeLogTail {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Error message returned when a scrape is aborted by the user. Kept as a
+/// constant so callers (and the cancel-registry command) can distinguish a
+/// user cancellation from a genuine driver failure.
+pub const SCRAPE_CANCELED_MESSAGE: &str = "scrape canceled by user";
+
+/// Run the driver future, aborting early if the `cancel` watch channel is set
+/// to `true`. Returns `Err(SCRAPE_CANCELED_MESSAGE)` on cancellation. When
+/// `cancel` is `None`, this is a plain `.await`. Callers still run finalize and
+/// browser close afterwards, so the lock is released and the browser killed.
+pub async fn run_driver_cancellable<F>(
+    driver_future: F,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+{
+    let Some(mut cancel) = cancel else {
+        return driver_future.await;
+    };
+    // Already-canceled channels short-circuit before touching the browser.
+    if *cancel.borrow() {
+        return Err(SCRAPE_CANCELED_MESSAGE.into());
+    }
+    tokio::pin!(driver_future);
+    loop {
+        tokio::select! {
+            result = &mut driver_future => return result,
+            changed = cancel.changed() => {
+                match changed {
+                    // A new value arrived; abort only when it is `true`.
+                    Ok(()) if *cancel.borrow() => {
+                        return Err(SCRAPE_CANCELED_MESSAGE.into());
+                    }
+                    // Value changed to false (ignore) — keep waiting.
+                    Ok(()) => {}
+                    // Sender dropped: cancellation is impossible now, so just
+                    // await the driver to completion.
+                    Err(_) => return (&mut driver_future).await,
+                }
+            }
+        }
     }
 }
 
@@ -753,15 +801,15 @@ pub async fn run_scrape_async(
         prompt_ui_handler: config.prompt_ui_handler.clone(),
     }));
 
-    // 8. Run the driver script in the sandbox
+    // 8. Run the driver script in the sandbox, abortable via the cancel channel.
     eprintln!("Running driver: {}", driver_path.display());
-    let mut result = sandbox::run_driver(
+    let driver_future = sandbox::run_driver(
         &extension_dir,
         &driver_path,
         page_inner,
         refreshmint_inner.clone(),
-    )
-    .await;
+    );
+    let mut result = run_driver_cancellable(driver_future, config.cancel.clone()).await;
     eprintln!("Driver finished: {result:?}");
 
     // Clear the sink so the forwarder task drains and exits (mirror
@@ -847,7 +895,8 @@ mod tests {
     use super::{
         clear_staged_output_dir, combine_run_and_finalize, finalize_staged_resources,
         list_runnable_extensions, load_manifest, load_manifest_secret_declarations,
-        normalize_manifest_domain, resolve_driver_script_path, run_log_forwarder, ScrapeLogTail,
+        normalize_manifest_domain, resolve_driver_script_path, run_driver_cancellable,
+        run_log_forwarder, ScrapeLogTail, SCRAPE_CANCELED_MESSAGE,
     };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
@@ -1429,6 +1478,45 @@ try {
             login_name: String::new(),
             ledger_dir: PathBuf::new(),
             prompt_ui_handler: None,
+        }
+    }
+
+    type BoxedDriverResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    #[tokio::test]
+    async fn run_driver_cancellable_passes_through_without_cancel() {
+        let driver = async { Ok::<(), Box<dyn std::error::Error + Send + Sync>>(()) };
+        assert!(run_driver_cancellable(driver, None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_driver_cancellable_short_circuits_when_precanceled() {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        sender
+            .send(true)
+            .unwrap_or_else(|err| panic!("send cancel failed: {err}"));
+        let driver = std::future::pending::<BoxedDriverResult>();
+        let result = run_driver_cancellable(driver, Some(receiver)).await;
+        match result {
+            Ok(()) => panic!("expected cancellation error, got Ok"),
+            Err(err) => assert_eq!(err.to_string(), SCRAPE_CANCELED_MESSAGE),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_driver_cancellable_aborts_when_signaled_mid_run() {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let driver = std::future::pending::<BoxedDriverResult>();
+        let handle = tokio::spawn(run_driver_cancellable(driver, Some(receiver)));
+        sender
+            .send(true)
+            .unwrap_or_else(|err| panic!("send cancel failed: {err}"));
+        let result = handle
+            .await
+            .unwrap_or_else(|err| panic!("join failed: {err}"));
+        match result {
+            Ok(()) => panic!("expected cancellation error, got Ok"),
+            Err(err) => assert_eq!(err.to_string(), SCRAPE_CANCELED_MESSAGE),
         }
     }
 

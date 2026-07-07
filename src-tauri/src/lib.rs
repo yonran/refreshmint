@@ -95,6 +95,49 @@ struct LoginExtractionSupport {
 #[derive(Default)]
 pub struct PromptAnswerState(pub std::sync::Mutex<Option<std::sync::mpsc::Sender<Option<String>>>>);
 
+/// Tauri state holding a cancel-signal sender per in-flight scrape, keyed by
+/// login name. `run_scrape_for_login` registers a `watch` channel before
+/// launching a scrape and passes the receiver into `ScrapeConfig::cancel`; the
+/// `cancel_scrape` command flips the sender to `true` to abort the driver.
+/// Concurrent scrapes of the same login are prevented by the login lock, so the
+/// login name is a sufficient key.
+#[derive(Default)]
+pub struct ScrapeCancelState(
+    pub std::sync::Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>,
+);
+
+/// Register a cancel channel for `login_name`, returning the receiver to hand to
+/// `ScrapeConfig::cancel`. Replaces any stale sender for the same login.
+fn register_scrape_cancel(
+    state: &ScrapeCancelState,
+    login_name: &str,
+) -> tokio::sync::watch::Receiver<bool> {
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    if let Ok(mut guard) = state.0.lock() {
+        guard.insert(login_name.to_string(), sender);
+    }
+    receiver
+}
+
+/// Remove the cancel channel for `login_name` (called on every scrape exit).
+fn unregister_scrape_cancel(state: &ScrapeCancelState, login_name: &str) {
+    if let Ok(mut guard) = state.0.lock() {
+        guard.remove(login_name);
+    }
+}
+
+/// Signal cancellation for an in-flight scrape. Returns `true` if a scrape was
+/// registered for that login.
+fn trigger_scrape_cancel(state: &ScrapeCancelState, login_name: &str) -> bool {
+    let Ok(guard) = state.0.lock() else {
+        return false;
+    };
+    match guard.get(login_name) {
+        Some(sender) => sender.send(true).is_ok(),
+        None => false,
+    }
+}
+
 static UI_DEBUG_SESSION: std::sync::OnceLock<std::sync::Mutex<Option<UiDebugSession>>> =
     std::sync::OnceLock::new();
 static LOCK_METADATA_WATCHER: std::sync::OnceLock<std::sync::Mutex<Option<LockMetadataWatcher>>> =
@@ -121,6 +164,7 @@ pub fn run_with_context(
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(PromptAnswerState::default())
+        .manage(ScrapeCancelState::default())
         .invoke_handler(tauri::generate_handler![
             new_ledger,
             open_ledger,
@@ -140,6 +184,7 @@ pub fn run_with_context(
             get_login_extraction_support,
             run_scrape_for_login,
             run_scrape,
+            cancel_scrape,
             get_scrape_log,
             list_documents,
             list_login_account_documents,
@@ -683,6 +728,14 @@ async fn run_scrape_for_login(
     // From here ledger and login are confirmed to exist; logging is safe.
     let timestamp = operations::now_timestamp();
 
+    // Register a cancel channel so `cancel_scrape` can abort this run. The
+    // receiver is handed to ScrapeConfig; the sender is removed on every exit
+    // path below.
+    let cancel_receiver = {
+        let cancel_state = app_handle.state::<ScrapeCancelState>();
+        register_scrape_cancel(&cancel_state, &login_name)
+    };
+
     let result: Result<(), String> = async {
         let extension = login_config::resolve_login_extension(&target_dir, &login_name)
             .map_err(|err| err.to_string())?;
@@ -717,6 +770,7 @@ async fn run_scrape_for_login(
             prompt_requires_override: false,
             prompt_ui_handler: Some(prompt_ui_handler),
             log_listener: Some(log_listener),
+            cancel: Some(cancel_receiver),
         };
 
         tokio::task::spawn_blocking(move || {
@@ -726,6 +780,12 @@ async fn run_scrape_for_login(
         .map_err(|err| err.to_string())?
     }
     .await;
+
+    // Remove the cancel channel now that the run has finished (any exit path).
+    {
+        let cancel_state = app_handle.state::<ScrapeCancelState>();
+        unregister_scrape_cancel(&cancel_state, &login_name);
+    }
 
     let entry = operations::ScrapeLogEntry {
         login_name: login_name.clone(),
@@ -759,6 +819,22 @@ async fn run_scrape(
 ) -> Result<(), String> {
     let login_name = require_non_empty_input("account", account)?;
     run_scrape_for_login(app_handle, ledger, login_name, "manual".to_string(), false).await
+}
+
+/// Abort an in-flight scrape for `login_name`. Signals the cancel channel and
+/// also answers any pending MFA prompt with `None`, so a scrape blocked waiting
+/// for prompt input (which cannot observe the cancel channel while parked in
+/// `rx.recv()`) unwinds instead of hanging.
+#[tauri::command]
+fn cancel_scrape(
+    login_name: String,
+    cancel_state: tauri::State<'_, ScrapeCancelState>,
+    prompt_state: tauri::State<'_, PromptAnswerState>,
+) -> Result<(), String> {
+    let login_name = require_login_name_input(login_name)?;
+    trigger_scrape_cancel(&cancel_state, &login_name);
+    send_prompt_answer(None, &prompt_state)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2478,9 +2554,10 @@ fn submit_prompt_answer(
 mod tests {
     use super::{
         delete_login_account, evidence_ref_matches_document, inspect_login_extraction_support,
-        require_existing_login, require_label_input, require_login_name_input,
-        require_non_empty_input, run_login_account_extraction_blocking, scrape_output_payload,
-        send_prompt_answer, PromptAnswerState,
+        register_scrape_cancel, require_existing_login, require_label_input,
+        require_login_name_input, require_non_empty_input, run_login_account_extraction_blocking,
+        scrape_output_payload, send_prompt_answer, trigger_scrape_cancel, unregister_scrape_cancel,
+        PromptAnswerState, ScrapeCancelState,
     };
     use crate::scrape::js_api::{DebugOutputEvent, DebugOutputStream};
     use std::collections::BTreeMap;
@@ -2517,6 +2594,31 @@ mod tests {
         assert_eq!(json["loginName"], "chase-personal");
         assert_eq!(json["stream"], "stderr");
         assert_eq!(json["line"], "hello");
+    }
+
+    #[test]
+    fn scrape_cancel_registry_register_trigger_unregister() {
+        let state = ScrapeCancelState::default();
+        let mut receiver = register_scrape_cancel(&state, "chase-personal");
+        assert!(!*receiver.borrow_and_update(), "starts un-canceled");
+
+        assert!(
+            trigger_scrape_cancel(&state, "chase-personal"),
+            "trigger returns true when a scrape is registered"
+        );
+        assert!(*receiver.borrow(), "receiver observes the cancel signal");
+
+        unregister_scrape_cancel(&state, "chase-personal");
+        assert!(
+            !trigger_scrape_cancel(&state, "chase-personal"),
+            "trigger returns false after unregister"
+        );
+    }
+
+    #[test]
+    fn trigger_scrape_cancel_unknown_login_is_false() {
+        let state = ScrapeCancelState::default();
+        assert!(!trigger_scrape_cancel(&state, "nobody"));
     }
 
     #[test]

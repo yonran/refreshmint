@@ -1048,6 +1048,7 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
                 eprintln!("{}", event.line);
             },
         )),
+        cancel: None,
     };
 
     let timestamp = crate::operations::now_timestamp();
