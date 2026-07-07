@@ -2,7 +2,26 @@ import { describe, it, expect } from 'vitest';
 import {
     appendLogLine,
     formatScrapeOutputLine,
+    partitionArtifacts,
 } from './scrape-console-utils.ts';
+
+describe('partitionArtifacts', () => {
+    it('separates the png screenshot from text artifacts', () => {
+        expect(
+            partitionArtifacts(['log-tail.txt', 'screenshot.png', 'url.txt']),
+        ).toEqual({
+            imageName: 'screenshot.png',
+            textNames: ['log-tail.txt', 'url.txt'],
+        });
+    });
+
+    it('returns null image when no png is present', () => {
+        expect(partitionArtifacts(['url.txt', 'log-tail.txt'])).toEqual({
+            imageName: null,
+            textNames: ['log-tail.txt', 'url.txt'],
+        });
+    });
+});
 
 describe('formatScrapeOutputLine', () => {
     it('passes stdout lines through unchanged', () => {

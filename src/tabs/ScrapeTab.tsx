@@ -5,10 +5,14 @@ import {
     listScrapeExtensions,
     getScrapeLog,
     runScrapeForLogin,
+    cancelScrape,
+    listScrapeFailureArtifacts,
+    readScrapeFailureArtifact,
 } from '../tauri-commands.ts';
 import { type ScrapeLogEntry } from '../scrapeLog.ts';
 import {
     appendLogLine,
+    partitionArtifacts,
     type ScrapeOutputLine,
 } from '../scrape-console-utils.ts';
 
@@ -51,6 +55,13 @@ export function ScrapeTab({
     // backend via `refreshmint://scrape-output`.
     const [consoleLines, setConsoleLines] = useState<string[]>([]);
     const consoleRef = useRef<HTMLPreElement | null>(null);
+    // Loaded failure artifacts for the entry whose "Artifacts" link was clicked.
+    const [artifactView, setArtifactView] = useState<{
+        dir: string;
+        image: string | null;
+        texts: { name: string; content: string }[];
+    } | null>(null);
+    const [artifactError, setArtifactError] = useState<string | null>(null);
 
     const ledgerPath = ledger?.path ?? null;
 
@@ -196,6 +207,48 @@ export function ScrapeTab({
         }
     }
 
+    async function handleCancelScrape() {
+        const loginName = activeScrapeLoginName;
+        if (loginName === null) return;
+        try {
+            await cancelScrape(loginName);
+            setScrapeStatus(`Canceling scrape for ${loginName}...`);
+        } catch (error) {
+            setScrapeStatus(`Cancel failed: ${String(error)}`);
+        }
+    }
+
+    async function handleViewArtifacts(dir: string) {
+        if (!ledger) return;
+        setArtifactError(null);
+        try {
+            const names = await listScrapeFailureArtifacts(ledger.path, dir);
+            const { imageName, textNames } = partitionArtifacts(names);
+            const image =
+                imageName !== null
+                    ? await readScrapeFailureArtifact(
+                          ledger.path,
+                          dir,
+                          imageName,
+                      )
+                    : null;
+            const texts = await Promise.all(
+                textNames.map(async (name) => ({
+                    name,
+                    content: await readScrapeFailureArtifact(
+                        ledger.path,
+                        dir,
+                        name,
+                    ),
+                })),
+            );
+            setArtifactView({ dir, image, texts });
+        } catch (error) {
+            setArtifactView(null);
+            setArtifactError(`Failed to load artifacts: ${String(error)}`);
+        }
+    }
+
     // ─── JSX ────────────────────────────────────────────────────────────────────
 
     return (
@@ -250,6 +303,17 @@ export function ScrapeTab({
                     >
                         {isRunningScrape ? 'Running scrape...' : 'Run scrape'}
                     </button>
+                    {isRunningScrape && (
+                        <button
+                            type="button"
+                            className="secondary-button"
+                            onClick={() => {
+                                void handleCancelScrape();
+                            }}
+                        >
+                            Cancel scrape
+                        </button>
+                    )}
                     <button
                         type="button"
                         className="secondary-button"
@@ -302,6 +366,7 @@ export function ScrapeTab({
                                     <th>Source</th>
                                     <th>Status</th>
                                     <th>Error</th>
+                                    <th>Artifacts</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -322,10 +387,69 @@ export function ScrapeTab({
                                             {entry.success ? 'OK' : 'Failed'}
                                         </td>
                                         <td>{entry.error ?? ''}</td>
+                                        <td>
+                                            {entry.artifactsDir !==
+                                            undefined ? (
+                                                <button
+                                                    type="button"
+                                                    className="link-button"
+                                                    onClick={() => {
+                                                        void handleViewArtifacts(
+                                                            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+                                                            entry.artifactsDir!,
+                                                        );
+                                                    }}
+                                                >
+                                                    View
+                                                </button>
+                                            ) : (
+                                                ''
+                                            )}
+                                        </td>
                                     </tr>
                                 ))}
                             </tbody>
                         </table>
+                        {artifactError !== null && (
+                            <p className="status status-error">
+                                {artifactError}
+                            </p>
+                        )}
+                        {artifactView !== null && (
+                            <div className="scrape-artifacts">
+                                <div className="scrape-artifacts-header">
+                                    <span>
+                                        Failure artifacts — {artifactView.dir}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        className="link-button"
+                                        onClick={() => {
+                                            setArtifactView(null);
+                                        }}
+                                    >
+                                        Close
+                                    </button>
+                                </div>
+                                {artifactView.image !== null && (
+                                    <img
+                                        className="scrape-artifacts-image"
+                                        src={artifactView.image}
+                                        alt="Scrape failure screenshot"
+                                    />
+                                )}
+                                {artifactView.texts.map((file) => (
+                                    <div key={file.name}>
+                                        <div className="scrape-console-header">
+                                            {file.name}
+                                        </div>
+                                        <pre className="scrape-console-pane">
+                                            {file.content}
+                                        </pre>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                     </details>
                 )}
                 {scrapeExtensions.length === 0 && !isLoadingScrapeExtensions ? (

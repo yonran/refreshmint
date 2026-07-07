@@ -1343,6 +1343,35 @@ export async function getScrapeLog(
     return invoke('get_scrape_log', { ledger, loginName });
 }
 
+/** Abort an in-flight scrape (also unblocks a pending MFA prompt). */
+export async function cancelScrape(loginName: string): Promise<void> {
+    await invoke('cancel_scrape', { loginName });
+}
+
+/** List the artifact filenames captured for a failed scrape run. */
+export async function listScrapeFailureArtifacts(
+    ledger: string,
+    artifactsDir: string,
+): Promise<string[]> {
+    return invoke('list_scrape_failure_artifacts', { ledger, artifactsDir });
+}
+
+/**
+ * Read one failure artifact. PNGs come back as a `data:` URL; other files as
+ * UTF-8 text.
+ */
+export async function readScrapeFailureArtifact(
+    ledger: string,
+    artifactsDir: string,
+    filename: string,
+): Promise<string> {
+    return invoke('read_scrape_failure_artifact', {
+        ledger,
+        artifactsDir,
+        filename,
+    });
+}
+
 export async function migrateLedger(
     ledger: string,
     dryRun: boolean,

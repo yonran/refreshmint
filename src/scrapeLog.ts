@@ -4,6 +4,10 @@ export interface ScrapeLogEntry {
     success: boolean;
     error?: string;
     source: 'manual' | 'auto';
+    // Ledger-relative directory of captured failure artifacts, present only on
+    // failed runs where capture succeeded. Set by the Rust backend
+    // (operations::ScrapeLogEntry.artifacts_dir).
+    artifactsDir?: string;
 }
 
 const MAX_PER_LOGIN = 100;

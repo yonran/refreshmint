@@ -34,6 +34,7 @@ import {
     type CategoryResult,
     openLedger,
     runScrapeForLogin,
+    cancelScrape,
     type LedgerView,
     setLoginAccount,
     recoverLedgerConsistency,
@@ -1303,13 +1304,51 @@ function App() {
                                 type="button"
                                 className="ghost-button"
                                 onClick={() => {
+                                    // Abort the running login; the queue drains
+                                    // the rest.
+                                    void cancelScrape(autoScrapeActive);
+                                }}
+                            >
+                                Cancel current
+                            </button>
+                            <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => {
                                     setAutoScrapeQueue([]);
                                 }}
                             >
-                                Skip
+                                Skip queue
                             </button>
                         </div>
                     )}
+                    {autoScrapeActive !== null &&
+                        autoScrapeQueue.length > 0 && (
+                            <div className="auto-scrape-queue">
+                                {autoScrapeQueue.map((loginName) => (
+                                    <span
+                                        key={loginName}
+                                        className="auto-scrape-queue-item"
+                                    >
+                                        {loginName}
+                                        <button
+                                            type="button"
+                                            className="link-button"
+                                            title={`Remove ${loginName} from the queue`}
+                                            onClick={() => {
+                                                setAutoScrapeQueue((current) =>
+                                                    current.filter(
+                                                        (n) => n !== loginName,
+                                                    ),
+                                                );
+                                            }}
+                                        >
+                                            ✕
+                                        </button>
+                                    </span>
+                                ))}
+                            </div>
+                        )}
                     {autoEtlErrors !== null && (
                         <div className="auto-scrape-banner auto-scrape-banner--error">
                             <span>{autoEtlErrors}</span>

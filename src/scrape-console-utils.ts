@@ -20,6 +20,25 @@ export function formatScrapeOutputLine(entry: ScrapeOutputLine): string {
     return entry.stream === 'stderr' ? `[stderr] ${entry.line}` : entry.line;
 }
 
+export interface PartitionedArtifacts {
+    /** The screenshot artifact (a `.png`), if present. */
+    imageName: string | null;
+    /** Remaining artifacts (url.txt, log-tail.txt, …), sorted. */
+    textNames: string[];
+}
+
+/**
+ * Split a failure-artifacts directory listing into the screenshot (shown as an
+ * image) and the text artifacts (shown as text). Keeps the viewer logic pure
+ * and unit-testable.
+ */
+export function partitionArtifacts(names: string[]): PartitionedArtifacts {
+    const imageName =
+        names.find((name) => name.toLowerCase().endsWith('.png')) ?? null;
+    const textNames = names.filter((name) => name !== imageName).sort();
+    return { imageName, textNames };
+}
+
 /**
  * Append a formatted scrape-output line to a bounded console buffer, evicting
  * the oldest lines once `max` is exceeded. Returns a new array (never mutates
