@@ -67,6 +67,8 @@ import {
     suggestGlAccountName,
 } from '../types.ts';
 import { AccountInput } from '../components/AccountInput.tsx';
+import { StatusBanner } from '../components/StatusBanner.tsx';
+import { classifyStatusMessage } from '../status-utils.ts';
 import { AttachmentLightbox } from '../components/AttachmentLightbox.tsx';
 import { useAttachmentLightbox } from '../components/useAttachmentLightbox.ts';
 import {
@@ -1780,7 +1782,10 @@ export function PipelineTab({
                         </button>
                     </div>
                     {pipelineStatus !== null && (
-                        <p className="status">{pipelineStatus}</p>
+                        <StatusBanner
+                            level={classifyStatusMessage(pipelineStatus)}
+                            message={pipelineStatus}
+                        />
                     )}
                     {pipelineBulkStats !== null && (
                         <div className="hint">
@@ -3348,9 +3353,6 @@ export function PipelineTab({
                             </div>
                         )}
                     </div>
-                )}
-                {pipelineStatus === null ? null : (
-                    <p className="status">{pipelineStatus}</p>
                 )}
             </section>
             <AttachmentLightbox

@@ -23,6 +23,8 @@ import {
     type ScrapeOutputLine,
 } from '../scrape-console-utils.ts';
 import type { ScrapeTabSession } from '../types.ts';
+import { StatusBanner } from '../components/StatusBanner.tsx';
+import { classifyStatusMessage } from '../status-utils.ts';
 
 interface ScrapeTabProps {
     ledger: LedgerView | null;
@@ -508,16 +510,10 @@ export function ScrapeTab({
                     </button>
                 </div>
                 {scrapeStatus === null ? null : (
-                    <p
-                        className={
-                            scrapeStatus.toLowerCase().includes('failed') ||
-                            scrapeStatus.toLowerCase().includes('error')
-                                ? 'status status-error'
-                                : 'status'
-                        }
-                    >
-                        {scrapeStatus}
-                    </p>
+                    <StatusBanner
+                        level={classifyStatusMessage(scrapeStatus)}
+                        message={scrapeStatus}
+                    />
                 )}
                 {(isRunningScrape || consoleLines.length > 0) && (
                     <div className="scrape-console">
