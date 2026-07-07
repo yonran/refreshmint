@@ -97,6 +97,25 @@ describe('buildReportArgs', () => {
             buildReportArgs(config({ command: 'balance', drop: '1' })),
         ).toContain('--drop=1');
     });
+
+    it('emits --budget only for balance-family commands', () => {
+        expect(
+            buildReportArgs(config({ command: 'balance', budget: true })),
+        ).toContain('--budget');
+        expect(
+            buildReportArgs(
+                config({ command: 'incomestatement', budget: true }),
+            ),
+        ).toContain('--budget');
+        // Register family ignores budget.
+        expect(
+            buildReportArgs(config({ command: 'register', budget: true })),
+        ).not.toContain('--budget');
+        // Off by default.
+        expect(buildReportArgs(config({ command: 'balance' }))).not.toContain(
+            '--budget',
+        );
+    });
 });
 
 describe('computePeriodPresetRange', () => {
@@ -200,6 +219,23 @@ describe('cannedReportConfig', () => {
             '-M',
             '--depth=1',
             '-H',
+        ]);
+    });
+
+    it('budget: monthly Expenses balance vs. budget, this month', () => {
+        const cfg = cannedReportConfig('budget', today);
+        expect(cfg.command).toBe('balance');
+        expect(cfg.budget).toBe(true);
+        expect(cfg.interval).toBe('-M');
+        expect(cfg.queryInput).toBe('acct:^Expenses');
+        expect(buildReportArgs(cfg)).toEqual([
+            '-b',
+            '2026-07-01',
+            '-e',
+            '2026-08-01',
+            '-M',
+            '--budget',
+            'acct:^Expenses',
         ]);
     });
 });

@@ -122,6 +122,9 @@ export interface ReportConfig {
     invert: boolean;
     transpose: boolean;
     drop: string;
+    /** Compare actuals against budget.journal periodic transactions (--budget).
+     * Balance-family only; the backend supplies budget.journal as a second -f. */
+    budget: boolean;
 
     // Register-family options
     regAccumulation: RegisterAccumulation;
@@ -160,6 +163,7 @@ export function createDefaultReportConfig(): ReportConfig {
         invert: false,
         transpose: false,
         drop: '',
+        budget: false,
         regAccumulation: '',
         regAverage: false,
         regRelated: false,
@@ -263,7 +267,8 @@ export function isReportConfigStale(
 export type CannedReportId =
     | 'spending-by-category'
     | 'income-vs-expense'
-    | 'net-worth-trend';
+    | 'net-worth-trend'
+    | 'budget';
 
 /**
  * Build a fully-formed ReportConfig for a one-click canned report, relative to
@@ -319,6 +324,21 @@ export function cannedReportConfig(
                 endDate: end,
             };
         }
+        case 'budget': {
+            const { begin, end } = computePeriodPresetRange(
+                'this-month',
+                today,
+            );
+            return {
+                ...base,
+                command: 'balance',
+                interval: '-M',
+                budget: true,
+                queryInput: 'acct:^Expenses',
+                beginDate: begin,
+                endDate: end,
+            };
+        }
     }
 }
 
@@ -359,6 +379,7 @@ export function buildReportArgs(config: ReportConfig): string[] {
     const isRegisterFamily = REGISTER_FAMILY.includes(config.command);
 
     if (isBalanceFamily) {
+        if (config.budget) args.push('--budget');
         if (config.balanceMode) args.push(config.balanceMode);
         if (config.accumulation) args.push(config.accumulation);
         if (config.balanceView) args.push(config.balanceView);

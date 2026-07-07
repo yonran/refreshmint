@@ -141,7 +141,12 @@ export function ReportsTab({
             let ok = false;
             try {
                 const args = buildReportArgs(cfg);
-                const res = await runHledgerReport(ledger, cfg.command, args);
+                const res = await runHledgerReport(
+                    ledger,
+                    cfg.command,
+                    args,
+                    cfg.budget,
+                );
                 setResult(res);
                 ok = true;
             } catch (e) {
@@ -238,6 +243,7 @@ export function ReportsTab({
                                 ],
                                 ['income-vs-expense', 'Income vs. expense'],
                                 ['net-worth-trend', 'Net worth trend'],
+                                ['budget', 'Budget vs. actual'],
                             ] as [CannedReportId, string][]
                         ).map(([id, label]) => (
                             <button
@@ -758,6 +764,18 @@ export function ReportsTab({
                                             }}
                                         />
                                         <span>Percent (-%)</span>
+                                    </label>
+                                    <label className="checkbox-field">
+                                        <input
+                                            type="checkbox"
+                                            checked={config.budget}
+                                            onChange={(e) => {
+                                                patch({
+                                                    budget: e.target.checked,
+                                                });
+                                            }}
+                                        />
+                                        <span>Budget (--budget)</span>
                                     </label>
                                     {command === 'balance' && (
                                         <label className="checkbox-field">

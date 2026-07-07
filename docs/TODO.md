@@ -299,17 +299,26 @@ Still open:
   back over it, leaving a dangling ref. Fix by re-reading (or merging) the
   triggering journal after the other-side writes when the paths coincide.
 
-### Reports (plumbing exists; presentation missing)
+### Reports
+
+Done in the 2026-07-07 Reports batch (starting `ec8bfa5`):
 
 - Period presets (This month / Last month / YTD / Last 12 months) and canned
-  one-click reports (Spending by category, Income vs expense, Net worth trend)
-  in ReportsTab — frontend-only over the existing `run_hledger_report`.
-- Saved report configs + an Overview/dashboard landing panel (also covers the
-  "Net Worth Dashboard" item above).
+  one-click reports (Spending by category, Income vs expense, Net worth trend,
+  Budget vs. actual) in ReportsTab — frontend-only over `run_hledger_report`.
+  (`798e96c`, `9bd1e2f`, budget canned report in this batch)
 - Data-quality banner: "N transactions ($X) still Expenses:Unknown in this
-  period" with a jump-to-categorize link.
-- Budgets via hledger periodic transactions and `balance --budget` (cheapest
-  credible answer to the Budgets section above).
+  period" with a jump-to-categorize link. (`9575968`)
+- Budgets via hledger periodic transactions and `balance --budget`, reading a
+  user-owned `budget.journal` next to `general.journal`. (`317b07b` plus the
+  budget canned report/checkbox in this batch; see docs/budgets.md)
+
+Still deferred:
+
+- Saved report configs (named, reloadable) + an Overview/dashboard landing
+  panel (also covers the "Net Worth Dashboard" item above).
+- CSS overhaul of ReportsTab (the batch left the ~18 undefined helper classes
+  as-is; see the CSS-debt item below).
 
 ### Scraping UX
 
@@ -391,10 +400,10 @@ Still open:
 - Bookkeeping: replace raw-UUID textareas and Left/Right ref inputs with
   pickers; humanize enum options ("Settlement" not "settlement-link"); label
   the tab as advanced ("Reconcile & Close").
-- Reports: `type="date"` inputs (other tabs already use them); plain-language
-  option labels with the hledger flag as tooltip; command selector styled
-  distinctly from the top-level nav tabs; default report on first open; stale-
-  result hint when options change after a run.
+- Reports: `type="date"` inputs (`798e96c`); plain-language option labels with
+  the hledger flag as tooltip and a distinctly-styled command selector
+  (`a7467ed`); default report on first open (`41ee2d5`); stale-result hint when
+  options change after a run (`9573610`). [done in the 2026-07-07 Reports batch]
 - Accounts tab as a real home screen: rename the misleading "Extraction"
   column, add net-worth total, per-login last-synced freshness, an
   Expenses:Unknown count chip, and a per-login "Sync now" button.
