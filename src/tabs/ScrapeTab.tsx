@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import {
     type LedgerView,
     listScrapeExtensions,
@@ -6,6 +7,10 @@ import {
     runScrapeForLogin,
 } from '../tauri-commands.ts';
 import { type ScrapeLogEntry } from '../scrapeLog.ts';
+import {
+    appendLogLine,
+    type ScrapeOutputLine,
+} from '../scrape-console-utils.ts';
 
 interface ScrapeTabProps {
     ledger: LedgerView | null;
@@ -42,6 +47,10 @@ export function ScrapeTab({
     const [isLoadingScrapeExtensions, setIsLoadingScrapeExtensions] =
         useState(false);
     const [isRunningScrape, setIsRunningScrape] = useState(false);
+    // Live driver output for the currently-selected login, streamed from the
+    // backend via `refreshmint://scrape-output`.
+    const [consoleLines, setConsoleLines] = useState<string[]>([]);
+    const consoleRef = useRef<HTMLPreElement | null>(null);
 
     const ledgerPath = ledger?.path ?? null;
 
@@ -56,7 +65,45 @@ export function ScrapeTab({
     useEffect(() => {
         setScrapeStatus(null);
         setScrapeLogEntries([]);
+        setConsoleLines([]);
     }, [ledgerPath]);
+
+    // Stream live driver output for the selected login into the console pane.
+    // Filtering by login keeps a running scrape's output out of other logins'
+    // panes (an auto-scrape may run a different login concurrently).
+    useEffect(() => {
+        if (activeScrapeLoginName === null) return;
+        const loginName = activeScrapeLoginName;
+        const unlisten = listen<ScrapeOutputLine & { loginName: string }>(
+            'refreshmint://scrape-output',
+            (event) => {
+                if (event.payload.loginName !== loginName) return;
+                setConsoleLines((current) =>
+                    appendLogLine(current, {
+                        stream: event.payload.stream,
+                        line: event.payload.line,
+                    }),
+                );
+            },
+        );
+        return () => {
+            void unlisten.then((fn) => {
+                fn();
+            });
+        };
+    }, [activeScrapeLoginName]);
+
+    // Clear the console when switching logins so it only shows the selected
+    // login's output.
+    useEffect(() => {
+        setConsoleLines([]);
+    }, [activeScrapeLoginName]);
+
+    // Auto-scroll the console pane to the newest line.
+    useEffect(() => {
+        const pane = consoleRef.current;
+        if (pane) pane.scrollTop = pane.scrollHeight;
+    }, [consoleLines]);
 
     // Reload scrape log when selected login or scrapeLogVersion changes.
     useEffect(() => {
@@ -124,6 +171,7 @@ export function ScrapeTab({
         }
 
         setIsRunningScrape(true);
+        setConsoleLines([]);
         setScrapeStatus(`Running scrape for ${loginName}...`);
         const timestamp = new Date().toISOString();
         try {
@@ -226,6 +274,21 @@ export function ScrapeTab({
                     >
                         {scrapeStatus}
                     </p>
+                )}
+                {(isRunningScrape || consoleLines.length > 0) && (
+                    <div className="scrape-console">
+                        <div className="scrape-console-header">
+                            Live output
+                            {activeScrapeLoginName !== null
+                                ? ` — ${activeScrapeLoginName}`
+                                : ''}
+                        </div>
+                        <pre className="scrape-console-pane" ref={consoleRef}>
+                            {consoleLines.length > 0
+                                ? consoleLines.join('\n')
+                                : 'Waiting for driver output...'}
+                        </pre>
+                    </div>
                 )}
                 {scrapeLogEntries.length > 0 && (
                     <details className="scrape-log-disclosure">

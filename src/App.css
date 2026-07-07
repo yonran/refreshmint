@@ -481,6 +481,32 @@
     font-variant-numeric: tabular-nums;
 }
 
+.scrape-console {
+    margin-top: 0.75rem;
+}
+
+.scrape-console-header {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #555;
+    margin-bottom: 0.25rem;
+}
+
+.scrape-console-pane {
+    max-height: 18rem;
+    overflow: auto;
+    background: #1e1e1e;
+    color: #e6e6e6;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.8rem;
+    line-height: 1.35;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 .amount {
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
