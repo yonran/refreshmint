@@ -67,6 +67,7 @@ import {
     suggestGlAccountName,
 } from '../types.ts';
 import { AccountInput } from '../components/AccountInput.tsx';
+import { Modal } from '../components/Modal.tsx';
 import { StatusBanner } from '../components/StatusBanner.tsx';
 import { classifyStatusMessage } from '../status-utils.ts';
 import { AttachmentLightbox } from '../components/AttachmentLightbox.tsx';
@@ -2963,394 +2964,357 @@ export function PipelineTab({
                             </table>
                         </div>
                         {transferModalEntryId !== null && (
-                            <div
-                                className="modal-overlay"
-                                onClick={() => {
+                            <Modal
+                                onClose={() => {
                                     setTransferModalEntryId(null);
                                 }}
+                                ariaLabel="Link Transfer"
                             >
-                                <div
-                                    className="modal-dialog"
-                                    onClick={(e) => {
-                                        e.stopPropagation();
+                                <div className="modal-header">
+                                    <h3>Link Transfer</h3>
+                                    <button
+                                        type="button"
+                                        className="ghost-button"
+                                        onClick={() => {
+                                            setTransferModalEntryId(null);
+                                        }}
+                                    >
+                                        Close
+                                    </button>
+                                </div>
+                                <input
+                                    type="search"
+                                    placeholder="Search candidates…"
+                                    value={transferModalSearch}
+                                    onChange={(e) => {
+                                        setTransferModalSearch(e.target.value);
                                     }}
-                                >
-                                    <div className="modal-header">
-                                        <h3>Link Transfer</h3>
+                                />
+                                {transferModalFeePrompt !== null && (
+                                    <div className="status">
+                                        <div>
+                                            The selected entry does not cancel
+                                            this amount; the difference of{' '}
+                                            {transferModalFeePrompt.residual}{' '}
+                                            will post to the fee account below.
+                                        </div>
+                                        <AccountInput
+                                            value={transferModalFeeAccount}
+                                            onChange={
+                                                setTransferModalFeeAccount
+                                            }
+                                            accounts={ledger.accounts.map(
+                                                (a) => a.name,
+                                            )}
+                                            placeholder="Fee account…"
+                                        />
+                                        {(transferModalFeeAccount
+                                            .trim()
+                                            .startsWith('Assets:') ||
+                                            transferModalFeeAccount
+                                                .trim()
+                                                .startsWith(
+                                                    'Liabilities:',
+                                                )) && (
+                                            <div className="hint">
+                                                Fee must be an expense/income
+                                                account, not a balance-sheet
+                                                account.
+                                            </div>
+                                        )}
                                         <button
                                             type="button"
                                             className="ghost-button"
-                                            onClick={() => {
-                                                setTransferModalEntryId(null);
-                                            }}
-                                        >
-                                            Close
-                                        </button>
-                                    </div>
-                                    <input
-                                        type="search"
-                                        placeholder="Search candidates…"
-                                        value={transferModalSearch}
-                                        onChange={(e) => {
-                                            setTransferModalSearch(
-                                                e.target.value,
-                                            );
-                                        }}
-                                    />
-                                    {transferModalFeePrompt !== null && (
-                                        <div className="status">
-                                            <div>
-                                                The selected entry does not
-                                                cancel this amount; the
-                                                difference of{' '}
-                                                {
-                                                    transferModalFeePrompt.residual
-                                                }{' '}
-                                                will post to the fee account
-                                                below.
-                                            </div>
-                                            <AccountInput
-                                                value={transferModalFeeAccount}
-                                                onChange={
-                                                    setTransferModalFeeAccount
-                                                }
-                                                accounts={ledger.accounts.map(
-                                                    (a) => a.name,
-                                                )}
-                                                placeholder="Fee account…"
-                                            />
-                                            {(transferModalFeeAccount
-                                                .trim()
-                                                .startsWith('Assets:') ||
+                                            disabled={
+                                                transferModalFeeAccount.trim() ===
+                                                    '' ||
+                                                transferModalFeeAccount
+                                                    .trim()
+                                                    .startsWith('Assets:') ||
                                                 transferModalFeeAccount
                                                     .trim()
                                                     .startsWith(
                                                         'Liabilities:',
-                                                    )) && (
-                                                <div className="hint">
-                                                    Fee must be an
-                                                    expense/income account, not
-                                                    a balance-sheet account.
-                                                </div>
-                                            )}
-                                            <button
-                                                type="button"
-                                                className="ghost-button"
-                                                disabled={
-                                                    transferModalFeeAccount.trim() ===
-                                                        '' ||
-                                                    transferModalFeeAccount
-                                                        .trim()
-                                                        .startsWith(
-                                                            'Assets:',
-                                                        ) ||
-                                                    transferModalFeeAccount
-                                                        .trim()
-                                                        .startsWith(
-                                                            'Liabilities:',
-                                                        ) ||
-                                                    busyPostEntryId !== null
-                                                }
-                                                onClick={() => {
-                                                    void handleLinkTransferFromModal(
-                                                        transferModalFeePrompt.candidate,
-                                                        transferModalFeeAccount.trim(),
-                                                    );
-                                                }}
-                                            >
-                                                Link with fee
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className="ghost-button"
-                                                onClick={() => {
-                                                    setTransferModalFeePrompt(
-                                                        null,
-                                                    );
-                                                }}
-                                            >
-                                                Cancel
-                                            </button>
-                                        </div>
-                                    )}
-                                    {isLoadingTransferModal ? (
-                                        <p className="status">
-                                            Loading entries...
-                                        </p>
-                                    ) : (
-                                        <div className="table-wrap">
-                                            <table className="ledger-table">
-                                                <thead>
-                                                    <tr>
-                                                        <th>Date</th>
-                                                        <th>Login/Label</th>
-                                                        <th>Description</th>
-                                                        <th>Amount</th>
-                                                        <th></th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {visibleTransferResults.length ===
-                                                    0 ? (
-                                                        <tr>
-                                                            <td
-                                                                colSpan={5}
-                                                                className="table-empty"
-                                                            >
-                                                                No unposted
-                                                                entries found in
-                                                                other accounts.
-                                                            </td>
-                                                        </tr>
-                                                    ) : (
-                                                        visibleTransferResults.map(
-                                                            (r) => (
-                                                                <tr
-                                                                    key={
-                                                                        r.entry
-                                                                            .id
-                                                                    }
-                                                                >
-                                                                    <td className="mono">
-                                                                        {
-                                                                            r
-                                                                                .entry
-                                                                                .date
-                                                                        }
-                                                                    </td>
-                                                                    <td>
-                                                                        {
-                                                                            r.loginName
-                                                                        }
-                                                                        /
-                                                                        {
-                                                                            r.label
-                                                                        }
-                                                                    </td>
-                                                                    <td>
-                                                                        {
-                                                                            r
-                                                                                .entry
-                                                                                .description
-                                                                        }
-                                                                    </td>
-                                                                    <td className="mono">
-                                                                        {r.entry
-                                                                            .amount ??
-                                                                            '-'}
-                                                                    </td>
-                                                                    <td>
-                                                                        <button
-                                                                            type="button"
-                                                                            className="primary-button"
-                                                                            disabled={
-                                                                                busyPostEntryId !==
-                                                                                null
-                                                                            }
-                                                                            onClick={() => {
-                                                                                // Non-cancelling pair →
-                                                                                // prompt for a fee
-                                                                                // account first.
-                                                                                const residual =
-                                                                                    transferModalResidual(
-                                                                                        r,
-                                                                                    );
-                                                                                if (
-                                                                                    residual !==
-                                                                                    null
-                                                                                ) {
-                                                                                    setTransferModalFeePrompt(
-                                                                                        {
-                                                                                            candidate:
-                                                                                                r,
-                                                                                            residual,
-                                                                                        },
-                                                                                    );
-                                                                                    return;
-                                                                                }
-                                                                                void handleLinkTransferFromModal(
-                                                                                    r,
-                                                                                );
-                                                                            }}
-                                                                        >
-                                                                            Link
-                                                                        </button>
-                                                                    </td>
-                                                                </tr>
-                                                            ),
-                                                        )
-                                                    )}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        )}
-                        {splitModalEntryId !== null && (
-                            <div
-                                className="modal-overlay"
-                                onClick={() => {
-                                    setSplitModalEntryId(null);
-                                }}
-                            >
-                                <div
-                                    className="modal-dialog"
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                    }}
-                                >
-                                    <div className="modal-header">
-                                        <h3>Split Transaction</h3>
-                                        <button
-                                            type="button"
-                                            className="ghost-button"
+                                                    ) ||
+                                                busyPostEntryId !== null
+                                            }
                                             onClick={() => {
-                                                setSplitModalEntryId(null);
-                                            }}
-                                        >
-                                            Close
-                                        </button>
-                                    </div>
-                                    <p className="status">
-                                        Assign the full amount across
-                                        counterpart accounts. Leave the last
-                                        row&apos;s amount blank to let hledger
-                                        infer the remainder.
-                                    </p>
-                                    <table className="ledger-table">
-                                        <thead>
-                                            <tr>
-                                                <th>Account</th>
-                                                <th>Amount</th>
-                                                <th></th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {splitDraftRows.map((row, i) => (
-                                                <tr key={i}>
-                                                    <td>
-                                                        <input
-                                                            type="text"
-                                                            placeholder="Expenses:Food"
-                                                            value={row.account}
-                                                            onChange={(e) => {
-                                                                const v =
-                                                                    e.target
-                                                                        .value;
-                                                                setSplitDraftRows(
-                                                                    (cur) =>
-                                                                        cur.map(
-                                                                            (
-                                                                                r,
-                                                                                j,
-                                                                            ) =>
-                                                                                j ===
-                                                                                i
-                                                                                    ? {
-                                                                                          ...r,
-                                                                                          account:
-                                                                                              v,
-                                                                                      }
-                                                                                    : r,
-                                                                        ),
-                                                                );
-                                                            }}
-                                                        />
-                                                    </td>
-                                                    <td>
-                                                        <input
-                                                            type="text"
-                                                            placeholder={
-                                                                i ===
-                                                                splitDraftRows.length -
-                                                                    1
-                                                                    ? '(remainder)'
-                                                                    : '0.00 USD'
-                                                            }
-                                                            value={row.amount}
-                                                            onChange={(e) => {
-                                                                const v =
-                                                                    e.target
-                                                                        .value;
-                                                                setSplitDraftRows(
-                                                                    (cur) =>
-                                                                        cur.map(
-                                                                            (
-                                                                                r,
-                                                                                j,
-                                                                            ) =>
-                                                                                j ===
-                                                                                i
-                                                                                    ? {
-                                                                                          ...r,
-                                                                                          amount: v,
-                                                                                      }
-                                                                                    : r,
-                                                                        ),
-                                                                );
-                                                            }}
-                                                        />
-                                                    </td>
-                                                    <td>
-                                                        {splitDraftRows.length >
-                                                            2 && (
-                                                            <button
-                                                                type="button"
-                                                                className="ghost-button"
-                                                                onClick={() => {
-                                                                    setSplitDraftRows(
-                                                                        (cur) =>
-                                                                            cur.filter(
-                                                                                (
-                                                                                    _,
-                                                                                    j,
-                                                                                ) =>
-                                                                                    j !==
-                                                                                    i,
-                                                                            ),
-                                                                    );
-                                                                }}
-                                                            >
-                                                                ×
-                                                            </button>
-                                                        )}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                    <div className="pipeline-row-actions">
-                                        <button
-                                            type="button"
-                                            className="ghost-button"
-                                            onClick={() => {
-                                                setSplitDraftRows((cur) => [
-                                                    ...cur,
-                                                    {
-                                                        account: '',
-                                                        amount: '',
-                                                    },
-                                                ]);
-                                            }}
-                                        >
-                                            + Add row
-                                        </button>
-                                        <button
-                                            type="button"
-                                            className="primary-button"
-                                            onClick={() => {
-                                                void handlePipelinePostSplit(
-                                                    splitModalEntryId,
-                                                    splitDraftRows,
+                                                void handleLinkTransferFromModal(
+                                                    transferModalFeePrompt.candidate,
+                                                    transferModalFeeAccount.trim(),
                                                 );
                                             }}
                                         >
-                                            Post Split
+                                            Link with fee
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="ghost-button"
+                                            onClick={() => {
+                                                setTransferModalFeePrompt(null);
+                                            }}
+                                        >
+                                            Cancel
                                         </button>
                                     </div>
+                                )}
+                                {isLoadingTransferModal ? (
+                                    <p className="status">Loading entries...</p>
+                                ) : (
+                                    <div className="table-wrap">
+                                        <table className="ledger-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Date</th>
+                                                    <th>Login/Label</th>
+                                                    <th>Description</th>
+                                                    <th>Amount</th>
+                                                    <th></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {visibleTransferResults.length ===
+                                                0 ? (
+                                                    <tr>
+                                                        <td
+                                                            colSpan={5}
+                                                            className="table-empty"
+                                                        >
+                                                            No unposted entries
+                                                            found in other
+                                                            accounts.
+                                                        </td>
+                                                    </tr>
+                                                ) : (
+                                                    visibleTransferResults.map(
+                                                        (r) => (
+                                                            <tr
+                                                                key={r.entry.id}
+                                                            >
+                                                                <td className="mono">
+                                                                    {
+                                                                        r.entry
+                                                                            .date
+                                                                    }
+                                                                </td>
+                                                                <td>
+                                                                    {
+                                                                        r.loginName
+                                                                    }
+                                                                    /{r.label}
+                                                                </td>
+                                                                <td>
+                                                                    {
+                                                                        r.entry
+                                                                            .description
+                                                                    }
+                                                                </td>
+                                                                <td className="mono">
+                                                                    {r.entry
+                                                                        .amount ??
+                                                                        '-'}
+                                                                </td>
+                                                                <td>
+                                                                    <button
+                                                                        type="button"
+                                                                        className="primary-button"
+                                                                        disabled={
+                                                                            busyPostEntryId !==
+                                                                            null
+                                                                        }
+                                                                        onClick={() => {
+                                                                            // Non-cancelling pair →
+                                                                            // prompt for a fee
+                                                                            // account first.
+                                                                            const residual =
+                                                                                transferModalResidual(
+                                                                                    r,
+                                                                                );
+                                                                            if (
+                                                                                residual !==
+                                                                                null
+                                                                            ) {
+                                                                                setTransferModalFeePrompt(
+                                                                                    {
+                                                                                        candidate:
+                                                                                            r,
+                                                                                        residual,
+                                                                                    },
+                                                                                );
+                                                                                return;
+                                                                            }
+                                                                            void handleLinkTransferFromModal(
+                                                                                r,
+                                                                            );
+                                                                        }}
+                                                                    >
+                                                                        Link
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        ),
+                                                    )
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </Modal>
+                        )}
+                        {splitModalEntryId !== null && (
+                            <Modal
+                                onClose={() => {
+                                    setSplitModalEntryId(null);
+                                }}
+                                ariaLabel="Split Transaction"
+                            >
+                                <div className="modal-header">
+                                    <h3>Split Transaction</h3>
+                                    <button
+                                        type="button"
+                                        className="ghost-button"
+                                        onClick={() => {
+                                            setSplitModalEntryId(null);
+                                        }}
+                                    >
+                                        Close
+                                    </button>
                                 </div>
-                            </div>
+                                <p className="status">
+                                    Assign the full amount across counterpart
+                                    accounts. Leave the last row&apos;s amount
+                                    blank to let hledger infer the remainder.
+                                </p>
+                                <table className="ledger-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Account</th>
+                                            <th>Amount</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {splitDraftRows.map((row, i) => (
+                                            <tr key={i}>
+                                                <td>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Expenses:Food"
+                                                        value={row.account}
+                                                        onChange={(e) => {
+                                                            const v =
+                                                                e.target.value;
+                                                            setSplitDraftRows(
+                                                                (cur) =>
+                                                                    cur.map(
+                                                                        (
+                                                                            r,
+                                                                            j,
+                                                                        ) =>
+                                                                            j ===
+                                                                            i
+                                                                                ? {
+                                                                                      ...r,
+                                                                                      account:
+                                                                                          v,
+                                                                                  }
+                                                                                : r,
+                                                                    ),
+                                                            );
+                                                        }}
+                                                    />
+                                                </td>
+                                                <td>
+                                                    <input
+                                                        type="text"
+                                                        placeholder={
+                                                            i ===
+                                                            splitDraftRows.length -
+                                                                1
+                                                                ? '(remainder)'
+                                                                : '0.00 USD'
+                                                        }
+                                                        value={row.amount}
+                                                        onChange={(e) => {
+                                                            const v =
+                                                                e.target.value;
+                                                            setSplitDraftRows(
+                                                                (cur) =>
+                                                                    cur.map(
+                                                                        (
+                                                                            r,
+                                                                            j,
+                                                                        ) =>
+                                                                            j ===
+                                                                            i
+                                                                                ? {
+                                                                                      ...r,
+                                                                                      amount: v,
+                                                                                  }
+                                                                                : r,
+                                                                    ),
+                                                            );
+                                                        }}
+                                                    />
+                                                </td>
+                                                <td>
+                                                    {splitDraftRows.length >
+                                                        2 && (
+                                                        <button
+                                                            type="button"
+                                                            className="ghost-button"
+                                                            onClick={() => {
+                                                                setSplitDraftRows(
+                                                                    (cur) =>
+                                                                        cur.filter(
+                                                                            (
+                                                                                _,
+                                                                                j,
+                                                                            ) =>
+                                                                                j !==
+                                                                                i,
+                                                                        ),
+                                                                );
+                                                            }}
+                                                        >
+                                                            ×
+                                                        </button>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                <div className="pipeline-row-actions">
+                                    <button
+                                        type="button"
+                                        className="ghost-button"
+                                        onClick={() => {
+                                            setSplitDraftRows((cur) => [
+                                                ...cur,
+                                                {
+                                                    account: '',
+                                                    amount: '',
+                                                },
+                                            ]);
+                                        }}
+                                    >
+                                        + Add row
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="primary-button"
+                                        onClick={() => {
+                                            void handlePipelinePostSplit(
+                                                splitModalEntryId,
+                                                splitDraftRows,
+                                            );
+                                        }}
+                                    >
+                                        Post Split
+                                    </button>
+                                </div>
+                            </Modal>
                         )}
                     </div>
                 )}
@@ -3363,45 +3327,36 @@ export function PipelineTab({
                 onClose={lightbox.close}
             />
             {textViewContent !== null && (
-                <div
-                    className="modal-overlay"
-                    onClick={() => {
+                <Modal
+                    onClose={() => {
                         setTextViewContent(null);
                     }}
-                    role="dialog"
-                    aria-modal="true"
-                    aria-label={textViewFilename ?? 'Document'}
+                    ariaLabel={textViewFilename ?? 'Document'}
+                    dialogClassName="modal-dialog attachment-lightbox"
                 >
-                    <div
-                        className="modal-dialog attachment-lightbox"
-                        onClick={(e) => {
-                            e.stopPropagation();
+                    <div className="modal-header">
+                        <h3>{textViewFilename}</h3>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setTextViewContent(null);
+                            }}
+                            className="ghost-button"
+                        >
+                            Close
+                        </button>
+                    </div>
+                    <pre
+                        style={{
+                            overflow: 'auto',
+                            maxHeight: 'calc(90vh - 4rem)',
+                            margin: 0,
+                            padding: '0.5rem',
                         }}
                     >
-                        <div className="modal-header">
-                            <h3>{textViewFilename}</h3>
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    setTextViewContent(null);
-                                }}
-                                className="ghost-button"
-                            >
-                                Close
-                            </button>
-                        </div>
-                        <pre
-                            style={{
-                                overflow: 'auto',
-                                maxHeight: 'calc(90vh - 4rem)',
-                                margin: 0,
-                                padding: '0.5rem',
-                            }}
-                        >
-                            {textViewContent}
-                        </pre>
-                    </div>
-                </div>
+                        {textViewContent}
+                    </pre>
+                </Modal>
             )}
         </div>
     );

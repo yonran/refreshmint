@@ -65,6 +65,10 @@ export function AccountInput({
             if (sug !== undefined) applyCompletion(sug);
         } else if (e.key === 'Escape') {
             // First Escape dismisses suggestions; second Escape reaches parent.
+            // preventDefault marks this keystroke handled so a surrounding
+            // Modal (which ignores defaultPrevented Escapes) does not also close
+            // on the same press — the modal closes only on the second Escape.
+            e.preventDefault();
             setSuggestions([]);
             setActiveIndex(-1);
         } else {

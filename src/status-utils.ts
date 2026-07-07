@@ -14,3 +14,18 @@ export function classifyStatusMessage(message: string): 'error' | 'info' {
         ? 'error'
         : 'info';
 }
+
+/**
+ * Whether a keydown should close a Modal. True only for a fresh Escape
+ * (defaultPrevented === false) when closeOnEscape is enabled. Ignoring
+ * already-handled Escapes lets an inner control (e.g. AccountInput dismissing
+ * its suggestions via preventDefault) consume the first Escape without also
+ * closing the surrounding modal. See src/components/Modal.tsx.
+ */
+export function shouldCloseOnKey(
+    key: string,
+    defaultPrevented: boolean,
+    closeOnEscape: boolean,
+): boolean {
+    return closeOnEscape && key === 'Escape' && !defaultPrevented;
+}

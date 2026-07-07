@@ -49,6 +49,7 @@ import {
 } from '../types.ts';
 import { TransactionsTable } from './TransactionsTable.tsx';
 import { AccountInput } from '../components/AccountInput.tsx';
+import { Modal } from '../components/Modal.tsx';
 import { BulkRecategorizeConfirmModal } from '../components/BulkRecategorizeConfirmModal.tsx';
 import { StatusBanner, type StatusLevel } from '../components/StatusBanner.tsx';
 
@@ -2273,180 +2274,169 @@ export function TransactionsTab({
                         feeTrimmed.startsWith('Assets:') ||
                         feeTrimmed.startsWith('Liabilities:');
                     return (
-                        <div
-                            className="modal-overlay"
-                            onClick={() => {
+                        <Modal
+                            onClose={() => {
                                 setGlTransferModalTxnId(null);
                             }}
+                            ariaLabel="Link Transfer"
                         >
-                            <div
-                                className="modal-dialog"
-                                onClick={(e) => {
-                                    e.stopPropagation();
+                            <div className="modal-header">
+                                <h3>Link Transfer</h3>
+                                <button
+                                    type="button"
+                                    className="ghost-button"
+                                    onClick={() => {
+                                        setGlTransferModalTxnId(null);
+                                    }}
+                                >
+                                    Close
+                                </button>
+                            </div>
+                            <input
+                                type="search"
+                                placeholder="Search… (text, date, or amt:12.34)"
+                                value={glTransferModalSearch}
+                                onChange={(e) => {
+                                    setGlTransferModalSearch(e.target.value);
                                 }}
-                            >
-                                <div className="modal-header">
-                                    <h3>Link Transfer</h3>
+                            />
+                            {glTransferFeePrompt !== null && (
+                                <div className="status">
+                                    <div>
+                                        The selected transaction does not cancel
+                                        this amount; the difference of{' '}
+                                        {glTransferFeePrompt.residual} will post
+                                        to the fee account below.
+                                    </div>
+                                    <AccountInput
+                                        value={glTransferFeeAccount}
+                                        onChange={setGlTransferFeeAccount}
+                                        accounts={ledger.accounts.map(
+                                            (a) => a.name,
+                                        )}
+                                        placeholder="Fee account…"
+                                    />
+                                    {feeIsBalanceSheet && (
+                                        <div className="hint">
+                                            Fee must be an expense/income
+                                            account, not a balance-sheet
+                                            account.
+                                        </div>
+                                    )}
+                                    <button
+                                        type="button"
+                                        className="ghost-button"
+                                        disabled={
+                                            transferActionBusy ||
+                                            feeTrimmed === '' ||
+                                            feeIsBalanceSheet
+                                        }
+                                        onClick={() => {
+                                            const candidateId =
+                                                glTransferFeePrompt.candidateId;
+                                            setGlTransferFeePrompt(null);
+                                            setGlTransferModalTxnId(null);
+                                            void handleMergeGlTransfer(
+                                                modalTxnId,
+                                                candidateId,
+                                                glTransferFeeAccount.trim(),
+                                            );
+                                        }}
+                                    >
+                                        Link with fee
+                                    </button>
                                     <button
                                         type="button"
                                         className="ghost-button"
                                         onClick={() => {
-                                            setGlTransferModalTxnId(null);
+                                            setGlTransferFeePrompt(null);
                                         }}
                                     >
-                                        Close
+                                        Cancel
                                     </button>
                                 </div>
-                                <input
-                                    type="search"
-                                    placeholder="Search… (text, date, or amt:12.34)"
-                                    value={glTransferModalSearch}
-                                    onChange={(e) => {
-                                        setGlTransferModalSearch(
-                                            e.target.value,
-                                        );
-                                    }}
-                                />
-                                {glTransferFeePrompt !== null && (
-                                    <div className="status">
-                                        <div>
-                                            The selected transaction does not
-                                            cancel this amount; the difference
-                                            of {glTransferFeePrompt.residual}{' '}
-                                            will post to the fee account below.
-                                        </div>
-                                        <AccountInput
-                                            value={glTransferFeeAccount}
-                                            onChange={setGlTransferFeeAccount}
-                                            accounts={ledger.accounts.map(
-                                                (a) => a.name,
-                                            )}
-                                            placeholder="Fee account…"
-                                        />
-                                        {feeIsBalanceSheet && (
-                                            <div className="hint">
-                                                Fee must be an expense/income
-                                                account, not a balance-sheet
-                                                account.
-                                            </div>
-                                        )}
-                                        <button
-                                            type="button"
-                                            className="ghost-button"
-                                            disabled={
-                                                transferActionBusy ||
-                                                feeTrimmed === '' ||
-                                                feeIsBalanceSheet
-                                            }
-                                            onClick={() => {
-                                                const candidateId =
-                                                    glTransferFeePrompt.candidateId;
-                                                setGlTransferFeePrompt(null);
-                                                setGlTransferModalTxnId(null);
-                                                void handleMergeGlTransfer(
-                                                    modalTxnId,
-                                                    candidateId,
-                                                    glTransferFeeAccount.trim(),
-                                                );
-                                            }}
-                                        >
-                                            Link with fee
-                                        </button>
-                                        <button
-                                            type="button"
-                                            className="ghost-button"
-                                            onClick={() => {
-                                                setGlTransferFeePrompt(null);
-                                            }}
-                                        >
-                                            Cancel
-                                        </button>
-                                    </div>
-                                )}
-                                <div className="table-wrap">
-                                    <table className="ledger-table">
-                                        <thead>
+                            )}
+                            <div className="table-wrap">
+                                <table className="ledger-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Date</th>
+                                            <th>Description</th>
+                                            <th>Amount</th>
+                                            <th />
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {candidates.length === 0 ? (
                                             <tr>
-                                                <th>Date</th>
-                                                <th>Description</th>
-                                                <th>Amount</th>
-                                                <th />
+                                                <td
+                                                    colSpan={4}
+                                                    className="table-empty"
+                                                >
+                                                    No uncategorized
+                                                    transactions found.
+                                                </td>
                                             </tr>
-                                        </thead>
-                                        <tbody>
-                                            {candidates.length === 0 ? (
-                                                <tr>
-                                                    <td
-                                                        colSpan={4}
-                                                        className="table-empty"
-                                                    >
-                                                        No uncategorized
-                                                        transactions found.
+                                        ) : (
+                                            candidates.map((t) => (
+                                                <tr key={t.id}>
+                                                    <td className="mono">
+                                                        {t.date}
+                                                    </td>
+                                                    <td>{t.description}</td>
+                                                    <td className="amount">
+                                                        {formatTotals(t.totals)}
+                                                    </td>
+                                                    <td>
+                                                        <button
+                                                            type="button"
+                                                            className="ghost-button"
+                                                            disabled={
+                                                                transferActionBusy
+                                                            }
+                                                            onClick={() => {
+                                                                // Non-cancelling pair → prompt for a
+                                                                // fee account instead of merging
+                                                                // (backend would refuse anyway).
+                                                                const residual =
+                                                                    subject
+                                                                        ? glTransferResidual(
+                                                                              subject,
+                                                                              t,
+                                                                          )
+                                                                        : null;
+                                                                if (
+                                                                    residual !==
+                                                                    null
+                                                                ) {
+                                                                    setGlTransferFeePrompt(
+                                                                        {
+                                                                            candidateId:
+                                                                                t.id,
+                                                                            residual: `${residual.residual.toFixed(2)} ${residual.commodity}`,
+                                                                        },
+                                                                    );
+                                                                    return;
+                                                                }
+                                                                void handleMergeGlTransfer(
+                                                                    modalTxnId,
+                                                                    t.id,
+                                                                );
+                                                                setGlTransferModalTxnId(
+                                                                    null,
+                                                                );
+                                                            }}
+                                                        >
+                                                            Link
+                                                        </button>
                                                     </td>
                                                 </tr>
-                                            ) : (
-                                                candidates.map((t) => (
-                                                    <tr key={t.id}>
-                                                        <td className="mono">
-                                                            {t.date}
-                                                        </td>
-                                                        <td>{t.description}</td>
-                                                        <td className="amount">
-                                                            {formatTotals(
-                                                                t.totals,
-                                                            )}
-                                                        </td>
-                                                        <td>
-                                                            <button
-                                                                type="button"
-                                                                className="ghost-button"
-                                                                disabled={
-                                                                    transferActionBusy
-                                                                }
-                                                                onClick={() => {
-                                                                    // Non-cancelling pair → prompt for a
-                                                                    // fee account instead of merging
-                                                                    // (backend would refuse anyway).
-                                                                    const residual =
-                                                                        subject
-                                                                            ? glTransferResidual(
-                                                                                  subject,
-                                                                                  t,
-                                                                              )
-                                                                            : null;
-                                                                    if (
-                                                                        residual !==
-                                                                        null
-                                                                    ) {
-                                                                        setGlTransferFeePrompt(
-                                                                            {
-                                                                                candidateId:
-                                                                                    t.id,
-                                                                                residual: `${residual.residual.toFixed(2)} ${residual.commodity}`,
-                                                                            },
-                                                                        );
-                                                                        return;
-                                                                    }
-                                                                    void handleMergeGlTransfer(
-                                                                        modalTxnId,
-                                                                        t.id,
-                                                                    );
-                                                                    setGlTransferModalTxnId(
-                                                                        null,
-                                                                    );
-                                                                }}
-                                                            >
-                                                                Link
-                                                            </button>
-                                                        </td>
-                                                    </tr>
-                                                ))
-                                            )}
-                                        </tbody>
-                                    </table>
-                                </div>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
                             </div>
-                        </div>
+                        </Modal>
                     );
                 })(glTransferModalTxnId)}
         </div>

@@ -23,6 +23,7 @@ import {
 } from '../categorize-utils.ts';
 import { formatScaled, formatTotals } from '../amount-utils.ts';
 import { AccountInput } from '../components/AccountInput.tsx';
+import { Modal } from '../components/Modal.tsx';
 import { AttachmentLightbox } from '../components/AttachmentLightbox.tsx';
 import { useAttachmentLightbox } from '../components/useAttachmentLightbox.ts';
 import { BulkRecategorizeConfirmModal } from '../components/BulkRecategorizeConfirmModal.tsx';
@@ -1389,83 +1390,73 @@ export function TransactionsTable({
                 />
             )}
             {acceptAllConfirm !== null && (
-                <div
-                    className="modal-overlay"
-                    onClick={() => {
+                <Modal
+                    onClose={() => {
                         setAcceptAllConfirm(null);
                     }}
+                    ariaLabel="Accept ML suggestions"
                 >
-                    <div
-                        className="modal-dialog"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                        }}
-                    >
-                        <div className="modal-header">
-                            <h3>Accept ML suggestions</h3>
-                            <button
-                                type="button"
-                                className="ghost-button"
-                                onClick={() => {
-                                    setAcceptAllConfirm(null);
-                                }}
-                            >
-                                Close
-                            </button>
-                        </div>
-                        <p>
-                            Apply {acceptAllConfirm.length} suggested categor
-                            {acceptAllConfirm.length === 1 ? 'y' : 'ies'}:
-                        </p>
-                        <ul>
-                            {[
-                                ...new Map(
-                                    acceptAllConfirm.map((e) => [
-                                        e.newAccount,
-                                        0,
-                                    ]),
-                                ).keys(),
-                            ].map((acct) => {
-                                const count = acceptAllConfirm.filter(
-                                    (e) => e.newAccount === acct,
-                                ).length;
-                                return (
-                                    <li key={acct}>
-                                        {count} → {acct}
-                                    </li>
-                                );
-                            })}
-                        </ul>
-                        <div
-                            style={{
-                                display: 'flex',
-                                gap: '0.5rem',
-                                justifyContent: 'flex-end',
+                    <div className="modal-header">
+                        <h3>Accept ML suggestions</h3>
+                        <button
+                            type="button"
+                            className="ghost-button"
+                            onClick={() => {
+                                setAcceptAllConfirm(null);
                             }}
                         >
-                            <button
-                                type="button"
-                                className="ghost-button"
-                                onClick={() => {
-                                    setAcceptAllConfirm(null);
-                                }}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                type="button"
-                                className="ghost-button"
-                                disabled={acceptSuggestionsBusy}
-                                onClick={() => {
-                                    onAcceptSuggestions?.(acceptAllConfirm);
-                                    setAcceptAllConfirm(null);
-                                }}
-                            >
-                                Accept {acceptAllConfirm.length}
-                            </button>
-                        </div>
+                            Close
+                        </button>
                     </div>
-                </div>
+                    <p>
+                        Apply {acceptAllConfirm.length} suggested categor
+                        {acceptAllConfirm.length === 1 ? 'y' : 'ies'}:
+                    </p>
+                    <ul>
+                        {[
+                            ...new Map(
+                                acceptAllConfirm.map((e) => [e.newAccount, 0]),
+                            ).keys(),
+                        ].map((acct) => {
+                            const count = acceptAllConfirm.filter(
+                                (e) => e.newAccount === acct,
+                            ).length;
+                            return (
+                                <li key={acct}>
+                                    {count} → {acct}
+                                </li>
+                            );
+                        })}
+                    </ul>
+                    <div
+                        style={{
+                            display: 'flex',
+                            gap: '0.5rem',
+                            justifyContent: 'flex-end',
+                        }}
+                    >
+                        <button
+                            type="button"
+                            className="ghost-button"
+                            onClick={() => {
+                                setAcceptAllConfirm(null);
+                            }}
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            type="button"
+                            className="ghost-button"
+                            disabled={acceptSuggestionsBusy}
+                            onClick={() => {
+                                onAcceptSuggestions?.(acceptAllConfirm);
+                                setAcceptAllConfirm(null);
+                            }}
+                        >
+                            Accept {acceptAllConfirm.length}
+                        </button>
+                    </div>
+                </Modal>
             )}
             {contextMenu && (
                 <div
