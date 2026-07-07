@@ -725,6 +725,13 @@ export function TransactionsTab({
     // Execute the exact inverse of a just-performed chip action (categorize /
     // merge) and refresh. Used by the Undo affordance on the success banner.
     async function runUndoPlan(plan: UndoPlan) {
+        // Guard against a double-click firing the plan twice (the second unpost
+        // races the first's GL mutation and fails, showing a spurious "Undo
+        // failed" after a successful undo) and against chips being clicked
+        // mid-undo (GL lock race). Reuses transferActionBusy, which already
+        // gates the merge chips and the Undo button (below).
+        if (transferActionBusy) return;
+        setTransferActionBusy(true);
         try {
             if (plan.kind === 'recategorize-back') {
                 await recategorizeGlTransaction(
@@ -777,6 +784,8 @@ export function TransactionsTab({
                 level: 'error',
                 message: `Undo failed: ${String(error)}`,
             });
+        } finally {
+            setTransferActionBusy(false);
         }
     }
 
@@ -1839,7 +1848,16 @@ export function TransactionsTab({
                 <StatusBanner
                     level={actionStatus.level}
                     message={actionStatus.message}
-                    action={actionStatus.action}
+                    // Disable the Undo button while an undo (or other transfer
+                    // action) is in flight so it can't be double-fired.
+                    action={
+                        actionStatus.action !== undefined
+                            ? {
+                                  ...actionStatus.action,
+                                  disabled: transferActionBusy,
+                              }
+                            : undefined
+                    }
                     autoDismissMs={actionStatus.autoDismissMs}
                     onDismiss={() => {
                         setActionStatus(null);

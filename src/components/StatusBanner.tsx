@@ -18,8 +18,12 @@ export function StatusBanner({
     message: string;
     onDismiss?: () => void;
     // `| undefined` so callers can forward optional fields from a nullable
-    // status object under exactOptionalPropertyTypes.
-    action?: { label: string; onClick: () => void } | undefined;
+    // status object under exactOptionalPropertyTypes. `disabled` lets a caller
+    // gate the action while its handler is already in flight (e.g. an Undo
+    // running against the GL).
+    action?:
+        | { label: string; onClick: () => void; disabled?: boolean }
+        | undefined;
     autoDismissMs?: number | undefined;
 }) {
     useEffect(() => {
@@ -47,6 +51,7 @@ export function StatusBanner({
                     type="button"
                     className="ghost-button status-banner-action"
                     onClick={action.onClick}
+                    disabled={action.disabled ?? false}
                 >
                     {action.label}
                 </button>
