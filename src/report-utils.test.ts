@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     buildReportArgs,
+    cannedReportConfig,
     computePeriodPresetRange,
     createDefaultReportConfig,
     type ReportConfig,
@@ -138,5 +139,62 @@ describe('computePeriodPresetRange', () => {
         expect(
             computePeriodPresetRange('last-12-months', new Date(2024, 1, 15)),
         ).toEqual({ begin: '2023-03-01', end: '2024-03-01' });
+    });
+});
+
+describe('cannedReportConfig', () => {
+    // Fixed today = 2026-07-07 (local). this-month = 2026-07-01..2026-08-01;
+    // last-12-months = 2025-08-01..2026-08-01.
+    const today = new Date(2026, 6, 7);
+
+    it('spending-by-category: monthly Expenses balance, this month, sorted', () => {
+        const cfg = cannedReportConfig('spending-by-category', today);
+        expect(cfg.command).toBe('balance');
+        expect(cfg.interval).toBe('-M');
+        expect(cfg.queryInput).toBe('acct:^Expenses');
+        expect(cfg.sortAmount).toBe(true);
+        expect({ begin: cfg.beginDate, end: cfg.endDate }).toEqual({
+            begin: '2026-07-01',
+            end: '2026-08-01',
+        });
+        expect(buildReportArgs(cfg)).toEqual([
+            '-b',
+            '2026-07-01',
+            '-e',
+            '2026-08-01',
+            '-M',
+            '-S',
+            'acct:^Expenses',
+        ]);
+    });
+
+    it('income-vs-expense: monthly income statement over last 12 months', () => {
+        const cfg = cannedReportConfig('income-vs-expense', today);
+        expect(cfg.command).toBe('incomestatement');
+        expect(cfg.interval).toBe('-M');
+        expect(buildReportArgs(cfg)).toEqual([
+            '-b',
+            '2025-08-01',
+            '-e',
+            '2026-08-01',
+            '-M',
+        ]);
+    });
+
+    it('net-worth-trend: monthly historical balance sheet, depth 1', () => {
+        const cfg = cannedReportConfig('net-worth-trend', today);
+        expect(cfg.command).toBe('balancesheet');
+        expect(cfg.interval).toBe('-M');
+        expect(cfg.accumulation).toBe('-H');
+        expect(cfg.depth).toBe('1');
+        expect(buildReportArgs(cfg)).toEqual([
+            '-b',
+            '2025-08-01',
+            '-e',
+            '2026-08-01',
+            '-M',
+            '--depth=1',
+            '-H',
+        ]);
     });
 });

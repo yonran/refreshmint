@@ -219,6 +219,68 @@ export function computePeriodPresetRange(
     }
 }
 
+export type CannedReportId =
+    | 'spending-by-category'
+    | 'income-vs-expense'
+    | 'net-worth-trend';
+
+/**
+ * Build a fully-formed ReportConfig for a one-click canned report, relative to
+ * `today`. Each starts from createDefaultReportConfig() so unrelated options are
+ * cleared. The report-utils.test.ts suite pins the resulting buildReportArgs.
+ */
+export function cannedReportConfig(
+    id: CannedReportId,
+    today: Date,
+): ReportConfig {
+    const base = createDefaultReportConfig();
+    switch (id) {
+        case 'spending-by-category': {
+            const { begin, end } = computePeriodPresetRange(
+                'this-month',
+                today,
+            );
+            return {
+                ...base,
+                command: 'balance',
+                interval: '-M',
+                queryInput: 'acct:^Expenses',
+                sortAmount: true,
+                beginDate: begin,
+                endDate: end,
+            };
+        }
+        case 'income-vs-expense': {
+            const { begin, end } = computePeriodPresetRange(
+                'last-12-months',
+                today,
+            );
+            return {
+                ...base,
+                command: 'incomestatement',
+                interval: '-M',
+                beginDate: begin,
+                endDate: end,
+            };
+        }
+        case 'net-worth-trend': {
+            const { begin, end } = computePeriodPresetRange(
+                'last-12-months',
+                today,
+            );
+            return {
+                ...base,
+                command: 'balancesheet',
+                interval: '-M',
+                accumulation: '-H',
+                depth: '1',
+                beginDate: begin,
+                endDate: end,
+            };
+        }
+    }
+}
+
 /**
  * Verbatim port of the original ReportsTab.buildArgs(). Assembles the hledger
  * CLI arguments (excluding the command itself and the -f journal path, which the

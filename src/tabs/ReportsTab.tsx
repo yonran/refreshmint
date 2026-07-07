@@ -11,8 +11,10 @@ import {
     COMMAND_LABELS,
     REGISTER_FAMILY,
     buildReportArgs,
+    cannedReportConfig,
     computePeriodPresetRange,
     type Accumulation,
+    type CannedReportId,
     type BalanceMode,
     type BalanceView,
     type Interval,
@@ -113,20 +115,39 @@ export function ReportsTab({
         [patch],
     );
 
-    const handleRun = useCallback(async () => {
-        setRunning(true);
-        setError(null);
-        setResult(null);
-        try {
-            const args = buildReportArgs(config);
-            const res = await runHledgerReport(ledger, config.command, args);
-            setResult(res);
-        } catch (e) {
-            setError(String(e));
-        } finally {
-            setRunning(false);
-        }
-    }, [ledger, config]);
+    // Run an explicit config. Taking the config as an argument (rather than
+    // reading component state) lets canned reports set the whole config and run
+    // it in the same click without waiting for a setState to flush.
+    const runReport = useCallback(
+        async (cfg: ReportConfig) => {
+            setRunning(true);
+            setError(null);
+            setResult(null);
+            try {
+                const args = buildReportArgs(cfg);
+                const res = await runHledgerReport(ledger, cfg.command, args);
+                setResult(res);
+            } catch (e) {
+                setError(String(e));
+            } finally {
+                setRunning(false);
+            }
+        },
+        [ledger],
+    );
+
+    const handleRun = useCallback(() => {
+        void runReport(config);
+    }, [runReport, config]);
+
+    const runCannedReport = useCallback(
+        (id: CannedReportId) => {
+            const cfg = cannedReportConfig(id, new Date());
+            setConfig(cfg);
+            void runReport(cfg);
+        },
+        [runReport],
+    );
 
     const isBalanceFamily = BALANCE_FAMILY.includes(command);
     const isRegisterFamily = REGISTER_FAMILY.includes(command);
@@ -146,6 +167,35 @@ export function ReportsTab({
             <section className="txn-form">
                 <div className="txn-form-header">
                     <h2>Reports</h2>
+                </div>
+
+                {/* Canned one-click reports */}
+                <div className="field-group">
+                    <label className="field-label">Quick reports</label>
+                    <div className="field-row">
+                        {(
+                            [
+                                [
+                                    'spending-by-category',
+                                    'Spending by category',
+                                ],
+                                ['income-vs-expense', 'Income vs. expense'],
+                                ['net-worth-trend', 'Net worth trend'],
+                            ] as [CannedReportId, string][]
+                        ).map(([id, label]) => (
+                            <button
+                                key={id}
+                                type="button"
+                                className="tab"
+                                disabled={running}
+                                onClick={() => {
+                                    runCannedReport(id);
+                                }}
+                            >
+                                {label}
+                            </button>
+                        ))}
+                    </div>
                 </div>
 
                 {/* Command selector */}
@@ -338,7 +388,7 @@ export function ReportsTab({
                         type="button"
                         className="primary-button"
                         disabled={running}
-                        onClick={() => void handleRun()}
+                        onClick={handleRun}
                     >
                         {running ? 'Running…' : 'Run'}
                     </button>
