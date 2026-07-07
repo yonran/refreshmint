@@ -379,6 +379,10 @@ fn write_other_sides(
 ///
 /// For transfer GL transactions (two `; source:` lines), also clears the
 /// `posted` tag on the other-side account journal entry.
+// Eight positional args (one over the clippy default): each is a distinct
+// identity/behavior selector on the unpost operation; bundling them into a
+// struct would not aid clarity at the few call sites.
+#[allow(clippy::too_many_arguments)]
 pub fn unpost_login_account_entry(
     ledger_dir: &Path,
     login_name: &str,
@@ -391,6 +395,11 @@ pub fn unpost_login_account_entry(
     // entry is not silently unposted from a different, live block. Read under the
     // GL lock, so this doubles as the TOCTOU check. Entry-level callers pass None.
     expected_gl_txn: Option<&str>,
+    // When false, skip the automatic NotTransferLink negative-memory recording
+    // for a 2-source (merged transfer) unpost. Undo of a merge passes false so
+    // an undone merge is not remembered as not-a-transfer; ordinary unmerges
+    // pass true. See the recording block below.
+    record_memory: bool,
     lock_owner: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _gl_lock =
@@ -523,7 +532,7 @@ pub fn unpost_login_account_entry(
     // paths). Best-effort AFTER the committed unpost: a failure here must NOT roll
     // it back (log + proceed).
     let sources = parse_sources_from_block(&gl_block);
-    if sources.len() == 2 {
+    if record_memory && sources.len() == 2 {
         let triples: Vec<(String, String, String)> = sources
             .iter()
             .filter_map(|(locator, entry_id)| {
@@ -555,6 +564,9 @@ pub fn unpost_login_account_entry(
 pub fn unpost_gl_transaction(
     ledger_dir: &Path,
     gl_txn_id: &str,
+    // Forwarded to unpost_login_account_entry: false suppresses the automatic
+    // NotTransferLink recording (used by the merge-undo path).
+    record_memory: bool,
     lock_owner: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let block = find_gl_block(ledger_dir, gl_txn_id)?
@@ -574,6 +586,7 @@ pub fn unpost_gl_transaction(
         &entry_id,
         None,
         Some(gl_txn_id),
+        record_memory,
         lock_owner,
     )
 }
@@ -3144,8 +3157,10 @@ mod tests {
         let gl = fs::read_to_string(root.join("general.journal")).unwrap();
         assert!(gl.contains("Expenses:Bank Fees"), "fee leg expected: {gl}");
 
-        unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, None, "test")
-            .unwrap();
+        unpost_login_account_entry(
+            &root, "chase", "checking", "txn-1", None, None, true, "test",
+        )
+        .unwrap();
 
         let entries1 = account_journal::read_journal_at_path(&path1).unwrap();
         assert!(entries1[0].posted.is_none(), "txn-1 ref should be cleared");
@@ -3183,7 +3198,7 @@ mod tests {
         )
         .unwrap();
 
-        unpost_gl_transaction(&root, &gl_id, "test").unwrap();
+        unpost_gl_transaction(&root, &gl_id, true, "test").unwrap();
 
         let entries1 = account_journal::read_journal_at_path(&path1).unwrap();
         assert!(entries1[0].posted.is_none(), "txn-1 ref should be cleared");
@@ -3199,6 +3214,46 @@ mod tests {
                     && r.status == crate::automation::ResolutionStatus::Active
             }),
             "unmerge should record a NotTransferLink"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unpost_gl_transaction_skips_memory_when_opted_out() {
+        // Undo path: unposting a just-merged transfer must NOT record
+        // NotTransferLink negative memory, or an undone merge would be
+        // remembered as not-a-transfer and never re-suggested.
+        let root = temp_dir("unpost-gl-txn-no-memory");
+        fs::write(root.join("general.journal"), "").unwrap();
+        let path1 = account_journal::login_account_journal_path(&root, "chase", "checking");
+        account_journal::write_journal_at_path(
+            &path1,
+            &[make_entry("txn-1", "2024-01-15", "Transfer out", "-100.00")],
+        )
+        .unwrap();
+        let path2 = account_journal::login_account_journal_path(&root, "boa", "savings");
+        account_journal::write_journal_at_path(
+            &path2,
+            &[make_entry("txn-2", "2024-01-15", "Transfer in", "100.00")],
+        )
+        .unwrap();
+        let gl_id = post_login_account_transfer(
+            &root, "chase", "checking", "txn-1", "boa", "savings", "txn-2", None, "test",
+        )
+        .unwrap();
+
+        unpost_gl_transaction(&root, &gl_id, false, "test").unwrap();
+
+        let entries1 = account_journal::read_journal_at_path(&path1).unwrap();
+        assert!(entries1[0].posted.is_none(), "txn-1 ref should be cleared");
+        let entries2 = account_journal::read_journal_at_path(&path2).unwrap();
+        assert!(entries2[0].posted.is_none(), "txn-2 ref should be cleared");
+        let resolutions = crate::automation::list_resolutions(&root).unwrap();
+        assert!(
+            !resolutions
+                .iter()
+                .any(|r| r.kind == crate::automation::ResolutionKind::NotTransferLink),
+            "opted-out unmerge must not record a NotTransferLink"
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -3233,7 +3288,7 @@ mod tests {
         let existing = fs::read_to_string(&gl_path).unwrap();
         fs::write(&gl_path, format!("{existing}{orphan}")).unwrap();
 
-        let err = unpost_gl_transaction(&root, "orphan-o", "test").unwrap_err();
+        let err = unpost_gl_transaction(&root, "orphan-o", true, "test").unwrap_err();
         assert!(
             err.to_string().contains("txn-1") && err.to_string().contains("orphan-o"),
             "expected posted-elsewhere refusal, got: {err}"
@@ -3265,7 +3320,7 @@ mod tests {
             "2024-01-15 Manual  ; id: manual-1\n    Assets:A  1 USD\n    Income:B\n",
         )
         .unwrap();
-        let err = unpost_gl_transaction(&root, "manual-1", "test").unwrap_err();
+        let err = unpost_gl_transaction(&root, "manual-1", true, "test").unwrap_err();
         assert!(
             err.to_string().contains("source"),
             "expected a no-source-tag error, got: {err}"
@@ -3409,8 +3464,10 @@ mod tests {
         )
         .unwrap();
         let before = head_commit_count(&root);
-        unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, None, "test")
-            .unwrap();
+        unpost_login_account_entry(
+            &root, "chase", "checking", "txn-1", None, None, true, "test",
+        )
+        .unwrap();
         assert!(
             head_commit_count(&root) > before,
             "unpost must create a git commit"
@@ -3441,8 +3498,10 @@ mod tests {
         );
 
         // retire commits (unpost first so the entry is retirable).
-        unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, None, "test")
-            .unwrap();
+        unpost_login_account_entry(
+            &root, "chase", "checking", "txn-1", None, None, true, "test",
+        )
+        .unwrap();
         let before = head_commit_count(&root);
         retire_login_account_entry(&root, "chase", "checking", "txn-1", "test reason", "test")
             .unwrap();
@@ -3601,9 +3660,10 @@ mod tests {
         )
         .unwrap();
 
-        let err =
-            unpost_login_account_entry(&root, "chase", "checking", "txn-1", None, None, "test")
-                .unwrap_err();
+        let err = unpost_login_account_entry(
+            &root, "chase", "checking", "txn-1", None, None, true, "test",
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("protected"),
             "unpost of a reconciled GL txn must be blocked, got: {err}"

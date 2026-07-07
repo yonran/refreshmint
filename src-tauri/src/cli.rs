@@ -1608,6 +1608,8 @@ fn run_account_unpost(
         &entry_id,
         args.posting_index,
         None,
+        // CLI unpost keeps the default negative-memory behavior.
+        true,
         "cli",
     )
     .map_err(|err| std::io::Error::other(err.to_string()))?;
@@ -2706,6 +2708,7 @@ mod tests {
             "out-1",
             None,
             None,
+            true,
             "test",
         )
         .unwrap();

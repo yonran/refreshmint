@@ -2386,6 +2386,8 @@ fn unpost_login_account_entry(
         &entry_id,
         posting_index,
         None,
+        // Entry-level unpost keeps the default negative-memory behavior.
+        true,
         "gui",
     )
     .map_err(|err| err.to_string())
@@ -2590,10 +2592,23 @@ fn merge_gl_transfer(
 /// Unmerge/unpost a generated GL transaction by GL txn id (Transactions tab
 /// "Unmerge transfer"). See post::unpost_gl_transaction.
 #[tauri::command]
-fn unpost_gl_transaction(ledger: String, gl_txn_id: String) -> Result<(), String> {
+fn unpost_gl_transaction(
+    ledger: String,
+    gl_txn_id: String,
+    // Defaults to true (ordinary unmerge records NotTransferLink negative
+    // memory). The merge-undo path passes false so an undone merge is not
+    // remembered as not-a-transfer. See post::unpost_gl_transaction.
+    record_memory: Option<bool>,
+) -> Result<(), String> {
     let target_dir = std::path::PathBuf::from(ledger);
     let gl_txn_id = require_non_empty_input("gl_txn_id", gl_txn_id)?;
-    post::unpost_gl_transaction(&target_dir, &gl_txn_id, "gui").map_err(|err| err.to_string())
+    post::unpost_gl_transaction(
+        &target_dir,
+        &gl_txn_id,
+        record_memory.unwrap_or(true),
+        "gui",
+    )
+    .map_err(|err| err.to_string())
 }
 
 /// Record not-a-transfer negative memory for two generated GL txns
