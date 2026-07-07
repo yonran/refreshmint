@@ -110,6 +110,13 @@ function App() {
         }));
         setActiveTab('transactions');
     }
+    function handleNavigateToTransactionsSearch(search: string) {
+        setTransactionsTabSession((current) => ({
+            ...current,
+            transactionsSearch: search,
+        }));
+        setActiveTab('transactions');
+    }
     const [recentLedgers, setRecentLedgersState] = useState<string[]>([]);
     const [loginNames, setLoginNames] = useState<string[]>([]);
     const [loginConfigsByName, setLoginConfigsByName] = useState<
@@ -1495,6 +1502,9 @@ function App() {
                             accounts={ledger.accounts}
                             session={reportsTabSession}
                             onSessionChange={setReportsTabSession}
+                            onNavigateToTransactions={
+                                handleNavigateToTransactionsSearch
+                            }
                         />
                     ) : activeTab === 'preferences' ? (
                         <div className="preferences-panel">

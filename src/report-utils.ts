@@ -3,6 +3,8 @@
 // stale-result detection). Keep buildReportArgs behavior identical to the
 // original ReportsTab.buildArgs — the report-utils.test.ts suite pins it.
 
+import { UNCATEGORIZED_GL_ACCOUNT } from './tauri-commands.ts';
+
 export type ReportCommand =
     | 'balance'
     | 'balancesheet'
@@ -389,4 +391,74 @@ export function buildReportArgs(config: ReportConfig): string[] {
     }
 
     return args;
+}
+
+// ---------------------------------------------------------------------------
+// Data-quality banner: surface uncategorized (Expenses:Unknown) activity that
+// falls within the report's date range. Frontend-only — runs a register query
+// after the main report and summarizes it.
+// ---------------------------------------------------------------------------
+
+/**
+ * hledger register args to list postings to Expenses:Unknown within a date
+ * range. Dates are omitted when blank. The `(:|$)` suffix restricts the match to
+ * the account itself and its subaccounts (not e.g. Expenses:UnknownFoo).
+ * UNCATEGORIZED_GL_ACCOUNT is the single source of truth for the account name.
+ */
+export function buildUnknownRegisterArgs(begin: string, end: string): string[] {
+    const args: string[] = [];
+    if (begin.trim()) args.push('-b', begin.trim());
+    if (end.trim()) args.push('-e', end.trim());
+    args.push(`acct:^${UNCATEGORIZED_GL_ACCOUNT}(:|$)`);
+    return args;
+}
+
+/**
+ * A transactions-tab search string that jumps to the Expenses:Unknown postings
+ * in the given date range (blank dates omit the date clause).
+ */
+export function buildUnknownJumpSearch(begin: string, end: string): string {
+    let search = `acct:${UNCATEGORIZED_GL_ACCOUNT}`;
+    const b = begin.trim();
+    const e = end.trim();
+    if (b || e) search += ` date:${b}..${e}`;
+    return search;
+}
+
+/**
+ * Summarize the CSV rows of a register query built by buildUnknownRegisterArgs.
+ * Columns are resolved BY HEADER NAME against the hledger 1.52 register CSV
+ * header (txnidx,date,code,description,account,amount,total). Counts distinct
+ * txnidx values (so a multi-posting transaction counts once) and sums the amount
+ * column ($ and comma stripped). If any amount cell is unparseable (e.g. a
+ * multi-commodity amount) the total falls back to '' (count-only). Returns null
+ * when there are no data rows.
+ */
+export function summarizeUnknownRegister(
+    rows: string[][],
+): { txnCount: number; total: string } | null {
+    if (rows.length <= 1) return null;
+    const header = rows[0] ?? [];
+    const txnidxCol = header.indexOf('txnidx');
+    const amountCol = header.indexOf('amount');
+    const dataRows = rows.slice(1);
+
+    const txnids = new Set<string>();
+    let sum = 0;
+    let parseable = amountCol >= 0;
+    for (const row of dataRows) {
+        if (txnidxCol >= 0) txnids.add(row[txnidxCol] ?? '');
+        if (amountCol >= 0) {
+            const cleaned = (row[amountCol] ?? '').replace(/[$,]/g, '').trim();
+            const n = Number(cleaned);
+            if (cleaned === '' || Number.isNaN(n)) {
+                parseable = false;
+            } else {
+                sum += n;
+            }
+        }
+    }
+
+    const txnCount = txnidxCol >= 0 ? txnids.size : dataRows.length;
+    return { txnCount, total: parseable ? sum.toFixed(2) : '' };
 }

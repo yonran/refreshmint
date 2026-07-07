@@ -162,6 +162,18 @@
     font-size: 0.85rem;
 }
 
+.report-unknown-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    color: #7c2d12;
+    background: #ffedd5;
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+}
+
 .table-wrap {
     border: 1px solid #e3e3e3;
     border-radius: 1rem;

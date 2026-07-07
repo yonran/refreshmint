@@ -1,11 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
     buildReportArgs,
+    buildUnknownJumpSearch,
+    buildUnknownRegisterArgs,
     cannedReportConfig,
     computePeriodPresetRange,
     createDefaultReportConfig,
     isReportConfigStale,
     shouldAutoRunDefault,
+    summarizeUnknownRegister,
     type ReportConfig,
 } from './report-utils.ts';
 
@@ -280,5 +283,89 @@ describe('isReportConfigStale', () => {
                 config({ queryInput: 'acct:^Expenses' }),
             ),
         ).toBe(false);
+    });
+});
+
+describe('buildUnknownRegisterArgs', () => {
+    // hledger 1.52 register CSV header (verified): txnidx,date,code,description,
+    // account,amount,total.
+    it('includes dates when present and the Expenses:Unknown account filter', () => {
+        expect(buildUnknownRegisterArgs('2026-07-01', '2026-08-01')).toEqual([
+            '-b',
+            '2026-07-01',
+            '-e',
+            '2026-08-01',
+            'acct:^Expenses:Unknown(:|$)',
+        ]);
+    });
+
+    it('omits blank dates', () => {
+        expect(buildUnknownRegisterArgs('', '')).toEqual([
+            'acct:^Expenses:Unknown(:|$)',
+        ]);
+    });
+});
+
+describe('buildUnknownJumpSearch', () => {
+    it('builds an acct + date-range transactions search', () => {
+        expect(buildUnknownJumpSearch('2026-07-01', '2026-08-01')).toBe(
+            'acct:Expenses:Unknown date:2026-07-01..2026-08-01',
+        );
+    });
+
+    it('omits the date clause when both dates are blank', () => {
+        expect(buildUnknownJumpSearch('', '')).toBe('acct:Expenses:Unknown');
+    });
+});
+
+describe('summarizeUnknownRegister', () => {
+    const header = [
+        'txnidx',
+        'date',
+        'code',
+        'description',
+        'account',
+        'amount',
+        'total',
+    ];
+
+    it('returns null when there are no data rows', () => {
+        expect(summarizeUnknownRegister([])).toBeNull();
+        expect(summarizeUnknownRegister([header])).toBeNull();
+    });
+
+    it('counts a multi-posting transaction once', () => {
+        const rows = [
+            header,
+            ['2', '2024-01-20', '', 'Split', 'Expenses:Unknown', '$5.00', ''],
+            ['2', '2024-01-20', '', 'Split', 'Expenses:Unknown', '$3.00', ''],
+        ];
+        expect(summarizeUnknownRegister(rows)).toEqual({
+            txnCount: 1,
+            total: '8.00',
+        });
+    });
+
+    it('sums amounts across transactions, stripping $ and commas', () => {
+        const rows = [
+            header,
+            ['1', '2024-01-15', '', 'A', 'Expenses:Unknown', '$1,234.56', ''],
+            ['2', '2024-01-20', '', 'B', 'Expenses:Unknown', '$-5.00', ''],
+        ];
+        expect(summarizeUnknownRegister(rows)).toEqual({
+            txnCount: 2,
+            total: '1229.56',
+        });
+    });
+
+    it('falls back to count-only when an amount is unparseable', () => {
+        const rows = [
+            header,
+            ['1', '2024-01-15', '', 'A', 'Expenses:Unknown', '5 AAPL', ''],
+        ];
+        expect(summarizeUnknownRegister(rows)).toEqual({
+            txnCount: 1,
+            total: '',
+        });
     });
 });

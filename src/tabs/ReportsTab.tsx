@@ -11,10 +11,13 @@ import {
     COMMAND_LABELS,
     REGISTER_FAMILY,
     buildReportArgs,
+    buildUnknownJumpSearch,
+    buildUnknownRegisterArgs,
     cannedReportConfig,
     computePeriodPresetRange,
     isReportConfigStale,
     shouldAutoRunDefault,
+    summarizeUnknownRegister,
     type Accumulation,
     type CannedReportId,
     type BalanceMode,
@@ -33,6 +36,8 @@ interface Props {
     onSessionChange: (
         updater: (current: ReportsTabSession) => ReportsTabSession,
     ) => void;
+    // Cross-tab navigation: open the Transactions tab pre-filtered to `search`.
+    onNavigateToTransactions: (search: string) => void;
 }
 
 export function ReportsTab({
@@ -40,6 +45,7 @@ export function ReportsTab({
     accounts,
     session,
     onSessionChange,
+    onNavigateToTransactions,
 }: Props) {
     const [config, setConfig] = useState<ReportConfig>(session.config);
     // Shallow-merge a partial update into the single config atom.
@@ -58,6 +64,12 @@ export function ReportsTab({
     );
     const [error, setError] = useState<string | null>(session.error);
     const [running, setRunning] = useState(false);
+    // Data-quality banner: Expenses:Unknown activity in the last run's date
+    // range. Recomputed after every successful run; not persisted in the session.
+    const [unknownSummary, setUnknownSummary] = useState<{
+        txnCount: number;
+        total: string;
+    } | null>(null);
     // lastRunConfig/hasAutoRun are persisted across tab switches but are only
     // read/written by later features (stale hint, default auto-run); mirror them
     // through refs so they survive the App-held session round-trip.
@@ -125,10 +137,13 @@ export function ReportsTab({
             setRunning(true);
             setError(null);
             setResult(null);
+            setUnknownSummary(null);
+            let ok = false;
             try {
                 const args = buildReportArgs(cfg);
                 const res = await runHledgerReport(ledger, cfg.command, args);
                 setResult(res);
+                ok = true;
             } catch (e) {
                 setError(String(e));
             } finally {
@@ -137,6 +152,25 @@ export function ReportsTab({
                 // subsequent edits.
                 lastRunConfigRef.current = cfg;
                 setRunning(false);
+            }
+            // Data-quality banner: a secondary register query over the run's date
+            // range. It runs after the main report is already displayed and its
+            // failures are non-fatal (logged, never surfaced as a report error).
+            if (ok) {
+                try {
+                    const unkArgs = buildUnknownRegisterArgs(
+                        cfg.beginDate,
+                        cfg.endDate,
+                    );
+                    const unkRes = await runHledgerReport(
+                        ledger,
+                        'register',
+                        unkArgs,
+                    );
+                    setUnknownSummary(summarizeUnknownRegister(unkRes.rows));
+                } catch (e) {
+                    console.warn('Expenses:Unknown banner query failed', e);
+                }
             }
         },
         [ledger],
@@ -867,6 +901,37 @@ export function ReportsTab({
                     <div className="report-stale-hint">
                         Options changed — results may be stale. Re-run to
                         refresh.
+                    </div>
+                )}
+
+                {/* Data-quality banner: uncategorized activity in this period */}
+                {unknownSummary !== null && unknownSummary.txnCount > 0 && (
+                    <div className="report-unknown-banner">
+                        <span>
+                            {unknownSummary.txnCount}{' '}
+                            {unknownSummary.txnCount === 1
+                                ? 'transaction'
+                                : 'transactions'}
+                            {unknownSummary.total
+                                ? ` ($${unknownSummary.total})`
+                                : ''}{' '}
+                            still in Expenses:Unknown in this period.
+                        </span>
+                        <button
+                            type="button"
+                            className="tab"
+                            onClick={() => {
+                                const last = lastRunConfigRef.current;
+                                onNavigateToTransactions(
+                                    buildUnknownJumpSearch(
+                                        last?.beginDate ?? '',
+                                        last?.endDate ?? '',
+                                    ),
+                                );
+                            }}
+                        >
+                            Categorize them
+                        </button>
                     </div>
                 )}
             </section>
