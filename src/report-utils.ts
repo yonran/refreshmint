@@ -219,6 +219,20 @@ export function computePeriodPresetRange(
     }
 }
 
+/**
+ * Whether the Reports tab should auto-run its default report. True only when the
+ * session is pristine: nothing has run (no result, no error) and the default has
+ * not already auto-run. Session persistence keeps this false on tab re-entry; a
+ * ledger open resets the session so the next open auto-runs again.
+ */
+export function shouldAutoRunDefault(state: {
+    result: object | null;
+    error: string | null;
+    hasAutoRun: boolean;
+}): boolean {
+    return state.result === null && state.error === null && !state.hasAutoRun;
+}
+
 export type CannedReportId =
     | 'spending-by-category'
     | 'income-vs-expense'

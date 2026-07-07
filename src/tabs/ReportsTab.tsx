@@ -13,6 +13,7 @@ import {
     buildReportArgs,
     cannedReportConfig,
     computePeriodPresetRange,
+    shouldAutoRunDefault,
     type Accumulation,
     type CannedReportId,
     type BalanceMode,
@@ -148,6 +149,18 @@ export function ReportsTab({
         },
         [runReport],
     );
+
+    // On first open for a ledger, auto-run a useful default so the tab isn't a
+    // blank form. Session persistence (result/hasAutoRun) makes this a no-op when
+    // returning to an already-populated tab; a ledger open resets the session, so
+    // the next mount auto-runs again. Mount-only — deps intentionally empty.
+    useEffect(() => {
+        if (shouldAutoRunDefault(sessionRef.current)) {
+            hasAutoRunRef.current = true;
+            runCannedReport('spending-by-category');
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const isBalanceFamily = BALANCE_FAMILY.includes(command);
     const isRegisterFamily = REGISTER_FAMILY.includes(command);

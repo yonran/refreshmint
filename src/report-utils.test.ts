@@ -4,6 +4,7 @@ import {
     cannedReportConfig,
     computePeriodPresetRange,
     createDefaultReportConfig,
+    shouldAutoRunDefault,
     type ReportConfig,
 } from './report-utils.ts';
 
@@ -196,5 +197,49 @@ describe('cannedReportConfig', () => {
             '--depth=1',
             '-H',
         ]);
+    });
+});
+
+describe('shouldAutoRunDefault', () => {
+    const someResult = { rows: [['account', 'balance']], text: null };
+
+    it('is true when nothing has run yet', () => {
+        expect(
+            shouldAutoRunDefault({
+                result: null,
+                error: null,
+                hasAutoRun: false,
+            }),
+        ).toBe(true);
+    });
+
+    it('is false once the default has auto-run', () => {
+        expect(
+            shouldAutoRunDefault({
+                result: null,
+                error: null,
+                hasAutoRun: true,
+            }),
+        ).toBe(false);
+    });
+
+    it('is false when a result already exists', () => {
+        expect(
+            shouldAutoRunDefault({
+                result: someResult,
+                error: null,
+                hasAutoRun: false,
+            }),
+        ).toBe(false);
+    });
+
+    it('is false when an error already exists', () => {
+        expect(
+            shouldAutoRunDefault({
+                result: null,
+                error: 'boom',
+                hasAutoRun: false,
+            }),
+        ).toBe(false);
     });
 });
