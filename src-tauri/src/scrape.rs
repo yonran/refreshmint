@@ -138,6 +138,122 @@ where
     }
 }
 
+/// A scrape failure, carrying the error message and, when a driver run failed
+/// (not a user cancellation or a setup error), the ledger-relative path of the
+/// captured failure-artifacts directory so callers can record it in the scrape
+/// log.
+#[derive(Debug)]
+pub struct ScrapeError {
+    pub message: String,
+    pub artifacts_dir: Option<PathBuf>,
+}
+
+impl ScrapeError {
+    pub fn message_only(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            artifacts_dir: None,
+        }
+    }
+}
+
+impl std::fmt::Display for ScrapeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for ScrapeError {}
+
+impl From<String> for ScrapeError {
+    fn from(message: String) -> Self {
+        Self::message_only(message)
+    }
+}
+
+impl From<&str> for ScrapeError {
+    fn from(message: &str) -> Self {
+        Self::message_only(message.to_string())
+    }
+}
+
+impl From<std::io::Error> for ScrapeError {
+    fn from(error: std::io::Error) -> Self {
+        Self::message_only(error.to_string())
+    }
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for ScrapeError {
+    fn from(error: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        Self::message_only(error.to_string())
+    }
+}
+
+/// Ledger-relative directory for a failed scrape's captured artifacts:
+/// `logins/<login>/scrape-failures/<timestamp>`.
+pub fn scrape_failure_dir_relative(login_name: &str, timestamp: &str) -> PathBuf {
+    Path::new("logins")
+        .join(login_name)
+        .join("scrape-failures")
+        .join(timestamp)
+}
+
+/// Best-effort artifacts captured when a scrape driver fails, so the failure can
+/// be diagnosed after the browser is gone.
+pub struct FailureArtifacts {
+    pub url: Option<String>,
+    pub screenshot_png: Option<Vec<u8>>,
+    pub log_tail: String,
+}
+
+/// Write whatever failure artifacts were captured into `dir`. Best-effort: each
+/// file is written independently and per-file errors are logged, never
+/// returned, so a partial capture never masks the original scrape error. Only a
+/// failure to create the directory is surfaced.
+pub fn write_failure_artifacts(dir: &Path, artifacts: &FailureArtifacts) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    if let Some(url) = &artifacts.url {
+        if let Err(e) = std::fs::write(dir.join("url.txt"), url) {
+            eprintln!("warning: failed to write failure url.txt: {e}");
+        }
+    }
+    if let Some(png) = &artifacts.screenshot_png {
+        if let Err(e) = std::fs::write(dir.join("screenshot.png"), png) {
+            eprintln!("warning: failed to write failure screenshot.png: {e}");
+        }
+    }
+    if let Err(e) = std::fs::write(dir.join("log-tail.txt"), &artifacts.log_tail) {
+        eprintln!("warning: failed to write failure log-tail.txt: {e}");
+    }
+    Ok(())
+}
+
+/// Best-effort current page URL for failure capture.
+async fn capture_failure_url(page: &chromiumoxide::Page) -> Option<String> {
+    page.url().await.ok().flatten()
+}
+
+/// Best-effort full-viewport PNG screenshot for failure capture. Returns `None`
+/// if the renderer is dead/unresponsive.
+async fn capture_failure_screenshot(page: &chromiumoxide::Page) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    use chromiumoxide::cdp::browser_protocol::page::{
+        CaptureScreenshotFormat, CaptureScreenshotParams,
+    };
+    let shot = page
+        .execute(
+            CaptureScreenshotParams::builder()
+                .format(CaptureScreenshotFormat::Png)
+                .build(),
+        )
+        .await
+        .ok()?;
+    let encoded: String = shot.result.data.clone().into();
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded.as_bytes())
+        .ok()
+}
+
 /// Drain driver log events from the scrape sink, appending each to the shared
 /// `ScrapeLogTail` and forwarding it to the optional per-run listener. Runs
 /// until the sender (`RefreshmintInner::debug_output_sink`) is dropped.
@@ -676,9 +792,7 @@ pub fn list_runnable_extensions(
 /// Run the full scrape orchestration.
 ///
 /// This is the async core called from `run_scrape` which sets up a tokio runtime.
-pub async fn run_scrape_async(
-    config: ScrapeConfig,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
     let login_name = config.login_name.clone();
     let _login_lock = crate::login_config::acquire_login_lock_with_metadata(
         &config.ledger_dir,
@@ -770,6 +884,9 @@ pub async fn run_scrape_async(
         download_dir,
         target_frame_id: None,
     }));
+    // Keep a handle to the page for failure-artifact capture: `page_inner` is
+    // moved into the sandbox below, but the browser stays alive until step 11.
+    let page_inner_for_capture = page_inner.clone();
 
     // Attach a log sink so driver `log`/`reportValue` lines can be streamed live
     // and captured into a rolling tail. A forwarder task pushes each event into
@@ -868,6 +985,50 @@ pub async fn run_scrape_async(
         }
     }
 
+    // Capture failure artifacts (best-effort) while the browser is still alive,
+    // when the driver failed for a reason other than user cancellation. Each
+    // capture is timeout-wrapped so a dead renderer can't hang the run (risk 3),
+    // and artifacts never mask the original error.
+    let mut failure_artifacts_dir: Option<PathBuf> = None;
+    if let Err(err) = &result {
+        if err.to_string() != SCRAPE_CANCELED_MESSAGE {
+            let timestamp = generate_scrape_session_id();
+            let rel_dir = scrape_failure_dir_relative(&login_name, &timestamp);
+            let abs_dir = config.ledger_dir.join(&rel_dir);
+            let page_for_capture = { page_inner_for_capture.lock().await.page.clone() };
+            let url = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                capture_failure_url(&page_for_capture),
+            )
+            .await
+            .ok()
+            .flatten();
+            let screenshot_png = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                capture_failure_screenshot(&page_for_capture),
+            )
+            .await
+            .ok()
+            .flatten();
+            let log_tail = log_tail
+                .lock()
+                .map(|tail| tail.to_text())
+                .unwrap_or_default();
+            let artifacts = FailureArtifacts {
+                url,
+                screenshot_png,
+                log_tail,
+            };
+            match write_failure_artifacts(&abs_dir, &artifacts) {
+                Ok(()) => {
+                    eprintln!("Wrote scrape failure artifacts to {}", abs_dir.display());
+                    failure_artifacts_dir = Some(rel_dir);
+                }
+                Err(e) => eprintln!("warning: failed to write failure artifacts: {e}"),
+            }
+        }
+    }
+
     // 11. Close browser
     eprintln!("Closing browser...");
     {
@@ -879,15 +1040,16 @@ pub async fn run_scrape_async(
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handler_handle).await;
     eprintln!("Done.");
 
-    result
+    result.map_err(|err| ScrapeError {
+        message: err.to_string(),
+        artifacts_dir: failure_artifacts_dir,
+    })
 }
 
 /// Synchronous entry point that creates a tokio runtime and runs the scrape.
-pub fn run_scrape(config: ScrapeConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let rt = tokio::runtime::Runtime::new()?;
+pub fn run_scrape(config: ScrapeConfig) -> Result<(), ScrapeError> {
+    let rt = tokio::runtime::Runtime::new().map_err(ScrapeError::from)?;
     rt.block_on(run_scrape_async(config))
-        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -896,7 +1058,8 @@ mod tests {
         clear_staged_output_dir, combine_run_and_finalize, finalize_staged_resources,
         list_runnable_extensions, load_manifest, load_manifest_secret_declarations,
         normalize_manifest_domain, resolve_driver_script_path, run_driver_cancellable,
-        run_log_forwarder, ScrapeLogTail, SCRAPE_CANCELED_MESSAGE,
+        run_log_forwarder, scrape_failure_dir_relative, write_failure_artifacts, FailureArtifacts,
+        ScrapeLogTail, SCRAPE_CANCELED_MESSAGE,
     };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
@@ -1394,6 +1557,60 @@ try {
             stream: DebugOutputStream::Stdout,
             line: line.to_string(),
         }
+    }
+
+    #[test]
+    fn scrape_failure_dir_relative_builds_login_scoped_path() {
+        let dir = scrape_failure_dir_relative("chase-personal", "20260707-010203");
+        assert_eq!(
+            dir,
+            PathBuf::from("logins/chase-personal/scrape-failures/20260707-010203")
+        );
+    }
+
+    #[test]
+    fn write_failure_artifacts_writes_available_files() {
+        let dir = create_temp_dir("failure-artifacts").join("cap");
+        let artifacts = FailureArtifacts {
+            url: Some("https://bank.example/login".to_string()),
+            screenshot_png: Some(vec![1, 2, 3, 4]),
+            log_tail: "line one\nline two\n".to_string(),
+        };
+        write_failure_artifacts(&dir, &artifacts)
+            .unwrap_or_else(|err| panic!("write_failure_artifacts failed: {err}"));
+
+        assert_eq!(
+            fs::read_to_string(dir.join("url.txt"))
+                .unwrap_or_else(|err| panic!("read url.txt: {err}")),
+            "https://bank.example/login"
+        );
+        assert_eq!(
+            fs::read(dir.join("screenshot.png"))
+                .unwrap_or_else(|err| panic!("read screenshot.png: {err}")),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("log-tail.txt"))
+                .unwrap_or_else(|err| panic!("read log-tail.txt: {err}")),
+            "line one\nline two\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_failure_artifacts_skips_missing_optional_files() {
+        let dir = create_temp_dir("failure-artifacts").join("partial");
+        let artifacts = FailureArtifacts {
+            url: None,
+            screenshot_png: None,
+            log_tail: "only the tail\n".to_string(),
+        };
+        write_failure_artifacts(&dir, &artifacts)
+            .unwrap_or_else(|err| panic!("write_failure_artifacts failed: {err}"));
+        assert!(!dir.join("url.txt").exists());
+        assert!(!dir.join("screenshot.png").exists());
+        assert!(dir.join("log-tail.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

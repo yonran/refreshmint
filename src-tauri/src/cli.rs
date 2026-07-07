@@ -1057,13 +1057,18 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
         login_name: login_name_str,
         timestamp,
         success: result.is_ok(),
-        error: result.as_ref().err().map(|e| e.to_string()),
+        error: result.as_ref().err().map(|e| e.message.clone()),
         source: "manual".to_string(),
+        artifacts_dir: result
+            .as_ref()
+            .err()
+            .and_then(|e| e.artifacts_dir.as_ref())
+            .map(|dir| dir.to_string_lossy().into_owned()),
     };
     if let Err(e) = crate::operations::append_scrape_log_entry(&ledger_dir_clone, &entry) {
         eprintln!("warning: failed to write scrape log: {e}");
     }
-    result
+    result.map_err(|e| -> Box<dyn Error> { Box::new(e) })
 }
 
 #[derive(serde::Serialize)]

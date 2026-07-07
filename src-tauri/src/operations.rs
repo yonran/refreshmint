@@ -252,6 +252,11 @@ pub struct ScrapeLogEntry {
     pub error: Option<String>,
     /// `"manual"` for user-triggered runs, `"auto"` for auto-scrape runs.
     pub source: String,
+    /// Ledger-relative path of the captured failure-artifacts directory, when a
+    /// driver run failed and artifacts were written. Additive field: old JSONL
+    /// lines without it parse via `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts_dir: Option<String>,
 }
 
 /// Returns the path to the per-login scrape log.
@@ -491,6 +496,7 @@ mod tests {
             success: false,
             error: Some("no progress in last 3 steps".to_string()),
             source: "auto".to_string(),
+            artifacts_dir: Some("logins/bankofamerica/scrape-failures/20260329-183945".to_string()),
         };
         let e2 = ScrapeLogEntry {
             login_name: "bankofamerica".to_string(),
@@ -498,6 +504,7 @@ mod tests {
             success: true,
             error: None,
             source: "manual".to_string(),
+            artifacts_dir: None,
         };
         // Create the login dir so append_scrape_log_entry can write.
         fs::create_dir_all(root.join("logins").join("bankofamerica")).unwrap();
@@ -512,11 +519,27 @@ mod tests {
             Some("no progress in last 3 steps")
         );
         assert_eq!(entries[0].source, "auto");
+        assert_eq!(
+            entries[0].artifacts_dir.as_deref(),
+            Some("logins/bankofamerica/scrape-failures/20260329-183945")
+        );
         assert!(entries[1].success);
         assert!(entries[1].error.is_none());
         assert_eq!(entries[1].source, "manual");
+        // A successful run omits the field entirely (skip_serializing_if).
+        assert!(entries[1].artifacts_dir.is_none());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scrape_log_line_without_artifacts_dir_parses() {
+        // Lines written before the artifactsDir field must still deserialize.
+        let old_line = r#"{"loginName":"chase","timestamp":"2026-01-01T00:00:00Z","success":false,"error":"boom","source":"manual"}"#;
+        let entry: ScrapeLogEntry = serde_json::from_str(old_line).unwrap();
+        assert_eq!(entry.login_name, "chase");
+        assert!(!entry.success);
+        assert!(entry.artifacts_dir.is_none());
     }
 
     #[test]

@@ -186,6 +186,8 @@ pub fn run_with_context(
             run_scrape,
             cancel_scrape,
             get_scrape_log,
+            list_scrape_failure_artifacts,
+            read_scrape_failure_artifact,
             list_documents,
             list_login_account_documents,
             read_login_account_document_rows,
@@ -736,7 +738,7 @@ async fn run_scrape_for_login(
         register_scrape_cancel(&cancel_state, &login_name)
     };
 
-    let result: Result<(), String> = async {
+    let result: Result<(), scrape::ScrapeError> = async {
         let extension = login_config::resolve_login_extension(&target_dir, &login_name)
             .map_err(|err| err.to_string())?;
         let prompt_ui_handler = {
@@ -773,11 +775,9 @@ async fn run_scrape_for_login(
             cancel: Some(cancel_receiver),
         };
 
-        tokio::task::spawn_blocking(move || {
-            scrape::run_scrape(config).map_err(|err| err.to_string())
-        })
-        .await
-        .map_err(|err| err.to_string())?
+        tokio::task::spawn_blocking(move || scrape::run_scrape(config))
+            .await
+            .map_err(|err| scrape::ScrapeError::message_only(err.to_string()))?
     }
     .await;
 
@@ -787,12 +787,20 @@ async fn run_scrape_for_login(
         unregister_scrape_cancel(&cancel_state, &login_name);
     }
 
+    let artifacts_dir = result
+        .as_ref()
+        .err()
+        .and_then(|err| err.artifacts_dir.as_ref())
+        .map(|dir| dir.to_string_lossy().into_owned());
+    let result: Result<(), String> = result.map_err(|err| err.message);
+
     let entry = operations::ScrapeLogEntry {
         login_name: login_name.clone(),
         timestamp,
         success: result.is_ok(),
         error: result.as_ref().err().cloned(),
         source,
+        artifacts_dir,
     };
     if let Err(e) = operations::append_scrape_log_entry(&target_dir, &entry) {
         eprintln!("warning: failed to write scrape log: {e}");
@@ -850,6 +858,73 @@ fn get_scrape_log(
         operations::read_scrape_log(&ledger_dir, &login_name).map_err(|err| err.to_string())?;
     entries.reverse(); // newest-first to match prior localStorage behaviour
     Ok(entries)
+}
+
+/// Reject artifact filenames that contain path separators, parent references,
+/// or NUL bytes, so a garbled/malicious scrape-log entry can't be used to read
+/// files outside the artifacts directory.
+fn validate_artifact_filename(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains('\0')
+    {
+        return Err(format!("invalid artifact filename: {name}"));
+    }
+    Ok(())
+}
+
+/// Resolve a ledger-relative failure-artifacts directory to an absolute path,
+/// rejecting absolute paths and any `..` traversal.
+fn resolve_artifact_dir(ledger: &str, artifacts_dir: &str) -> Result<std::path::PathBuf, String> {
+    let ledger_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&ledger_dir).map_err(|err| err.to_string())?;
+    let rel = std::path::Path::new(artifacts_dir);
+    if artifacts_dir.is_empty() || rel.is_absolute() || artifacts_dir.contains("..") {
+        return Err(format!("invalid artifacts directory: {artifacts_dir}"));
+    }
+    Ok(ledger_dir.join(rel))
+}
+
+/// List the artifact filenames present in a failure-artifacts directory.
+#[tauri::command]
+fn list_scrape_failure_artifacts(
+    ledger: String,
+    artifacts_dir: String,
+) -> Result<Vec<String>, String> {
+    let dir = resolve_artifact_dir(&ledger, &artifacts_dir)?;
+    let mut names = Vec::new();
+    if let Ok(read) = std::fs::read_dir(&dir) {
+        for entry in read.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Read a single failure artifact. PNG files are returned as a `data:` URL so
+/// they can be shown inline; everything else is returned as UTF-8 text.
+#[tauri::command]
+fn read_scrape_failure_artifact(
+    ledger: String,
+    artifacts_dir: String,
+    filename: String,
+) -> Result<String, String> {
+    validate_artifact_filename(&filename)?;
+    let dir = resolve_artifact_dir(&ledger, &artifacts_dir)?;
+    let path = dir.join(&filename);
+    let bytes = std::fs::read(&path).map_err(|err| err.to_string())?;
+    if filename.to_ascii_lowercase().ends_with(".png") {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(format!("data:image/png;base64,{encoded}"))
+    } else {
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
 }
 
 #[tauri::command]
@@ -2555,8 +2630,9 @@ mod tests {
     use super::{
         delete_login_account, evidence_ref_matches_document, inspect_login_extraction_support,
         register_scrape_cancel, require_existing_login, require_label_input,
-        require_login_name_input, require_non_empty_input, run_login_account_extraction_blocking,
-        scrape_output_payload, send_prompt_answer, trigger_scrape_cancel, unregister_scrape_cancel,
+        require_login_name_input, require_non_empty_input, resolve_artifact_dir,
+        run_login_account_extraction_blocking, scrape_output_payload, send_prompt_answer,
+        trigger_scrape_cancel, unregister_scrape_cancel, validate_artifact_filename,
         PromptAnswerState, ScrapeCancelState,
     };
     use crate::scrape::js_api::{DebugOutputEvent, DebugOutputStream};
@@ -2594,6 +2670,35 @@ mod tests {
         assert_eq!(json["loginName"], "chase-personal");
         assert_eq!(json["stream"], "stderr");
         assert_eq!(json["line"], "hello");
+    }
+
+    #[test]
+    fn validate_artifact_filename_rejects_traversal() {
+        assert!(validate_artifact_filename("screenshot.png").is_ok());
+        assert!(validate_artifact_filename("url.txt").is_ok());
+        for bad in ["../secret", "a/b", "a\\b", "..", "", "with\0nul"] {
+            assert!(
+                validate_artifact_filename(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_artifact_dir_rejects_traversal_and_absolute() {
+        // require_refreshmint_extension only accepts a dir whose name ends in
+        // `.refreshmint`.
+        let dir = create_temp_dir("resolve-artifact").join("ledger.refreshmint");
+        fs::create_dir_all(&dir).ok();
+        let ledger = dir.to_string_lossy().into_owned();
+        assert!(resolve_artifact_dir(&ledger, "../etc").is_err());
+        assert!(resolve_artifact_dir(&ledger, "/etc/passwd").is_err());
+        assert!(resolve_artifact_dir(&ledger, "").is_err());
+        // A well-formed relative path under the ledger resolves.
+        let ok = resolve_artifact_dir(&ledger, "logins/chase/scrape-failures/t")
+            .unwrap_or_else(|err| panic!("expected valid artifacts dir, got {err}"));
+        assert!(ok.starts_with(&dir));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
