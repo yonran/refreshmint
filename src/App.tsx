@@ -103,6 +103,12 @@ function App() {
             Number(localStorage.getItem('pref:mfaPromptTimeoutMinutes') ?? '5'),
         ),
     );
+    // Raw text of the MFA-timeout input so the user can clear it and type freely;
+    // it is clamped and committed to mfaPromptTimeoutMinutes on blur, not on
+    // every keystroke (which would snap a momentarily-empty field to 1).
+    const [mfaPromptTimeoutInput, setMfaPromptTimeoutInput] = useState(() =>
+        String(mfaPromptTimeoutMinutes),
+    );
     const [autoScrapeQueue, setAutoScrapeQueue] = useState<string[]>([]);
     const [autoScrapeActive, setAutoScrapeActive] = useState<string | null>(
         null,
@@ -1752,12 +1758,21 @@ function App() {
                                         type="number"
                                         min="1"
                                         max="60"
-                                        value={mfaPromptTimeoutMinutes}
+                                        value={mfaPromptTimeoutInput}
                                         onChange={(e) => {
+                                            // Keep the raw text while typing so an
+                                            // intermediate empty value doesn't snap
+                                            // to 1; clamp on blur below.
+                                            setMfaPromptTimeoutInput(
+                                                e.target.value,
+                                            );
+                                        }}
+                                        onBlur={(e) => {
                                             const v = clampPromptTimeoutMinutes(
                                                 Number(e.target.value),
                                             );
                                             setMfaPromptTimeoutMinutes(v);
+                                            setMfaPromptTimeoutInput(String(v));
                                             localStorage.setItem(
                                                 'pref:mfaPromptTimeoutMinutes',
                                                 String(v),

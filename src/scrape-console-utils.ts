@@ -64,6 +64,22 @@ export function clampPromptTimeoutMinutes(value: number): number {
     return rounded;
 }
 
+/**
+ * Whether the console should auto-scroll to the newest line: only when the view
+ * is already at (or within `threshold` px of) the bottom. This keeps a user who
+ * has scrolled up to read earlier output from being yanked back down when new
+ * lines arrive. Pure so the sticky-scroll decision is unit-testable.
+ */
+export function shouldStickToBottom(
+    scrollTop: number,
+    scrollHeight: number,
+    clientHeight: number,
+    threshold = 32,
+): boolean {
+    const distanceFromBottom = scrollHeight - clientHeight - scrollTop;
+    return distanceFromBottom <= threshold;
+}
+
 export interface PartitionedArtifacts {
     /** The screenshot artifact (a `.png`), if present. */
     imageName: string | null;

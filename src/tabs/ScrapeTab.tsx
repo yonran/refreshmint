@@ -19,6 +19,7 @@ import {
 import {
     appendLogLine,
     partitionArtifacts,
+    shouldStickToBottom,
     type ScrapeOutputLine,
 } from '../scrape-console-utils.ts';
 import type { ScrapeTabSession } from '../types.ts';
@@ -83,6 +84,10 @@ export function ScrapeTab({
         useState(false);
     const isRunningScrape = runningLoginName !== null;
     const consoleRef = useRef<HTMLPreElement | null>(null);
+    // Whether the console is currently pinned to the bottom. Updated from the
+    // pane's scroll position so auto-scroll only follows new output when the user
+    // hasn't scrolled up to read earlier lines. Starts pinned.
+    const stickToBottomRef = useRef(true);
 
     // Live snapshot of the App-tracked session, flushed on unmount so the running
     // state survives a tab switch. Assigned during render (like ReportsTab) so it
@@ -186,10 +191,13 @@ export function ScrapeTab({
         }
     }, [activeScrapeLoginName]);
 
-    // Auto-scroll the console pane to the newest line.
+    // Auto-scroll the console pane to the newest line, but only when the user is
+    // already at (or near) the bottom, so reading earlier output isn't yanked
+    // down. `stickToBottomRef` is maintained by the pane's onScroll handler.
     useEffect(() => {
         const pane = consoleRef.current;
-        if (pane) pane.scrollTop = pane.scrollHeight;
+        if (pane && stickToBottomRef.current)
+            pane.scrollTop = pane.scrollHeight;
     }, [consoleLines]);
 
     // Reload scrape log when selected login or scrapeLogVersion changes.
@@ -222,7 +230,10 @@ export function ScrapeTab({
 
         let cancelled = false;
         setIsLoadingScrapeExtensions(true);
-        setScrapeStatus(null);
+        // Do NOT clear scrapeStatus here: this effect re-runs on every (re)mount,
+        // so clearing would wipe the completion status adopted from the App-held
+        // session after a tab switch. A ledger change clears it via the session
+        // reset instead.
         void listScrapeExtensions(ledgerPath)
             .then((extensions) => {
                 if (cancelled) return;
@@ -247,29 +258,24 @@ export function ScrapeTab({
         };
     }, [ledgerPath]);
 
-    // Load per-login summaries and lock status for the console, and keep the
-    // lock status live via the lock-status watcher (mirrors PipelineTab).
+    // Keep the lock status live via the lock-status watcher (mirrors
+    // PipelineTab). Deliberately does NOT depend on scrapeLogVersion: bumping it
+    // after every completed scrape would tear down and restart the GLOBAL
+    // lock-metadata watcher. The summaries refetch (which DOES need
+    // scrapeLogVersion) lives in its own effect below.
     useEffect(() => {
         if (ledgerPath === null || loginNames.length === 0) {
-            setSummaries({});
             setLockStatus(null);
             return;
         }
         let cancelled = false;
         let unlisten: (() => void) | null = null;
-        const refreshSummaries = () =>
-            getLastScrapeSummaries(ledgerPath, loginNames)
-                .then((s) => {
-                    if (!cancelled) setSummaries(s);
-                })
-                .catch(() => {});
         const loadLocks = () =>
             getLockStatusSnapshot(ledgerPath, loginNames)
                 .then((s) => {
                     if (!cancelled) setLockStatus(s);
                 })
                 .catch(() => {});
-        void refreshSummaries();
         void loadLocks();
         void startLockMetadataWatch(ledgerPath)
             .then(() =>
@@ -286,6 +292,25 @@ export function ScrapeTab({
             cancelled = true;
             if (unlisten !== null) unlisten();
             void stopLockMetadataWatch();
+        };
+    }, [ledgerPath, loginNames]);
+
+    // Refetch per-login scrape summaries for the console table. Runs on ledger /
+    // login changes and after each completed scrape (scrapeLogVersion), without
+    // disturbing the lock-metadata watcher above.
+    useEffect(() => {
+        if (ledgerPath === null || loginNames.length === 0) {
+            setSummaries({});
+            return;
+        }
+        let cancelled = false;
+        void getLastScrapeSummaries(ledgerPath, loginNames)
+            .then((s) => {
+                if (!cancelled) setSummaries(s);
+            })
+            .catch(() => {});
+        return () => {
+            cancelled = true;
         };
     }, [ledgerPath, loginNames, scrapeLogVersion]);
 
@@ -326,7 +351,14 @@ export function ScrapeTab({
             setScrapeStatus(finalStatus);
             await onScrapeComplete(loginName);
         } catch (error) {
-            finalStatus = `Scrape failed: ${String(error)}`;
+            const message = String(error);
+            // A user cancel comes back as the backend's canonical cancel message
+            // (SCRAPE_CANCELED_MESSAGE, "scrape canceled by user"). Render it as an
+            // informational status, not a red failure. The status classifier keys
+            // off "failed"/"error" substrings, which this message avoids.
+            finalStatus = message.toLowerCase().includes('canceled')
+                ? `Scrape canceled for ${loginName}.`
+                : `Scrape failed: ${message}`;
             setScrapeStatus(finalStatus);
         } finally {
             setRunningLoginName(null);
@@ -495,7 +527,18 @@ export function ScrapeTab({
                                 ? ` — ${activeScrapeLoginName}`
                                 : ''}
                         </div>
-                        <pre className="scrape-console-pane" ref={consoleRef}>
+                        <pre
+                            className="scrape-console-pane"
+                            ref={consoleRef}
+                            onScroll={(e) => {
+                                const pane = e.currentTarget;
+                                stickToBottomRef.current = shouldStickToBottom(
+                                    pane.scrollTop,
+                                    pane.scrollHeight,
+                                    pane.clientHeight,
+                                );
+                            }}
+                        >
                             {consoleLines.length > 0
                                 ? consoleLines.join('\n')
                                 : 'Waiting for driver output...'}

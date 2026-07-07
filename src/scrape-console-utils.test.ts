@@ -5,6 +5,7 @@ import {
     computeStaleLogins,
     formatScrapeOutputLine,
     partitionArtifacts,
+    shouldStickToBottom,
 } from './scrape-console-utils.ts';
 
 describe('computeStaleLogins', () => {
@@ -23,6 +24,23 @@ describe('computeStaleLogins', () => {
             stale: { lastSuccess: '2026-07-05T06:00:00Z' }, // ~54h ago
         };
         expect(computeStaleLogins(summaries, 24, now)).toEqual(['stale']);
+    });
+});
+
+describe('shouldStickToBottom', () => {
+    it('sticks when scrolled to the exact bottom', () => {
+        // scrollTop === scrollHeight - clientHeight => distance 0.
+        expect(shouldStickToBottom(900, 1000, 100)).toBe(true);
+    });
+
+    it('sticks when within the near-bottom threshold', () => {
+        // 20px from the bottom, default threshold 32.
+        expect(shouldStickToBottom(880, 1000, 100)).toBe(true);
+    });
+
+    it('does not stick when the user has scrolled up past the threshold', () => {
+        // 400px from the bottom.
+        expect(shouldStickToBottom(500, 1000, 100)).toBe(false);
     });
 });
 
