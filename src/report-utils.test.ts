@@ -9,6 +9,7 @@ import {
     defaultAutoRunConfig,
     isReportConfigStale,
     shouldAutoRunDefault,
+    shouldIncludeBudget,
     summarizeUnknownRegister,
     type ReportConfig,
 } from './report-utils.ts';
@@ -307,6 +308,28 @@ describe('shouldAutoRunDefault', () => {
                 error: 'boom',
                 hasAutoRun: false,
             }),
+        ).toBe(false);
+    });
+});
+
+describe('shouldIncludeBudget', () => {
+    it('is true only for a balance-family command with budget enabled', () => {
+        expect(
+            shouldIncludeBudget(config({ command: 'balance', budget: true })),
+        ).toBe(true);
+    });
+
+    it('is false for a register command even with budget enabled', () => {
+        // A persisted budget checkbox must not gate a Transaction Register run
+        // with "No budget.journal found".
+        expect(
+            shouldIncludeBudget(config({ command: 'register', budget: true })),
+        ).toBe(false);
+    });
+
+    it('is false for a balance command with budget disabled', () => {
+        expect(
+            shouldIncludeBudget(config({ command: 'balance', budget: false })),
         ).toBe(false);
     });
 });

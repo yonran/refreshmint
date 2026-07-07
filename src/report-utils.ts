@@ -343,6 +343,19 @@ export function cannedReportConfig(
 }
 
 /**
+ * Whether a run should pass --budget (and have the backend supply
+ * budget.journal as a second -f). True only when the budget option is enabled
+ * AND the command is in the balance family; --budget is meaningless for the
+ * register family and other commands. Gating here keeps a persisted budget
+ * checkbox from blocking e.g. a Transaction Register run with "No budget.journal
+ * found". Mirrors the buildReportArgs guard that only emits --budget for
+ * balance-family commands.
+ */
+export function shouldIncludeBudget(config: ReportConfig): boolean {
+    return config.budget && BALANCE_FAMILY.includes(config.command);
+}
+
+/**
  * The report the Reports tab auto-runs on first open for a ledger. It is the
  * spending-by-category canned report widened from this-month to the
  * last-12-months range so a ledger whose data ended months ago is not greeted

@@ -18,6 +18,7 @@ import {
     defaultAutoRunConfig,
     isReportConfigStale,
     shouldAutoRunDefault,
+    shouldIncludeBudget,
     summarizeUnknownRegister,
     type Accumulation,
     type CannedReportId,
@@ -146,7 +147,7 @@ export function ReportsTab({
                     ledger,
                     cfg.command,
                     args,
-                    cfg.budget,
+                    shouldIncludeBudget(cfg),
                 );
                 setResult(res);
                 ok = true;
