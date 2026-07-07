@@ -1719,7 +1719,7 @@ export function PipelineTab({
             <section className="txn-form">
                 <div className="txn-form-header">
                     <div>
-                        <h2>Pipeline</h2>
+                        <h2>Review</h2>
                         <p>
                             Inspect the ETL stages for a bank account: evidence
                             documents, raw rows, extracted account entries, and

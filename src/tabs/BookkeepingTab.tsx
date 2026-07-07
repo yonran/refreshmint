@@ -491,7 +491,7 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
             <section className="pipeline-panel">
                 <div className="txn-form-header">
                     <div>
-                        <h2>Bookkeeping</h2>
+                        <h2>Reconcile &amp; Close</h2>
                         <p>
                             Reconciliation sessions, settlement links, and
                             soft-close records live here.

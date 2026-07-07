@@ -1320,19 +1320,6 @@ function App() {
                         </button>
                         <button
                             className={
-                                activeTab === 'bookkeeping'
-                                    ? 'tab active'
-                                    : 'tab'
-                            }
-                            onClick={() => {
-                                setActiveTab('bookkeeping');
-                            }}
-                            type="button"
-                        >
-                            Bookkeeping
-                        </button>
-                        <button
-                            className={
                                 activeTab === 'transactions'
                                     ? 'tab active'
                                     : 'tab'
@@ -1372,7 +1359,7 @@ function App() {
                             }}
                             type="button"
                         >
-                            Pipeline
+                            Review
                         </button>
                         <button
                             className={
@@ -1387,16 +1374,16 @@ function App() {
                         </button>
                         <button
                             className={
-                                activeTab === 'preferences'
+                                activeTab === 'bookkeeping'
                                     ? 'tab active'
                                     : 'tab'
                             }
                             onClick={() => {
-                                setActiveTab('preferences');
+                                setActiveTab('bookkeeping');
                             }}
                             type="button"
                         >
-                            Preferences
+                            Reconcile &amp; Close
                         </button>
                         <button
                             className={
@@ -1408,6 +1395,19 @@ function App() {
                             type="button"
                         >
                             Scraping
+                        </button>
+                        <button
+                            className={
+                                activeTab === 'preferences'
+                                    ? 'tab active'
+                                    : 'tab'
+                            }
+                            onClick={() => {
+                                setActiveTab('preferences');
+                            }}
+                            type="button"
+                        >
+                            Preferences
                         </button>
                         <button
                             className={
