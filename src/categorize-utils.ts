@@ -51,6 +51,17 @@ export function postButtonLabel(
 }
 
 /**
+ * One pre-merge source account entry, enough to re-post it to Expenses:Unknown
+ * when undoing a chip merge. Captured at action time from each source GL txn's
+ * comment (parseGlSourceRefs + parseLoginAccountLocator, src/evidence-nav-utils.ts).
+ */
+export interface MergeSourceRef {
+    loginName: string;
+    label: string;
+    entryId: string;
+}
+
+/**
  * A completed one-click chip action, enough to compute its exact inverse for an
  * Undo toast. Kept in this pure module so the inverse logic is unit-testable.
  */
@@ -62,7 +73,7 @@ export type ChipAction =
           oldAccount: string;
           newAccount: string;
       }
-    | { kind: 'merge'; glTxnId: string };
+    | { kind: 'merge'; glTxnId: string; sourceRefs: MergeSourceRef[] };
 
 /** The reversing operation for a {@link ChipAction}. */
 export type UndoPlan =
@@ -73,13 +84,20 @@ export type UndoPlan =
           account: string;
       }
     // Unpost the merged transfer WITHOUT recording not-a-transfer negative
-    // memory (recordMemory: false), so an undone merge stays re-suggestable.
-    | { kind: 'unpost-no-memory'; glTxnId: string };
+    // memory (recordMemory: false), so an undone merge stays re-suggestable,
+    // then re-post each source entry to Expenses:Unknown so the two pre-merge
+    // rows reappear (with new txn ids).
+    | {
+          kind: 'unpost-no-memory';
+          glTxnId: string;
+          sourceRefs: MergeSourceRef[];
+      };
 
 /**
  * Build the exact inverse of a just-performed chip action:
  * - categorize → recategorize the same posting back to its old account;
- * - merge → unpost the new transfer without negative memory.
+ * - merge → unpost the new transfer without negative memory, then re-post the
+ *   captured source entries.
  */
 export function buildUndoPlan(action: ChipAction): UndoPlan {
     switch (action.kind) {
@@ -91,7 +109,11 @@ export function buildUndoPlan(action: ChipAction): UndoPlan {
                 account: action.oldAccount,
             };
         case 'merge':
-            return { kind: 'unpost-no-memory', glTxnId: action.glTxnId };
+            return {
+                kind: 'unpost-no-memory',
+                glTxnId: action.glTxnId,
+                sourceRefs: action.sourceRefs,
+            };
     }
 }
 

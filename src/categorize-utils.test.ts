@@ -214,10 +214,25 @@ describe('buildUndoPlan', () => {
         });
     });
 
-    it('inverts a merge by unposting without recording negative memory', () => {
-        expect(buildUndoPlan({ kind: 'merge', glTxnId: 'gl-9' })).toEqual({
+    it('inverts a merge by unposting without memory and carrying source refs', () => {
+        // The undo re-posts each source entry to Expenses:Unknown, so the plan
+        // must carry the two pre-merge source refs captured at action time.
+        expect(
+            buildUndoPlan({
+                kind: 'merge',
+                glTxnId: 'gl-9',
+                sourceRefs: [
+                    { loginName: 'chase', label: 'checking', entryId: 'e1' },
+                    { loginName: 'boa', label: 'savings', entryId: 'e2' },
+                ],
+            }),
+        ).toEqual({
             kind: 'unpost-no-memory',
             glTxnId: 'gl-9',
+            sourceRefs: [
+                { loginName: 'chase', label: 'checking', entryId: 'e1' },
+                { loginName: 'boa', label: 'savings', entryId: 'e2' },
+            ],
         });
     });
 });

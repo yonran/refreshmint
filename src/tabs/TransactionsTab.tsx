@@ -10,11 +10,13 @@ import {
     mergeGlTransfer,
     type NewTransactionInput,
     normalizePayee,
+    postLoginAccountEntry,
     queryTransactions,
     recategorizeGlTransaction,
     recategorizeGlTransactions,
     suggestGlCategories,
     type TransactionRow,
+    UNCATEGORIZED_GL_ACCOUNT,
     unpostGlTransaction,
     validateTransaction,
     validateTransactionText,
@@ -24,9 +26,14 @@ import { categoryRulesFromBulkRows } from '../automation-utils.ts';
 import {
     type AcceptAllEdit,
     buildUndoPlan,
+    type MergeSourceRef,
     type UndoPlan,
 } from '../categorize-utils.ts';
-import type { GlSourceRef } from '../evidence-nav-utils.ts';
+import {
+    parseGlSourceRefs,
+    parseLoginAccountLocator,
+    type GlSourceRef,
+} from '../evidence-nav-utils.ts';
 import {
     getCurrentToken,
     getSearchSuggestions,
@@ -726,19 +733,73 @@ export function TransactionsTab({
                     plan.postingIndex,
                     plan.account,
                 );
+                onLedgerRefresh();
+                setActionStatus(null);
             } else {
-                // recordMemory:false so undoing the merge doesn't remember the
-                // pair as not-a-transfer.
+                // Unpost the merged transfer (recordMemory:false so undoing it
+                // doesn't remember the pair as not-a-transfer), then re-post each
+                // source entry to Expenses:Unknown so the two pre-merge rows
+                // reappear (with new txn ids).
                 await unpostGlTransaction(ledgerPath, plan.glTxnId, false);
+                const failed: string[] = [];
+                for (const ref of plan.sourceRefs) {
+                    try {
+                        await postLoginAccountEntry(
+                            ledgerPath,
+                            ref.loginName,
+                            ref.label,
+                            ref.entryId,
+                            UNCATEGORIZED_GL_ACCOUNT,
+                            null,
+                        );
+                    } catch (error) {
+                        console.error(
+                            're-post after merge undo failed:',
+                            error,
+                        );
+                        failed.push(
+                            `${ref.loginName}/${ref.label}:${ref.entryId}`,
+                        );
+                    }
+                }
+                onLedgerRefresh();
+                if (failed.length > 0) {
+                    setActionStatus({
+                        level: 'error',
+                        message: `Undo left unposted: ${failed.join(', ')}`,
+                    });
+                } else {
+                    setActionStatus(null);
+                }
             }
-            setActionStatus(null);
-            onLedgerRefresh();
         } catch (error) {
             setActionStatus({
                 level: 'error',
                 message: `Undo failed: ${String(error)}`,
             });
         }
+    }
+
+    // Capture the two pre-merge source entries from the source GL txns' comments
+    // so a merge Undo can re-post them to Expenses:Unknown. Each chip-merge
+    // source txn is single-source (merge guard), so parseGlSourceRefs yields one
+    // ref per txn; parseLoginAccountLocator splits it into login + label.
+    function captureMergeSourceRefs(txnIds: string[]): MergeSourceRef[] {
+        const refs: MergeSourceRef[] = [];
+        for (const id of txnIds) {
+            const txn = ledger.transactions.find((t) => t.id === id);
+            if (txn === undefined) continue;
+            for (const src of parseGlSourceRefs(txn.comment)) {
+                const loc = parseLoginAccountLocator(src.locator);
+                if (loc === null) continue;
+                refs.push({
+                    loginName: loc.loginName,
+                    label: loc.label,
+                    entryId: src.entryId,
+                });
+            }
+        }
+        return refs;
     }
 
     async function handleRecategorizeGlTransaction(
@@ -810,6 +871,9 @@ export function TransactionsTab({
         setActionStatus(null);
         setTransferActionBusy(true);
         try {
+            // Capture the two pre-merge source entries BEFORE the merge consumes
+            // them, so a merge Undo can re-post both to Expenses:Unknown.
+            const sourceRefs = captureMergeSourceRefs([txnId1, txnId2]);
             // Capture the new transfer's GL txn id so Undo can unpost exactly
             // this block (without recording not-a-transfer memory).
             const newGlTxnId = await mergeGlTransfer(
@@ -832,6 +896,7 @@ export function TransactionsTab({
                             buildUndoPlan({
                                 kind: 'merge',
                                 glTxnId: newGlTxnId,
+                                sourceRefs,
                             }),
                         );
                     },
