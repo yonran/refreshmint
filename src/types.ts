@@ -122,6 +122,16 @@ export type PipelineBulkAccountStat = {
     };
 };
 
+/** Reason an account was skipped during bulk extract (non-null variants only). */
+export type ExtractSkipReason = NonNullable<
+    PipelineBulkAccountStat['extract']['skipReason']
+>;
+
+/** Reason an account was skipped during bulk post (non-null variants only). */
+export type PostSkipReason = NonNullable<
+    PipelineBulkAccountStat['post']['skipReason']
+>;
+
 export type PipelineBulkSummary = {
     eligibleAccounts: number;
     totalDocuments: number;
