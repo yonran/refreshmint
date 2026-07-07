@@ -78,6 +78,17 @@ export function ReportsTab({
     const lastRunConfigRef = useRef<ReportConfig | null>(session.lastRunConfig);
     const hasAutoRunRef = useRef<boolean>(session.hasAutoRun);
 
+    // Live mirror of the ledger prop, read in runReport's async resolve path to
+    // detect a ledger switch that happened while an hledger call was in flight
+    // (a stale run must not overwrite the new ledger's display). Assigned during
+    // render so it always reflects the currently-rendered prop.
+    const ledgerRef = useRef(ledger);
+    ledgerRef.current = ledger;
+    // In-flight guard: the Run button's disabled= only takes effect after a
+    // committed render, so two clicks in the same tick both pass it. runningRef
+    // is set synchronously at the top of runReport and blocks the second.
+    const runningRef = useRef(false);
+
     // Keep a live snapshot of everything the App-held session tracks so it can be
     // flushed back on unmount (mirrors the TransactionsTab persistence pattern).
     const sessionRef = useRef<ReportsTabSession>(session);
@@ -136,30 +147,59 @@ export function ReportsTab({
     // it in the same click without waiting for a setState to flush.
     const runReport = useCallback(
         async (cfg: ReportConfig) => {
+            // In-flight guard (see runningRef): drop a second concurrent run.
+            if (runningRef.current) return;
+            runningRef.current = true;
+            // Capture the ledger this run targets so we can discard the result
+            // if the ledger prop changes mid-flight.
+            const runLedger = ledger;
             setRunning(true);
             setError(null);
             setResult(null);
             setUnknownSummary(null);
             let ok = false;
+            let res: HledgerReportResult | null = null;
+            let errMsg: string | null = null;
             try {
                 const args = buildReportArgs(cfg);
-                const res = await runHledgerReport(
-                    ledger,
+                res = await runHledgerReport(
+                    runLedger,
                     cfg.command,
                     args,
                     shouldIncludeBudget(cfg),
                 );
-                setResult(res);
                 ok = true;
             } catch (e) {
-                setError(String(e));
-            } finally {
-                // Record the config that produced the current output (on both
-                // success and error) so the stale-result hint can compare against
-                // subsequent edits.
-                lastRunConfigRef.current = cfg;
-                setRunning(false);
+                errMsg = String(e);
             }
+            // Stale-run guard: if the ledger changed under us, discard every
+            // state/ref write so a previous ledger's output never displays.
+            if (runLedger !== ledgerRef.current) {
+                runningRef.current = false;
+                return;
+            }
+            if (ok) {
+                setResult(res);
+            } else {
+                setError(errMsg);
+            }
+            // Record the config that produced the current output (on both
+            // success and error) so the stale-result hint can compare against
+            // subsequent edits.
+            lastRunConfigRef.current = cfg;
+            setRunning(false);
+            runningRef.current = false;
+            // Eagerly mirror the resolved output into the session and flush it,
+            // so a run that resolves after the user switched tabs mid-run
+            // survives into the session instead of vanishing (App is still
+            // mounted, so the onSessionChange closure remains valid).
+            sessionRef.current = {
+                ...sessionRef.current,
+                result: ok ? res : null,
+                error: ok ? null : errMsg,
+                lastRunConfig: cfg,
+            };
+            onSessionChange(() => sessionRef.current);
             // Data-quality banner: a secondary register query over the run's date
             // range. It runs after the main report is already displayed and its
             // failures are non-fatal (logged, never surfaced as a report error).
@@ -170,17 +210,19 @@ export function ReportsTab({
                         cfg.endDate,
                     );
                     const unkRes = await runHledgerReport(
-                        ledger,
+                        runLedger,
                         'register',
                         unkArgs,
                     );
+                    // Discard the banner too if the ledger changed under us.
+                    if (runLedger !== ledgerRef.current) return;
                     setUnknownSummary(summarizeUnknownRegister(unkRes.rows));
                 } catch (e) {
                     console.warn('Expenses:Unknown banner query failed', e);
                 }
             }
         },
-        [ledger],
+        [ledger, onSessionChange],
     );
 
     const handleRun = useCallback(() => {
