@@ -99,39 +99,62 @@ impl Default for ScrapeLogTail {
 /// user cancellation from a genuine driver failure.
 pub const SCRAPE_CANCELED_MESSAGE: &str = "scrape canceled by user";
 
-/// Run the driver future, aborting early if the `cancel` watch channel is set
-/// to `true`. Returns `Err(SCRAPE_CANCELED_MESSAGE)` on cancellation. When
-/// `cancel` is `None`, this is a plain `.await`. Callers still run finalize and
-/// browser close afterwards, so the lock is released and the browser killed.
+/// Structured outcome of running the driver under a cancel watch. Distinguishing
+/// a user `Canceled` from a `Completed(Err(..))` by a flag (rather than
+/// string-matching the error message) fixes two holes: the `select!` race where
+/// the driver's own prompt-cancelled error is returned just after a cancel was
+/// requested, and `combine_run_and_finalize` rewriting the message so a canceled
+/// run with a finalize error no longer string-matches. See `run_scrape_async`,
+/// which uses the `Canceled` variant to skip failure-artifact capture.
+#[derive(Debug)]
+pub enum DriverOutcome {
+    Completed(Result<(), Box<dyn std::error::Error + Send + Sync>>),
+    Canceled,
+}
+
+/// Run the driver future, aborting early if the `cancel` watch channel is set to
+/// `true`. Returns `DriverOutcome::Canceled` on cancellation (including when the
+/// driver's own future errors out in the same instant a cancel was requested —
+/// e.g. a prompt answered with `None` by `cancel_scrape`). When `cancel` is
+/// `None`, this is a plain `.await`. Callers still run finalize and browser close
+/// afterwards, so the lock is released and the browser killed.
 pub async fn run_driver_cancellable<F>(
     driver_future: F,
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+) -> DriverOutcome
 where
     F: std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>,
 {
     let Some(mut cancel) = cancel else {
-        return driver_future.await;
+        return DriverOutcome::Completed(driver_future.await);
     };
     // Already-canceled channels short-circuit before touching the browser.
     if *cancel.borrow() {
-        return Err(SCRAPE_CANCELED_MESSAGE.into());
+        return DriverOutcome::Canceled;
     }
     tokio::pin!(driver_future);
     loop {
         tokio::select! {
-            result = &mut driver_future => return result,
+            result = &mut driver_future => {
+                // The driver finished. If a cancel was requested in the same
+                // instant (the select! can pick this branch even though the
+                // cancel also fired, and the driver's error is often the
+                // prompt-None unwind that cancel_scrape triggers), classify as a
+                // user cancel rather than a genuine failure.
+                if *cancel.borrow() {
+                    return DriverOutcome::Canceled;
+                }
+                return DriverOutcome::Completed(result);
+            }
             changed = cancel.changed() => {
                 match changed {
                     // A new value arrived; abort only when it is `true`.
-                    Ok(()) if *cancel.borrow() => {
-                        return Err(SCRAPE_CANCELED_MESSAGE.into());
-                    }
+                    Ok(()) if *cancel.borrow() => return DriverOutcome::Canceled,
                     // Value changed to false (ignore) — keep waiting.
                     Ok(()) => {}
                     // Sender dropped: cancellation is impossible now, so just
                     // await the driver to completion.
-                    Err(_) => return (&mut driver_future).await,
+                    Err(_) => return DriverOutcome::Completed((&mut driver_future).await),
                 }
             }
         }
@@ -476,14 +499,24 @@ fn default_document_label() -> String {
 /// scrape (`run_scrape`) and `debug exec` (scrape/debug.rs) so they report the
 /// two failures consistently: a run error takes precedence but a finalize error
 /// is appended, and a finalize-only error is surfaced on an otherwise-ok run.
+///
+/// When `canceled` is set, the run was aborted by the user: return the canonical
+/// cancel message and drop any finalize error, so the outcome string-compares as
+/// a cancel (finalize still ran for data preservation; its errors just don't
+/// turn a cancel into a "failure"). Callers key artifact capture off `canceled`,
+/// not the message.
 pub(crate) fn combine_run_and_finalize<R, F, E1, E2>(
     run: Result<R, E1>,
     finalize: Result<F, E2>,
+    canceled: bool,
 ) -> Result<(), String>
 where
     E1: std::fmt::Display,
     E2: std::fmt::Display,
 {
+    if canceled {
+        return Err(SCRAPE_CANCELED_MESSAGE.to_string());
+    }
     match (run, finalize) {
         (Ok(_), Ok(_)) => Ok(()),
         (Ok(_), Err(finalize_err)) => Err(format!(
@@ -926,8 +959,16 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
         page_inner,
         refreshmint_inner.clone(),
     );
-    let mut result = run_driver_cancellable(driver_future, config.cancel.clone()).await;
-    eprintln!("Driver finished: {result:?}");
+    let driver_outcome = run_driver_cancellable(driver_future, config.cancel.clone()).await;
+    eprintln!("Driver finished: {driver_outcome:?}");
+    // Track the user-cancel classification by flag, not by string-matching the
+    // (possibly finalize-augmented) error message.
+    let canceled = matches!(driver_outcome, DriverOutcome::Canceled);
+    let run_result = match driver_outcome {
+        DriverOutcome::Completed(result) => result,
+        DriverOutcome::Canceled => Err(SCRAPE_CANCELED_MESSAGE.into()),
+    };
+    let mut result = run_result;
 
     // Clear the sink so the forwarder task drains and exits (mirror
     // debug.rs:654). Awaiting it guarantees `log_tail` has every emitted line
@@ -964,7 +1005,7 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
             finalized
         }
     };
-    result = combine_run_and_finalize(result, finalize_result).map_err(Into::into);
+    result = combine_run_and_finalize(result, finalize_result, canceled).map_err(Into::into);
 
     // 10. Auto-save extension in login config if not already set
     if result.is_ok() {
@@ -990,8 +1031,10 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
     // capture is timeout-wrapped so a dead renderer can't hang the run (risk 3),
     // and artifacts never mask the original error.
     let mut failure_artifacts_dir: Option<PathBuf> = None;
-    if let Err(err) = &result {
-        if err.to_string() != SCRAPE_CANCELED_MESSAGE {
+    if let Err(_err) = &result {
+        // Skip capture on a user cancel (keyed off the structured flag, not the
+        // message, which combine_run_and_finalize may have rewritten).
+        if !canceled {
             let timestamp = generate_scrape_session_id();
             let rel_dir = scrape_failure_dir_relative(&login_name, &timestamp);
             let abs_dir = config.ledger_dir.join(&rel_dir);
@@ -1058,8 +1101,8 @@ mod tests {
         clear_staged_output_dir, combine_run_and_finalize, finalize_staged_resources,
         list_runnable_extensions, load_manifest, load_manifest_secret_declarations,
         normalize_manifest_domain, resolve_driver_script_path, run_driver_cancellable,
-        run_log_forwarder, scrape_failure_dir_relative, write_failure_artifacts, FailureArtifacts,
-        ScrapeLogTail, SCRAPE_CANCELED_MESSAGE,
+        run_log_forwarder, scrape_failure_dir_relative, write_failure_artifacts, DriverOutcome,
+        FailureArtifacts, ScrapeLogTail, SCRAPE_CANCELED_MESSAGE,
     };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
@@ -1414,12 +1457,12 @@ mod tests {
         let fin_err: Result<Vec<String>, String> = Err("finalize boom".to_string());
 
         // (Ok, Ok) -> Ok
-        assert!(combine_run_and_finalize(ok.clone(), fin_ok.clone()).is_ok());
+        assert!(combine_run_and_finalize(ok.clone(), fin_ok.clone(), false).is_ok());
 
         // (Ok, FinalizeErr) -> finalize error surfaced
         assert_eq!(
             expect_err(
-                combine_run_and_finalize(ok.clone(), fin_err.clone()),
+                combine_run_and_finalize(ok.clone(), fin_err.clone(), false),
                 "ok+finalize-err"
             ),
             "failed to finalize staged resources: finalize boom"
@@ -1428,7 +1471,7 @@ mod tests {
         // (RunErr, Ok) -> the run error, verbatim
         assert_eq!(
             expect_err(
-                combine_run_and_finalize(run_err.clone(), fin_ok.clone()),
+                combine_run_and_finalize(run_err.clone(), fin_ok.clone(), false),
                 "run-err+ok"
             ),
             "run boom"
@@ -1437,7 +1480,7 @@ mod tests {
         // (RunErr, FinalizeErr) -> both, run error first
         assert_eq!(
             expect_err(
-                combine_run_and_finalize(run_err, fin_err),
+                combine_run_and_finalize(run_err, fin_err, false),
                 "run-err+finalize-err"
             ),
             "run boom; additionally failed to finalize staged resources: finalize boom"
@@ -1703,7 +1746,10 @@ try {
     #[tokio::test]
     async fn run_driver_cancellable_passes_through_without_cancel() {
         let driver = async { Ok::<(), Box<dyn std::error::Error + Send + Sync>>(()) };
-        assert!(run_driver_cancellable(driver, None).await.is_ok());
+        assert!(matches!(
+            run_driver_cancellable(driver, None).await,
+            DriverOutcome::Completed(Ok(()))
+        ));
     }
 
     #[tokio::test]
@@ -1713,11 +1759,8 @@ try {
             .send(true)
             .unwrap_or_else(|err| panic!("send cancel failed: {err}"));
         let driver = std::future::pending::<BoxedDriverResult>();
-        let result = run_driver_cancellable(driver, Some(receiver)).await;
-        match result {
-            Ok(()) => panic!("expected cancellation error, got Ok"),
-            Err(err) => assert_eq!(err.to_string(), SCRAPE_CANCELED_MESSAGE),
-        }
+        let outcome = run_driver_cancellable(driver, Some(receiver)).await;
+        assert!(matches!(outcome, DriverOutcome::Canceled));
     }
 
     #[tokio::test]
@@ -1728,13 +1771,41 @@ try {
         sender
             .send(true)
             .unwrap_or_else(|err| panic!("send cancel failed: {err}"));
-        let result = handle
+        let outcome = handle
             .await
             .unwrap_or_else(|err| panic!("join failed: {err}"));
-        match result {
-            Ok(()) => panic!("expected cancellation error, got Ok"),
-            Err(err) => assert_eq!(err.to_string(), SCRAPE_CANCELED_MESSAGE),
-        }
+        assert!(matches!(outcome, DriverOutcome::Canceled));
+    }
+
+    #[tokio::test]
+    async fn run_driver_cancellable_classifies_cancel_when_driver_errors_in_race() {
+        // The cancel fires as the driver itself unwinds: cancel_scrape answers the
+        // pending prompt with None, so the driver returns an error at the same
+        // instant the cancel watch flips true. The select! resolves the driver
+        // branch (it becomes ready when polled), and the outcome must still be
+        // Canceled -- not a genuine failure that would capture artifacts.
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let driver = async move {
+            sender
+                .send(true)
+                .unwrap_or_else(|err| panic!("send cancel failed: {err}"));
+            Err::<(), Box<dyn std::error::Error + Send + Sync>>("prompt cancelled".into())
+        };
+        let outcome = run_driver_cancellable(driver, Some(receiver)).await;
+        assert!(
+            matches!(outcome, DriverOutcome::Canceled),
+            "a driver error concurrent with a cancel is classified as Canceled"
+        );
+    }
+
+    #[test]
+    fn combine_run_and_finalize_canceled_ignores_finalize_error() {
+        // A user cancel with a finalize error must still classify as a cancel
+        // (canonical message), so the caller skips artifact capture.
+        let run_err: Result<(), String> = Err("prompt cancelled".to_string());
+        let fin_err: Result<Vec<String>, String> = Err("finalize boom".to_string());
+        let combined = combine_run_and_finalize(run_err, fin_err, true);
+        assert_eq!(combined, Err(SCRAPE_CANCELED_MESSAGE.to_string()));
     }
 
     #[tokio::test]

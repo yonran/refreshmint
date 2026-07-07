@@ -646,8 +646,9 @@ async fn handle_exec_request_async(
         };
 
         // Same run+finalize combining as the full scrape (see
-        // super::combine_run_and_finalize).
-        let result = super::combine_run_and_finalize(run_result, finalize_result);
+        // super::combine_run_and_finalize). `debug exec` has no cancel watch, so
+        // it is never a user cancel.
+        let result = super::combine_run_and_finalize(run_result, finalize_result, false);
 
         {
             let mut refreshmint = refreshmint_inner_for_task.lock().await;
