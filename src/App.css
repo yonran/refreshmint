@@ -362,15 +362,6 @@
     flex-wrap: wrap;
 }
 
-/* Modifier on .chip: adds spacing and the muted secret palette. */
-.secret-chip {
-    margin-left: 0.45rem;
-    border-color: #d9cdaa;
-    background: #fff7df;
-    color: #7a5c18;
-    letter-spacing: 0.02em;
-}
-
 .secret-prompt-overlay {
     position: fixed;
     inset: 0;
@@ -799,51 +790,10 @@ details[open] > .disclosure-summary::before {
     font-size: 0.85rem;
 }
 
-.secret-chip.warning {
-    background: #fff3cd;
-    border-color: #ffeeba;
-    color: #856404;
-}
-
 .evidence-list {
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
-}
-
-/* Modifier on .chip .chip-mono: a rectangular, truncating evidence tag. */
-.evidence-chip {
-    font-size: 0.75rem;
-    color: #666;
-    background: var(--color-surface-faint);
-    padding: 0.1rem 0.35rem;
-    border-radius: 0.25rem;
-    border-color: #eee;
-    white-space: nowrap;
-    max-width: 16ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.evidence-chip-image {
-    cursor: pointer;
-    color: var(--color-accent);
-    text-decoration: underline;
-}
-
-.evidence-chip-image:hover {
-    background: #eff6ff;
-    border-color: #bfdbfe;
-}
-
-.evidence-chip-toggle {
-    cursor: pointer;
-    color: #555;
-}
-
-.evidence-chip-toggle:hover {
-    background: #f3f4f6;
-    border-color: #d1d5db;
 }
 
 .attachment-lightbox {
@@ -891,13 +841,13 @@ details[open] > .disclosure-summary::before {
     white-space: nowrap;
 }
 
-/* Status chips for account rows */
 /*
  * Unified chip system. .chip is the shared pill base; the other chip classes
  * are semantic (ok/warning/info), typographic (mono), or behavioral
  * (interactive) modifiers layered on top. Component-specific chips
  * (.secret-chip, .evidence-chip, .similar-count-pill) reuse .chip and only
- * override what differs.
+ * override what differs — they MUST be declared after .chip: everything here
+ * has equal specificity, so source order decides which declarations win.
  */
 .chip {
     display: inline-flex;
@@ -943,6 +893,56 @@ details[open] > .disclosure-summary::before {
 .chip-interactive:disabled {
     opacity: 0.55;
     cursor: not-allowed;
+}
+
+/* Modifier on .chip: adds spacing and the muted secret palette. */
+.secret-chip {
+    margin-left: 0.45rem;
+    border-color: #d9cdaa;
+    background: #fff7df;
+    color: #7a5c18;
+    letter-spacing: 0.02em;
+}
+
+.secret-chip.warning {
+    background: #fff3cd;
+    border-color: #ffeeba;
+    color: #856404;
+}
+
+/* Modifier on .chip .chip-mono: a rectangular, truncating evidence tag. */
+.evidence-chip {
+    font-size: 0.75rem;
+    color: #666;
+    background: var(--color-surface-faint);
+    padding: 0.1rem 0.35rem;
+    border-radius: 0.25rem;
+    border-color: #eee;
+    white-space: nowrap;
+    max-width: 16ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.evidence-chip-image {
+    cursor: pointer;
+    color: var(--color-accent);
+    text-decoration: underline;
+}
+
+.evidence-chip-image:hover {
+    background: #eff6ff;
+    border-color: #bfdbfe;
+}
+
+.evidence-chip-toggle {
+    cursor: pointer;
+    color: #555;
+}
+
+.evidence-chip-toggle:hover {
+    background: #f3f4f6;
+    border-color: #d1d5db;
 }
 
 .transaction-bookkeeping-badges {
