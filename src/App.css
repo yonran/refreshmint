@@ -140,6 +140,20 @@
     border-color: #1f1f1f;
 }
 
+/* The report command selector reuses .tabs but must not read as top-level nav.
+   Let it wrap, drop the underline, and give the active pill a blue accent so it
+   is visually distinct from the black top-level tab bar. */
+.report-command-tabs {
+    flex-wrap: wrap;
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.report-command-tabs .tab.active {
+    background: #2563eb;
+    border-color: #2563eb;
+}
+
 .table-wrap {
     border: 1px solid #e3e3e3;
     border-radius: 1rem;

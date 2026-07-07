@@ -33,6 +33,55 @@ export const BALANCE_FAMILY: ReportCommand[] = [
 export const REGISTER_FAMILY: ReportCommand[] = ['register', 'aregister'];
 
 /**
+ * Plain-language labels for the report command selector. `tooltip` is the
+ * underlying hledger command, surfaced via a title= attribute so power users can
+ * still see what runs. Order here is the display order in the selector.
+ */
+export const COMMAND_LABELS: {
+    command: ReportCommand;
+    label: string;
+    tooltip: string;
+}[] = [
+    {
+        command: 'balance',
+        label: 'Account Balances',
+        tooltip: 'hledger balance',
+    },
+    {
+        command: 'balancesheet',
+        label: 'Balance Sheet',
+        tooltip: 'hledger balancesheet',
+    },
+    {
+        command: 'balancesheetequity',
+        label: 'Balance Sheet + Equity',
+        tooltip: 'hledger balancesheetequity',
+    },
+    {
+        command: 'incomestatement',
+        label: 'Income Statement',
+        tooltip: 'hledger incomestatement',
+    },
+    { command: 'cashflow', label: 'Cash Flow', tooltip: 'hledger cashflow' },
+    {
+        command: 'register',
+        label: 'Transaction Register',
+        tooltip: 'hledger register',
+    },
+    {
+        command: 'aregister',
+        label: 'Account Register',
+        tooltip: 'hledger aregister',
+    },
+    {
+        command: 'activity',
+        label: 'Activity Chart',
+        tooltip: 'hledger activity',
+    },
+    { command: 'stats', label: 'Statistics', tooltip: 'hledger stats' },
+];
+
+/**
  * The full set of report options, one field per useState atom that previously
  * lived in ReportsTab. Autocomplete/results/running state stay local to the
  * component; only the request-shaping fields live here.

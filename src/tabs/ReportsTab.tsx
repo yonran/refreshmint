@@ -8,6 +8,7 @@ import {
 } from '../tauri-commands.ts';
 import {
     BALANCE_FAMILY,
+    COMMAND_LABELS,
     REGISTER_FAMILY,
     buildReportArgs,
     computePeriodPresetRange,
@@ -17,7 +18,6 @@ import {
     type BalanceView,
     type Interval,
     type PeriodPreset,
-    type ReportCommand,
     type ReportConfig,
     type RegisterAccumulation,
 } from '../report-utils.ts';
@@ -109,34 +109,25 @@ export function ReportsTab({ ledger, accounts }: Props) {
 
                 {/* Command selector */}
                 <div className="field-group">
-                    <label className="field-label">Command</label>
-                    <div className="tabs">
-                        {(
-                            [
-                                ['balance', 'Balance'],
-                                ['balancesheet', 'Balance Sheet'],
-                                ['balancesheetequity', 'BS+Equity'],
-                                ['cashflow', 'Cash Flow'],
-                                ['incomestatement', 'Income Stmt'],
-                                ['register', 'Register'],
-                                ['aregister', 'Account Reg'],
-                                ['activity', 'Activity'],
-                                ['stats', 'Stats'],
-                            ] as [ReportCommand, string][]
-                        ).map(([cmd, label]) => (
-                            <button
-                                key={cmd}
-                                type="button"
-                                className={
-                                    command === cmd ? 'tab active' : 'tab'
-                                }
-                                onClick={() => {
-                                    patch({ command: cmd });
-                                }}
-                            >
-                                {label}
-                            </button>
-                        ))}
+                    <label className="field-label">Report</label>
+                    <div className="tabs report-command-tabs">
+                        {COMMAND_LABELS.map(
+                            ({ command: cmd, label, tooltip }) => (
+                                <button
+                                    key={cmd}
+                                    type="button"
+                                    title={tooltip}
+                                    className={
+                                        command === cmd ? 'tab active' : 'tab'
+                                    }
+                                    onClick={() => {
+                                        patch({ command: cmd });
+                                    }}
+                                >
+                                    {label}
+                                </button>
+                            ),
+                        )}
                     </div>
                 </div>
 
