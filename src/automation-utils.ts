@@ -32,7 +32,7 @@ export async function createTransferLinkResolution(
     ledgerPath: string,
     left: { loginName: string; label: string; entryId: string },
     right: { loginName: string; label: string; entryId: string },
-    notes = 'Created from Pipeline transfer link',
+    notes = 'Created from Review tab transfer link',
 ): Promise<Resolution> {
     return createResolution(ledgerPath, {
         kind: 'transfer-link',

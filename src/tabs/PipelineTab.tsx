@@ -994,7 +994,7 @@ export function PipelineTab({
                     ref: null,
                     notes: null,
                 })),
-                notes: 'Created from Pipeline split post',
+                notes: 'Created from Review tab split post',
             });
             const glId = await postLoginAccountEntrySplit(
                 ledgerPath,
@@ -1057,7 +1057,7 @@ export function PipelineTab({
                         notes: null,
                     },
                 ],
-                notes: 'Created from Pipeline "Always" action',
+                notes: 'Created from Review tab "Always" action',
                 predicate: {
                     descriptionRegex: null,
                     normalizedPayee,
@@ -1087,7 +1087,7 @@ export function PipelineTab({
                 kind: 'ignore-source',
                 subjectRefs: [loginEntryRef(loginName, label, entry.id)],
                 parts: [],
-                notes: 'Created from Pipeline account row',
+                notes: 'Created from Review tab account row',
             });
             await refreshPipelineLoginAccountData();
             setPipelineStatus(`Ignored automation for ${entry.id}.`);
@@ -1435,7 +1435,7 @@ export function PipelineTab({
             });
             await reviewImportAnomaly(ledgerPath, {
                 id: anomaly.id,
-                notes: 'Retired source entry from Pipeline',
+                notes: 'Retired source entry from Review tab',
             });
             await refreshPipelineLoginAccountData();
             setPipelineStatus(`Retired source entry ${anomaly.sourceEntryId}.`);
@@ -1472,7 +1472,7 @@ export function PipelineTab({
             });
             await reviewImportAnomaly(ledgerPath, {
                 id: anomaly.id,
-                notes: `Saved ${kind} resolution from Pipeline`,
+                notes: `Saved ${kind} decision from Review tab`,
             });
             await refreshPipelineLoginAccountData();
             setPipelineStatus(
@@ -1482,7 +1482,7 @@ export function PipelineTab({
                 )} decision for ${anomaly.sourceEntryId}.`,
             );
         } catch (error) {
-            setPipelineStatus(`Save resolution failed: ${String(error)}`);
+            setPipelineStatus(`Save decision failed: ${String(error)}`);
         } finally {
             setBusyAnomalyId(null);
         }
@@ -1701,7 +1701,7 @@ export function PipelineTab({
                     ),
                 ],
                 parts: [],
-                notes: 'Marked not-a-transfer from Pipeline',
+                notes: 'Marked not-a-transfer from Review tab',
             });
             await refreshPipelineLoginAccountData();
             setPipelineStatus(`Marked ${entryId} as not a transfer.`);

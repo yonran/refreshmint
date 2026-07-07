@@ -15,6 +15,7 @@ import type {
     PeriodCloseStatus,
     ProposalPolicyDecision,
     ProposalReversibility,
+    ReconciliationSession,
     ResolutionKind,
     ResolutionStatus,
 } from './tauri-commands.ts';
@@ -122,6 +123,14 @@ export const LINK_KIND_LABELS: EnumLabelTable<LinkKind> = {
 export const PERIOD_CLOSE_STATUS_LABELS: EnumLabelTable<PeriodCloseStatus> = {
     draft: { label: 'Draft' },
     'soft-closed': { label: 'Soft closed' },
+    reopened: { label: 'Reopened' },
+};
+
+export const RECONCILIATION_SESSION_STATUS_LABELS: EnumLabelTable<
+    ReconciliationSession['status']
+> = {
+    draft: { label: 'Draft' },
+    finalized: { label: 'Finalized' },
     reopened: { label: 'Reopened' },
 };
 

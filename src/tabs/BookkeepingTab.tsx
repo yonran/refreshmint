@@ -27,6 +27,7 @@ import {
     enumLabel,
     LINK_KIND_LABELS,
     PERIOD_CLOSE_STATUS_LABELS,
+    RECONCILIATION_SESSION_STATUS_LABELS,
 } from '../enum-labels.ts';
 import { appendIdToList } from '../bookkeeping-utils.ts';
 
@@ -770,7 +771,12 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                                             </div>
                                         </td>
                                         <td>{session.statementEndDate}</td>
-                                        <td>{session.status}</td>
+                                        <td>
+                                            {enumLabel(
+                                                RECONCILIATION_SESSION_STATUS_LABELS,
+                                                session.status,
+                                            )}
+                                        </td>
                                         <td>
                                             {session.reconciledTxnIds.length}
                                         </td>

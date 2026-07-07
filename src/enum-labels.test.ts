@@ -7,6 +7,7 @@ import {
     POLICY_DECISION_LABELS,
     PROPOSAL_KIND_LABELS,
     RESOLUTION_KIND_LABELS,
+    RECONCILIATION_SESSION_STATUS_LABELS,
 } from './enum-labels.ts';
 
 describe('enumLabel', () => {
@@ -48,5 +49,16 @@ describe('enumDescription', () => {
         expect(
             enumDescription(LINK_KIND_LABELS, 'no-such-kind'),
         ).toBeUndefined();
+    });
+});
+
+describe('RECONCILIATION_SESSION_STATUS_LABELS', () => {
+    it('maps session statuses to human labels', () => {
+        expect(
+            enumLabel(RECONCILIATION_SESSION_STATUS_LABELS, 'finalized'),
+        ).toBe('Finalized');
+        expect(enumLabel(RECONCILIATION_SESSION_STATUS_LABELS, 'draft')).toBe(
+            'Draft',
+        );
     });
 });
