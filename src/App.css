@@ -524,6 +524,11 @@
     overflow-x: auto;
 }
 
+.source-chip {
+    font-size: 0.7rem;
+    margin-top: 0.15rem;
+}
+
 .scrape-console-header {
     font-size: 0.85rem;
     font-weight: 600;

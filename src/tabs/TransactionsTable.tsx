@@ -13,6 +13,7 @@ import {
     UNCATEGORIZED_GL_ACCOUNT,
 } from '../tauri-commands.ts';
 import { quoteHledgerValue } from '../search-utils.ts';
+import { parseGlSourceRefs, type GlSourceRef } from '../evidence-nav-utils.ts';
 import type { SimilarRecategorizeSeed } from '../types.ts';
 import {
     type AcceptAllEdit,
@@ -159,6 +160,7 @@ export function TransactionsTable({
     onOpenSimilarRecategorize,
     hideObviousAmounts = true,
     onAddSearchTerm,
+    onOpenEvidence,
 }: {
     transactions: TransactionRow[];
     ledgerPath: string | null;
@@ -202,6 +204,9 @@ export function TransactionsTable({
     onOpenSimilarRecategorize?: (seed: SimilarRecategorizeSeed) => void;
     hideObviousAmounts?: boolean;
     onAddSearchTerm?: (term: string) => void;
+    // Navigate from a GL transaction's `; source:` ref to the originating
+    // account entry's evidence rows (Pipeline tab). Threaded App → TransactionsTab.
+    onOpenEvidence?: (ref: GlSourceRef) => void;
 }) {
     const lightbox = useAttachmentLightbox(ledgerPath);
     const [expandedEvidenceIds, setExpandedEvidenceIds] = useState<
@@ -696,6 +701,23 @@ export function TransactionsTable({
                                             }}
                                         >
                                             <div>{txn.description}</div>
+                                            {onOpenEvidence !== undefined &&
+                                                parseGlSourceRefs(
+                                                    txn.comment,
+                                                ).map((ref) => (
+                                                    <button
+                                                        key={`${txn.id}:src:${ref.locator}:${ref.entryId}`}
+                                                        type="button"
+                                                        className="link-button source-chip"
+                                                        title={`Open source evidence (${ref.locator})`}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            onOpenEvidence(ref);
+                                                        }}
+                                                    >
+                                                        source
+                                                    </button>
+                                                ))}
                                             {(() => {
                                                 const badges =
                                                     bookkeepingBadges(txn);

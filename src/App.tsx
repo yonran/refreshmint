@@ -16,6 +16,11 @@ import {
     computeStaleLogins,
 } from './scrape-console-utils.ts';
 import {
+    parseLoginAccountLocator,
+    pickEvidenceTarget,
+    type GlSourceRef,
+} from './evidence-nav-utils.ts';
+import {
     type ActiveTab,
     addRecentLedger,
     getLastActiveTab,
@@ -41,6 +46,7 @@ import {
     cancelScrape,
     getPendingPrompt,
     getLastScrapeSummaries,
+    getLoginAccountJournal,
     type LedgerView,
     setLoginAccount,
     recoverLedgerConsistency,
@@ -128,6 +134,37 @@ function App() {
         setPromptRequest(null);
         setPromptPending(null);
         void invoke('submit_prompt_answer', { answer });
+    }
+    // Navigate from a GL transaction's `; source:` ref back to the originating
+    // account entry's evidence rows in the Pipeline tab.
+    async function handleOpenEvidence(ref: GlSourceRef) {
+        if (!ledger) return;
+        const locator = parseLoginAccountLocator(ref.locator);
+        if (locator === null) return;
+        let target: ReturnType<typeof pickEvidenceTarget> = null;
+        try {
+            const entries = await getLoginAccountJournal(
+                ledger.path,
+                locator.loginName,
+                locator.label,
+            );
+            const entry = entries.find((e) => e.id === ref.entryId);
+            target =
+                entry !== undefined ? pickEvidenceTarget(entry.evidence) : null;
+        } catch {
+            // Fall through: still navigate to the account, just without a
+            // pre-selected evidence document.
+        }
+        setPipelineTabSession((current) => ({
+            ...current,
+            selectedLoginAccount: {
+                loginName: locator.loginName,
+                label: locator.label,
+            },
+            pipelineSubTab: 'evidence-rows',
+            evidenceRowsDocument: target?.document ?? '',
+        }));
+        setActiveTab('pipeline');
     }
     function handleSelectAccount(accountName: string) {
         setTransactionsTabSession((current) => ({
@@ -1609,6 +1646,9 @@ function App() {
                             pendingSearch={pendingTransactionSearch}
                             onPendingSearchConsumed={() => {
                                 setPendingTransactionSearch(null);
+                            }}
+                            onOpenEvidence={(ref) => {
+                                void handleOpenEvidence(ref);
                             }}
                             session={transactionsTabSession}
                             onSessionChange={setTransactionsTabSession}

@@ -22,6 +22,7 @@ import {
 import { formatTotals } from '../amount-utils.ts';
 import { categoryRulesFromBulkRows } from '../automation-utils.ts';
 import type { AcceptAllEdit } from '../categorize-utils.ts';
+import type { GlSourceRef } from '../evidence-nav-utils.ts';
 import {
     getCurrentToken,
     getSearchSuggestions,
@@ -148,6 +149,8 @@ interface TransactionsTabProps {
     // Cross-tab navigation: set a search term from outside (e.g. PipelineTab)
     pendingSearch: string | null;
     onPendingSearchConsumed: () => void;
+    // Navigate from a GL transaction's source ref to its evidence rows (Pipeline).
+    onOpenEvidence: (ref: GlSourceRef) => void;
     session: TransactionsTabSession;
     onSessionChange: (
         updater: (current: TransactionsTabSession) => TransactionsTabSession,
@@ -265,6 +268,7 @@ export function TransactionsTab({
     recategorizeTabIdRef,
     pendingSearch,
     onPendingSearchConsumed,
+    onOpenEvidence,
     session,
     onSessionChange,
 }: TransactionsTabProps) {
@@ -2079,6 +2083,7 @@ export function TransactionsTab({
                 transactions={filteredTransactions}
                 ledgerPath={ledgerPath}
                 accountNames={ledger.accounts.map((a) => a.name)}
+                onOpenEvidence={onOpenEvidence}
                 glCategorySuggestions={glCategorySuggestions}
                 selectedTransactionIds={selectedTransactionIds}
                 onSelectedTransactionIdsChange={setSelectedTransactionIds}
