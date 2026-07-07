@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     buildAcceptAllEdits,
+    buildUndoPlan,
     categorizeChipLabel,
     mergeTransferChipLabel,
     summarizeBulkRecategorize,
@@ -190,5 +191,31 @@ describe('mergeTransferChipLabel', () => {
         expect(
             mergeTransferChipLabel({ date: '2026-07-01', description: exact }),
         ).toBe(`Merge as transfer: 2026-07-01 ${exact}`);
+    });
+});
+
+describe('buildUndoPlan', () => {
+    it('inverts a categorize by recategorizing back to the old account', () => {
+        expect(
+            buildUndoPlan({
+                kind: 'categorize',
+                txnId: 't1',
+                postingIndex: 1,
+                oldAccount: 'Expenses:Unknown',
+                newAccount: 'Expenses:Groceries',
+            }),
+        ).toEqual({
+            kind: 'recategorize-back',
+            txnId: 't1',
+            postingIndex: 1,
+            account: 'Expenses:Unknown',
+        });
+    });
+
+    it('inverts a merge by unposting without recording negative memory', () => {
+        expect(buildUndoPlan({ kind: 'merge', glTxnId: 'gl-9' })).toEqual({
+            kind: 'unpost-no-memory',
+            glTxnId: 'gl-9',
+        });
     });
 });

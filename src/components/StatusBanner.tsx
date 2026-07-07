@@ -17,8 +17,10 @@ export function StatusBanner({
     level: StatusLevel;
     message: string;
     onDismiss?: () => void;
-    action?: { label: string; onClick: () => void };
-    autoDismissMs?: number;
+    // `| undefined` so callers can forward optional fields from a nullable
+    // status object under exactOptionalPropertyTypes.
+    action?: { label: string; onClick: () => void } | undefined;
+    autoDismissMs?: number | undefined;
 }) {
     useEffect(() => {
         if (autoDismissMs === undefined || onDismiss === undefined) return;

@@ -21,7 +21,11 @@ import {
 } from '../tauri-commands.ts';
 import { formatTotals } from '../amount-utils.ts';
 import { categoryRulesFromBulkRows } from '../automation-utils.ts';
-import type { AcceptAllEdit } from '../categorize-utils.ts';
+import {
+    type AcceptAllEdit,
+    buildUndoPlan,
+    type UndoPlan,
+} from '../categorize-utils.ts';
 import type { GlSourceRef } from '../evidence-nav-utils.ts';
 import {
     getCurrentToken,
@@ -338,6 +342,9 @@ export function TransactionsTab({
     const [actionStatus, setActionStatus] = useState<{
         level: StatusLevel;
         message: string;
+        // Optional Undo affordance for reversible one-click chip actions.
+        action?: { label: string; onClick: () => void };
+        autoDismissMs?: number;
     } | null>(null);
     // In-flight guard for the batch "Accept N suggestions" action, so a slow
     // recategorize can't be double-submitted by re-clicking.
@@ -707,10 +714,37 @@ export function TransactionsTab({
         }
     }
 
+    // Execute the exact inverse of a just-performed chip action (categorize /
+    // merge) and refresh. Used by the Undo affordance on the success banner.
+    async function runUndoPlan(plan: UndoPlan) {
+        try {
+            if (plan.kind === 'recategorize-back') {
+                await recategorizeGlTransaction(
+                    ledgerPath,
+                    plan.txnId,
+                    plan.postingIndex,
+                    plan.account,
+                );
+            } else {
+                // recordMemory:false so undoing the merge doesn't remember the
+                // pair as not-a-transfer.
+                await unpostGlTransaction(ledgerPath, plan.glTxnId, false);
+            }
+            setActionStatus(null);
+            onLedgerRefresh();
+        } catch (error) {
+            setActionStatus({
+                level: 'error',
+                message: `Undo failed: ${String(error)}`,
+            });
+        }
+    }
+
     async function handleRecategorizeGlTransaction(
         txnId: string,
         postingIndex: number,
         newAccount: string,
+        oldAccount: string,
     ) {
         // Guard against a double-click firing a second concurrent recategorize
         // (matching the transfer handlers): the second races the first's GL
@@ -730,6 +764,25 @@ export function TransactionsTab({
             // locally instead of retraining the categorizer over the whole
             // ledger on every click.
             dropGlCategorySuggestions([txnId]);
+            setActionStatus({
+                level: 'info',
+                message: `Categorized as ${newAccount}`,
+                action: {
+                    label: 'Undo',
+                    onClick: () => {
+                        void runUndoPlan(
+                            buildUndoPlan({
+                                kind: 'categorize',
+                                txnId,
+                                postingIndex,
+                                oldAccount,
+                                newAccount,
+                            }),
+                        );
+                    },
+                },
+                autoDismissMs: 10000,
+            });
         } catch (error) {
             // Previously swallowed to console only, leaving the user to think
             // the click worked. Surface it via the shared banner.
@@ -756,11 +809,34 @@ export function TransactionsTab({
         setActionStatus(null);
         setTransferActionBusy(true);
         try {
-            await mergeGlTransfer(ledgerPath, txnId1, txnId2, feeAccount);
+            // Capture the new transfer's GL txn id so Undo can unpost exactly
+            // this block (without recording not-a-transfer memory).
+            const newGlTxnId = await mergeGlTransfer(
+                ledgerPath,
+                txnId1,
+                txnId2,
+                feeAccount,
+            );
             onLedgerRefresh();
             // Both originals are consumed by the merge; the new transfer needs
             // no Unknown suggestion.
             dropGlCategorySuggestions([txnId1, txnId2]);
+            setActionStatus({
+                level: 'info',
+                message: 'Merged as transfer',
+                action: {
+                    label: 'Undo',
+                    onClick: () => {
+                        void runUndoPlan(
+                            buildUndoPlan({
+                                kind: 'merge',
+                                glTxnId: newGlTxnId,
+                            }),
+                        );
+                    },
+                },
+                autoDismissMs: 10000,
+            });
         } catch (error) {
             console.error('merge transfer failed:', error);
             setActionStatus({
@@ -1697,6 +1773,8 @@ export function TransactionsTab({
                 <StatusBanner
                     level={actionStatus.level}
                     message={actionStatus.message}
+                    action={actionStatus.action}
+                    autoDismissMs={actionStatus.autoDismissMs}
                     onDismiss={() => {
                         setActionStatus(null);
                     }}
@@ -2123,11 +2201,17 @@ export function TransactionsTab({
                         transactionsTableScrollTop: scrollTop,
                     };
                 }}
-                onRecategorize={(txnId, postingIndex, newAccount) => {
+                onRecategorize={(
+                    txnId,
+                    postingIndex,
+                    newAccount,
+                    oldAccount,
+                ) => {
                     void handleRecategorizeGlTransaction(
                         txnId,
                         postingIndex,
                         newAccount,
+                        oldAccount,
                     );
                 }}
                 onMergeTransfer={(txnId1, txnId2) => {

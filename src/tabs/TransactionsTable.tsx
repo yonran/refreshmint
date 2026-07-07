@@ -177,6 +177,8 @@ export function TransactionsTable({
         txnId: string,
         postingIndex: number,
         newAccount: string,
+        // Current account of the posting, so callers can build an exact Undo.
+        oldAccount: string,
     ) => void;
     onMergeTransfer?: (txnId1: string, txnId2: string) => void;
     onOpenLinkTransfer?: (txnId: string) => void;
@@ -937,6 +939,7 @@ export function TransactionsTable({
                                                                                             txn.id,
                                                                                             postingIndex,
                                                                                             categoryDraft.trim(),
+                                                                                            p.account,
                                                                                         );
                                                                                         setEditingKey(
                                                                                             null,
@@ -972,6 +975,7 @@ export function TransactionsTable({
                                                                                             txn.id,
                                                                                             postingIndex,
                                                                                             categoryDraft.trim(),
+                                                                                            p.account,
                                                                                         );
                                                                                         setEditingKey(
                                                                                             null,
@@ -1144,6 +1148,7 @@ export function TransactionsTable({
                                                                                             txn.id,
                                                                                             postingIndex,
                                                                                             suggested,
+                                                                                            p.account,
                                                                                         );
                                                                                     }}
                                                                                 >

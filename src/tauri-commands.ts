@@ -1058,12 +1058,17 @@ export async function mergeGlTransfer(
  * "Unmerge transfer"). The backend resolves the block's source tags and clears
  * every side's posted ref; unposting a 2-source transfer also records
  * not-a-transfer negative memory. Mirrors Rust post::unpost_gl_transaction.
+ *
+ * `recordMemory` defaults to true (ordinary unmerge). Pass false to undo a
+ * just-made merge without remembering the pair as not-a-transfer; matches the
+ * backend command's `record_memory: Option<bool>`.
  */
 export async function unpostGlTransaction(
     ledger: string,
     glTxnId: string,
+    recordMemory = true,
 ): Promise<void> {
-    return invoke('unpost_gl_transaction', { ledger, glTxnId });
+    return invoke('unpost_gl_transaction', { ledger, glTxnId, recordMemory });
 }
 
 /**

@@ -30,6 +30,51 @@ export function categorizeChipLabel(account: string): string {
     return `Categorize as ${account}`;
 }
 
+/**
+ * A completed one-click chip action, enough to compute its exact inverse for an
+ * Undo toast. Kept in this pure module so the inverse logic is unit-testable.
+ */
+export type ChipAction =
+    | {
+          kind: 'categorize';
+          txnId: string;
+          postingIndex: number;
+          oldAccount: string;
+          newAccount: string;
+      }
+    | { kind: 'merge'; glTxnId: string };
+
+/** The reversing operation for a {@link ChipAction}. */
+export type UndoPlan =
+    | {
+          kind: 'recategorize-back';
+          txnId: string;
+          postingIndex: number;
+          account: string;
+      }
+    // Unpost the merged transfer WITHOUT recording not-a-transfer negative
+    // memory (recordMemory: false), so an undone merge stays re-suggestable.
+    | { kind: 'unpost-no-memory'; glTxnId: string };
+
+/**
+ * Build the exact inverse of a just-performed chip action:
+ * - categorize → recategorize the same posting back to its old account;
+ * - merge → unpost the new transfer without negative memory.
+ */
+export function buildUndoPlan(action: ChipAction): UndoPlan {
+    switch (action.kind) {
+        case 'categorize':
+            return {
+                kind: 'recategorize-back',
+                txnId: action.txnId,
+                postingIndex: action.postingIndex,
+                account: action.oldAccount,
+            };
+        case 'merge':
+            return { kind: 'unpost-no-memory', glTxnId: action.glTxnId };
+    }
+}
+
 /** A per-old-account grouping for the bulk-recategorize confirm modal. */
 export interface BulkRecategorizeGroup {
     oldAccount: string;
