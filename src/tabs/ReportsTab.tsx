@@ -10,11 +10,13 @@ import {
     BALANCE_FAMILY,
     REGISTER_FAMILY,
     buildReportArgs,
+    computePeriodPresetRange,
     createDefaultReportConfig,
     type Accumulation,
     type BalanceMode,
     type BalanceView,
     type Interval,
+    type PeriodPreset,
     type ReportCommand,
     type ReportConfig,
     type RegisterAccumulation,
@@ -142,11 +144,36 @@ export function ReportsTab({ ledger, accounts }: Props) {
                 <div className="field-group">
                     <label className="field-label">Period</label>
                     <div className="field-row">
+                        {(
+                            [
+                                ['this-month', 'This month'],
+                                ['last-month', 'Last month'],
+                                ['ytd', 'Year to date'],
+                                ['last-12-months', 'Last 12 months'],
+                            ] as [PeriodPreset, string][]
+                        ).map(([preset, label]) => (
+                            <button
+                                key={preset}
+                                type="button"
+                                className="tab"
+                                onClick={() => {
+                                    const { begin, end } =
+                                        computePeriodPresetRange(
+                                            preset,
+                                            new Date(),
+                                        );
+                                    patch({ beginDate: begin, endDate: end });
+                                }}
+                            >
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                    <div className="field-row">
                         <label className="field-label-sm">Begin</label>
                         <input
-                            type="text"
+                            type="date"
                             className="date-input"
-                            placeholder="YYYY-MM-DD"
                             value={config.beginDate}
                             onChange={(e) => {
                                 patch({ beginDate: e.target.value });
@@ -154,9 +181,8 @@ export function ReportsTab({ ledger, accounts }: Props) {
                         />
                         <label className="field-label-sm">End</label>
                         <input
-                            type="text"
+                            type="date"
                             className="date-input"
-                            placeholder="YYYY-MM-DD"
                             value={config.endDate}
                             onChange={(e) => {
                                 patch({ endDate: e.target.value });

@@ -117,6 +117,59 @@ export function createDefaultReportConfig(): ReportConfig {
     };
 }
 
+export type PeriodPreset =
+    | 'this-month'
+    | 'last-month'
+    | 'ytd'
+    | 'last-12-months';
+
+/** Format a Date as YYYY-MM-DD using LOCAL date parts. Never use toISOString(),
+ * which converts to UTC and can shift the day across a timezone boundary. */
+function formatLocalDate(d: Date): string {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+/**
+ * Compute an hledger begin/end date range for a period preset relative to
+ * `today`. hledger's -e (end) is EXCLUSIVE, so `end` is always the day after the
+ * last day the range should include. The Date constructor normalizes out-of-range
+ * month/day components, which handles year boundaries and leap days for free.
+ */
+export function computePeriodPresetRange(
+    preset: PeriodPreset,
+    today: Date,
+): { begin: string; end: string } {
+    const y = today.getFullYear();
+    const m = today.getMonth(); // 0-based
+    const d = today.getDate();
+    switch (preset) {
+        case 'this-month':
+            return {
+                begin: formatLocalDate(new Date(y, m, 1)),
+                end: formatLocalDate(new Date(y, m + 1, 1)),
+            };
+        case 'last-month':
+            return {
+                begin: formatLocalDate(new Date(y, m - 1, 1)),
+                end: formatLocalDate(new Date(y, m, 1)),
+            };
+        case 'ytd':
+            return {
+                begin: formatLocalDate(new Date(y, 0, 1)),
+                // Exclusive end = tomorrow, so today's activity is included.
+                end: formatLocalDate(new Date(y, m, d + 1)),
+            };
+        case 'last-12-months':
+            return {
+                begin: formatLocalDate(new Date(y, m - 11, 1)),
+                end: formatLocalDate(new Date(y, m + 1, 1)),
+            };
+    }
+}
+
 /**
  * Verbatim port of the original ReportsTab.buildArgs(). Assembles the hledger
  * CLI arguments (excluding the command itself and the -f journal path, which the

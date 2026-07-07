@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     buildReportArgs,
+    computePeriodPresetRange,
     createDefaultReportConfig,
     type ReportConfig,
 } from './report-utils.ts';
@@ -89,5 +90,53 @@ describe('buildReportArgs', () => {
         expect(
             buildReportArgs(config({ command: 'balance', drop: '1' })),
         ).toContain('--drop=1');
+    });
+});
+
+describe('computePeriodPresetRange', () => {
+    // `today` is built from local date parts (new Date(y, m, d)) so the assertions
+    // are timezone-independent — matching computePeriodPresetRange's local
+    // formatting. hledger's -e is exclusive, so end is always the day AFTER the
+    // last day in the range.
+
+    it('this-month uses first-of-month .. first-of-next-month', () => {
+        expect(
+            computePeriodPresetRange('this-month', new Date(2026, 6, 7)),
+        ).toEqual({ begin: '2026-07-01', end: '2026-08-01' });
+    });
+
+    it('this-month exclusive end rolls into next year in December', () => {
+        expect(
+            computePeriodPresetRange('this-month', new Date(2026, 11, 5)),
+        ).toEqual({ begin: '2026-12-01', end: '2027-01-01' });
+    });
+
+    it('last-month across a year boundary (Jan → prior Dec)', () => {
+        expect(
+            computePeriodPresetRange('last-month', new Date(2026, 0, 15)),
+        ).toEqual({ begin: '2025-12-01', end: '2026-01-01' });
+    });
+
+    it('ytd in December ends tomorrow', () => {
+        expect(computePeriodPresetRange('ytd', new Date(2026, 11, 15))).toEqual(
+            {
+                begin: '2026-01-01',
+                end: '2026-12-16',
+            },
+        );
+    });
+
+    it('ytd tomorrow rolls over the leap day', () => {
+        // 2024-02-29 + 1 day = 2024-03-01 (2024 is a leap year).
+        expect(computePeriodPresetRange('ytd', new Date(2024, 1, 29))).toEqual({
+            begin: '2024-01-01',
+            end: '2024-03-01',
+        });
+    });
+
+    it('last-12-months spans years (11 months back .. next month)', () => {
+        expect(
+            computePeriodPresetRange('last-12-months', new Date(2024, 1, 15)),
+        ).toEqual({ begin: '2023-03-01', end: '2024-03-01' });
     });
 });
