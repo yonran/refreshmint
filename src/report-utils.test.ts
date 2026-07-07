@@ -6,6 +6,7 @@ import {
     cannedReportConfig,
     computePeriodPresetRange,
     createDefaultReportConfig,
+    defaultAutoRunConfig,
     isReportConfigStale,
     shouldAutoRunDefault,
     summarizeUnknownRegister,
@@ -237,6 +238,32 @@ describe('cannedReportConfig', () => {
             '--budget',
             'acct:^Expenses',
         ]);
+    });
+});
+
+describe('defaultAutoRunConfig', () => {
+    // Fixed today = 2026-07-07 (local). last-12-months = 2025-08-01..2026-08-01.
+    const today = new Date(2026, 6, 7);
+
+    it('is the spending-by-category report widened to the last 12 months', () => {
+        const cfg = defaultAutoRunConfig(today);
+        const canned = cannedReportConfig('spending-by-category', today);
+        const range = computePeriodPresetRange('last-12-months', today);
+        // Same command/query/interval/sort as the Quick-report button, but the
+        // wider auto-run window so a ledger whose data ended months ago is not
+        // greeted with an empty table.
+        expect(cfg.command).toBe('balance');
+        expect(cfg.interval).toBe('-M');
+        expect(cfg.queryInput).toBe('acct:^Expenses');
+        expect(cfg.sortAmount).toBe(true);
+        expect({ begin: cfg.beginDate, end: cfg.endDate }).toEqual(range);
+        // The only difference from the canned spending-by-category config is the
+        // date range.
+        expect({ ...cfg, beginDate: '', endDate: '' }).toEqual({
+            ...canned,
+            beginDate: '',
+            endDate: '',
+        });
     });
 });
 

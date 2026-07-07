@@ -15,6 +15,7 @@ import {
     buildUnknownRegisterArgs,
     cannedReportConfig,
     computePeriodPresetRange,
+    defaultAutoRunConfig,
     isReportConfigStale,
     shouldAutoRunDefault,
     summarizeUnknownRegister,
@@ -198,10 +199,30 @@ export function ReportsTab({
     // blank form. Session persistence (result/hasAutoRun) makes this a no-op when
     // returning to an already-populated tab; a ledger open resets the session, so
     // the next mount auto-runs again. Mount-only — deps intentionally empty.
+    //
+    // StrictMode safety: the guard reads the LIVE refs (hasAutoRunRef) rather
+    // than the sessionRef snapshot, and mirrors the mutation into
+    // sessionRef.current BEFORE running. Otherwise StrictMode's simulated
+    // unmount flushes a stale sessionRef (default config, hasAutoRun:false),
+    // which both re-triggers the auto-run on effect pass 2 (double hledger run)
+    // and echoes back through the adopt effect, wiping the auto-run config.
+    // Mirrors the eager-sessionRef pattern in TransactionsTab.tsx.
     useEffect(() => {
-        if (shouldAutoRunDefault(sessionRef.current)) {
+        if (
+            shouldAutoRunDefault({
+                ...sessionRef.current,
+                hasAutoRun: hasAutoRunRef.current,
+            })
+        ) {
             hasAutoRunRef.current = true;
-            runCannedReport('spending-by-category');
+            const cfg = defaultAutoRunConfig(new Date());
+            sessionRef.current = {
+                ...sessionRef.current,
+                config: cfg,
+                hasAutoRun: true,
+            };
+            setConfig(cfg);
+            void runReport(cfg);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);

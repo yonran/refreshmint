@@ -343,6 +343,23 @@ export function cannedReportConfig(
 }
 
 /**
+ * The report the Reports tab auto-runs on first open for a ledger. It is the
+ * spending-by-category canned report widened from this-month to the
+ * last-12-months range so a ledger whose data ended months ago is not greeted
+ * with an empty table. The Quick-report BUTTON stays this-month (matches its
+ * label); only the mount-time auto-run uses this wider window. Kept pure so the
+ * StrictMode-safe auto-run effect in ReportsTab can call it during render.
+ */
+export function defaultAutoRunConfig(today: Date): ReportConfig {
+    const { begin, end } = computePeriodPresetRange('last-12-months', today);
+    return {
+        ...cannedReportConfig('spending-by-category', today),
+        beginDate: begin,
+        endDate: end,
+    };
+}
+
+/**
  * Verbatim port of the original ReportsTab.buildArgs(). Assembles the hledger
  * CLI arguments (excluding the command itself and the -f journal path, which the
  * backend supplies) from a ReportConfig.
