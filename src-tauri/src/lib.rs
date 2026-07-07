@@ -878,13 +878,20 @@ async fn run_scrape(
 /// `rx.recv()`) unwinds instead of hanging.
 #[tauri::command]
 fn cancel_scrape(
+    app_handle: tauri::AppHandle,
     login_name: String,
     cancel_state: tauri::State<'_, ScrapeCancelState>,
     prompt_state: tauri::State<'_, PromptAnswerState>,
 ) -> Result<(), String> {
     let login_name = require_login_name_input(login_name)?;
     trigger_scrape_cancel(&cancel_state, &login_name);
-    send_prompt_answer(None, &prompt_state)?;
+    // Only answer a pending prompt that belongs to THIS login, so canceling one
+    // scrape can't unwind another login's concurrent MFA prompt. When we do
+    // clear it, notify the frontend so its modal + re-open pill disappear
+    // (previously only the timeout path emitted prompt-closed).
+    if cancel_prompt_for_login(&prompt_state, &login_name)? {
+        emit_prompt_closed(&app_handle, &login_name);
+    }
     Ok(())
 }
 
@@ -2665,6 +2672,30 @@ fn send_prompt_answer(answer: Option<String>, state: &PromptAnswerState) -> Resu
     Ok(())
 }
 
+/// Answer a pending prompt with `None` (Cancel) **only** when it belongs to
+/// `login_name`. Returns `Ok(true)` when a matching prompt was cleared, so the
+/// caller can emit `refreshmint://prompt-closed`. Canceling one login's scrape
+/// must never kill another concurrent login's pending MFA prompt (concurrent
+/// scrapes are reachable via the auto-scrape queue plus a manual Run, or a
+/// wrong-login manual cancel). Keep aligned with `send_prompt_answer`, which
+/// clears the sender and pending payload together.
+fn cancel_prompt_for_login(state: &PromptAnswerState, login_name: &str) -> Result<bool, String> {
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let matches = guard
+        .pending
+        .as_ref()
+        .is_some_and(|pending| pending.login_name == login_name);
+    if !matches {
+        return Ok(false);
+    }
+    guard.pending = None;
+    if let Some(sender) = guard.sender.take() {
+        // Ignore send errors: the scrape thread may have already timed out.
+        let _ = sender.send(None);
+    }
+    Ok(true)
+}
+
 /// Outcome of waiting for a prompt answer.
 enum PromptWaitOutcome {
     Answered(Option<String>),
@@ -2791,11 +2822,11 @@ fn get_pending_prompt(
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        delete_login_account, evidence_ref_matches_document, inspect_login_extraction_support,
-        register_scrape_cancel, require_existing_login, require_label_input,
-        require_login_name_input, require_non_empty_input, resolve_artifact_dir,
-        run_login_account_extraction_blocking, scrape_output_payload, send_prompt_answer,
-        summarize_scrape_log, trigger_scrape_cancel, unregister_scrape_cancel,
+        cancel_prompt_for_login, delete_login_account, evidence_ref_matches_document,
+        inspect_login_extraction_support, register_scrape_cancel, require_existing_login,
+        require_label_input, require_login_name_input, require_non_empty_input,
+        resolve_artifact_dir, run_login_account_extraction_blocking, scrape_output_payload,
+        send_prompt_answer, summarize_scrape_log, trigger_scrape_cancel, unregister_scrape_cancel,
         validate_artifact_filename, wait_for_prompt_answer, PendingPrompt, PromptAnswerInner,
         PromptAnswerState, PromptWaitOutcome, ScrapeCancelState,
     };
@@ -2988,6 +3019,55 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to receive prompt answer: {err}")),
             Some(String::new())
         );
+    }
+
+    #[test]
+    fn cancel_prompt_for_login_clears_only_matching_login() {
+        // A pending prompt for "chase" must NOT be cleared by canceling "amex".
+        let (tx, rx) = std::sync::mpsc::channel();
+        let state = prompt_state_with(tx, "chase");
+        let cleared = cancel_prompt_for_login(&state, "amex")
+            .unwrap_or_else(|err| panic!("cancel_prompt_for_login failed: {err}"));
+        assert!(!cleared, "wrong-login cancel reports no prompt cleared");
+        {
+            let guard = state.0.lock().unwrap_or_else(|err| panic!("lock: {err}"));
+            assert!(
+                guard.pending.is_some(),
+                "another login's pending prompt survives"
+            );
+            assert!(guard.sender.is_some(), "the sender survives too");
+        }
+        // No answer was delivered to the waiting scrape thread.
+        assert!(
+            rx.try_recv().is_err(),
+            "no answer delivered for wrong login"
+        );
+    }
+
+    #[test]
+    fn cancel_prompt_for_login_delivers_none_for_matching_login() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let state = prompt_state_with(tx, "chase");
+        let cleared = cancel_prompt_for_login(&state, "chase")
+            .unwrap_or_else(|err| panic!("cancel_prompt_for_login failed: {err}"));
+        assert!(cleared, "matching-login cancel reports the prompt cleared");
+        assert_eq!(
+            rx.recv()
+                .unwrap_or_else(|err| panic!("failed to receive prompt answer: {err}")),
+            None,
+            "matching login gets a None (Cancel) answer"
+        );
+        let guard = state.0.lock().unwrap_or_else(|err| panic!("lock: {err}"));
+        assert!(guard.pending.is_none());
+        assert!(guard.sender.is_none());
+    }
+
+    #[test]
+    fn cancel_prompt_for_login_no_pending_is_noop() {
+        let state = PromptAnswerState::default();
+        let cleared = cancel_prompt_for_login(&state, "chase")
+            .unwrap_or_else(|err| panic!("cancel_prompt_for_login failed: {err}"));
+        assert!(!cleared, "no pending prompt means nothing to clear");
     }
 
     #[test]
