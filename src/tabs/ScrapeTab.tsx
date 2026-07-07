@@ -2,14 +2,20 @@ import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
     type LedgerView,
+    type ScrapeLogEntry,
+    type LastScrapeSummary,
     listScrapeExtensions,
     getScrapeLog,
+    getLastScrapeSummaries,
     runScrapeForLogin,
     cancelScrape,
     listScrapeFailureArtifacts,
     readScrapeFailureArtifact,
+    getLockStatusSnapshot,
+    startLockMetadataWatch,
+    stopLockMetadataWatch,
+    type LockStatusSnapshot,
 } from '../tauri-commands.ts';
-import { type ScrapeLogEntry } from '../scrapeLog.ts';
 import {
     appendLogLine,
     partitionArtifacts,
@@ -64,6 +70,13 @@ export function ScrapeTab({
         texts: { name: string; content: string }[];
     } | null>(null);
     const [artifactError, setArtifactError] = useState<string | null>(null);
+    // Per-login scrape summaries and lock status for the console table.
+    const [summaries, setSummaries] = useState<
+        Record<string, LastScrapeSummary>
+    >({});
+    const [lockStatus, setLockStatus] = useState<LockStatusSnapshot | null>(
+        null,
+    );
 
     const ledgerPath = ledger?.path ?? null;
 
@@ -173,20 +186,64 @@ export function ScrapeTab({
         };
     }, [ledgerPath]);
 
-    // ─── Handlers ───────────────────────────────────────────────────────────────
-
-    async function handleRunScrape() {
-        if (!ledger) return;
-        const loginName = activeScrapeLoginName;
-        if (loginName === null) {
-            setScrapeStatus('Login is required.');
+    // Load per-login summaries and lock status for the console, and keep the
+    // lock status live via the lock-status watcher (mirrors PipelineTab).
+    useEffect(() => {
+        if (ledgerPath === null || loginNames.length === 0) {
+            setSummaries({});
+            setLockStatus(null);
             return;
         }
+        let cancelled = false;
+        let unlisten: (() => void) | null = null;
+        const refreshSummaries = () =>
+            getLastScrapeSummaries(ledgerPath, loginNames)
+                .then((s) => {
+                    if (!cancelled) setSummaries(s);
+                })
+                .catch(() => {});
+        const loadLocks = () =>
+            getLockStatusSnapshot(ledgerPath, loginNames)
+                .then((s) => {
+                    if (!cancelled) setLockStatus(s);
+                })
+                .catch(() => {});
+        void refreshSummaries();
+        void loadLocks();
+        void startLockMetadataWatch(ledgerPath)
+            .then(() =>
+                listen('refreshmint://lock-status-changed', () => {
+                    void loadLocks();
+                }),
+            )
+            .then((listener) => {
+                if (cancelled) listener();
+                else unlisten = listener;
+            })
+            .catch(() => {});
+        return () => {
+            cancelled = true;
+            if (unlisten !== null) unlisten();
+            void stopLockMetadataWatch();
+        };
+    }, [ledgerPath, loginNames, scrapeLogVersion]);
 
+    // ─── Handlers ───────────────────────────────────────────────────────────────
+
+    // Reload the per-login console summaries (called after a run completes).
+    function loadSummaries() {
+        if (ledgerPath === null || loginNames.length === 0) return;
+        getLastScrapeSummaries(ledgerPath, loginNames)
+            .then(setSummaries)
+            .catch(() => {});
+    }
+
+    async function runScrapeFor(loginName: string) {
+        if (!ledger) return;
+        onSelectedLoginNameChange(loginName);
         setIsRunningScrape(true);
         setConsoleLines([]);
         setScrapeStatus(`Running scrape for ${loginName}...`);
-        const timestamp = new Date().toISOString();
         try {
             await runScrapeForLogin(
                 ledger.path,
@@ -195,7 +252,6 @@ export function ScrapeTab({
                 headlessScrape,
                 promptTimeoutSecs,
             );
-            localStorage.setItem(`lastScrape:${loginName}`, timestamp);
             setScrapeStatus(`Scrape completed for ${loginName}.`);
             await onScrapeComplete(loginName);
         } catch (error) {
@@ -207,7 +263,17 @@ export function ScrapeTab({
                     setScrapeLogEntries(entries);
                 })
                 .catch(() => {});
+            loadSummaries();
         }
+    }
+
+    async function handleRunScrape() {
+        const loginName = activeScrapeLoginName;
+        if (loginName === null) {
+            setScrapeStatus('Login is required.');
+            return;
+        }
+        await runScrapeFor(loginName);
     }
 
     async function handleCancelScrape() {
@@ -355,6 +421,86 @@ export function ScrapeTab({
                                 ? consoleLines.join('\n')
                                 : 'Waiting for driver output...'}
                         </pre>
+                    </div>
+                )}
+                {loginNames.length > 0 && (
+                    <div className="scrape-console-table-wrap">
+                        <table className="scrape-log-table">
+                            <thead>
+                                <tr>
+                                    <th>Login</th>
+                                    <th>Last success</th>
+                                    <th>Last result</th>
+                                    <th>Lock</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {loginNames.map((login) => {
+                                    const summary:
+                                        | LastScrapeSummary
+                                        | undefined = summaries[login];
+                                    const lock = lockStatus?.logins[login];
+                                    const running =
+                                        isRunningScrape &&
+                                        activeScrapeLoginName === login;
+                                    return (
+                                        <tr key={login}>
+                                            <td>{login}</td>
+                                            <td>
+                                                {summary?.lastSuccess != null
+                                                    ? new Date(
+                                                          summary.lastSuccess,
+                                                      ).toLocaleString()
+                                                    : '—'}
+                                            </td>
+                                            <td>
+                                                {summary?.lastRun != null
+                                                    ? summary.lastRun.success
+                                                        ? 'OK'
+                                                        : 'Failed'
+                                                    : '—'}
+                                            </td>
+                                            <td>
+                                                {lock?.locked === true
+                                                    ? 'Locked'
+                                                    : ''}
+                                            </td>
+                                            <td>
+                                                {running ? (
+                                                    <button
+                                                        type="button"
+                                                        className="link-button"
+                                                        onClick={() => {
+                                                            void cancelScrape(
+                                                                login,
+                                                            );
+                                                        }}
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                ) : (
+                                                    <button
+                                                        type="button"
+                                                        className="link-button"
+                                                        disabled={
+                                                            isRunningScrape
+                                                        }
+                                                        onClick={() => {
+                                                            void runScrapeFor(
+                                                                login,
+                                                            );
+                                                        }}
+                                                    >
+                                                        Run
+                                                    </button>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
                     </div>
                 )}
                 {scrapeLogEntries.length > 0 && (

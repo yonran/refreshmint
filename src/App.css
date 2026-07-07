@@ -519,6 +519,11 @@
     margin-top: 0.75rem;
 }
 
+.scrape-console-table-wrap {
+    margin-top: 0.75rem;
+    overflow-x: auto;
+}
+
 .scrape-console-header {
     font-size: 0.85rem;
     font-weight: 600;

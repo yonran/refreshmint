@@ -2,9 +2,29 @@ import { describe, it, expect } from 'vitest';
 import {
     appendLogLine,
     clampPromptTimeoutMinutes,
+    computeStaleLogins,
     formatScrapeOutputLine,
     partitionArtifacts,
 } from './scrape-console-utils.ts';
+
+describe('computeStaleLogins', () => {
+    const now = Date.parse('2026-07-07T12:00:00Z');
+
+    it('treats a login with no successful scrape as stale', () => {
+        expect(
+            computeStaleLogins({ chase: { lastSuccess: null } }, 24, now),
+        ).toEqual(['chase']);
+        expect(computeStaleLogins({ chase: {} }, 24, now)).toEqual(['chase']);
+    });
+
+    it('excludes logins scraped within the interval and includes older ones', () => {
+        const summaries = {
+            fresh: { lastSuccess: '2026-07-07T06:00:00Z' }, // 6h ago
+            stale: { lastSuccess: '2026-07-05T06:00:00Z' }, // ~54h ago
+        };
+        expect(computeStaleLogins(summaries, 24, now)).toEqual(['stale']);
+    });
+});
 
 describe('clampPromptTimeoutMinutes', () => {
     it('falls back to the default for non-finite input', () => {

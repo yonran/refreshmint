@@ -11,7 +11,10 @@ import {
 } from '@tauri-apps/plugin-dialog';
 import './App.css';
 import { createTransferLinkResolution } from './automation-utils.ts';
-import { clampPromptTimeoutMinutes } from './scrape-console-utils.ts';
+import {
+    clampPromptTimeoutMinutes,
+    computeStaleLogins,
+} from './scrape-console-utils.ts';
 import {
     type ActiveTab,
     addRecentLedger,
@@ -37,6 +40,7 @@ import {
     runScrapeForLogin,
     cancelScrape,
     getPendingPrompt,
+    getLastScrapeSummaries,
     type LedgerView,
     setLoginAccount,
     recoverLedgerConsistency,
@@ -363,17 +367,27 @@ function App() {
     // spuriously trigger scrapes.
     useEffect(() => {
         if (!autoScrapeEnabled || !ledger) return;
+        const ledgerPath = ledger.path;
+        let cancelled = false;
 
-        function check() {
+        async function check() {
             const names = loginNamesRef.current;
             if (names.length === 0) return;
-            const intervalMs = autoScrapeIntervalHours * 60 * 60 * 1000;
-            const now = Date.now();
-            const stale = names.filter((loginName) => {
-                const last = localStorage.getItem(`lastScrape:${loginName}`);
-                if (last === null) return true;
-                return now - new Date(last).getTime() > intervalMs;
-            });
+            // Staleness is derived from scrape-log.jsonl (via getLastScrapeSummaries),
+            // the single source of truth — so CLI runs count and localStorage is
+            // no longer consulted.
+            let summaries;
+            try {
+                summaries = await getLastScrapeSummaries(ledgerPath, names);
+            } catch {
+                return;
+            }
+            if (cancelled) return;
+            const stale = computeStaleLogins(
+                summaries,
+                autoScrapeIntervalHours,
+                Date.now(),
+            );
             if (stale.length === 0) return;
             setAutoScrapeQueue((current) => {
                 const toAdd = stale.filter(
@@ -386,11 +400,17 @@ function App() {
         }
 
         // Immediate check when ledger opens or autoscrape settings change.
-        check();
+        void check();
         // Periodic re-check every 5 minutes to catch logins that become stale
         // while the app is open.
-        const id = window.setInterval(check, 5 * 60 * 1000);
+        const id = window.setInterval(
+            () => {
+                void check();
+            },
+            5 * 60 * 1000,
+        );
         return () => {
+            cancelled = true;
             window.clearInterval(id);
         };
     }, [ledger, autoScrapeEnabled, autoScrapeIntervalHours]);
@@ -632,7 +652,6 @@ function App() {
         if (loginName === undefined) return;
         setAutoScrapeActive(loginName);
         setAutoScrapeQueue(rest);
-        const timestamp = new Date().toISOString();
         void runScrapeForLogin(
             ledger.path,
             loginName,
@@ -641,7 +660,8 @@ function App() {
             mfaPromptTimeoutMinutes * 60,
         )
             .then(async () => {
-                localStorage.setItem(`lastScrape:${loginName}`, timestamp);
+                // No localStorage write: scrape-log.jsonl (written by the backend
+                // on every run) is the single source of truth for staleness.
                 await autoEtlForLoginRef.current?.(loginName);
             })
             .catch((error: unknown) => {

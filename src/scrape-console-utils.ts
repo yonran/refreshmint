@@ -20,6 +20,32 @@ export function formatScrapeOutputLine(entry: ScrapeOutputLine): string {
     return entry.stream === 'stderr' ? `[stderr] ${entry.line}` : entry.line;
 }
 
+/** Minimal shape of a per-login scrape summary needed to judge staleness. */
+export interface StaleSummaryLike {
+    lastSuccess?: string | null;
+}
+
+/**
+ * Return the login names that are stale: never successfully scraped, or whose
+ * most recent success is older than `intervalHours`. Pure so the scheduler's
+ * source-of-truth logic (backed by scrape-log.jsonl via getLastScrapeSummaries)
+ * is unit-testable.
+ */
+export function computeStaleLogins(
+    summaries: Record<string, StaleSummaryLike>,
+    intervalHours: number,
+    now: number,
+): string[] {
+    const intervalMs = intervalHours * 60 * 60 * 1000;
+    return Object.entries(summaries)
+        .filter(([, summary]) => {
+            const lastSuccess = summary.lastSuccess ?? null;
+            if (lastSuccess === null) return true;
+            return now - new Date(lastSuccess).getTime() > intervalMs;
+        })
+        .map(([loginName]) => loginName);
+}
+
 /** Default MFA-prompt timeout in minutes (matches DEFAULT_PROMPT_TIMEOUT_SECS / 60 on the Rust side). */
 export const DEFAULT_MFA_PROMPT_TIMEOUT_MINUTES = 5;
 /** Upper bound on the configurable MFA-prompt timeout. */

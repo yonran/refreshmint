@@ -1,5 +1,20 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { ScrapeLogEntry } from './scrapeLog.ts';
+
+/**
+ * A scrape run log entry, mirroring `operations::ScrapeLogEntry` on the Rust
+ * side. Persisted per-login to `logins/<login>/scrape-log.jsonl` and returned
+ * by getScrapeLog / getLastScrapeSummaries. Single source of truth for the type.
+ */
+export interface ScrapeLogEntry {
+    loginName: string;
+    timestamp: string; // ISO
+    success: boolean;
+    error?: string;
+    source: 'manual' | 'auto';
+    // Ledger-relative directory of captured failure artifacts, present only on
+    // failed runs where capture succeeded.
+    artifactsDir?: string;
+}
 
 export interface LedgerView {
     path: string;
@@ -1348,6 +1363,20 @@ export interface PendingPrompt {
 /** Fetch the currently-pending scraper prompt, if any (for re-open on mount). */
 export async function getPendingPrompt(): Promise<PendingPrompt | null> {
     return invoke('get_pending_prompt');
+}
+
+/** Per-login scrape summary, mirroring `LastScrapeSummary` on the Rust side. */
+export interface LastScrapeSummary {
+    lastSuccess: string | null;
+    lastRun: ScrapeLogEntry | null;
+}
+
+/** Batch per-login scrape summaries (scheduler source of truth + console). */
+export async function getLastScrapeSummaries(
+    ledger: string,
+    loginNames: string[],
+): Promise<Record<string, LastScrapeSummary>> {
+    return invoke('get_last_scrape_summaries', { ledger, loginNames });
 }
 
 export async function getScrapeLog(
