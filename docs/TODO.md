@@ -320,6 +320,19 @@ Still deferred:
 - CSS overhaul of ReportsTab (the batch left the ~18 undefined helper classes
   as-is; see the CSS-debt item below).
 
+Deferred from the 2026-07-07 Reports review-fixes batch:
+
+- Expenses:Unknown banner session persistence: the banner is intentionally
+  component-local (recomputed after each run, cleared on session adopt), so it
+  vanishes on tab switch until the next run. Persisting it in the session is a
+  possible future refinement.
+- Auto-run when a new ledger opens while Reports is already mounted: today the
+  auto-run is mount-only, so opening a ledger without leaving the tab does not
+  re-trigger the default report.
+- Comma-decimal commodity styles in `summarizeUnknownRegister` (it strips `$`
+  and `,` as a thousands separator; a `,`-decimal locale would misparse — only
+  theoretical for the $-denominated ledgers in use).
+
 ### Scraping UX
 
 - Live log pane: wire the existing `debug_output_sink` into

@@ -107,6 +107,11 @@ function App() {
         setTransactionsTabSession((current) => ({
             ...current,
             transactionsSearch: `acct:${accountName}`,
+            // Clear any prior selection so a stale multi-select cannot carry
+            // over into a new search and enable bulk actions on now-hidden rows.
+            // Kept in sync with handleNavigateToTransactionsSearch, which mirrors
+            // this.
+            selectedTransactionIds: [],
         }));
         setActiveTab('transactions');
     }
@@ -114,6 +119,9 @@ function App() {
         setTransactionsTabSession((current) => ({
             ...current,
             transactionsSearch: search,
+            // See handleSelectAccount: clear the selection so it cannot leak
+            // under a new search.
+            selectedTransactionIds: [],
         }));
         setActiveTab('transactions');
     }

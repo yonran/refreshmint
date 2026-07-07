@@ -105,6 +105,11 @@ export function ReportsTab({
         setConfig(session.config);
         setResult(session.result);
         setError(session.error);
+        // Clear the component-local Expenses:Unknown banner too: it is not part
+        // of the session, so without this a ledger open while the tab is mounted
+        // would leave the previous ledger's "N transactions still
+        // Expenses:Unknown" banner lingering until the next run.
+        setUnknownSummary(null);
         lastRunConfigRef.current = session.lastRunConfig;
         hasAutoRunRef.current = session.hasAutoRun;
     }, [session]);
