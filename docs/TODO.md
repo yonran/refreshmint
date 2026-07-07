@@ -1,5 +1,22 @@
 # TODO
 
+## Chip-action safety residuals (accepted from the 2026-07-07 feedback-safety batch)
+
+- Undo-of-categorize is a blind overwrite: runUndoPlan recategorizes the row back
+  to its captured old account without checking whether anything mutated that GL
+  posting in the ~10s undo window. An out-of-band edit landing before the user
+  clicks Undo is silently overwritten. Accepted for now (narrow window, single
+  user); a compare-and-swap on the posting's current account would close it.
+- Stale Active TransferLink after undoing a Pipeline-created transfer post: undo
+  reverts the GL block but does not retract the TransferLink resolution the
+  Pipeline post created, leaving an Active link with no backing transfer.
+- Surrogate-pair truncation nit in mergeTransferChipLabel: the 40-char slice can
+  split an astral-plane grapheme (emoji), emitting a lone surrogate before the
+  ellipsis. Cosmetic; switch to a code-point-aware slice if it ever bites.
+- Per-account "Post All" label ambiguity when two logins share a label: the
+  button names only the label, so two logins with the same account label render
+  indistinguishable buttons. Qualify with the login name when labels collide.
+
 ## Scraping UX (deferred from the 2026-07-07 review-fixes batch)
 
 - Scrape-output buffering while ScrapeTab is unmounted: the live console listener

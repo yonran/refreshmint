@@ -30,6 +30,11 @@ export function Modal({
         if (!closeOnEscape) return;
         function onKeyDown(e: KeyboardEvent) {
             if (shouldCloseOnKey(e.key, e.defaultPrevented, closeOnEscape)) {
+                // Mark the Escape handled so a second, simultaneously-mounted
+                // Modal (future stacking) and other window/document listeners
+                // (e.g. TransactionsTable's context-menu closer) skip it: one
+                // Escape closes exactly one layer.
+                e.preventDefault();
                 onClose();
             }
         }

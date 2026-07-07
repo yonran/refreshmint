@@ -279,7 +279,14 @@ export function TransactionsTable({
             setContextMenu(null);
         };
         const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') setContextMenu(null);
+            // Skip an Escape another layer already handled, and mark ours handled
+            // so an enclosing Modal's window listener skips it too: one Escape
+            // closes exactly one layer (the context menu here).
+            if (e.defaultPrevented) return;
+            if (e.key === 'Escape') {
+                setContextMenu(null);
+                e.preventDefault();
+            }
         };
         document.addEventListener('mousedown', close);
         document.addEventListener('keydown', onKey);
