@@ -1504,7 +1504,7 @@ function App() {
                                 <strong>
                                     Ledger consistency problems detected
                                 </strong>
-                                <div className="muted">
+                                <div className="text-muted">
                                     Likely from an interrupted operation. Each
                                     can be repaired so the entry can be
                                     re-posted.
