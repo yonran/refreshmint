@@ -46,6 +46,7 @@ import {
 import { TransactionsTable } from './TransactionsTable.tsx';
 import { AccountInput } from '../components/AccountInput.tsx';
 import { BulkRecategorizeConfirmModal } from '../components/BulkRecategorizeConfirmModal.tsx';
+import { StatusBanner, type StatusLevel } from '../components/StatusBanner.tsx';
 
 function joinQueryClauses(...clauses: string[]): string {
     return clauses
@@ -329,15 +330,21 @@ export function TransactionsTab({
         entries: RecategorizeSelectionEntry[];
         newAccount: string;
     } | null>(null);
-    // Rule-creation failures during a bulk recategorize: the GL edit already
-    // landed and the table was refreshed, but the standing CategoryRule(s) could
-    // not be saved. Surfaced so the user knows future matches won't auto-post.
-    const [bulkRecategorizeError, setBulkRecategorizeError] = useState<
-        string | null
-    >(null);
+    // Single surfaced status for user-initiated actions in this tab
+    // (recategorize, merge/unmerge, bulk, accept-suggestions, standing-rule
+    // save). Errors were previously the only case (bulkRecategorizeError);
+    // generalized so a successful action can also report progress/result via
+    // the shared StatusBanner. Background refreshes stay console.error.
+    const [actionStatus, setActionStatus] = useState<{
+        level: StatusLevel;
+        message: string;
+    } | null>(null);
     // In-flight guard for the batch "Accept N suggestions" action, so a slow
     // recategorize can't be double-submitted by re-clicking.
     const [isAcceptingSuggestions, setIsAcceptingSuggestions] = useState(false);
+    // In-flight guard for the single-row categorize chip, so a slow
+    // recategorize can't be double-submitted by re-clicking the same chip.
+    const [recategorizeBusy, setRecategorizeBusy] = useState(false);
 
     const searchInputRef = useRef<HTMLInputElement>(null);
     const similarSearchInputRef = useRef<HTMLInputElement>(null);
@@ -705,6 +712,12 @@ export function TransactionsTab({
         postingIndex: number,
         newAccount: string,
     ) {
+        // Guard against a double-click firing a second concurrent recategorize
+        // (matching the transfer handlers): the second races the first's GL
+        // mutation and fails in the backend.
+        if (recategorizeBusy) return;
+        setActionStatus(null);
+        setRecategorizeBusy(true);
         try {
             await recategorizeGlTransaction(
                 ledgerPath,
@@ -718,7 +731,15 @@ export function TransactionsTab({
             // ledger on every click.
             dropGlCategorySuggestions([txnId]);
         } catch (error) {
+            // Previously swallowed to console only, leaving the user to think
+            // the click worked. Surface it via the shared banner.
             console.error('recategorize failed:', error);
+            setActionStatus({
+                level: 'error',
+                message: `Categorize failed: ${String(error)}`,
+            });
+        } finally {
+            setRecategorizeBusy(false);
         }
     }
 
@@ -732,7 +753,7 @@ export function TransactionsTab({
         // GL mutation and fails in the backend, showing a spurious error banner
         // despite the merge having succeeded.
         if (transferActionBusy) return;
-        setBulkRecategorizeError(null);
+        setActionStatus(null);
         setTransferActionBusy(true);
         try {
             await mergeGlTransfer(ledgerPath, txnId1, txnId2, feeAccount);
@@ -742,7 +763,10 @@ export function TransactionsTab({
             dropGlCategorySuggestions([txnId1, txnId2]);
         } catch (error) {
             console.error('merge transfer failed:', error);
-            setBulkRecategorizeError(`Merge transfer failed: ${String(error)}`);
+            setActionStatus({
+                level: 'error',
+                message: `Merge transfer failed: ${String(error)}`,
+            });
         } finally {
             setTransferActionBusy(false);
         }
@@ -759,14 +783,17 @@ export function TransactionsTab({
             { title: 'Unmerge transfer', kind: 'warning' },
         );
         if (!confirmed) return;
-        setBulkRecategorizeError(null);
+        setActionStatus(null);
         setTransferActionBusy(true);
         try {
             await unpostGlTransaction(ledgerPath, txnId);
             onLedgerRefresh();
             dropGlCategorySuggestions([txnId]);
         } catch (error) {
-            setBulkRecategorizeError(`Unmerge failed: ${String(error)}`);
+            setActionStatus({
+                level: 'error',
+                message: `Unmerge failed: ${String(error)}`,
+            });
         } finally {
             setTransferActionBusy(false);
         }
@@ -776,13 +803,16 @@ export function TransactionsTab({
     // (txn, suggested counterpart) and refresh suggestions so the chip drops.
     async function handleNotATransfer(txnId1: string, txnId2: string) {
         if (transferActionBusy) return;
-        setBulkRecategorizeError(null);
+        setActionStatus(null);
         setTransferActionBusy(true);
         try {
             await createNotTransferLinkForGlPair(ledgerPath, txnId1, txnId2);
             setGlCategorySuggestions(await suggestGlCategories(ledgerPath));
         } catch (error) {
-            setBulkRecategorizeError(`Not-a-transfer failed: ${String(error)}`);
+            setActionStatus({
+                level: 'error',
+                message: `Not-a-transfer failed: ${String(error)}`,
+            });
         } finally {
             setTransferActionBusy(false);
         }
@@ -803,7 +833,7 @@ export function TransactionsTab({
         newAccount: string,
         createRule = false,
     ) {
-        setBulkRecategorizeError(null);
+        setActionStatus(null);
         try {
             await recategorizeGlTransactions(
                 ledgerPath,
@@ -816,9 +846,10 @@ export function TransactionsTab({
         } catch (error) {
             // The GL was not mutated; leave the table as-is and report.
             console.error('bulk recategorize failed:', error);
-            setBulkRecategorizeError(
-                `Bulk recategorize failed: ${String(error)}`,
-            );
+            setActionStatus({
+                level: 'error',
+                message: `Bulk recategorize failed: ${String(error)}`,
+            });
             return;
         }
         // The GL edit landed. Refresh + prune now, before the best-effort rule
@@ -844,9 +875,10 @@ export function TransactionsTab({
                 }
             } catch (error) {
                 console.error('bulk recategorize rule creation failed:', error);
-                setBulkRecategorizeError(
-                    `Recategorized rows, but saving the standing rule failed: ${String(error)}`,
-                );
+                setActionStatus({
+                    level: 'error',
+                    message: `Recategorized rows, but saving the standing rule failed: ${String(error)}`,
+                });
             }
         }
     }
@@ -854,7 +886,7 @@ export function TransactionsTab({
     // Accept every visible ML suggestion in one batch (per-row target account).
     async function handleAcceptSuggestions(edits: AcceptAllEdit[]) {
         if (edits.length === 0 || isAcceptingSuggestions) return;
-        setBulkRecategorizeError(null);
+        setActionStatus(null);
         setIsAcceptingSuggestions(true);
         try {
             await recategorizeGlTransactions(
@@ -869,9 +901,10 @@ export function TransactionsTab({
             dropGlCategorySuggestions(edits.map(({ txnId }) => txnId));
         } catch (error) {
             console.error('accept suggestions failed:', error);
-            setBulkRecategorizeError(
-                `Accept suggestions failed: ${String(error)}`,
-            );
+            setActionStatus({
+                level: 'error',
+                message: `Accept suggestions failed: ${String(error)}`,
+            });
         } finally {
             setIsAcceptingSuggestions(false);
         }
@@ -1660,19 +1693,14 @@ export function TransactionsTab({
             {queryError !== null && (
                 <div className="query-error">{queryError}</div>
             )}
-            {bulkRecategorizeError !== null && (
-                <div className="query-error">
-                    {bulkRecategorizeError}{' '}
-                    <button
-                        type="button"
-                        className="ghost-button"
-                        onClick={() => {
-                            setBulkRecategorizeError(null);
-                        }}
-                    >
-                        Dismiss
-                    </button>
-                </div>
+            {actionStatus !== null && (
+                <StatusBanner
+                    level={actionStatus.level}
+                    message={actionStatus.message}
+                    onDismiss={() => {
+                        setActionStatus(null);
+                    }}
+                />
             )}
             <section className="txn-form">
                 <button
@@ -2127,6 +2155,7 @@ export function TransactionsTab({
                     void handleAcceptSuggestions(edits);
                 }}
                 acceptSuggestionsBusy={isAcceptingSuggestions}
+                recategorizeBusy={recategorizeBusy}
                 transferActionBusy={transferActionBusy}
                 onOpenSimilarRecategorize={handleOpenSimilarRecategorize}
                 hideObviousAmounts={hideObviousAmounts}

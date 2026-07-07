@@ -156,6 +156,7 @@ export function TransactionsTable({
     onBulkRecategorize,
     onAcceptSuggestions,
     acceptSuggestionsBusy = false,
+    recategorizeBusy = false,
     transferActionBusy = false,
     onOpenSimilarRecategorize,
     hideObviousAmounts = true,
@@ -198,6 +199,10 @@ export function TransactionsTable({
     onAcceptSuggestions?: (edits: AcceptAllEdit[]) => void;
     // True while a batch accept is running, to disable the trigger buttons.
     acceptSuggestionsBusy?: boolean;
+    // True while a single-row categorize chip's recategorize is running, to
+    // disable the categorize chip so a double-click can't fire a second
+    // concurrent recategorize.
+    recategorizeBusy?: boolean;
     // True while a merge/unmerge/not-a-transfer action is running, to disable the
     // ↔ merge chip so a double-click can't fire a second concurrent merge.
     transferActionBusy?: boolean;
@@ -1129,6 +1134,9 @@ export function TransactionsTable({
                                                                                 <button
                                                                                     type="button"
                                                                                     className="ghost-button"
+                                                                                    disabled={
+                                                                                        recategorizeBusy
+                                                                                    }
                                                                                     onClick={() => {
                                                                                         onRecategorize(
                                                                                             txn.id,
