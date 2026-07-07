@@ -639,6 +639,31 @@ fn get_lock_status_snapshot(
     Ok(LockStatusSnapshot { gl, logins })
 }
 
+/// Payload for the `refreshmint://scrape-output` event streamed to the GUI as a
+/// scrape's driver emits `log`/`reportValue` lines. Keep the field set aligned
+/// with the listener in `src/tabs/ScrapeTab.tsx`.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ScrapeOutputPayload {
+    login_name: String,
+    stream: scrape::js_api::DebugOutputStream,
+    line: String,
+}
+
+/// Build the `refreshmint://scrape-output` payload for a single driver log
+/// event. Extracted as a pure function so the mapping is unit-tested; the emit
+/// wiring itself is exercised by the UI.
+fn scrape_output_payload(
+    login_name: &str,
+    event: &scrape::js_api::DebugOutputEvent,
+) -> ScrapeOutputPayload {
+    ScrapeOutputPayload {
+        login_name: login_name.to_string(),
+        stream: event.stream,
+        line: event.line.clone(),
+    }
+}
+
 #[tauri::command]
 async fn run_scrape_for_login(
     app_handle: tauri::AppHandle,
@@ -669,6 +694,19 @@ async fn run_scrape_for_login(
             })
         };
 
+        // Stream every driver log line to the GUI's live scrape console. The
+        // sink attached in run_scrape_async invokes this once per line.
+        let log_listener: scrape::ScrapeLogListener = {
+            let app_handle = app_handle.clone();
+            let login_name = login_name.clone();
+            std::sync::Arc::new(move |event: &scrape::js_api::DebugOutputEvent| {
+                let _ = app_handle.emit(
+                    "refreshmint://scrape-output",
+                    scrape_output_payload(&login_name, event),
+                );
+            })
+        };
+
         let config = scrape::ScrapeConfig {
             login_name: login_name.clone(),
             extension_name: extension,
@@ -678,7 +716,7 @@ async fn run_scrape_for_login(
             prompt_overrides: scrape::js_api::PromptOverrides::new(),
             prompt_requires_override: false,
             prompt_ui_handler: Some(prompt_ui_handler),
-            log_listener: None,
+            log_listener: Some(log_listener),
         };
 
         tokio::task::spawn_blocking(move || {
@@ -2441,9 +2479,10 @@ mod tests {
     use super::{
         delete_login_account, evidence_ref_matches_document, inspect_login_extraction_support,
         require_existing_login, require_label_input, require_login_name_input,
-        require_non_empty_input, run_login_account_extraction_blocking, send_prompt_answer,
-        PromptAnswerState,
+        require_non_empty_input, run_login_account_extraction_blocking, scrape_output_payload,
+        send_prompt_answer, PromptAnswerState,
     };
+    use crate::scrape::js_api::{DebugOutputEvent, DebugOutputStream};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -2460,6 +2499,24 @@ mod tests {
             panic!("failed to create temp dir: {err}");
         }
         dir
+    }
+
+    #[test]
+    fn scrape_output_payload_maps_fields_and_serializes_camelcase() {
+        let payload = scrape_output_payload(
+            "chase-personal",
+            &DebugOutputEvent {
+                stream: DebugOutputStream::Stderr,
+                line: "hello".to_string(),
+            },
+        );
+        assert_eq!(payload.login_name, "chase-personal");
+        assert_eq!(payload.line, "hello");
+        let json = serde_json::to_value(&payload)
+            .unwrap_or_else(|err| panic!("serialize payload failed: {err}"));
+        assert_eq!(json["loginName"], "chase-personal");
+        assert_eq!(json["stream"], "stderr");
+        assert_eq!(json["line"], "hello");
     }
 
     #[test]
