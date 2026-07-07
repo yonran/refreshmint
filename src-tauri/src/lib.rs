@@ -87,13 +87,34 @@ struct LoginExtractionSupport {
     reason: Option<&'static str>,
 }
 
-/// Tauri state holding the mpsc sender for an in-progress refreshmint.prompt()
-/// call. The scrape thread creates a channel, stores the Sender here, and
-/// blocks waiting for the Receiver. The frontend calls submit_prompt_answer
-/// to send `Some(answer)` for Submit or `None` for Cancel. Keep this aligned
-/// with the receiving half in `scrape/js_api.rs`.
+/// The details of a prompt currently awaiting an answer, retained so the
+/// frontend can re-open a hidden prompt via `get_pending_prompt`. Kept aligned
+/// with the `refreshmint://prompt-requested` payload and the frontend modal.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPrompt {
+    pub login_name: String,
+    pub message: String,
+    pub choices: Option<Vec<String>>,
+}
+
+/// Inner state for `PromptAnswerState`: the answer channel sender plus the
+/// pending prompt details. The sender and pending payload are always cleared
+/// together (on answer, cancel, or timeout).
 #[derive(Default)]
-pub struct PromptAnswerState(pub std::sync::Mutex<Option<std::sync::mpsc::Sender<Option<String>>>>);
+pub struct PromptAnswerInner {
+    pub sender: Option<std::sync::mpsc::Sender<Option<String>>>,
+    pub pending: Option<PendingPrompt>,
+}
+
+/// Tauri state holding the mpsc sender for an in-progress refreshmint.prompt()
+/// call, plus the pending prompt details. The scrape thread creates a channel,
+/// stores the Sender here, and blocks (with a timeout) waiting for the Receiver.
+/// The frontend calls submit_prompt_answer to send `Some(answer)` for Submit or
+/// `None` for Cancel, and get_pending_prompt to re-open a hidden prompt. Keep
+/// this aligned with the receiving half in `scrape/js_api.rs`.
+#[derive(Default)]
+pub struct PromptAnswerState(pub std::sync::Mutex<PromptAnswerInner>);
 
 /// Tauri state holding a cancel-signal sender per in-flight scrape, keyed by
 /// login name. `run_scrape_for_login` registers a `watch` channel before
@@ -261,6 +282,7 @@ pub fn run_with_context(
             query_transactions,
             run_hledger_report,
             submit_prompt_answer,
+            get_pending_prompt,
             check_ledger_consistency,
             recover_ledger_consistency,
             repair_dangling_ref,
@@ -711,6 +733,9 @@ fn scrape_output_payload(
     }
 }
 
+/// Default MFA-prompt timeout (5 minutes) when the caller does not specify one.
+const DEFAULT_PROMPT_TIMEOUT_SECS: u64 = 300;
+
 #[tauri::command]
 async fn run_scrape_for_login(
     app_handle: tauri::AppHandle,
@@ -718,8 +743,11 @@ async fn run_scrape_for_login(
     login_name: String,
     source: String,
     headless: bool,
+    prompt_timeout_secs: Option<u64>,
 ) -> Result<(), String> {
     let login_name = require_login_name_input(login_name)?;
+    let prompt_timeout =
+        std::time::Duration::from_secs(prompt_timeout_secs.unwrap_or(DEFAULT_PROMPT_TIMEOUT_SECS));
 
     let target_dir = std::path::PathBuf::from(&ledger);
     // Validate ledger and login BEFORE any logging: append_jsonl creates
@@ -745,7 +773,13 @@ async fn run_scrape_for_login(
             let app_handle = app_handle.clone();
             let login_name = login_name.clone();
             std::sync::Arc::new(move |message: String, choices: Option<Vec<String>>| {
-                request_prompt_answer(&app_handle, login_name.clone(), message, choices)
+                request_prompt_answer(
+                    &app_handle,
+                    login_name.clone(),
+                    message,
+                    choices,
+                    prompt_timeout,
+                )
             })
         };
 
@@ -826,7 +860,15 @@ async fn run_scrape(
     account: String,
 ) -> Result<(), String> {
     let login_name = require_non_empty_input("account", account)?;
-    run_scrape_for_login(app_handle, ledger, login_name, "manual".to_string(), false).await
+    run_scrape_for_login(
+        app_handle,
+        ledger,
+        login_name,
+        "manual".to_string(),
+        false,
+        None,
+    )
+    .await
 }
 
 /// Abort an in-flight scrape for `login_name`. Signals the cancel channel and
@@ -2570,11 +2612,42 @@ fn map_account_journal_entries(
 /// Sends `Some(answer)` for Submit or `None` for Cancel.
 fn send_prompt_answer(answer: Option<String>, state: &PromptAnswerState) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    if let Some(sender) = guard.take() {
+    // Clear the pending prompt and sender together so the frontend's re-open
+    // pill disappears once an answer (or cancel) is delivered.
+    guard.pending = None;
+    if let Some(sender) = guard.sender.take() {
         // Ignore send errors: the scrape thread may have already timed out.
         let _ = sender.send(answer);
     }
     Ok(())
+}
+
+/// Outcome of waiting for a prompt answer.
+enum PromptWaitOutcome {
+    Answered(Option<String>),
+    TimedOut,
+    Disconnected,
+}
+
+/// Block on `rx` for up to `timeout`, clearing the pending prompt and sender on
+/// timeout. Extracted (no `AppHandle`) so the timeout/clear behaviour is
+/// unit-testable; the caller handles the `refreshmint://prompt-closed` emit.
+fn wait_for_prompt_answer(
+    rx: &std::sync::mpsc::Receiver<Option<String>>,
+    state: &PromptAnswerState,
+    timeout: std::time::Duration,
+) -> PromptWaitOutcome {
+    match rx.recv_timeout(timeout) {
+        Ok(answer) => PromptWaitOutcome::Answered(answer),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            if let Ok(mut guard) = state.0.lock() {
+                guard.sender = None;
+                guard.pending = None;
+            }
+            PromptWaitOutcome::TimedOut
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => PromptWaitOutcome::Disconnected,
+    }
 }
 
 fn request_prompt_answer(
@@ -2585,12 +2658,18 @@ fn request_prompt_answer(
     // free-text input. Keep this aligned with `promptChoice` in `scrape/js_api.rs`
     // and the listener payload in `src/App.tsx`.
     choices: Option<Vec<String>>,
+    timeout: std::time::Duration,
 ) -> Result<Option<String>, String> {
     let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
     {
         let state = app_handle.state::<PromptAnswerState>();
         let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-        *guard = Some(tx);
+        guard.sender = Some(tx);
+        guard.pending = Some(PendingPrompt {
+            login_name: login_name.clone(),
+            message: message.clone(),
+            choices: choices.clone(),
+        });
     }
 
     #[derive(serde::Serialize, Clone)]
@@ -2604,14 +2683,45 @@ fn request_prompt_answer(
         .emit(
             "refreshmint://prompt-requested",
             PromptRequestedPayload {
-                login_name,
+                login_name: login_name.clone(),
                 message,
                 choices,
             },
         )
         .map_err(|e| format!("prompt emit failed: {e}"))?;
 
-    rx.recv().map_err(|_| "prompt cancelled".to_string())
+    let state = app_handle.state::<PromptAnswerState>();
+    match wait_for_prompt_answer(&rx, &state, timeout) {
+        PromptWaitOutcome::Answered(answer) => Ok(answer),
+        PromptWaitOutcome::TimedOut => {
+            // The pending prompt/sender were already cleared; notify the
+            // frontend so its re-open pill and any open modal disappear, then
+            // abort the scrape.
+            emit_prompt_closed(app_handle, &login_name);
+            let minutes = timeout.as_secs().div_ceil(60);
+            Err(format!(
+                "prompt timed out after {minutes} minutes; scrape aborted"
+            ))
+        }
+        PromptWaitOutcome::Disconnected => Err("prompt cancelled".to_string()),
+    }
+}
+
+/// Emit `refreshmint://prompt-closed` so the frontend clears a pending/hidden
+/// prompt for `login_name`. Keep the payload aligned with the listener in
+/// `src/App.tsx`.
+fn emit_prompt_closed(app_handle: &tauri::AppHandle, login_name: &str) {
+    #[derive(serde::Serialize, Clone)]
+    #[serde(rename_all = "camelCase")]
+    struct PromptClosedPayload {
+        login_name: String,
+    }
+    let _ = app_handle.emit(
+        "refreshmint://prompt-closed",
+        PromptClosedPayload {
+            login_name: login_name.to_string(),
+        },
+    );
 }
 
 /// Called by the frontend to deliver the user's answer to a pending
@@ -2624,6 +2734,16 @@ fn submit_prompt_answer(
     send_prompt_answer(answer, &state)
 }
 
+/// Return the currently-pending prompt (if any) so the frontend can re-open a
+/// prompt the user hid, or restore it after a reload.
+#[tauri::command]
+fn get_pending_prompt(
+    state: tauri::State<PromptAnswerState>,
+) -> Result<Option<PendingPrompt>, String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(guard.pending.clone())
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -2633,7 +2753,8 @@ mod tests {
         require_login_name_input, require_non_empty_input, resolve_artifact_dir,
         run_login_account_extraction_blocking, scrape_output_payload, send_prompt_answer,
         trigger_scrape_cancel, unregister_scrape_cancel, validate_artifact_filename,
-        PromptAnswerState, ScrapeCancelState,
+        wait_for_prompt_answer, PendingPrompt, PromptAnswerInner, PromptAnswerState,
+        PromptWaitOutcome, ScrapeCancelState,
     };
     use crate::scrape::js_api::{DebugOutputEvent, DebugOutputStream};
     use std::collections::BTreeMap;
@@ -2726,10 +2847,24 @@ mod tests {
         assert!(!trigger_scrape_cancel(&state, "nobody"));
     }
 
+    fn prompt_state_with(
+        tx: std::sync::mpsc::Sender<Option<String>>,
+        login: &str,
+    ) -> PromptAnswerState {
+        PromptAnswerState(std::sync::Mutex::new(PromptAnswerInner {
+            sender: Some(tx),
+            pending: Some(PendingPrompt {
+                login_name: login.to_string(),
+                message: "Enter OTP".to_string(),
+                choices: None,
+            }),
+        }))
+    }
+
     #[test]
-    fn send_prompt_answer_delivers_cancel_as_none() {
+    fn send_prompt_answer_delivers_cancel_as_none_and_clears_pending() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let state = PromptAnswerState(std::sync::Mutex::new(Some(tx)));
+        let state = prompt_state_with(tx, "chase");
 
         send_prompt_answer(None, &state)
             .unwrap_or_else(|err| panic!("send_prompt_answer failed: {err}"));
@@ -2739,12 +2874,16 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to receive prompt answer: {err}")),
             None
         );
+        // The pending prompt is cleared so the frontend's re-open pill vanishes.
+        let guard = state.0.lock().unwrap_or_else(|err| panic!("lock: {err}"));
+        assert!(guard.pending.is_none());
+        assert!(guard.sender.is_none());
     }
 
     #[test]
     fn send_prompt_answer_preserves_empty_string_submission() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let state = PromptAnswerState(std::sync::Mutex::new(Some(tx)));
+        let state = prompt_state_with(tx, "chase");
 
         send_prompt_answer(Some(String::new()), &state)
             .unwrap_or_else(|err| panic!("send_prompt_answer failed: {err}"));
@@ -2754,6 +2893,36 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to receive prompt answer: {err}")),
             Some(String::new())
         );
+    }
+
+    #[test]
+    fn wait_for_prompt_answer_times_out_and_clears_state() {
+        // Keep tx alive but never send, so recv_timeout elapses.
+        let (_tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        let state = prompt_state_with(_tx.clone(), "chase");
+
+        let outcome = wait_for_prompt_answer(&rx, &state, std::time::Duration::from_millis(10));
+        assert!(matches!(outcome, PromptWaitOutcome::TimedOut));
+
+        let guard = state.0.lock().unwrap_or_else(|err| panic!("lock: {err}"));
+        assert!(guard.pending.is_none(), "pending cleared on timeout");
+        assert!(guard.sender.is_none(), "sender cleared on timeout");
+    }
+
+    #[test]
+    fn wait_for_prompt_answer_returns_answer_before_timeout() {
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        let state = prompt_state_with(tx.clone(), "chase");
+        tx.send(Some("123456".to_string()))
+            .unwrap_or_else(|err| panic!("send failed: {err}"));
+
+        let outcome = wait_for_prompt_answer(&rx, &state, std::time::Duration::from_secs(5));
+        match outcome {
+            PromptWaitOutcome::Answered(answer) => {
+                assert_eq!(answer, Some("123456".to_string()));
+            }
+            _ => panic!("expected an answer before timeout"),
+        }
     }
 
     #[test]
