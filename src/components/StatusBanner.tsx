@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 
 export type StatusLevel = 'error' | 'info' | 'busy';
 
@@ -26,14 +26,24 @@ export function StatusBanner({
         | undefined;
     autoDismissMs?: number | undefined;
 }) {
+    // Keep the latest onDismiss without making it an effect dependency: parents
+    // pass a fresh closure each render, so keying the timer on it re-armed the
+    // countdown on every unrelated re-render and the banner never auto-dismissed.
+    const onDismissRef = useRef(onDismiss);
     useEffect(() => {
-        if (autoDismissMs === undefined || onDismiss === undefined) return;
-        const timer = setTimeout(onDismiss, autoDismissMs);
+        onDismissRef.current = onDismiss;
+    }, [onDismiss]);
+    useEffect(() => {
+        if (autoDismissMs === undefined) return;
+        const timer = setTimeout(() => {
+            onDismissRef.current?.();
+        }, autoDismissMs);
         return () => {
             clearTimeout(timer);
         };
-        // Re-arm when the message changes so a new banner gets its own timer.
-    }, [autoDismissMs, onDismiss, message]);
+        // Re-arm only when the message (or duration) changes, so a new banner
+        // gets its own timer but re-renders with the same message do not.
+    }, [autoDismissMs, message]);
 
     const className =
         level === 'error'

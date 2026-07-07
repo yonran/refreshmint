@@ -741,6 +741,10 @@ export function TransactionsTab({
                     plan.account,
                 );
                 onLedgerRefresh();
+                // The categorize dropped this row's suggestion locally; undoing
+                // it makes the row Uncategorized again, so re-fetch suggestions
+                // to bring the chip back without switching tabs.
+                setGlCategorySuggestions(await suggestGlCategories(ledgerPath));
                 setActionStatus(null);
             } else {
                 // Unpost the merged transfer (recordMemory:false so undoing it
