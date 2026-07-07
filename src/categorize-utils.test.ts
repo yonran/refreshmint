@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
     buildAcceptAllEdits,
+    categorizeChipLabel,
+    mergeTransferChipLabel,
     summarizeBulkRecategorize,
 } from './categorize-utils.ts';
 import type {
@@ -155,5 +157,38 @@ describe('summarizeBulkRecategorize', () => {
 
     it('returns an empty array for empty input', () => {
         expect(summarizeBulkRecategorize([])).toEqual([]);
+    });
+});
+
+describe('categorizeChipLabel', () => {
+    it('names the destination account', () => {
+        expect(categorizeChipLabel('Expenses:Groceries')).toBe(
+            'Categorize as Expenses:Groceries',
+        );
+    });
+});
+
+describe('mergeTransferChipLabel', () => {
+    it('prefixes the date and description with an action verb', () => {
+        expect(
+            mergeTransferChipLabel({
+                date: '2026-07-01',
+                description: 'ACH PAYMENT',
+            }),
+        ).toBe('Merge as transfer: 2026-07-01 ACH PAYMENT');
+    });
+
+    it('truncates a long description to 40 chars with an ellipsis', () => {
+        const long = 'A'.repeat(50);
+        expect(
+            mergeTransferChipLabel({ date: '2026-07-01', description: long }),
+        ).toBe(`Merge as transfer: 2026-07-01 ${'A'.repeat(40)}…`);
+    });
+
+    it('leaves a 40-char description unchanged', () => {
+        const exact = 'B'.repeat(40);
+        expect(
+            mergeTransferChipLabel({ date: '2026-07-01', description: exact }),
+        ).toBe(`Merge as transfer: 2026-07-01 ${exact}`);
     });
 });

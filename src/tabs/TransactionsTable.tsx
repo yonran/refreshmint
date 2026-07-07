@@ -18,6 +18,8 @@ import type { SimilarRecategorizeSeed } from '../types.ts';
 import {
     type AcceptAllEdit,
     buildAcceptAllEdits,
+    categorizeChipLabel,
+    mergeTransferChipLabel,
 } from '../categorize-utils.ts';
 import { formatScaled, formatTotals } from '../amount-utils.ts';
 import { AccountInput } from '../components/AccountInput.tsx';
@@ -1080,13 +1082,13 @@ export function TransactionsTable({
                                                                                     );
                                                                                 }}
                                                                             >
-                                                                                ↔{' '}
-                                                                                {
-                                                                                    transferMatch.date
-                                                                                }{' '}
-                                                                                {
-                                                                                    transferMatch.description
-                                                                                }
+                                                                                {mergeTransferChipLabel(
+                                                                                    {
+                                                                                        date: transferMatch.date,
+                                                                                        description:
+                                                                                            transferMatch.description,
+                                                                                    },
+                                                                                )}
                                                                             </button>
                                                                         )}
                                                                     {isNonBalanceSheet &&
@@ -1145,9 +1147,9 @@ export function TransactionsTable({
                                                                                         );
                                                                                     }}
                                                                                 >
-                                                                                    {
-                                                                                        suggested
-                                                                                    }
+                                                                                    {categorizeChipLabel(
+                                                                                        suggested,
+                                                                                    )}
                                                                                 </button>
                                                                                 {canShowSimilarPill && (
                                                                                     <button

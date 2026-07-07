@@ -1,5 +1,35 @@
 import type { GlCategoryResult, TransactionRow } from './tauri-commands';
 
+/** Max description length shown in a merge-transfer chip before truncation. */
+const MERGE_CHIP_DESC_MAX = 40;
+
+/**
+ * Label for the one-click "merge as transfer" chip. Names the action and the
+ * counterpart (date + description), truncating a long description so the chip
+ * stays a reasonable width. Replaces the previous bare "↔ {date} {desc}" glyph.
+ */
+export function mergeTransferChipLabel({
+    date,
+    description,
+}: {
+    date: string;
+    description: string;
+}): string {
+    const truncated =
+        description.length > MERGE_CHIP_DESC_MAX
+            ? `${description.slice(0, MERGE_CHIP_DESC_MAX)}…`
+            : description;
+    return `Merge as transfer: ${date} ${truncated}`;
+}
+
+/**
+ * Label for the one-click categorize chip, naming the destination account.
+ * Replaces the previous bare "{account}" chip text.
+ */
+export function categorizeChipLabel(account: string): string {
+    return `Categorize as ${account}`;
+}
+
 /** A per-old-account grouping for the bulk-recategorize confirm modal. */
 export interface BulkRecategorizeGroup {
     oldAccount: string;
