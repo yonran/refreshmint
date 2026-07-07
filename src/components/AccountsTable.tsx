@@ -42,7 +42,7 @@ export function AccountsTable({
                             </td>
                             <td>
                                 {account.unpostedCount > 0 ? (
-                                    <span className="secret-chip warning">
+                                    <span className="chip secret-chip warning">
                                         {account.unpostedCount} unposted
                                     </span>
                                 ) : (

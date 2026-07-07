@@ -726,11 +726,11 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                                                 {txn.bookkeeping
                                                     .reconciledSessionIds
                                                     .length > 0 ? (
-                                                    <span className="status-chip status-chip-warning">
+                                                    <span className="chip chip-warning">
                                                         reconciled elsewhere
                                                     </span>
                                                 ) : (
-                                                    <span className="status-chip">
+                                                    <span className="chip">
                                                         open
                                                     </span>
                                                 )}

@@ -1400,7 +1400,7 @@ export function SettingsTab({
                                                                     {config.glAccount ??
                                                                         '(ignored)'}
                                                                     {hasConflict ? (
-                                                                        <span className="secret-chip">
+                                                                        <span className="chip secret-chip">
                                                                             conflict
                                                                         </span>
                                                                     ) : null}
@@ -1911,7 +1911,7 @@ export function SettingsTab({
                                                                 {entry.domain}
                                                             </span>
                                                             {isExtra ? (
-                                                                <span className="secret-chip">
+                                                                <span className="chip secret-chip">
                                                                     extra
                                                                 </span>
                                                             ) : null}

@@ -362,17 +362,12 @@
     flex-wrap: wrap;
 }
 
+/* Modifier on .chip: adds spacing and the muted secret palette. */
 .secret-chip {
-    display: inline-flex;
     margin-left: 0.45rem;
-    padding: 0.1rem 0.45rem;
-    border-radius: var(--radius-pill);
-    border: 1px solid #d9cdaa;
+    border-color: #d9cdaa;
     background: #fff7df;
     color: #7a5c18;
-    font-size: 0.72rem;
-    line-height: 1.35;
-    text-transform: uppercase;
     letter-spacing: 0.02em;
 }
 
@@ -816,14 +811,14 @@ details[open] > .disclosure-summary::before {
     gap: 0.25rem;
 }
 
+/* Modifier on .chip .chip-mono: a rectangular, truncating evidence tag. */
 .evidence-chip {
     font-size: 0.75rem;
     color: #666;
-    font-family: 'Courier New', Courier, monospace;
     background: var(--color-surface-faint);
     padding: 0.1rem 0.35rem;
     border-radius: 0.25rem;
-    border: 1px solid #eee;
+    border-color: #eee;
     white-space: nowrap;
     max-width: 16ch;
     overflow: hidden;
@@ -897,7 +892,14 @@ details[open] > .disclosure-summary::before {
 }
 
 /* Status chips for account rows */
-.status-chip {
+/*
+ * Unified chip system. .chip is the shared pill base; the other chip classes
+ * are semantic (ok/warning/info), typographic (mono), or behavioral
+ * (interactive) modifiers layered on top. Component-specific chips
+ * (.secret-chip, .evidence-chip, .similar-count-pill) reuse .chip and only
+ * override what differs.
+ */
+.chip {
     display: inline-flex;
     padding: 0.1rem 0.45rem;
     border-radius: var(--radius-pill);
@@ -910,16 +912,37 @@ details[open] > .disclosure-summary::before {
     color: #555;
 }
 
-.status-chip-ok {
+.chip-ok {
     border-color: var(--color-ok-border);
     background: var(--color-ok-bg);
     color: var(--color-ok-text);
 }
 
-.status-chip-warning {
+.chip-warning {
     border-color: var(--color-warn-border);
     background: var(--color-warn-bg);
     color: var(--color-warn-text);
+}
+
+.chip-info {
+    border-color: var(--color-info-border);
+    background: var(--color-info-bg);
+    color: var(--color-accent);
+}
+
+.chip-mono {
+    font-family: 'Courier New', Courier, monospace;
+    text-transform: none;
+    letter-spacing: normal;
+}
+
+.chip-interactive {
+    cursor: pointer;
+}
+
+.chip-interactive:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
 }
 
 .transaction-bookkeeping-badges {
@@ -968,20 +991,15 @@ details[open] > .disclosure-summary::before {
     flex-wrap: wrap;
 }
 
+/* Modifier on .chip .chip-interactive: a roomier, non-uppercase count pill. */
 .similar-count-pill {
-    border: 1px solid #c7cedb;
+    border-color: #c7cedb;
     background: #f5f7fb;
     color: #4f5a70;
     padding: 0.2rem 0.55rem;
-    border-radius: var(--radius-pill);
     font-size: 0.75rem;
-    line-height: 1.3;
-    cursor: pointer;
-}
-
-.similar-count-pill:disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
+    text-transform: none;
+    letter-spacing: normal;
 }
 
 .similar-count-pill:hover:not(:disabled) {

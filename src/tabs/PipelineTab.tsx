@@ -1861,7 +1861,7 @@ export function PipelineTab({
                                             acct.label;
                                     const extractChip =
                                         acct.extract.inspectError !== null ? (
-                                            <span className="status-chip status-chip-warning">
+                                            <span className="chip chip-warning">
                                                 {acct.extract.inspectError.slice(
                                                     0,
                                                     40,
@@ -1869,21 +1869,21 @@ export function PipelineTab({
                                             </span>
                                         ) : acct.extract.skipReason ===
                                           'no-documents' ? (
-                                            <span className="status-chip">
+                                            <span className="chip">
                                                 {enumLabel(
                                                     EXTRACT_SKIP_REASON_LABELS,
                                                     acct.extract.skipReason,
                                                 )}
                                             </span>
                                         ) : acct.extract.skipReason !== null ? (
-                                            <span className="status-chip status-chip-warning">
+                                            <span className="chip chip-warning">
                                                 {enumLabel(
                                                     EXTRACT_SKIP_REASON_LABELS,
                                                     acct.extract.skipReason,
                                                 )}
                                             </span>
                                         ) : (
-                                            <span className="status-chip status-chip-ok">
+                                            <span className="chip chip-ok">
                                                 {`${acct.extract.documentCount} doc${acct.extract.documentCount === 1 ? '' : 's'}`}
                                                 {acct.extract.locked
                                                     ? ' 🔒'
@@ -1892,7 +1892,7 @@ export function PipelineTab({
                                         );
                                     const postChip =
                                         acct.post.inspectError !== null ? (
-                                            <span className="status-chip status-chip-warning">
+                                            <span className="chip chip-warning">
                                                 {acct.post.inspectError.slice(
                                                     0,
                                                     40,
@@ -1900,7 +1900,7 @@ export function PipelineTab({
                                             </span>
                                         ) : acct.post.skipReason ===
                                           'missing-gl-account' ? (
-                                            <span className="status-chip status-chip-warning">
+                                            <span className="chip chip-warning">
                                                 {enumLabel(
                                                     POST_SKIP_REASON_LABELS,
                                                     acct.post.skipReason,
@@ -1908,14 +1908,14 @@ export function PipelineTab({
                                             </span>
                                         ) : acct.post.skipReason ===
                                           'no-unposted' ? (
-                                            <span className="status-chip">
+                                            <span className="chip">
                                                 {enumLabel(
                                                     POST_SKIP_REASON_LABELS,
                                                     acct.post.skipReason,
                                                 )}
                                             </span>
                                         ) : (
-                                            <span className="status-chip status-chip-ok">
+                                            <span className="chip chip-ok">
                                                 {`${acct.post.unpostedCount} unposted`}
                                                 {acct.post.locked ? ' 🔒' : ''}
                                             </span>
@@ -2796,25 +2796,25 @@ export function PipelineTab({
                                                         <div className="transaction-bookkeeping-badges">
                                                             {entry.bankStatus ===
                                                             'pending' ? (
-                                                                <span className="status-chip status-chip-warning">
+                                                                <span className="chip chip-warning">
                                                                     bank pending
                                                                 </span>
                                                             ) : entry.bankStatus ===
                                                               'posted' ? (
-                                                                <span className="status-chip status-chip-ok">
+                                                                <span className="chip chip-ok">
                                                                     bank posted
                                                                 </span>
                                                             ) : null}
                                                             {isUnposted ? (
-                                                                <span className="status-chip">
+                                                                <span className="chip">
                                                                     unposted
                                                                 </span>
                                                             ) : needsSync ? (
-                                                                <span className="status-chip status-chip-warning">
+                                                                <span className="chip chip-warning">
                                                                     needs sync
                                                                 </span>
                                                             ) : (
-                                                                <span className="status-chip status-chip-ok">
+                                                                <span className="chip chip-ok">
                                                                     posted
                                                                 </span>
                                                             )}

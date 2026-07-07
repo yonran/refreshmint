@@ -744,7 +744,7 @@ export function TransactionsTable({
                                                         {badges.map((badge) => (
                                                             <span
                                                                 key={`${txn.id}:${badge}`}
-                                                                className="status-chip"
+                                                                className="chip"
                                                             >
                                                                 {badge}
                                                             </span>
@@ -1007,7 +1007,7 @@ export function TransactionsTable({
                                                                             {canShowSimilarPill && (
                                                                                 <button
                                                                                     type="button"
-                                                                                    className="similar-count-pill"
+                                                                                    className="chip chip-interactive similar-count-pill"
                                                                                     disabled={
                                                                                         !categoryDraft.trim()
                                                                                     }
@@ -1167,7 +1167,7 @@ export function TransactionsTable({
                                                                                 {canShowSimilarPill && (
                                                                                     <button
                                                                                         type="button"
-                                                                                        className="similar-count-pill"
+                                                                                        className="chip chip-interactive similar-count-pill"
                                                                                         onClick={() => {
                                                                                             openSimilarConfirmForTxn(
                                                                                                 txn,
@@ -1278,7 +1278,7 @@ export function TransactionsTable({
                                                                 ) => (
                                                                     <button
                                                                         key={`${txn.id}-${evidenceRef}`}
-                                                                        className="evidence-chip evidence-chip-image"
+                                                                        className="chip chip-mono chip-interactive evidence-chip evidence-chip-image"
                                                                         type="button"
                                                                         onClick={() => {
                                                                             void lightbox.openImage(
@@ -1298,7 +1298,7 @@ export function TransactionsTable({
                                                                 0 && (
                                                                 <>
                                                                     <button
-                                                                        className="evidence-chip evidence-chip-toggle"
+                                                                        className="chip chip-mono chip-interactive evidence-chip evidence-chip-toggle"
                                                                         type="button"
                                                                         onClick={() => {
                                                                             setExpandedEvidenceIds(
@@ -1344,7 +1344,7 @@ export function TransactionsTable({
                                                                             ) => (
                                                                                 <span
                                                                                     key={`${txn.id}-${evidenceRef}`}
-                                                                                    className="evidence-chip"
+                                                                                    className="chip chip-mono evidence-chip"
                                                                                     title={
                                                                                         evidenceRef
                                                                                     }
