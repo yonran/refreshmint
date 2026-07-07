@@ -1089,6 +1089,25 @@ details[open] > .disclosure-summary::before {
     font-size: 0.875rem;
 }
 
+.status-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.status-banner-message {
+    flex: 1;
+}
+
+.status-banner-action {
+    flex: 0 0 auto;
+}
+
+.status-banner-dismiss {
+    flex: 0 0 auto;
+    line-height: 1;
+}
+
 .txn-form-toggle {
     display: flex;
     align-items: center;
