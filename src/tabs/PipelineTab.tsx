@@ -1760,7 +1760,7 @@ export function PipelineTab({
                                 }
                             }}
                         >
-                            <option value="">Select a source...</option>
+                            <option value="">Select a bank account…</option>
                             {loginAccounts.map((account) => {
                                 const key = `${account.loginName}/${account.label}`;
                                 return (
@@ -2002,7 +2002,7 @@ export function PipelineTab({
                         }}
                         type="button"
                     >
-                        Account Rows
+                        Account Entries
                     </button>
                 </div>
                 {selectedLoginAccount === null ? (
@@ -2607,7 +2607,7 @@ export function PipelineTab({
                                                                     );
                                                                 }}
                                                             >
-                                                                Dismiss
+                                                                Mark reviewed
                                                             </button>
                                                             {anomaly.safeToRetire && (
                                                                 <button
@@ -2624,7 +2624,7 @@ export function PipelineTab({
                                                                     }}
                                                                 >
                                                                     Retire
-                                                                    source
+                                                                    source entry
                                                                 </button>
                                                             )}
                                                             {anomaly.kind ===
