@@ -289,6 +289,7 @@ fn locator_api_works() -> Result<(), Box<dyn Error>> {
         headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
+        log_listener: None,
     };
 
     scrape::run_scrape(config)?;
@@ -345,6 +346,7 @@ fn get_by_role_api_works() -> Result<(), Box<dyn Error>> {
         headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
+        log_listener: None,
     };
 
     scrape::run_scrape(config)?;
@@ -400,6 +402,7 @@ fn shadow_dom_api_works() -> Result<(), Box<dyn Error>> {
         headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
+        log_listener: None,
     };
 
     scrape::run_scrape(config)?;

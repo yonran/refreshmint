@@ -1039,6 +1039,15 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
         prompt_overrides,
         prompt_requires_override: true,
         prompt_ui_handler: None,
+        // Preserve the pre-sink CLI behaviour: once run_scrape_async attaches an
+        // mpsc sink, js_api::emit_debug_output routes driver output to the sink
+        // instead of the stderr fallback, so without this listener the CLI would
+        // print no driver log lines. Mirror the original stderr destination.
+        log_listener: Some(std::sync::Arc::new(
+            |event: &crate::scrape::js_api::DebugOutputEvent| {
+                eprintln!("{}", event.line);
+            },
+        )),
     };
 
     let timestamp = crate::operations::now_timestamp();

@@ -26,6 +26,89 @@ pub struct ScrapeConfig {
     /// When set, `refreshmint.prompt()` asks the host app for a response
     /// rather than reading from stdin.
     pub prompt_ui_handler: Option<js_api::PromptUiHandler>,
+    /// When set, every driver log line (`refreshmint.log`/`reportValue`) is
+    /// forwarded to this listener as it is emitted. The GUI uses it to stream a
+    /// live log pane; the CLI uses it to preserve stderr output (see
+    /// `run_scrape_async`, which attaches an mpsc sink that would otherwise
+    /// silence the stderr fallback in `js_api::emit_debug_output`).
+    pub log_listener: Option<ScrapeLogListener>,
+}
+
+/// A listener invoked once per driver log line as it is emitted during a scrape.
+pub type ScrapeLogListener = Arc<dyn Fn(&js_api::DebugOutputEvent) + Send + Sync>;
+
+/// A bounded, in-memory ring buffer of the most recent driver log lines for a
+/// scrape run. Used both to stream live output and to capture a log tail into
+/// failure artifacts (see `write_failure_artifacts`).
+pub struct ScrapeLogTail {
+    lines: std::collections::VecDeque<String>,
+    capacity: usize,
+}
+
+impl ScrapeLogTail {
+    /// Default number of retained log lines.
+    pub const DEFAULT_CAPACITY: usize = 500;
+
+    pub fn new() -> Self {
+        Self::with_capacity(Self::DEFAULT_CAPACITY)
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            lines: std::collections::VecDeque::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// Append a log line, evicting the oldest line once capacity is exceeded.
+    pub fn push(&mut self, event: &js_api::DebugOutputEvent) {
+        self.lines.push_back(event.line.clone());
+        while self.lines.len() > self.capacity {
+            self.lines.pop_front();
+        }
+    }
+
+    /// Render the retained lines as newline-joined text (oldest first).
+    pub fn to_text(&self) -> String {
+        let mut text = self.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+}
+
+impl Default for ScrapeLogTail {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Drain driver log events from the scrape sink, appending each to the shared
+/// `ScrapeLogTail` and forwarding it to the optional per-run listener. Runs
+/// until the sender (`RefreshmintInner::debug_output_sink`) is dropped.
+///
+/// Both stdout and stderr streams are forwarded so the CLI's stderr listener
+/// keeps receiving driver output once the sink is attached (see risk 4).
+pub async fn run_log_forwarder(
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<js_api::DebugOutputEvent>,
+    log_tail: Arc<std::sync::Mutex<ScrapeLogTail>>,
+    log_listener: Option<ScrapeLogListener>,
+) {
+    while let Some(event) = receiver.recv().await {
+        if let Ok(mut tail) = log_tail.lock() {
+            tail.push(&event);
+        }
+        if let Some(listener) = &log_listener {
+            listener(&event);
+        }
+    }
 }
 
 /// The value type for a domain entry in `manifest.json` `secrets` field.
@@ -640,12 +723,26 @@ pub async fn run_scrape_async(
         target_frame_id: None,
     }));
 
+    // Attach a log sink so driver `log`/`reportValue` lines can be streamed live
+    // and captured into a rolling tail. A forwarder task pushes each event into
+    // `log_tail` (used for failure artifacts) and invokes the optional per-run
+    // `log_listener` (GUI live pane / CLI stderr). Mirrors the debug-exec sink
+    // wiring in `scrape/debug.rs::handle_exec_request_async`.
+    let (output_sender, output_receiver) =
+        tokio::sync::mpsc::unbounded_channel::<js_api::DebugOutputEvent>();
+    let log_tail = Arc::new(std::sync::Mutex::new(ScrapeLogTail::new()));
+    let forwarder = tokio::spawn(run_log_forwarder(
+        output_receiver,
+        log_tail.clone(),
+        config.log_listener.clone(),
+    ));
+
     let refreshmint_inner = Arc::new(Mutex::new(js_api::RefreshmintInner {
         output_dir,
         prompt_overrides: config.prompt_overrides.clone(),
         prompt_requires_override: config.prompt_requires_override,
         script_options: js_api::ScriptOptions::new(),
-        debug_output_sink: None,
+        debug_output_sink: Some(output_sender),
         session_metadata: js_api::SessionMetadata::default(),
         staged_resources: Vec::new(),
         scrape_session_id: scrape_session_id.clone(),
@@ -666,6 +763,15 @@ pub async fn run_scrape_async(
     )
     .await;
     eprintln!("Driver finished: {result:?}");
+
+    // Clear the sink so the forwarder task drains and exits (mirror
+    // debug.rs:654). Awaiting it guarantees `log_tail` has every emitted line
+    // before failure-artifact capture reads it.
+    {
+        let mut inner = refreshmint_inner.lock().await;
+        inner.debug_output_sink = None;
+    }
+    let _ = forwarder.await;
 
     // 9. Finalize staged resources (move to accounts/<name>/documents/).
     // Do this UNCONDITIONALLY: even a failed/aborted run may have downloaded
@@ -741,12 +847,12 @@ mod tests {
     use super::{
         clear_staged_output_dir, combine_run_and_finalize, finalize_staged_resources,
         list_runnable_extensions, load_manifest, load_manifest_secret_declarations,
-        normalize_manifest_domain, resolve_driver_script_path,
+        normalize_manifest_domain, resolve_driver_script_path, run_log_forwarder, ScrapeLogTail,
     };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
-        PageInner, PromptOverrides, RefreshmintInner, ScriptOptions, SessionMetadata,
-        StagedResource,
+        DebugOutputEvent, DebugOutputStream, PageInner, PromptOverrides, RefreshmintApi,
+        RefreshmintInner, ScriptOptions, SessionMetadata, StagedResource,
     };
     use crate::scrape::{browser, sandbox};
     use crate::secret::SecretStore;
@@ -1232,5 +1338,134 @@ try {
 
             let _ = fs::remove_dir_all(&root);
         });
+    }
+
+    fn stdout_event(line: &str) -> DebugOutputEvent {
+        DebugOutputEvent {
+            stream: DebugOutputStream::Stdout,
+            line: line.to_string(),
+        }
+    }
+
+    #[test]
+    fn scrape_log_tail_caps_and_orders() {
+        let mut tail = ScrapeLogTail::with_capacity(3);
+        for i in 0..5 {
+            tail.push(&stdout_event(&format!("line {i}")));
+        }
+        // Capacity is 3, so the two oldest lines are evicted and order preserved.
+        assert_eq!(tail.len(), 3);
+        assert_eq!(tail.to_text(), "line 2\nline 3\nline 4\n");
+    }
+
+    #[test]
+    fn scrape_log_tail_empty_renders_empty() {
+        let tail = ScrapeLogTail::new();
+        assert_eq!(tail.to_text(), "");
+    }
+
+    #[tokio::test]
+    async fn log_forwarder_forwards_both_streams_to_listener_and_tail() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<DebugOutputEvent>();
+        let tail = Arc::new(std::sync::Mutex::new(ScrapeLogTail::new()));
+        let recorded = Arc::new(std::sync::Mutex::new(
+            Vec::<(DebugOutputStream, String)>::new(),
+        ));
+        let listener = {
+            let recorded = recorded.clone();
+            Arc::new(move |event: &DebugOutputEvent| {
+                if let Ok(mut recorded) = recorded.lock() {
+                    recorded.push((event.stream, event.line.clone()));
+                }
+            })
+        };
+        let forwarder = tokio::spawn(run_log_forwarder(receiver, tail.clone(), Some(listener)));
+
+        sender
+            .send(DebugOutputEvent {
+                stream: DebugOutputStream::Stdout,
+                line: "out line".to_string(),
+            })
+            .unwrap_or_else(|err| panic!("send stdout failed: {err}"));
+        sender
+            .send(DebugOutputEvent {
+                stream: DebugOutputStream::Stderr,
+                line: "err line".to_string(),
+            })
+            .unwrap_or_else(|err| panic!("send stderr failed: {err}"));
+        // Dropping the sender ends the forwarder loop.
+        drop(sender);
+        forwarder
+            .await
+            .unwrap_or_else(|err| panic!("forwarder join failed: {err}"));
+
+        let recorded = recorded.lock().unwrap_or_else(|err| panic!("lock: {err}"));
+        assert_eq!(
+            *recorded,
+            vec![
+                (DebugOutputStream::Stdout, "out line".to_string()),
+                (DebugOutputStream::Stderr, "err line".to_string()),
+            ],
+            "listener must receive both stdout and stderr (pins CLI stderr path)"
+        );
+        let tail = tail.lock().unwrap_or_else(|err| panic!("lock: {err}"));
+        assert_eq!(tail.to_text(), "out line\nerr line\n");
+    }
+
+    fn test_inner_with_sink(
+        sender: tokio::sync::mpsc::UnboundedSender<DebugOutputEvent>,
+    ) -> RefreshmintInner {
+        RefreshmintInner {
+            output_dir: PathBuf::new(),
+            prompt_overrides: PromptOverrides::new(),
+            prompt_requires_override: false,
+            script_options: ScriptOptions::new(),
+            debug_output_sink: Some(sender),
+            session_metadata: SessionMetadata::default(),
+            staged_resources: Vec::new(),
+            scrape_session_id: String::new(),
+            extension_name: String::new(),
+            account_name: String::new(),
+            login_name: String::new(),
+            ledger_dir: PathBuf::new(),
+            prompt_ui_handler: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn driver_log_reaches_listener_through_forwarder() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<DebugOutputEvent>();
+        let inner = Arc::new(Mutex::new(test_inner_with_sink(sender)));
+        let api = RefreshmintApi::new(inner.clone());
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let listener = {
+            let recorded = recorded.clone();
+            Arc::new(move |event: &DebugOutputEvent| {
+                if let Ok(mut recorded) = recorded.lock() {
+                    recorded.push(event.line.clone());
+                }
+            })
+        };
+        let tail = Arc::new(std::sync::Mutex::new(ScrapeLogTail::new()));
+        let forwarder = tokio::spawn(run_log_forwarder(receiver, tail, Some(listener)));
+
+        api.log("hello".to_string())
+            .unwrap_or_else(|err| panic!("log failed: {err}"));
+        api.js_report_value("answer".to_string(), "42".to_string())
+            .unwrap_or_else(|err| panic!("reportValue failed: {err}"));
+
+        // Drop the sink so the forwarder drains and exits.
+        {
+            inner.lock().await.debug_output_sink = None;
+        }
+        forwarder
+            .await
+            .unwrap_or_else(|err| panic!("forwarder join failed: {err}"));
+
+        let recorded = recorded.lock().unwrap_or_else(|err| panic!("lock: {err}"));
+        assert_eq!(
+            *recorded,
+            vec!["hello".to_string(), "answer: 42".to_string()]
+        );
     }
 }

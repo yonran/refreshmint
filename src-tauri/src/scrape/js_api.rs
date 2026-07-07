@@ -443,13 +443,15 @@ pub type ScriptOptions = serde_json::Map<String, serde_json::Value>;
 // See `src-tauri/src/lib.rs` `migrate_login_secrets` command.
 const ENABLE_LEGACY_SECRET_FALLBACK: bool = true;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DebugOutputStream {
     Stdout,
     Stderr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DebugOutputEvent {
     pub stream: DebugOutputStream,
     pub line: String,

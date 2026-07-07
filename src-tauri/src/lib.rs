@@ -678,6 +678,7 @@ async fn run_scrape_for_login(
             prompt_overrides: scrape::js_api::PromptOverrides::new(),
             prompt_requires_override: false,
             prompt_ui_handler: Some(prompt_ui_handler),
+            log_listener: None,
         };
 
         tokio::task::spawn_blocking(move || {
