@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     createEmptyPipelineTabSession,
     createEmptyReportsTabSession,
+    createEmptyScrapeTabSession,
 } from './types.ts';
 import { createDefaultReportConfig } from './report-utils.ts';
 
@@ -21,5 +22,14 @@ describe('createEmptyReportsTabSession', () => {
         expect(session.error).toBeNull();
         expect(session.lastRunConfig).toBeNull();
         expect(session.hasAutoRun).toBe(false);
+    });
+});
+
+describe('createEmptyScrapeTabSession', () => {
+    it('starts idle with no running login, status, or console output', () => {
+        const session = createEmptyScrapeTabSession();
+        expect(session.runningLoginName).toBeNull();
+        expect(session.scrapeStatus).toBeNull();
+        expect(session.consoleLines).toEqual([]);
     });
 });

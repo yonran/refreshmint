@@ -65,12 +65,14 @@ import { TransactionsTab } from './tabs/TransactionsTab.tsx';
 import {
     createEmptyPipelineTabSession,
     createEmptyReportsTabSession,
+    createEmptyScrapeTabSession,
     createEmptyTransactionsTabSession,
     type SecretPromptState,
     type LoginAccountRef,
     type PipelineTabSession,
     type RecategorizeTab,
     type ReportsTabSession,
+    type ScrapeTabSession,
     type TransactionsTabSession,
     normalizeLoginConfig,
 } from './types.ts';
@@ -221,6 +223,9 @@ function App() {
         useState<PipelineTabSession>(createEmptyPipelineTabSession);
     const [reportsTabSession, setReportsTabSession] =
         useState<ReportsTabSession>(createEmptyReportsTabSession);
+    const [scrapeTabSession, setScrapeTabSession] = useState<ScrapeTabSession>(
+        createEmptyScrapeTabSession,
+    );
     const [secretPrompt, setSecretPrompt] = useState<SecretPromptState | null>(
         null,
     );
@@ -362,6 +367,7 @@ function App() {
             setTransactionsTabSession(createEmptyTransactionsTabSession());
             setPipelineTabSession(createEmptyPipelineTabSession());
             setReportsTabSession(createEmptyReportsTabSession());
+            setScrapeTabSession(createEmptyScrapeTabSession());
         }
     }, [ledgerPath]);
 
@@ -1828,6 +1834,8 @@ function App() {
                             autoScrapeActive={autoScrapeActive}
                             headlessScrape={headlessScrape}
                             promptTimeoutSecs={mfaPromptTimeoutMinutes * 60}
+                            session={scrapeTabSession}
+                            onSessionChange={setScrapeTabSession}
                         />
                     )}
                 </section>

@@ -59,6 +59,19 @@ export type TransactionsTabSession = {
     glTransferModalSearch: string;
 };
 
+export type ScrapeTabSession = {
+    /**
+     * The login whose scrape this tab started and is still running, or null.
+     * Held in the App-owned session so switching tabs mid-scrape (which unmounts
+     * ScrapeTab) doesn't drop the Running/Cancel state or the completion status.
+     */
+    runningLoginName: string | null;
+    /** Latest status line (running / completed / failed / canceled), or null. */
+    scrapeStatus: string | null;
+    /** Live driver output lines for the selected login. */
+    consoleLines: string[];
+};
+
 export type PipelineTabSession = {
     selectedLoginAccount: LoginAccountRef | null;
     pipelineStatus: string | null;
@@ -242,6 +255,14 @@ export function createEmptyReportsTabSession(): ReportsTabSession {
         error: null,
         lastRunConfig: null,
         hasAutoRun: false,
+    };
+}
+
+export function createEmptyScrapeTabSession(): ScrapeTabSession {
+    return {
+        runningLoginName: null,
+        scrapeStatus: null,
+        consoleLines: [],
     };
 }
 
