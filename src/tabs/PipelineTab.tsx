@@ -1757,6 +1757,7 @@ export function PipelineTab({
                         <button
                             type="button"
                             className="primary-button"
+                            title="Post every unposted entry across all eligible accounts in the ledger"
                             disabled={
                                 isLoadingPipelineBulkStats ||
                                 isPipelinePostingAllLedger ||
@@ -1770,7 +1771,7 @@ export function PipelineTab({
                         >
                             {isPipelinePostingAllLedger
                                 ? 'Posting...'
-                                : `Post All (${pipelineBulkStats?.post.totalUnpostedEntries ?? 0})`}
+                                : `Post All Accounts (${pipelineBulkStats?.post.totalUnpostedEntries ?? 0})`}
                         </button>
                         <button
                             type="button"
@@ -2194,6 +2195,7 @@ export function PipelineTab({
                                 <button
                                     type="button"
                                     className="primary-button"
+                                    title={`Post every unposted entry in ${selectedLoginAccount.loginName}/${selectedLoginAccount.label}`}
                                     disabled={
                                         isPipelinePosting ||
                                         isPipelinePostingAllLedger ||
@@ -2207,7 +2209,7 @@ export function PipelineTab({
                                 >
                                     {isPipelinePosting
                                         ? 'Posting...'
-                                        : `Post All (${unpostedEntries.length.toString()})`}
+                                        : `Post All in ${selectedLoginAccount.label} (${unpostedEntries.length.toString()})`}
                                 </button>
                                 <button
                                     type="button"
