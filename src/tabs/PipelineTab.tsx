@@ -80,6 +80,17 @@ import {
     isPdfDocument,
 } from '../attachment-utils.ts';
 import { TRANSFER_CANCEL_EPSILON } from '../gl-transfer-utils.ts';
+import {
+    ANOMALY_KIND_LABELS,
+    enumLabel,
+    EXTRACT_SKIP_REASON_LABELS,
+    POLICY_DECISION_LABELS,
+    POST_SKIP_REASON_LABELS,
+    PROPOSAL_KIND_LABELS,
+    RESOLUTION_KIND_LABELS,
+    RESOLUTION_STATUS_LABELS,
+    REVERSIBILITY_LABELS,
+} from '../enum-labels.ts';
 
 interface PipelineTabProps {
     ledger: LedgerView;
@@ -1465,7 +1476,10 @@ export function PipelineTab({
             });
             await refreshPipelineLoginAccountData();
             setPipelineStatus(
-                `Saved ${kind} resolution for ${anomaly.sourceEntryId}.`,
+                `Saved ${enumLabel(
+                    RESOLUTION_KIND_LABELS,
+                    kind,
+                )} decision for ${anomaly.sourceEntryId}.`,
             );
         } catch (error) {
             setPipelineStatus(`Save resolution failed: ${String(error)}`);
@@ -1482,7 +1496,12 @@ export function PipelineTab({
                 proposal.id,
             );
             await refreshPipelineLoginAccountData();
-            setPipelineStatus(`Applied ${proposal.kind}: ${result}`);
+            setPipelineStatus(
+                `Applied ${enumLabel(
+                    PROPOSAL_KIND_LABELS,
+                    proposal.kind,
+                )}: ${result}`,
+            );
             void refreshPipelineBulkStats();
         } catch (error) {
             setPipelineStatus(`Automation failed: ${String(error)}`);
@@ -1497,7 +1516,10 @@ export function PipelineTab({
         const resolution = resolutionInputFromProposal(proposal);
         if (resolution == null) {
             setPipelineStatus(
-                `Cannot save ${proposal.kind} as a reusable decision.`,
+                `Cannot save ${enumLabel(
+                    PROPOSAL_KIND_LABELS,
+                    proposal.kind,
+                )} as a reusable decision.`,
             );
             return;
         }
@@ -1505,7 +1527,12 @@ export function PipelineTab({
         try {
             await createResolution(ledgerPath, resolution);
             await refreshPipelineLoginAccountData();
-            setPipelineStatus(`Saved ${resolution.kind} decision.`);
+            setPipelineStatus(
+                `Saved ${enumLabel(
+                    RESOLUTION_KIND_LABELS,
+                    resolution.kind,
+                )} decision.`,
+            );
         } catch (error) {
             setPipelineStatus(`Save decision failed: ${String(error)}`);
         } finally {
@@ -1518,7 +1545,12 @@ export function PipelineTab({
         try {
             await disableResolution(ledgerPath, resolution.id);
             await refreshPipelineLoginAccountData();
-            setPipelineStatus(`Disabled ${resolution.kind} decision.`);
+            setPipelineStatus(
+                `Disabled ${enumLabel(
+                    RESOLUTION_KIND_LABELS,
+                    resolution.kind,
+                )} decision.`,
+            );
         } catch (error) {
             setPipelineStatus(`Disable decision failed: ${String(error)}`);
         } finally {
@@ -1531,7 +1563,12 @@ export function PipelineTab({
         try {
             await enableResolution(ledgerPath, resolution.id);
             await refreshPipelineLoginAccountData();
-            setPipelineStatus(`Enabled ${resolution.kind} decision.`);
+            setPipelineStatus(
+                `Enabled ${enumLabel(
+                    RESOLUTION_KIND_LABELS,
+                    resolution.kind,
+                )} decision.`,
+            );
         } catch (error) {
             setPipelineStatus(`Enable decision failed: ${String(error)}`);
         } finally {
@@ -1831,21 +1868,19 @@ export function PipelineTab({
                                                 )}
                                             </span>
                                         ) : acct.extract.skipReason ===
-                                          'missing-extension' ? (
-                                            <span className="status-chip status-chip-warning">
-                                                no extension
-                                            </span>
-                                        ) : acct.extract.skipReason ===
-                                              'missing-extractor' ||
-                                          acct.extract.skipReason ===
-                                              'broken-extractor' ? (
-                                            <span className="status-chip status-chip-warning">
-                                                {acct.extract.skipReason}
-                                            </span>
-                                        ) : acct.extract.skipReason ===
                                           'no-documents' ? (
                                             <span className="status-chip">
-                                                no docs
+                                                {enumLabel(
+                                                    EXTRACT_SKIP_REASON_LABELS,
+                                                    acct.extract.skipReason,
+                                                )}
+                                            </span>
+                                        ) : acct.extract.skipReason !== null ? (
+                                            <span className="status-chip status-chip-warning">
+                                                {enumLabel(
+                                                    EXTRACT_SKIP_REASON_LABELS,
+                                                    acct.extract.skipReason,
+                                                )}
                                             </span>
                                         ) : (
                                             <span className="status-chip status-chip-ok">
@@ -1866,12 +1901,18 @@ export function PipelineTab({
                                         ) : acct.post.skipReason ===
                                           'missing-gl-account' ? (
                                             <span className="status-chip status-chip-warning">
-                                                no GL account
+                                                {enumLabel(
+                                                    POST_SKIP_REASON_LABELS,
+                                                    acct.post.skipReason,
+                                                )}
                                             </span>
                                         ) : acct.post.skipReason ===
                                           'no-unposted' ? (
                                             <span className="status-chip">
-                                                up to date
+                                                {enumLabel(
+                                                    POST_SKIP_REASON_LABELS,
+                                                    acct.post.skipReason,
+                                                )}
                                             </span>
                                         ) : (
                                             <span className="status-chip status-chip-ok">
@@ -2287,12 +2328,16 @@ export function PipelineTab({
                                                     return (
                                                         <tr key={proposal.id}>
                                                             <td>
-                                                                {proposal.kind}
+                                                                {enumLabel(
+                                                                    PROPOSAL_KIND_LABELS,
+                                                                    proposal.kind,
+                                                                )}
                                                             </td>
                                                             <td>
-                                                                {
-                                                                    proposal.policyDecision
-                                                                }
+                                                                {enumLabel(
+                                                                    POLICY_DECISION_LABELS,
+                                                                    proposal.policyDecision,
+                                                                )}
                                                             </td>
                                                             <td>
                                                                 {proposal.subjectRefs
@@ -2305,9 +2350,10 @@ export function PipelineTab({
                                                             </td>
                                                             <td>{result}</td>
                                                             <td>
-                                                                {
-                                                                    proposal.reversible
-                                                                }
+                                                                {enumLabel(
+                                                                    REVERSIBILITY_LABELS,
+                                                                    proposal.reversible,
+                                                                )}
                                                             </td>
                                                             <td>
                                                                 {proposal
@@ -2393,10 +2439,16 @@ export function PipelineTab({
                                                 (resolution) => (
                                                     <tr key={resolution.id}>
                                                         <td>
-                                                            {resolution.kind}
+                                                            {enumLabel(
+                                                                RESOLUTION_KIND_LABELS,
+                                                                resolution.kind,
+                                                            )}
                                                         </td>
                                                         <td>
-                                                            {resolution.status}
+                                                            {enumLabel(
+                                                                RESOLUTION_STATUS_LABELS,
+                                                                resolution.status,
+                                                            )}
                                                         </td>
                                                         <td>
                                                             {resolutionSubjectLabel(
@@ -2488,7 +2540,12 @@ export function PipelineTab({
                                         <tbody>
                                             {importAnomalies.map((anomaly) => (
                                                 <tr key={anomaly.id}>
-                                                    <td>{anomaly.kind}</td>
+                                                    <td title={anomaly.kind}>
+                                                        {enumLabel(
+                                                            ANOMALY_KIND_LABELS,
+                                                            anomaly.kind,
+                                                        )}
+                                                    </td>
                                                     <td className="mono">
                                                         {anomaly.date}
                                                     </td>
