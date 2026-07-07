@@ -124,26 +124,50 @@ pub struct PromptAnswerState(pub std::sync::Mutex<PromptAnswerInner>);
 /// login name is a sufficient key.
 #[derive(Default)]
 pub struct ScrapeCancelState(
-    pub std::sync::Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    #[allow(clippy::type_complexity)]
+    pub  std::sync::Mutex<
+        std::collections::HashMap<String, (u64, tokio::sync::watch::Sender<bool>)>,
+    >,
 );
 
-/// Register a cancel channel for `login_name`, returning the receiver to hand to
-/// `ScrapeConfig::cancel`. Replaces any stale sender for the same login.
+/// Monotonic owner-token source for `ScrapeCancelState` entries. Each successful
+/// `register_scrape_cancel` mints a fresh token so `unregister_scrape_cancel` can
+/// tell the owning run apart from a later same-login run.
+static SCRAPE_CANCEL_TOKEN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Register a cancel channel for `login_name` **only if none is registered**,
+/// returning the owner token plus the receiver to hand to `ScrapeConfig::cancel`.
+/// Returns `None` when a scrape for this login already owns the entry: a second
+/// concurrent run (reachable because the UI can Run an already-running login)
+/// must not clobber the first run's sender — doing so would leave the live scrape
+/// permanently uncancelable. The second run gets no cancel channel and fail-fasts
+/// on the login lock anyway.
 fn register_scrape_cancel(
     state: &ScrapeCancelState,
     login_name: &str,
-) -> tokio::sync::watch::Receiver<bool> {
-    let (sender, receiver) = tokio::sync::watch::channel(false);
-    if let Ok(mut guard) = state.0.lock() {
-        guard.insert(login_name.to_string(), sender);
+) -> Option<(u64, tokio::sync::watch::Receiver<bool>)> {
+    let mut guard = state.0.lock().ok()?;
+    if guard.contains_key(login_name) {
+        return None;
     }
-    receiver
+    let token = SCRAPE_CANCEL_TOKEN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    guard.insert(login_name.to_string(), (token, sender));
+    Some((token, receiver))
 }
 
-/// Remove the cancel channel for `login_name` (called on every scrape exit).
-fn unregister_scrape_cancel(state: &ScrapeCancelState, login_name: &str) {
+/// Remove the cancel channel for `login_name`, but only when `token` matches the
+/// currently-registered owner. A non-owner (e.g. a second same-login run that was
+/// denied registration) is a no-op, so its exit can't unregister the live
+/// scrape's channel and turn `cancel_scrape` into a silent no-op.
+fn unregister_scrape_cancel(state: &ScrapeCancelState, login_name: &str, token: u64) {
     if let Ok(mut guard) = state.0.lock() {
-        guard.remove(login_name);
+        if guard
+            .get(login_name)
+            .is_some_and(|(owner, _)| *owner == token)
+        {
+            guard.remove(login_name);
+        }
     }
 }
 
@@ -154,7 +178,7 @@ fn trigger_scrape_cancel(state: &ScrapeCancelState, login_name: &str) -> bool {
         return false;
     };
     match guard.get(login_name) {
-        Some(sender) => sender.send(true).is_ok(),
+        Some((_, sender)) => sender.send(true).is_ok(),
         None => false,
     }
 }
@@ -762,10 +786,15 @@ async fn run_scrape_for_login(
     // Register a cancel channel so `cancel_scrape` can abort this run. The
     // receiver is handed to ScrapeConfig; the sender is removed on every exit
     // path below.
-    let cancel_receiver = {
+    let cancel_registration = {
         let cancel_state = app_handle.state::<ScrapeCancelState>();
         register_scrape_cancel(&cancel_state, &login_name)
     };
+    // `None` means another run of this login already owns the cancel entry; this
+    // run gets no cancel channel (it fail-fasts on the login lock) and must not
+    // unregister the owner's entry on exit.
+    let cancel_token = cancel_registration.as_ref().map(|(token, _)| *token);
+    let cancel_receiver = cancel_registration.map(|(_, receiver)| receiver);
 
     let result: Result<(), scrape::ScrapeError> = async {
         let extension = login_config::resolve_login_extension(&target_dir, &login_name)
@@ -807,7 +836,7 @@ async fn run_scrape_for_login(
             prompt_requires_override: false,
             prompt_ui_handler: Some(prompt_ui_handler),
             log_listener: Some(log_listener),
-            cancel: Some(cancel_receiver),
+            cancel: cancel_receiver,
         };
 
         tokio::task::spawn_blocking(move || scrape::run_scrape(config))
@@ -816,10 +845,12 @@ async fn run_scrape_for_login(
     }
     .await;
 
-    // Remove the cancel channel now that the run has finished (any exit path).
-    {
+    // Remove the cancel channel now that the run has finished (any exit path),
+    // but only if this run owns the entry (a denied second run leaves the
+    // owner's channel intact).
+    if let Some(token) = cancel_token {
         let cancel_state = app_handle.state::<ScrapeCancelState>();
-        unregister_scrape_cancel(&cancel_state, &login_name);
+        unregister_scrape_cancel(&cancel_state, &login_name, token);
     }
 
     let artifacts_dir = result
@@ -2951,7 +2982,8 @@ mod tests {
     #[test]
     fn scrape_cancel_registry_register_trigger_unregister() {
         let state = ScrapeCancelState::default();
-        let mut receiver = register_scrape_cancel(&state, "chase-personal");
+        let (token, mut receiver) = register_scrape_cancel(&state, "chase-personal")
+            .unwrap_or_else(|| panic!("first register should own the entry"));
         assert!(!*receiver.borrow_and_update(), "starts un-canceled");
 
         assert!(
@@ -2960,10 +2992,54 @@ mod tests {
         );
         assert!(*receiver.borrow(), "receiver observes the cancel signal");
 
-        unregister_scrape_cancel(&state, "chase-personal");
+        unregister_scrape_cancel(&state, "chase-personal", token);
         assert!(
             !trigger_scrape_cancel(&state, "chase-personal"),
             "trigger returns false after unregister"
+        );
+    }
+
+    #[test]
+    fn scrape_cancel_registry_second_register_is_denied() {
+        // A second run of an already-running login must not replace the first
+        // run's sender (which would make the live scrape uncancelable).
+        let state = ScrapeCancelState::default();
+        let (_token1, receiver1) = register_scrape_cancel(&state, "chase-personal")
+            .unwrap_or_else(|| panic!("first register should own the entry"));
+        assert!(
+            register_scrape_cancel(&state, "chase-personal").is_none(),
+            "second register for a live login is denied"
+        );
+        // The first run's channel is still the registered one.
+        assert!(
+            trigger_scrape_cancel(&state, "chase-personal"),
+            "trigger still reaches the owner's channel"
+        );
+        assert!(
+            *receiver1.borrow(),
+            "the first run's receiver observes the cancel"
+        );
+    }
+
+    #[test]
+    fn scrape_cancel_registry_non_owner_unregister_is_noop() {
+        // The denied second run exiting (with a bogus/foreign token) must not
+        // remove the live owner's channel.
+        let state = ScrapeCancelState::default();
+        let (owner_token, receiver) = register_scrape_cancel(&state, "chase-personal")
+            .unwrap_or_else(|| panic!("first register should own the entry"));
+        let foreign_token = owner_token.wrapping_add(1);
+        unregister_scrape_cancel(&state, "chase-personal", foreign_token);
+        assert!(
+            trigger_scrape_cancel(&state, "chase-personal"),
+            "owner channel survives a non-owner unregister"
+        );
+        assert!(*receiver.borrow(), "owner still observes the cancel");
+        // The true owner can still unregister.
+        unregister_scrape_cancel(&state, "chase-personal", owner_token);
+        assert!(
+            !trigger_scrape_cancel(&state, "chase-personal"),
+            "owner unregister removes the entry"
         );
     }
 
