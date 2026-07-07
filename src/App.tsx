@@ -51,11 +51,13 @@ import { BookkeepingTab } from './tabs/BookkeepingTab.tsx';
 import { TransactionsTab } from './tabs/TransactionsTab.tsx';
 import {
     createEmptyPipelineTabSession,
+    createEmptyReportsTabSession,
     createEmptyTransactionsTabSession,
     type SecretPromptState,
     type LoginAccountRef,
     type PipelineTabSession,
     type RecategorizeTab,
+    type ReportsTabSession,
     type TransactionsTabSession,
     normalizeLoginConfig,
 } from './types.ts';
@@ -139,6 +141,8 @@ function App() {
         useState<TransactionsTabSession>(createEmptyTransactionsTabSession);
     const [pipelineTabSession, setPipelineTabSession] =
         useState<PipelineTabSession>(createEmptyPipelineTabSession);
+    const [reportsTabSession, setReportsTabSession] =
+        useState<ReportsTabSession>(createEmptyReportsTabSession);
     const [secretPrompt, setSecretPrompt] = useState<SecretPromptState | null>(
         null,
     );
@@ -279,6 +283,7 @@ function App() {
             setPendingTransactionSearch(null);
             setTransactionsTabSession(createEmptyTransactionsTabSession());
             setPipelineTabSession(createEmptyPipelineTabSession());
+            setReportsTabSession(createEmptyReportsTabSession());
         }
     }, [ledgerPath]);
 
@@ -1488,6 +1493,8 @@ function App() {
                         <ReportsTab
                             ledger={ledger.path}
                             accounts={ledger.accounts}
+                            session={reportsTabSession}
+                            onSessionChange={setReportsTabSession}
                         />
                     ) : activeTab === 'preferences' ? (
                         <div className="preferences-panel">

@@ -3,7 +3,12 @@ import type {
     LoginAccountConfig,
     LockStatus,
     TransactionRow,
+    HledgerReportResult,
 } from './tauri-commands.ts';
+import {
+    createDefaultReportConfig,
+    type ReportConfig,
+} from './report-utils.ts';
 
 export type TransactionDraft = {
     date: string;
@@ -65,6 +70,19 @@ export type PipelineTabSession = {
     splitModalEntryId: string | null;
     splitDraftRows: SplitDraftRow[];
     transferModalSearch: string;
+};
+
+export type ReportsTabSession = {
+    /** The current (possibly unrun) report options. */
+    config: ReportConfig;
+    /** Last successful report output, or null if none has run. */
+    result: HledgerReportResult | null;
+    /** Last run's error message, or null. */
+    error: string | null;
+    /** The config that produced `result`/`error`; drives the stale-result hint. */
+    lastRunConfig: ReportConfig | null;
+    /** Whether the default report has auto-run once for this ledger. */
+    hasAutoRun: boolean;
 };
 
 export type PipelineBulkAccountStat = {
@@ -214,6 +232,16 @@ export function createEmptyTransactionsTabSession(): TransactionsTabSession {
         isNewTxnExpandedOverride: null,
         glTransferModalTxnId: null,
         glTransferModalSearch: '',
+    };
+}
+
+export function createEmptyReportsTabSession(): ReportsTabSession {
+    return {
+        config: createDefaultReportConfig(),
+        result: null,
+        error: null,
+        lastRunConfig: null,
+        hasAutoRun: false,
     };
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ReportChart } from './ReportChart.tsx';
 import { getCurrentToken, getSearchSuggestions } from '../search-utils.ts';
 import {
@@ -12,7 +12,6 @@ import {
     REGISTER_FAMILY,
     buildReportArgs,
     computePeriodPresetRange,
-    createDefaultReportConfig,
     type Accumulation,
     type BalanceMode,
     type BalanceView,
@@ -21,16 +20,24 @@ import {
     type ReportConfig,
     type RegisterAccumulation,
 } from '../report-utils.ts';
+import type { ReportsTabSession } from '../types.ts';
 
 interface Props {
     ledger: string;
     accounts: AccountRow[];
+    session: ReportsTabSession;
+    onSessionChange: (
+        updater: (current: ReportsTabSession) => ReportsTabSession,
+    ) => void;
 }
 
-export function ReportsTab({ ledger, accounts }: Props) {
-    const [config, setConfig] = useState<ReportConfig>(
-        createDefaultReportConfig,
-    );
+export function ReportsTab({
+    ledger,
+    accounts,
+    session,
+    onSessionChange,
+}: Props) {
+    const [config, setConfig] = useState<ReportConfig>(session.config);
     // Shallow-merge a partial update into the single config atom.
     const patch = useCallback((partial: Partial<ReportConfig>) => {
         setConfig((current) => ({ ...current, ...partial }));
@@ -42,9 +49,43 @@ export function ReportsTab({ ledger, accounts }: Props) {
     const queryInputRef = useRef<HTMLInputElement>(null);
 
     // Results
-    const [result, setResult] = useState<HledgerReportResult | null>(null);
-    const [error, setError] = useState<string | null>(null);
+    const [result, setResult] = useState<HledgerReportResult | null>(
+        session.result,
+    );
+    const [error, setError] = useState<string | null>(session.error);
     const [running, setRunning] = useState(false);
+    // lastRunConfig/hasAutoRun are persisted across tab switches but are only
+    // read/written by later features (stale hint, default auto-run); mirror them
+    // through refs so they survive the App-held session round-trip.
+    const lastRunConfigRef = useRef<ReportConfig | null>(session.lastRunConfig);
+    const hasAutoRunRef = useRef<boolean>(session.hasAutoRun);
+
+    // Keep a live snapshot of everything the App-held session tracks so it can be
+    // flushed back on unmount (mirrors the TransactionsTab persistence pattern).
+    const sessionRef = useRef<ReportsTabSession>(session);
+    sessionRef.current = {
+        config,
+        result,
+        error,
+        lastRunConfig: lastRunConfigRef.current,
+        hasAutoRun: hasAutoRunRef.current,
+    };
+
+    // Adopt the incoming session when it changes (e.g. after a ledger reset).
+    useEffect(() => {
+        setConfig(session.config);
+        setResult(session.result);
+        setError(session.error);
+        lastRunConfigRef.current = session.lastRunConfig;
+        hasAutoRunRef.current = session.hasAutoRun;
+    }, [session]);
+
+    // Flush the latest local state back to the App when the tab unmounts.
+    useEffect(() => {
+        return () => {
+            onSessionChange(() => sessionRef.current);
+        };
+    }, [onSessionChange]);
 
     const { command, interval, queryInput } = config;
 
