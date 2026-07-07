@@ -207,6 +207,7 @@ pub fn run_with_context(
             run_scrape,
             cancel_scrape,
             get_scrape_log,
+            get_last_scrape_summaries,
             list_scrape_failure_artifacts,
             read_scrape_failure_artifact,
             list_documents,
@@ -900,6 +901,48 @@ fn get_scrape_log(
         operations::read_scrape_log(&ledger_dir, &login_name).map_err(|err| err.to_string())?;
     entries.reverse(); // newest-first to match prior localStorage behaviour
     Ok(entries)
+}
+
+/// Summary of a login's scrape history for the scheduler and per-login console.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastScrapeSummary {
+    /// Timestamp of the most recent successful run, if any.
+    pub last_success: Option<String>,
+    /// The most recent run (success or failure), if any.
+    pub last_run: Option<operations::ScrapeLogEntry>,
+}
+
+/// Fold a login's scrape log (oldest-first, as returned by `read_scrape_log`)
+/// into a `LastScrapeSummary`. Pure so it can be unit-tested.
+fn summarize_scrape_log(entries: &[operations::ScrapeLogEntry]) -> LastScrapeSummary {
+    LastScrapeSummary {
+        last_success: entries
+            .iter()
+            .rev()
+            .find(|entry| entry.success)
+            .map(|entry| entry.timestamp.clone()),
+        last_run: entries.last().cloned(),
+    }
+}
+
+/// Batch per-login scrape summaries for the scheduler (which decides staleness
+/// from `lastSuccess`) and the per-login console. Missing/unreadable logs yield
+/// an empty summary rather than an error.
+#[tauri::command]
+fn get_last_scrape_summaries(
+    ledger: String,
+    login_names: Vec<String>,
+) -> Result<std::collections::BTreeMap<String, LastScrapeSummary>, String> {
+    let ledger_dir = std::path::PathBuf::from(&ledger);
+    crate::ledger::require_refreshmint_extension(&ledger_dir).map_err(|err| err.to_string())?;
+    let mut summaries = std::collections::BTreeMap::new();
+    for login_name in login_names {
+        let login_name = require_login_name_input(login_name)?;
+        let entries = operations::read_scrape_log(&ledger_dir, &login_name).unwrap_or_default();
+        summaries.insert(login_name, summarize_scrape_log(&entries));
+    }
+    Ok(summaries)
 }
 
 /// Reject artifact filenames that contain path separators, parent references,
@@ -2752,10 +2795,11 @@ mod tests {
         register_scrape_cancel, require_existing_login, require_label_input,
         require_login_name_input, require_non_empty_input, resolve_artifact_dir,
         run_login_account_extraction_blocking, scrape_output_payload, send_prompt_answer,
-        trigger_scrape_cancel, unregister_scrape_cancel, validate_artifact_filename,
-        wait_for_prompt_answer, PendingPrompt, PromptAnswerInner, PromptAnswerState,
-        PromptWaitOutcome, ScrapeCancelState,
+        summarize_scrape_log, trigger_scrape_cancel, unregister_scrape_cancel,
+        validate_artifact_filename, wait_for_prompt_answer, PendingPrompt, PromptAnswerInner,
+        PromptAnswerState, PromptWaitOutcome, ScrapeCancelState,
     };
+    use crate::operations::ScrapeLogEntry;
     use crate::scrape::js_api::{DebugOutputEvent, DebugOutputStream};
     use std::collections::BTreeMap;
     use std::fs;
@@ -2820,6 +2864,57 @@ mod tests {
             .unwrap_or_else(|err| panic!("expected valid artifacts dir, got {err}"));
         assert!(ok.starts_with(&dir));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn scrape_entry(timestamp: &str, success: bool) -> ScrapeLogEntry {
+        ScrapeLogEntry {
+            login_name: "chase".to_string(),
+            timestamp: timestamp.to_string(),
+            success,
+            error: if success {
+                None
+            } else {
+                Some("boom".to_string())
+            },
+            source: "manual".to_string(),
+            artifacts_dir: None,
+        }
+    }
+
+    #[test]
+    fn summarize_scrape_log_empty_is_all_none() {
+        let summary = summarize_scrape_log(&[]);
+        assert!(summary.last_success.is_none());
+        assert!(summary.last_run.is_none());
+    }
+
+    #[test]
+    fn summarize_scrape_log_failures_only_has_no_success() {
+        let entries = vec![scrape_entry("t1", false), scrape_entry("t2", false)];
+        let summary = summarize_scrape_log(&entries);
+        assert!(summary.last_success.is_none());
+        // last_run is the most recent (last) entry.
+        assert_eq!(
+            summary.last_run.map(|e| e.timestamp),
+            Some("t2".to_string())
+        );
+    }
+
+    #[test]
+    fn summarize_scrape_log_mixed_picks_latest_success_and_run() {
+        // oldest-first: success, failure, success, failure
+        let entries = vec![
+            scrape_entry("t1", true),
+            scrape_entry("t2", false),
+            scrape_entry("t3", true),
+            scrape_entry("t4", false),
+        ];
+        let summary = summarize_scrape_log(&entries);
+        assert_eq!(summary.last_success, Some("t3".to_string()));
+        assert_eq!(
+            summary.last_run.map(|e| e.timestamp),
+            Some("t4".to_string())
+        );
     }
 
     #[test]
