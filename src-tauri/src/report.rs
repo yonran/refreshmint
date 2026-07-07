@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 use std::process::Command;
@@ -71,27 +72,57 @@ fn parse_csv_rows(bytes: &[u8]) -> io::Result<Vec<Vec<String>>> {
     Ok(rows)
 }
 
-pub fn run_report(journal_path: &Path, command: &str, args: &[String]) -> io::Result<ReportResult> {
+/// Assemble the hledger CLI arguments (command, journal `-f` flags, output
+/// format, and the caller-supplied args). Kept pure and separate from process
+/// spawning so it can be unit-tested. When `extra` is Some, a second `-f` is
+/// emitted after the primary journal — hledger merges multiple `-f` journals,
+/// which is how a budget.journal's periodic transactions feed `--budget`.
+fn hledger_invocation_args(
+    journal: &Path,
+    extra: Option<&Path>,
+    command: &str,
+    args: &[String],
+    use_text: bool,
+) -> Vec<OsString> {
+    let mut out: Vec<OsString> = Vec::new();
+    out.push(command.into());
+    out.push("-f".into());
+    out.push(journal.as_os_str().to_owned());
+    if let Some(extra) = extra {
+        out.push("-f".into());
+        out.push(extra.as_os_str().to_owned());
+    }
+    if !use_text {
+        out.push("--output-format=csv".into());
+    }
+    for arg in args {
+        out.push(arg.into());
+    }
+    out
+}
+
+pub fn run_report(
+    journal_path: &Path,
+    command: &str,
+    args: &[String],
+    extra_journal: Option<&Path>,
+) -> io::Result<ReportResult> {
     validate_args(command, args)?;
 
     let text_commands = ["stats", "activity"];
     let use_text = text_commands.contains(&command);
 
     let mut cmd = Command::new(crate::binpath::hledger_path());
-    cmd.arg(command)
-        .arg("-f")
-        .arg(journal_path)
-        .env("GIT_CONFIG_GLOBAL", crate::ledger::NULL_DEVICE)
-        .env("GIT_CONFIG_SYSTEM", crate::ledger::NULL_DEVICE)
-        .env("GIT_CONFIG_NOSYSTEM", "1");
-
-    if !use_text {
-        cmd.arg("--output-format=csv");
-    }
-
-    for arg in args {
-        cmd.arg(arg);
-    }
+    cmd.args(hledger_invocation_args(
+        journal_path,
+        extra_journal,
+        command,
+        args,
+        use_text,
+    ))
+    .env("GIT_CONFIG_GLOBAL", crate::ledger::NULL_DEVICE)
+    .env("GIT_CONFIG_SYSTEM", crate::ledger::NULL_DEVICE)
+    .env("GIT_CONFIG_NOSYSTEM", "1");
 
     let output = cmd.output()?;
     if !output.status.success() {
@@ -209,6 +240,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn budget_flags_pass_validation() {
+        // --budget is a report display flag, not a blocked file-I/O flag.
+        assert!(validate_args("balance", &args(&["--budget", "-M"])).is_ok());
+    }
+
+    // --- hledger_invocation_args ---
+
+    #[test]
+    fn invocation_args_without_extra_journal() {
+        let journal = std::path::Path::new("/ledger/general.journal");
+        let out = hledger_invocation_args(journal, None, "balance", &args(&["-M"]), false);
+        assert_eq!(
+            out,
+            vec![
+                std::ffi::OsString::from("balance"),
+                std::ffi::OsString::from("-f"),
+                std::ffi::OsString::from("/ledger/general.journal"),
+                std::ffi::OsString::from("--output-format=csv"),
+                std::ffi::OsString::from("-M"),
+            ]
+        );
+    }
+
+    #[test]
+    fn invocation_args_emits_second_dash_f_when_extra_present() {
+        let journal = std::path::Path::new("/ledger/general.journal");
+        let extra = std::path::Path::new("/ledger/budget.journal");
+        let out =
+            hledger_invocation_args(journal, Some(extra), "balance", &args(&["--budget"]), false);
+        // Exactly two -f flags: general.journal then budget.journal.
+        let dash_f_positions: Vec<usize> = out
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.as_os_str() == "-f")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(dash_f_positions.len(), 2, "expected two -f flags: {out:?}");
+        assert_eq!(
+            out[dash_f_positions[1] + 1],
+            std::ffi::OsString::from("/ledger/budget.journal")
+        );
+    }
+
+    #[test]
+    fn invocation_args_omits_csv_for_text_commands() {
+        let journal = std::path::Path::new("/ledger/general.journal");
+        let out = hledger_invocation_args(journal, None, "stats", &[], true);
+        assert!(
+            !out.iter().any(|a| a == "--output-format=csv"),
+            "text commands must not force CSV: {out:?}"
+        );
+    }
+
     // --- parse_csv_rows ---
 
     #[test]
@@ -297,7 +382,7 @@ mod tests {
     #[ignore = "requires hledger on PATH"]
     fn integration_balance_returns_csv_rows() {
         let (_dir, journal) = write_temp_journal();
-        let result = run_report(&journal, "balance", &[]).expect("run_report failed");
+        let result = run_report(&journal, "balance", &[], None).expect("run_report failed");
         assert!(result.text.is_none());
         // Header row + at least one data row
         assert!(
@@ -319,7 +404,7 @@ mod tests {
     #[ignore = "requires hledger on PATH"]
     fn integration_stats_returns_text() {
         let (_dir, journal) = write_temp_journal();
-        let result = run_report(&journal, "stats", &[]).expect("run_report failed");
+        let result = run_report(&journal, "stats", &[], None).expect("run_report failed");
         assert!(result.rows.is_empty());
         let text = result.text.expect("stats should return text");
         assert!(
@@ -332,7 +417,8 @@ mod tests {
     #[ignore = "requires hledger on PATH"]
     fn integration_monthly_balance_has_month_columns() {
         let (_dir, journal) = write_temp_journal();
-        let result = run_report(&journal, "balance", &args(&["-M"])).expect("run_report failed");
+        let result =
+            run_report(&journal, "balance", &args(&["-M"]), None).expect("run_report failed");
         assert!(result.text.is_none());
         let header = &result.rows[0];
         // With -M and two months of data the header should contain a 2024-01 column
@@ -350,7 +436,7 @@ mod tests {
     #[ignore = "requires hledger on PATH"]
     fn integration_register_returns_running_total() {
         let (_dir, journal) = write_temp_journal();
-        let result = run_report(&journal, "register", &args(&["Assets:Checking"]))
+        let result = run_report(&journal, "register", &args(&["Assets:Checking"]), None)
             .expect("run_report failed");
         assert!(result.text.is_none());
         // register CSV: txnidx, date, description, account, amount, balance
@@ -366,7 +452,7 @@ mod tests {
     #[ignore = "requires hledger on PATH"]
     fn integration_incomestatement_has_income_and_expenses() {
         let (_dir, journal) = write_temp_journal();
-        let result = run_report(&journal, "incomestatement", &[]).expect("run_report failed");
+        let result = run_report(&journal, "incomestatement", &[], None).expect("run_report failed");
         assert!(result.text.is_none());
         assert!(result.rows.len() >= 2);
         // The account column should contain both Income and Expenses accounts
@@ -385,10 +471,50 @@ mod tests {
     #[ignore = "requires hledger on PATH"]
     fn integration_nonexistent_journal_returns_error() {
         let path = std::path::Path::new("/nonexistent/path/test.journal");
-        let err = run_report(path, "balance", &[]).unwrap_err();
+        let err = run_report(path, "balance", &[], None).unwrap_err();
         assert!(
             !err.to_string().is_empty(),
             "expected a non-empty error message"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires hledger on PATH"]
+    fn integration_budget_report_merges_extra_journal() {
+        // A budget.journal with a monthly periodic transaction, passed as the
+        // extra `-f`, should make `balance --budget` render budget goals.
+        let (dir, journal) = write_temp_journal();
+        let budget = dir.path.join("budget.journal");
+        std::fs::write(
+            &budget,
+            "\
+~ monthly
+    Expenses:Food    $100.00
+    Assets:Checking
+",
+        )
+        .expect("write budget journal");
+
+        let result = run_report(
+            &journal,
+            "balance",
+            &args(&["--budget", "-M", "Expenses:Food"]),
+            Some(budget.as_path()),
+        )
+        .expect("run_report failed");
+        assert!(result.text.is_none());
+        assert!(result.rows.len() >= 2, "expected header + data rows");
+        // With --budget, hledger renders the goal alongside the actual amount as
+        // "actual [goal]"; the goal ($100.00) must appear somewhere in the body.
+        let body_has_goal = result
+            .rows
+            .iter()
+            .skip(1)
+            .any(|row| row.iter().any(|cell| cell.contains("100")));
+        assert!(
+            body_has_goal,
+            "expected the $100 monthly budget goal in the output; rows = {:?}",
+            result.rows
         );
     }
 }

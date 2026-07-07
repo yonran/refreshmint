@@ -1387,6 +1387,12 @@ export async function runHledgerReport(
     ledger: string,
     command: string,
     args: string[],
+    includeBudget?: boolean,
 ): Promise<HledgerReportResult> {
-    return invoke('run_hledger_report', { ledger, command, args });
+    return invoke('run_hledger_report', {
+        ledger,
+        command,
+        args,
+        includeBudget,
+    });
 }

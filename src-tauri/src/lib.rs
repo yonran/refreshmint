@@ -1655,9 +1655,28 @@ fn run_hledger_report(
     ledger: String,
     command: String,
     args: Vec<String>,
+    include_budget: Option<bool>,
 ) -> Result<report::ReportResult, String> {
-    let journal_path = std::path::PathBuf::from(&ledger).join("general.journal");
-    report::run_report(&journal_path, &command, &args).map_err(|e| e.to_string())
+    let ledger_path = std::path::PathBuf::from(&ledger);
+    let journal_path = ledger_path.join("general.journal");
+    // budget.journal is user-owned and lives NEXT TO general.journal (never an
+    // include inside it — general.journal is app-owned and migration id-backfill
+    // would corrupt an include line). It is merged via a second -f only on
+    // request. See docs/budgets.md.
+    let budget_path = ledger_path.join("budget.journal");
+    let extra_journal: Option<&std::path::Path> = if include_budget == Some(true) {
+        if !budget_path.exists() {
+            return Err(
+                "No budget.journal found in the ledger folder. Create one with \
+                 periodic transactions (see docs/budgets.md)."
+                    .to_string(),
+            );
+        }
+        Some(budget_path.as_path())
+    } else {
+        None
+    };
+    report::run_report(&journal_path, &command, &args, extra_journal).map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
