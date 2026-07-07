@@ -1014,6 +1014,28 @@ fn run_migrate(
     Ok(())
 }
 
+/// Route one driver output event to the CLI's stdout or stderr, restoring the
+/// pre-sink CLI behaviour: `reportValue` output (stream Stdout) goes to stdout so
+/// `refreshmint scrape | grep ...` pipelines see it (see `js_report_value` /
+/// `diag_println!` in scrape/js_api.rs), while `log` output (stream Stderr) goes
+/// to stderr. Writes are error-swallowing (via scrape::diag) so a closed pipe in
+/// the long-lived process can never panic the scrape (see scrape/diag.rs).
+fn write_scrape_log_event(
+    event: &crate::scrape::js_api::DebugOutputEvent,
+    out: impl std::io::Write,
+    err: impl std::io::Write,
+) {
+    use crate::scrape::js_api::DebugOutputStream;
+    match event.stream {
+        DebugOutputStream::Stdout => {
+            crate::scrape::diag::write_line(out, format_args!("{}", event.line));
+        }
+        DebugOutputStream::Stderr => {
+            crate::scrape::diag::write_line(err, format_args!("{}", event.line));
+        }
+    }
+}
+
 fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
     let ledger_dir = match args.ledger.as_ref() {
         Some(path) => crate::ledger::ensure_refreshmint_extension(path.clone())?,
@@ -1041,11 +1063,13 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
         prompt_ui_handler: None,
         // Preserve the pre-sink CLI behaviour: once run_scrape_async attaches an
         // mpsc sink, js_api::emit_debug_output routes driver output to the sink
-        // instead of the stderr fallback, so without this listener the CLI would
-        // print no driver log lines. Mirror the original stderr destination.
+        // instead of the stdout/stderr fallback, so without this listener the CLI
+        // would print no driver log lines. Restore the per-stream destinations
+        // (reportValue -> stdout, log -> stderr) and swallow write errors so a
+        // closed pipe can't panic the run.
         log_listener: Some(std::sync::Arc::new(
             |event: &crate::scrape::js_api::DebugOutputEvent| {
-                eprintln!("{}", event.line);
+                write_scrape_log_event(event, std::io::stdout(), std::io::stderr());
             },
         )),
         cancel: None,
@@ -1839,17 +1863,50 @@ mod tests {
         post_all_counterpart, require_cli_existing_login, require_cli_label,
         require_cli_login_name, resolve_extraction_document_names, run_account_extract_with_dir,
         run_account_post_all_with_dir, run_extension_load_with_dir, run_gl_add_with_dir,
-        run_new_with_ledger_path, run_secret, AccountCommand, AddArgs, Cli, Commands,
-        ExtensionLoadArgs, LoginCommand, SecretAddArgs, SecretArgs, SecretCommand, SecretListArgs,
-        SecretRemoveArgs,
+        run_new_with_ledger_path, run_secret, write_scrape_log_event, AccountCommand, AddArgs, Cli,
+        Commands, ExtensionLoadArgs, LoginCommand, SecretAddArgs, SecretArgs, SecretCommand,
+        SecretListArgs, SecretRemoveArgs,
     };
     use crate::ledger::ensure_refreshmint_extension;
+    use crate::scrape::js_api::{DebugOutputEvent, DebugOutputStream};
     use clap::Parser;
     use serde_json::Value;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn write_scrape_log_event_routes_reportvalue_to_stdout() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        write_scrape_log_event(
+            &DebugOutputEvent {
+                stream: DebugOutputStream::Stdout,
+                line: "TOTAL: 42".to_string(),
+            },
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(out, b"TOTAL: 42\n", "reportValue goes to stdout");
+        assert!(err.is_empty(), "nothing goes to stderr");
+    }
+
+    #[test]
+    fn write_scrape_log_event_routes_log_to_stderr() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        write_scrape_log_event(
+            &DebugOutputEvent {
+                stream: DebugOutputStream::Stderr,
+                line: "navigating".to_string(),
+            },
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(err, b"navigating\n", "log goes to stderr");
+        assert!(out.is_empty(), "nothing goes to stdout");
+    }
 
     #[test]
     fn map_entries_for_cli_honors_extra_transfer_patterns() {
