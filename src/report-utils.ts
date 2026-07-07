@@ -233,6 +233,31 @@ export function shouldAutoRunDefault(state: {
     return state.result === null && state.error === null && !state.hasAutoRun;
 }
 
+/**
+ * Whether `current` would produce a different report than the one that produced
+ * the displayed results (`lastRun`). Used to show a "results may be stale" hint.
+ * Compares every ReportConfig field structurally. queryInput is compared by its
+ * trimmed value because buildReportArgs trims it, so whitespace-only edits do not
+ * change the report. Returns false when nothing has run yet.
+ */
+export function isReportConfigStale(
+    current: ReportConfig,
+    lastRun: ReportConfig | null,
+): boolean {
+    if (lastRun === null) return false;
+    // Normalize queryInput (buildReportArgs trims it) then compare structurally.
+    // Both objects share the ReportConfig key order, so a serialized compare is
+    // order-stable.
+    const normalize = (c: ReportConfig): ReportConfig => ({
+        ...c,
+        queryInput: c.queryInput.trim(),
+    });
+    return (
+        JSON.stringify(normalize(current)) !==
+        JSON.stringify(normalize(lastRun))
+    );
+}
+
 export type CannedReportId =
     | 'spending-by-category'
     | 'income-vs-expense'

@@ -154,6 +154,14 @@
     border-color: #2563eb;
 }
 
+.report-stale-hint {
+    color: #92400e;
+    background: #fef3c7;
+    border-radius: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.85rem;
+}
+
 .table-wrap {
     border: 1px solid #e3e3e3;
     border-radius: 1rem;

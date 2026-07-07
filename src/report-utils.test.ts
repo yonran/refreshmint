@@ -4,6 +4,7 @@ import {
     cannedReportConfig,
     computePeriodPresetRange,
     createDefaultReportConfig,
+    isReportConfigStale,
     shouldAutoRunDefault,
     type ReportConfig,
 } from './report-utils.ts';
@@ -240,6 +241,44 @@ describe('shouldAutoRunDefault', () => {
                 error: 'boom',
                 hasAutoRun: false,
             }),
+        ).toBe(false);
+    });
+});
+
+describe('isReportConfigStale', () => {
+    it('is false when nothing has run yet (null lastRun)', () => {
+        expect(isReportConfigStale(config(), null)).toBe(false);
+    });
+
+    it('is false when the config is unchanged since the last run', () => {
+        const cfg = config({ command: 'balance', interval: '-M' });
+        expect(isReportConfigStale(cfg, { ...cfg })).toBe(false);
+    });
+
+    it('is true when the command changed', () => {
+        expect(
+            isReportConfigStale(
+                config({ command: 'register' }),
+                config({ command: 'balance' }),
+            ),
+        ).toBe(true);
+    });
+
+    it('is true when a single option field changed', () => {
+        expect(
+            isReportConfigStale(
+                config({ interval: '-M' }),
+                config({ interval: '' }),
+            ),
+        ).toBe(true);
+    });
+
+    it('ignores query whitespace-only differences (matches buildReportArgs trim)', () => {
+        expect(
+            isReportConfigStale(
+                config({ queryInput: '  acct:^Expenses  ' }),
+                config({ queryInput: 'acct:^Expenses' }),
+            ),
         ).toBe(false);
     });
 });

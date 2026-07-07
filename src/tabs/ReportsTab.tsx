@@ -13,6 +13,7 @@ import {
     buildReportArgs,
     cannedReportConfig,
     computePeriodPresetRange,
+    isReportConfigStale,
     shouldAutoRunDefault,
     type Accumulation,
     type CannedReportId,
@@ -131,6 +132,10 @@ export function ReportsTab({
             } catch (e) {
                 setError(String(e));
             } finally {
+                // Record the config that produced the current output (on both
+                // success and error) so the stale-result hint can compare against
+                // subsequent edits.
+                lastRunConfigRef.current = cfg;
                 setRunning(false);
             }
         },
@@ -174,6 +179,11 @@ export function ReportsTab({
 
     const chartKind: 'register' | 'balance-interval' =
         command === 'register' ? 'register' : 'balance-interval';
+
+    // Show a hint when the options have been edited since the displayed output
+    // was produced. Suppressed while a run is in flight.
+    const isStale =
+        !running && isReportConfigStale(config, lastRunConfigRef.current);
 
     return (
         <div className="transactions-panel">
@@ -849,6 +859,14 @@ export function ReportsTab({
                 {error !== null && (
                     <div className="error-message">
                         <pre>{error}</pre>
+                    </div>
+                )}
+
+                {/* Stale-result hint */}
+                {isStale && (
+                    <div className="report-stale-hint">
+                        Options changed — results may be stale. Re-run to
+                        refresh.
                     </div>
                 )}
             </section>
