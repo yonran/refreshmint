@@ -49,7 +49,9 @@ import {
     reviewImportAnomaly,
     type UnpostedTransferResult,
     type TypedRef,
+    UNCATEGORIZED_GL_ACCOUNT,
 } from '../tauri-commands.ts';
+import { postButtonLabel } from '../categorize-utils.ts';
 import {
     createTransferLinkResolution,
     loginEntryRef,
@@ -923,14 +925,15 @@ export function PipelineTab({
         }
 
         // A matching CategoryRule posts directly to its account (one GL write);
-        // else Expenses:Unknown. Mirrors App.tsx auto-ETL / cli.rs
-        // post_all_counterpart (categorize CategoryResult.ruleAccount).
+        // else the uncategorized account. Mirrors App.tsx auto-ETL / cli.rs
+        // post_all_counterpart (categorize CategoryResult.ruleAccount). Kept in
+        // sync with postButtonLabel, which names this same destination.
         const glId = await postLoginAccountEntry(
             ledgerPath,
             loginName,
             label,
             entryId,
-            suggestion?.ruleAccount ?? 'Expenses:Unknown',
+            suggestion?.ruleAccount ?? UNCATEGORIZED_GL_ACCOUNT,
             null,
         );
         return `Posted ${entryId} to ${glId}`;
@@ -2780,7 +2783,9 @@ export function PipelineTab({
                                                                     >
                                                                         {isBusy
                                                                             ? 'Posting...'
-                                                                            : 'Post'}
+                                                                            : postButtonLabel(
+                                                                                  suggestion,
+                                                                              )}
                                                                     </button>
                                                                     <button
                                                                         type="button"

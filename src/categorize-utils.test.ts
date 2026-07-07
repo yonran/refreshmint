@@ -4,8 +4,10 @@ import {
     buildUndoPlan,
     categorizeChipLabel,
     mergeTransferChipLabel,
+    postButtonLabel,
     summarizeBulkRecategorize,
 } from './categorize-utils.ts';
+import { UNCATEGORIZED_GL_ACCOUNT } from './tauri-commands.ts';
 import type {
     GlCategoryResult,
     PostingRow,
@@ -217,5 +219,51 @@ describe('buildUndoPlan', () => {
             kind: 'unpost-no-memory',
             glTxnId: 'gl-9',
         });
+    });
+});
+
+describe('postButtonLabel', () => {
+    const base = {
+        suggested: null,
+        amountChanged: false,
+        statusChanged: false,
+        transferCandidates: [],
+    };
+
+    it('names a transfer post when a transfer match exists', () => {
+        expect(
+            postButtonLabel({
+                ...base,
+                transferMatch: {
+                    accountLocator: 'logins/boa/accounts/savings',
+                    entryId: 'e2',
+                    matchedAmount: '100.00',
+                },
+                ruleAccount: null,
+            }),
+        ).toBe('Post as transfer');
+    });
+
+    it('names the rule account when one matches', () => {
+        expect(
+            postButtonLabel({
+                ...base,
+                transferMatch: null,
+                ruleAccount: 'Expenses:Groceries',
+            }),
+        ).toBe('Post to Expenses:Groceries');
+    });
+
+    it('falls back to the uncategorized account', () => {
+        expect(
+            postButtonLabel({
+                ...base,
+                transferMatch: null,
+                ruleAccount: null,
+            }),
+        ).toBe(`Post to ${UNCATEGORIZED_GL_ACCOUNT}`);
+        expect(postButtonLabel(undefined)).toBe(
+            `Post to ${UNCATEGORIZED_GL_ACCOUNT}`,
+        );
     });
 });

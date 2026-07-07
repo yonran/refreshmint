@@ -1,4 +1,9 @@
-import type { GlCategoryResult, TransactionRow } from './tauri-commands';
+import type {
+    CategoryResult,
+    GlCategoryResult,
+    TransactionRow,
+} from './tauri-commands';
+import { UNCATEGORIZED_GL_ACCOUNT } from './tauri-commands';
 
 /** Max description length shown in a merge-transfer chip before truncation. */
 const MERGE_CHIP_DESC_MAX = 40;
@@ -28,6 +33,21 @@ export function mergeTransferChipLabel({
  */
 export function categorizeChipLabel(account: string): string {
     return `Categorize as ${account}`;
+}
+
+/**
+ * Label for a Pipeline per-entry Post button, naming where the entry will land:
+ * a transfer, its matching CategoryRule account, or the uncategorized account.
+ * Mirrors doPipelinePostForAccount's destination logic so the button and the
+ * post agree. Replaces the bare "Post".
+ */
+export function postButtonLabel(
+    suggestion:
+        | Pick<CategoryResult, 'transferMatch' | 'ruleAccount'>
+        | undefined,
+): string {
+    if (suggestion?.transferMatch) return 'Post as transfer';
+    return `Post to ${suggestion?.ruleAccount ?? UNCATEGORIZED_GL_ACCOUNT}`;
 }
 
 /**
