@@ -23,6 +23,11 @@ import {
     type TypedRefKind,
     upsertPeriodClose,
 } from '../tauri-commands.ts';
+import {
+    enumLabel,
+    LINK_KIND_LABELS,
+    PERIOD_CLOSE_STATUS_LABELS,
+} from '../enum-labels.ts';
 
 interface Props {
     ledger: string;
@@ -836,9 +841,14 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                                 );
                             }}
                         >
-                            <option value="draft">draft</option>
-                            <option value="soft-closed">soft-closed</option>
-                            <option value="reopened">reopened</option>
+                            {PERIOD_CLOSE_STATUSES.map((status) => (
+                                <option key={status} value={status}>
+                                    {enumLabel(
+                                        PERIOD_CLOSE_STATUS_LABELS,
+                                        status,
+                                    )}
+                                </option>
+                            ))}
                         </select>
                     </label>
                     <label className="field">
@@ -916,7 +926,12 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                                 periodCloses.map((close) => (
                                     <tr key={close.periodId}>
                                         <td>{close.periodId}</td>
-                                        <td>{close.status}</td>
+                                        <td>
+                                            {enumLabel(
+                                                PERIOD_CLOSE_STATUS_LABELS,
+                                                close.status,
+                                            )}
+                                        </td>
                                         <td>
                                             {
                                                 close.reconciliationSessionIds
@@ -952,8 +967,9 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                     <div>
                         <h3>Links and Settlements</h3>
                         <p>
-                            `settlement-link` is for clearing open balances.
-                            Other link kinds stay descriptive only.
+                            Settlement links clear open balances such as
+                            accruals, deferrals, receivables, or payables.
+                            Evidence and Source links stay descriptive only.
                         </p>
                     </div>
                 </div>
@@ -966,11 +982,11 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                                 setLinkKind(parseLinkKind(event.target.value));
                             }}
                         >
-                            <option value="settlement-link">
-                                settlement-link
-                            </option>
-                            <option value="evidence-link">evidence-link</option>
-                            <option value="source-link">source-link</option>
+                            {LINK_KINDS.map((kind) => (
+                                <option key={kind} value={kind}>
+                                    {enumLabel(LINK_KIND_LABELS, kind)}
+                                </option>
+                            ))}
                         </select>
                     </label>
                     <label className="field">
@@ -1040,7 +1056,12 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                                 links.map((link) => (
                                     <tr key={link.id}>
                                         <td>
-                                            <div>{link.kind}</div>
+                                            <div>
+                                                {enumLabel(
+                                                    LINK_KIND_LABELS,
+                                                    link.kind,
+                                                )}
+                                            </div>
                                             <div className="status-dim">
                                                 {link.id}
                                             </div>
