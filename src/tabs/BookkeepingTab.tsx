@@ -28,6 +28,7 @@ import {
     LINK_KIND_LABELS,
     PERIOD_CLOSE_STATUS_LABELS,
 } from '../enum-labels.ts';
+import { appendIdToList } from '../bookkeeping-utils.ts';
 
 interface Props {
     ledger: string;
@@ -496,6 +497,11 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                             Reconciliation sessions, settlement links, and
                             soft-close records live here.
                         </p>
+                        <p className="hint">
+                            Advanced: statement reconciliation, period close,
+                            and manual links. Day-to-day review lives in the
+                            Review tab.
+                        </p>
                     </div>
                     <div className="header-actions">
                         <button
@@ -770,6 +776,21 @@ export function BookkeepingTab({ ledger, accounts }: Props) {
                                         </td>
                                         <td>
                                             <div className="pipeline-row-actions">
+                                                <button
+                                                    type="button"
+                                                    className="ghost-button"
+                                                    onClick={() => {
+                                                        setCloseSessionIds(
+                                                            (current) =>
+                                                                appendIdToList(
+                                                                    current,
+                                                                    session.id,
+                                                                ),
+                                                        );
+                                                    }}
+                                                >
+                                                    Use in close
+                                                </button>
                                                 {session.status !==
                                                 'finalized' ? (
                                                     <button
