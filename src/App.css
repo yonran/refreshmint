@@ -1326,6 +1326,12 @@ details[open] > .disclosure-summary::before {
     gap: 0.35rem;
 }
 
+/* A column flexbox stretches children by default; buttons (e.g. Run) should
+   size to their content like everywhere else in the app. */
+.field-group > button {
+    align-self: flex-start;
+}
+
 .field-row {
     display: flex;
     flex-wrap: wrap;
