@@ -1,0 +1,8 @@
+# Apple's last open-sourced ld64 (bundled here via nix's cctools-binutils-darwin)
+# crashes with SIGTRAP in ld::passes::stubs::Pass::process when linking newer
+# AppKit-framework symbol references (e.g. from tauri-plugin-notification's
+# mac-notification-sys/objc2-app-kit) — an internal bug in that frozen linker,
+# not in this project's code. Use LLVM's lld instead, scoped to this project
+# only (see .envrc for llvmPackages.bintools on PATH).
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]

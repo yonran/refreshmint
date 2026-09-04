@@ -196,7 +196,14 @@ fn lock_metadata_watcher_state() -> &'static std::sync::Mutex<Option<LockMetadat
     LOCK_METADATA_WATCHER.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+// Desktop's main.rs generates its own context (needed up front for CLI
+// dispatch) and calls `run_with_context` directly, bypassing this. Gating the
+// whole item (not just the attribute) behind `mobile` keeps this second
+// `generate_context!()` expansion out of desktop builds entirely — with both
+// present, the two `EMBED_INFO_PLIST` symbols they embed collide under lld
+// (the old cctools ld64 silently tolerated the duplicate; lld does not).
+#[cfg(mobile)]
+#[tauri::mobile_entry_point]
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     run_with_context(context)
