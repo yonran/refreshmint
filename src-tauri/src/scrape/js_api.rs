@@ -351,6 +351,10 @@ struct SnapshotNode {
     text: String,
     #[serde(default)]
     value: String,
+    /// Internal marker used to mask password values before a snapshot reaches
+    /// either the trusted driver or an external observer.
+    #[serde(default, skip_serializing)]
+    password: bool,
     #[serde(default)]
     visible: bool,
     #[serde(default)]
@@ -457,12 +461,66 @@ pub struct DebugOutputEvent {
     pub line: String,
 }
 
+/// Values that must be removed when data leaves the trusted driver runtime.
+///
+/// Keep this session-scoped: prompt answers must not remain resident after the
+/// browser session ends, and one login's values must not affect another's logs.
+pub struct SensitiveData {
+    values: std::sync::Mutex<BTreeSet<String>>,
+    redact_all: bool,
+}
+
+impl Default for SensitiveData {
+    fn default() -> Self {
+        Self {
+            values: std::sync::Mutex::new(BTreeSet::new()),
+            redact_all: false,
+        }
+    }
+}
+
+impl SensitiveData {
+    pub fn for_secret_store(secret_store: &SecretStore) -> Self {
+        let sensitive = Self::default();
+        if let Ok(usernames) = secret_store.all_usernames() {
+            for username in usernames {
+                sensitive.register(&username);
+            }
+        }
+        sensitive
+    }
+
+    pub fn register(&self, value: &str) {
+        if value.is_empty() {
+            return;
+        }
+        if let Ok(mut values) = self.values.lock() {
+            values.insert(value.to_string());
+        }
+    }
+
+    pub fn redact(&self, text: &str) -> String {
+        if self.redact_all {
+            return "[REDACTED]".to_string();
+        }
+        let Ok(values) = self.values.lock() else {
+            return "[REDACTION FAILED]".to_string();
+        };
+        let mut values = values.iter().collect::<Vec<_>>();
+        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        values.into_iter().fold(text.to_string(), |text, value| {
+            text.replace(value.as_str(), "[REDACTED]")
+        })
+    }
+}
+
 /// Shared state backing the `page` JS object.
 pub struct PageInner {
     pub page: chromiumoxide::Page,
     pub target_id: String,
     pub browser: Arc<Mutex<chromiumoxide::browser::Browser>>,
     pub secret_store: Arc<SecretStore>,
+    pub sensitive_data: Arc<SensitiveData>,
     pub declared_secrets: Arc<SecretDeclarations>,
     pub download_dir: PathBuf,
     pub target_frame_id: Option<chromiumoxide::cdp::browser_protocol::page::FrameId>,
@@ -1688,9 +1746,8 @@ impl JsHandle {
         )
         .await
         .map_err(|e| js_err(format!("JSHandle.jsonValue failed: {e}")))?;
-        let mut text =
+        let text =
             stringify_evaluation_result(result.value.as_ref(), result.description.as_deref());
-        scrub_known_secrets(&inner.secret_store, &mut text);
         Ok(text)
     }
 }
@@ -1748,9 +1805,8 @@ impl ElementHandle {
         )
         .await
         .map_err(|e| js_err(format!("ElementHandle.jsonValue failed: {e}")))?;
-        let mut text =
+        let text =
             stringify_evaluation_result(result.value.as_ref(), result.description.as_deref());
-        scrub_known_secrets(&inner.secret_store, &mut text);
         Ok(text)
     }
 
@@ -2045,7 +2101,8 @@ unsafe impl<'js> JsLifetime<'js> for ResponseApi {
 /// JS types; non-serialisable values (functions, DOM nodes, circular graphs,
 /// …) are returned as `JSHandle` or `ElementHandle` instances.
 pub enum JsEvalResult {
-    /// A JS string.  Secret values have been scrubbed to `[REDACTED]`.
+    /// A JS string. Values remain truthful inside the trusted driver runtime;
+    /// redaction happens when logs or errors leave the session.
     Str(String),
     /// A JSON literal (number / boolean / null / array / plain object).
     /// Stored as a JSON string so it can be parsed via `ctx.eval()`.
@@ -3575,11 +3632,10 @@ impl PageApi {
             .evaluate_expression_with_session(eval, session_id)
             .await
             .map_err(|e| js_err(format!("frameEvaluate failed: {e}")))?;
-        let mut eval_result = remote_object_to_eval_result(result.object().clone(), page_inner_arc);
-        if let JsEvalResult::Str(ref mut s) = eval_result {
-            scrub_known_secrets(&inner.secret_store, s);
-        }
-        Ok(eval_result)
+        Ok(remote_object_to_eval_result(
+            result.object().clone(),
+            page_inner_arc,
+        ))
     }
 
     /// Fill a value in a frame execution context.
@@ -3750,6 +3806,7 @@ impl PageApi {
                         const role = (el.getAttribute('role') || implicitRole(el) || (el.tagName || '').toLowerCase()).trim();
                         const label = computeLabel(el);
                         const value = typeof el.value === 'string' ? String(el.value) : '';
+                        const password = (el.getAttribute('type') || '').toLowerCase() === 'password';
                         const text = String((el.innerText || el.textContent || '').trim()).slice(0, 240);
                         const ariaChecked = el.getAttribute('aria-checked');
                         let checked = null;
@@ -3778,6 +3835,7 @@ impl PageApi {
                             tag: (el.tagName || '').toLowerCase(),
                             text,
                             value,
+                            password,
                             visible: isVisible(el),
                             disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
                             expanded: el.hasAttribute('aria-expanded')
@@ -3800,12 +3858,13 @@ impl PageApi {
             .map_err(|e| js_err(format!("snapshot failed: {e}")))?;
         drop(inner);
 
-        let nodes = if let Some(value) = result.value() {
+        let mut nodes = if let Some(value) = result.value() {
             serde_json::from_value::<Vec<SnapshotNode>>(value.clone())
                 .map_err(|e| js_err(format!("snapshot parse failed: {e}")))?
         } else {
             Vec::new()
         };
+        mask_password_snapshot_values(&mut nodes);
 
         let mut tracks = self.snapshot_tracks.lock().await;
         let previous = tracks.get(&options.track).cloned().unwrap_or_default();
@@ -3828,7 +3887,8 @@ impl PageApi {
     /// array, `null`, or `undefined` for serialisable values; a `JSHandle` or
     /// `ElementHandle` for non-serialisable ones (functions, DOM nodes, …).
     ///
-    /// Secret string values in the result are scrubbed to `[REDACTED]`.
+    /// Results remain truthful inside the trusted driver runtime. Sensitive
+    /// values are redacted if the driver sends them to an output boundary.
     pub async fn evaluate(&self, expression: String) -> JsResult<JsEvalResult> {
         self.evaluate_in_active_context(expression).await
     }
@@ -3929,11 +3989,10 @@ impl PageApi {
                 .unwrap_or(&exc.text);
             return Err(js_err(msg.to_string()));
         }
-        let mut eval_result = remote_object_to_eval_result(response.result.result, page_inner_arc);
-        if let JsEvalResult::Str(ref mut s) = eval_result {
-            scrub_known_secrets(&inner.secret_store, s);
-        }
-        Ok(eval_result)
+        Ok(remote_object_to_eval_result(
+            response.result.result,
+            page_inner_arc,
+        ))
     }
 
     /// Return the first element in the document matching `selector`, or `null`.
@@ -4164,16 +4223,13 @@ impl PageApi {
     ///
     /// Uses `returnByValue: false` so non-serialisable results (DOM nodes, functions, …)
     /// come back as remote-object handles rather than `undefined`.
-    /// Secret string values in the result are scrubbed to `[REDACTED]`.
+    /// Results remain truthful inside the trusted driver runtime. Sensitive
+    /// values are redacted if the driver sends them to an output boundary.
     async fn evaluate_in_active_context(&self, expression: String) -> JsResult<JsEvalResult> {
         use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
-        let (page, frame_id, secret_store) = {
+        let (page, frame_id) = {
             let inner = self.inner.lock().await;
-            (
-                inner.page.clone(),
-                inner.target_frame_id.clone(),
-                inner.secret_store.clone(),
-            )
+            (inner.page.clone(), inner.target_frame_id.clone())
         };
         let page_inner_arc = self.inner.clone();
         if let Some(frame_id) = frame_id {
@@ -4229,12 +4285,10 @@ impl PageApi {
                         })?
                 }
             };
-            let mut eval_result =
-                remote_object_to_eval_result(result.object().clone(), page_inner_arc);
-            if let JsEvalResult::Str(ref mut s) = eval_result {
-                scrub_known_secrets(&secret_store, s);
-            }
-            Ok(eval_result)
+            Ok(remote_object_to_eval_result(
+                result.object().clone(),
+                page_inner_arc,
+            ))
         } else {
             let eval = EvaluateParams::builder()
                 .expression(expression.clone())
@@ -4272,12 +4326,10 @@ impl PageApi {
                         })?
                 }
             };
-            let mut eval_result =
-                remote_object_to_eval_result(result.object().clone(), page_inner_arc);
-            if let JsEvalResult::Str(ref mut s) = eval_result {
-                scrub_known_secrets(&secret_store, s);
-            }
-            Ok(eval_result)
+            Ok(remote_object_to_eval_result(
+                result.object().clone(),
+                page_inner_arc,
+            ))
         }
     }
 
@@ -5307,6 +5359,7 @@ async fn build_page_api_from_template(
         page,
         browser: template.browser.clone(),
         secret_store: template.secret_store.clone(),
+        sensitive_data: template.sensitive_data.clone(),
         declared_secrets: template.declared_secrets.clone(),
         download_dir: template.download_dir.clone(),
         target_frame_id: None,
@@ -5460,19 +5513,6 @@ pub(crate) fn stringify_evaluation_result(
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(other) => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
         None => description.unwrap_or("undefined").to_string(),
-    }
-}
-
-pub(crate) fn scrub_known_secrets(secret_store: &SecretStore, text: &mut String) {
-    // Usernames are readable without biometric and are the most likely to
-    // appear in page-evaluation results.  Passwords are typed into form
-    // fields and rarely returned by JS evaluation.
-    if let Ok(usernames) = secret_store.all_usernames() {
-        for username in &usernames {
-            if !username.is_empty() {
-                *text = text.replace(username.as_str(), "[REDACTED]");
-            }
-        }
     }
 }
 
@@ -7167,9 +7207,11 @@ pub(crate) async fn resolve_secret_if_applicable(
         is_username_role(&inner.declared_secrets, &top_level_domain, referenced_name);
     if username_role {
         if let Ok(v) = inner.secret_store.get_username(&top_level_domain) {
+            inner.sensitive_data.register(&v);
             return Ok(v);
         }
     } else if let Ok(v) = inner.secret_store.get_password(&top_level_domain) {
+        inner.sensitive_data.register(&v);
         return Ok(v);
     }
 
@@ -7177,14 +7219,16 @@ pub(crate) async fn resolve_secret_if_applicable(
     if ENABLE_LEGACY_SECRET_FALLBACK {
         for (domain, name) in &legacy_known {
             if name == referenced_name && domain.eq_ignore_ascii_case(&top_level_domain) {
-                return inner
+                let value = inner
                     .secret_store
                     .get_legacy_value(domain, name)
                     .map_err(|e| {
                         js_err(format!(
                             "failed to read secret '{name}' for domain '{domain}': {e}"
                         ))
-                    });
+                    })?;
+                inner.sensitive_data.register(&value);
+                return Ok(value);
             }
         }
     }
@@ -7301,6 +7345,7 @@ pub struct RefreshmintInner {
     pub prompt_requires_override: bool,
     pub script_options: ScriptOptions,
     pub debug_output_sink: Option<tokio::sync::mpsc::UnboundedSender<DebugOutputEvent>>,
+    pub sensitive_data: Arc<SensitiveData>,
     pub session_metadata: SessionMetadata,
     pub staged_resources: Vec<StagedResource>,
     pub scrape_session_id: String,
@@ -7326,6 +7371,8 @@ fn resolve_prompt_response(response: Option<String>) -> JsResult<String> {
 pub struct RefreshmintApi {
     #[qjs(skip_trace)]
     inner: Arc<Mutex<RefreshmintInner>>,
+    #[qjs(skip_trace)]
+    sensitive_data: Arc<SensitiveData>,
 }
 
 // Safety: RefreshmintApi only contains Arc<Mutex<...>> which is 'static.
@@ -7336,7 +7383,22 @@ unsafe impl<'js> JsLifetime<'js> for RefreshmintApi {
 
 impl RefreshmintApi {
     pub fn new(inner: Arc<Mutex<RefreshmintInner>>) -> Self {
-        Self { inner }
+        let sensitive_data = inner
+            .try_lock()
+            .map(|inner| inner.sensitive_data.clone())
+            // Construction normally happens before the state is shared. If a
+            // future caller violates that invariant, fail closed rather than
+            // emitting unredacted output.
+            .unwrap_or_else(|_| {
+                Arc::new(SensitiveData {
+                    values: std::sync::Mutex::new(BTreeSet::new()),
+                    redact_all: true,
+                })
+            });
+        Self {
+            inner,
+            sensitive_data,
+        }
     }
 
     /// Shared backend for `prompt` (free-text, `choices == None`) and
@@ -7347,6 +7409,7 @@ impl RefreshmintApi {
         message: String,
         choices: Option<Vec<String>>,
     ) -> JsResult<String> {
+        let answer_is_sensitive = choices.is_none();
         let (override_value, require_override, prompt_ui_handler) = {
             let inner = self
                 .inner
@@ -7367,6 +7430,9 @@ impl RefreshmintApi {
         };
 
         if let Some(value) = override_value {
+            if answer_is_sensitive {
+                self.sensitive_data.register(&value);
+            }
             return Ok(value);
         }
 
@@ -7378,7 +7444,11 @@ impl RefreshmintApi {
         // runs on a spawn_blocking thread so a blocking callback is safe.
         if let Some(prompt_ui_handler) = prompt_ui_handler {
             let response = prompt_ui_handler(message, choices).map_err(js_err)?;
-            return resolve_prompt_response(response);
+            let response = resolve_prompt_response(response)?;
+            if answer_is_sensitive {
+                self.sensitive_data.register(&response);
+            }
+            return Ok(response);
         }
 
         // CLI context: read from stdin. List the choices so the operator knows
@@ -7393,7 +7463,11 @@ impl RefreshmintApi {
         std::io::stdin()
             .read_line(&mut line)
             .map_err(|e| js_err(format!("prompt read failed: {e}")))?;
-        Ok(line.trim_end().to_string())
+        let answer = line.trim_end().to_string();
+        if answer_is_sensitive {
+            self.sensitive_data.register(&answer);
+        }
+        Ok(answer)
     }
 }
 
@@ -7733,6 +7807,21 @@ fn snapshot_nodes_by_ref(nodes: &[SnapshotNode]) -> BTreeMap<String, SnapshotNod
     map
 }
 
+fn mask_password_snapshot_values(nodes: &mut [SnapshotNode]) {
+    for node in nodes {
+        if !node.password || node.value.is_empty() {
+            continue;
+        }
+        let value = std::mem::replace(&mut node.value, "[REDACTED]".to_string());
+        if node.label == value {
+            node.label = "[REDACTED]".to_string();
+        }
+        if node.text == value {
+            node.text = "[REDACTED]".to_string();
+        }
+    }
+}
+
 fn build_snapshot_diff(
     previous: &[SnapshotNode],
     current: &[SnapshotNode],
@@ -7982,7 +8071,7 @@ impl RefreshmintApi {
     /// Report a key-value pair to stdout.
     #[qjs(rename = "reportValue")]
     pub fn js_report_value(&self, key: String, value: String) -> JsResult<()> {
-        let message = format!("{key}: {value}");
+        let message = self.sensitive_data.redact(&format!("{key}: {value}"));
         if !self.emit_debug_output(DebugOutputStream::Stdout, message.clone()) {
             diag_println!("{message}");
         }
@@ -7991,6 +8080,7 @@ impl RefreshmintApi {
 
     /// Log a message to stderr.
     pub fn log(&self, message: String) -> JsResult<()> {
+        let message = self.sensitive_data.redact(&message);
         if !self.emit_debug_output(DebugOutputStream::Stderr, message.clone()) {
             diag_eprintln!("{message}");
         }
@@ -8800,6 +8890,7 @@ mod tests {
             tag: "button".to_string(),
             text: label.to_string(),
             value: String::new(),
+            password: false,
             visible: true,
             disabled: false,
             expanded: None,
@@ -8810,6 +8901,23 @@ mod tests {
             aria_described_by: None,
             selector_hint: "button".to_string(),
         }
+    }
+
+    #[test]
+    fn password_snapshot_values_are_masked_before_serialization() {
+        let mut node = snapshot_node("password", "hunter2");
+        node.tag = "input".to_string();
+        node.value = "hunter2".to_string();
+        node.password = true;
+
+        mask_password_snapshot_values(std::slice::from_mut(&mut node));
+
+        assert_eq!(node.value, "[REDACTED]");
+        assert_eq!(node.label, "[REDACTED]");
+        let json = serde_json::to_string(&node)
+            .unwrap_or_else(|err| panic!("snapshot serialization failed: {err}"));
+        assert!(!json.contains("hunter2"));
+        assert!(!json.contains("password\":true"));
     }
 
     #[test]
@@ -8930,6 +9038,7 @@ mod tests {
             prompt_requires_override: true,
             script_options: ScriptOptions::new(),
             debug_output_sink: None,
+            sensitive_data: Arc::new(SensitiveData::default()),
             session_metadata: SessionMetadata::default(),
             staged_resources: Vec::new(),
             scrape_session_id: String::new(),
@@ -8985,6 +9094,28 @@ mod tests {
             .prompt("OTP".to_string())
             .unwrap_or_else(|err| panic!("prompt unexpectedly failed: {err}"));
         assert_eq!(value, "123456");
+    }
+
+    #[test]
+    fn prompt_value_is_redacted_only_when_it_leaves_through_log_output() {
+        let mut overrides = PromptOverrides::new();
+        overrides.insert("OTP".to_string(), "123456".to_string());
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut inner = test_refreshmint_inner(overrides);
+        inner.debug_output_sink = Some(sender);
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(inner)));
+
+        let value = api
+            .prompt("OTP".to_string())
+            .unwrap_or_else(|err| panic!("prompt unexpectedly failed: {err}"));
+        assert_eq!(value, "123456", "the trusted driver sees the real value");
+
+        api.log(format!("submitted {value}"))
+            .unwrap_or_else(|err| panic!("log failed: {err}"));
+        let event = receiver
+            .try_recv()
+            .unwrap_or_else(|err| panic!("missing output event: {err}"));
+        assert_eq!(event.line, "submitted [REDACTED]");
     }
 
     #[test]

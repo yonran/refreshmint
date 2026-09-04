@@ -218,8 +218,8 @@ impl SecretStore {
     /// Return all stored usernames for log scrubbing — no biometric prompt.
     ///
     /// Passwords are NOT included here because reading them triggers biometric
-    /// on macOS. Callers that need passwords for scrubbing should maintain their
-    /// own cache of resolved values (see `scrub_known_secrets` in js_api.rs).
+    /// on macOS. The scraper registers passwords in its session redactor when
+    /// they are resolved for a fill operation.
     pub fn all_usernames(&self) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
         let index = self.read_domains_index()?;
         let mut values = Vec::new();

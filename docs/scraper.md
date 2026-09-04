@@ -481,6 +481,13 @@ means a mid-run failure finalizes documents whose sidecars overstate coverage.
 - if keychain secret exists but is not declared for current domain, `fill`/`frameFill` throws
 - otherwise `value` is treated literally
 
+Secret substitution does not alter values returned by `evaluate`, `jsonValue`,
+or locator evaluation inside the trusted driver runtime. Resolved credentials
+and free-text prompt answers are instead redacted when they cross an output
+boundary through `refreshmint.log`, `reportValue`, scrape errors, debug errors,
+or failure URLs. Accessibility snapshots always mask populated password fields.
+Raw downloaded evidence is not modified by this output redaction.
+
 Manifest secret declarations now support typed role mapping:
 
 ```json

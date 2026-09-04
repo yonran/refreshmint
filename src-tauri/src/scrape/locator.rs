@@ -9,8 +9,8 @@ use rquickjs::{class::Trace, function::Opt, JsLifetime, Result as JsResult, Valu
 
 use super::js_api::{
     js_err, parse_screenshot_options, resolve_screenshot_output_path, resolve_secret_if_applicable,
-    run_screenshot_capture, screenshot_clip_for_object_id, scrub_known_secrets,
-    stringify_evaluation_result, wait_for_frame_execution_target, PageInner, ScreenshotClip,
+    run_screenshot_capture, screenshot_clip_for_object_id, stringify_evaluation_result,
+    wait_for_frame_execution_target, PageInner, ScreenshotClip,
 };
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -1054,9 +1054,8 @@ impl Locator {
                 .map_err(|e| js_err(format!("evaluate failed: {e}")))?
         };
 
-        let mut text =
+        let text =
             stringify_evaluation_result(result.value(), result.object().description.as_deref());
-        scrub_known_secrets(&inner.secret_store, &mut text);
         Ok(text)
     }
 

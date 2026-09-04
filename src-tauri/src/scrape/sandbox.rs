@@ -70,6 +70,29 @@ fn init_quickjs_web_platform(ctx: &rquickjs::Ctx<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// Route JavaScript console output through the same session redactor used by
+/// `refreshmint.log`. This must run after `register_globals` installs
+/// `refreshmint`; otherwise `console.log(pageValue)` could bypass the outward
+/// log boundary even though the documented logger is protected.
+fn route_console_through_refreshmint(ctx: &rquickjs::Ctx<'_>) -> Result<(), String> {
+    ctx.eval::<(), _>(
+        r#"(() => {
+            const format = (value) => {
+                if (typeof value === 'string') return value;
+                try { return JSON.stringify(value); }
+                catch (_) {
+                    try { return String(value); }
+                    catch (_) { return '<unprintable>'; }
+                }
+            };
+            for (const method of ['log', 'info', 'warn', 'error', 'debug']) {
+                console[method] = (...args) => refreshmint.log(args.map(format).join(' '));
+            }
+        })()"#,
+    )
+    .map_err(|error| format!("failed to route console output: {error}"))
+}
+
 /// Run a driver script inside a QuickJS sandbox with the given page and config.
 pub async fn run_driver(
     extension_dir: &Path,
@@ -185,6 +208,7 @@ async fn run_module_path_internal(
             if let Some((page_inner, refreshmint_inner)) = globals {
                 js_api::register_globals(&ctx, page_inner, refreshmint_inner)
                     .map_err(|e| format!("failed to register globals: {e}"))?;
+                route_console_through_refreshmint(&ctx)?;
             }
             maybe_diag(options, "[sandbox] Globals registered.");
             maybe_diag(options, "[sandbox] Importing driver module...");
@@ -238,7 +262,9 @@ async fn run_module_path_internal(
                         Ok(()) => "unknown JavaScript exception".to_string(),
                     };
                     if options.emit_diagnostics {
-                        diag_eprintln!("[sandbox] Promise rejected: {msg}");
+                        // The detailed error crosses the redacting session
+                        // boundary in `run_scrape_async`; do not print it here.
+                        diag_eprintln!("[sandbox] Promise rejected.");
                     }
                     Err(msg)
                 }
@@ -292,6 +318,7 @@ async fn run_script_source_internal(
             if let Some((page_inner, refreshmint_inner)) = globals {
                 js_api::register_globals(&ctx, page_inner, refreshmint_inner)
                     .map_err(|e| format!("failed to register globals: {e}"))?;
+                route_console_through_refreshmint(&ctx)?;
             }
             maybe_diag(options, "[sandbox] Globals registered.");
 
@@ -363,7 +390,9 @@ async fn run_script_source_internal(
                         Ok(()) => "unknown JavaScript exception".to_string(),
                     };
                     if options.emit_diagnostics {
-                        diag_eprintln!("[sandbox] Promise rejected: {msg}");
+                        // The detailed error crosses the redacting session
+                        // boundary in `run_scrape_async`; do not print it here.
+                        diag_eprintln!("[sandbox] Promise rejected.");
                     }
                     Err(msg)
                 }
@@ -397,9 +426,10 @@ async fn drive_runtime(runtime: &AsyncRuntime, options: &SandboxRunOptions) {
                             if let Some(exc) =
                                 err.clone().into_object().and_then(Exception::from_object)
                             {
-                                diag_eprintln!("[sandbox] error executing job: {exc}");
+                                let _ = exc;
+                                diag_eprintln!("[sandbox] error executing job");
                             } else {
-                                diag_eprintln!("[sandbox] error executing job: {err:?}");
+                                diag_eprintln!("[sandbox] error executing job");
                             }
                         })
                         .await;
@@ -437,6 +467,32 @@ mod tests {
 
     async fn drive_runtime_idle(runtime: &AsyncRuntime) {
         runtime.idle().await;
+    }
+
+    #[tokio::test]
+    async fn console_output_routes_through_refreshmint_logger() {
+        let runtime =
+            AsyncRuntime::new().unwrap_or_else(|err| panic!("failed to create runtime: {err}"));
+        let context = AsyncContext::full(&runtime)
+            .await
+            .unwrap_or_else(|err| panic!("failed to create context: {err}"));
+
+        let captured = context
+            .with(|ctx| {
+                init_quickjs_web_platform(&ctx)?;
+                ctx.eval::<(), _>(
+                    "globalThis.captured = []; globalThis.refreshmint = { log: value => captured.push(value) };",
+                )
+                .map_err(|err| err.to_string())?;
+                route_console_through_refreshmint(&ctx)?;
+                ctx.eval::<(), _>("console.log('account', { value: 42 })")
+                    .map_err(|err| err.to_string())?;
+                ctx.eval::<Vec<String>, _>("captured").map_err(|err| err.to_string())
+            })
+            .await
+            .unwrap_or_else(|err: String| panic!("console routing failed: {err}"));
+
+        assert_eq!(captured, vec!["account {\"value\":42}".to_string()]);
     }
 
     fn temp_dir(prefix: &str) -> PathBuf {

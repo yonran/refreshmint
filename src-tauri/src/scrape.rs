@@ -850,7 +850,8 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
     eprintln!("Scrape session: {scrape_session_id}");
 
     // 2. Create secret store for the login
-    let secret_store = SecretStore::new(format!("login/{login_name}"));
+    let secret_store = Arc::new(SecretStore::new(format!("login/{login_name}")));
+    let sensitive_data = Arc::new(js_api::SensitiveData::for_secret_store(&secret_store));
 
     // 3. Resolve browser profile directory
     let profile_dir = profile::resolve_profile_dir(
@@ -912,7 +913,8 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
         target_id: page.target_id().as_ref().to_string(),
         page,
         browser: browser.clone(),
-        secret_store: Arc::new(secret_store),
+        secret_store: secret_store.clone(),
+        sensitive_data: sensitive_data.clone(),
         declared_secrets: Arc::new(declared_secrets),
         download_dir,
         target_frame_id: None,
@@ -941,6 +943,7 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
         prompt_requires_override: config.prompt_requires_override,
         script_options: js_api::ScriptOptions::new(),
         debug_output_sink: Some(output_sender),
+        sensitive_data: sensitive_data.clone(),
         session_metadata: js_api::SessionMetadata::default(),
         staged_resources: Vec::new(),
         scrape_session_id: scrape_session_id.clone(),
@@ -960,7 +963,13 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
         refreshmint_inner.clone(),
     );
     let driver_outcome = run_driver_cancellable(driver_future, config.cancel.clone()).await;
-    eprintln!("Driver finished: {driver_outcome:?}");
+    match &driver_outcome {
+        DriverOutcome::Completed(Ok(())) => eprintln!("Driver finished successfully."),
+        DriverOutcome::Completed(Err(err)) => {
+            eprintln!("Driver failed: {}", sensitive_data.redact(&err.to_string()));
+        }
+        DriverOutcome::Canceled => eprintln!("Driver canceled."),
+    }
     // Track the user-cancel classification by flag, not by string-matching the
     // (possibly finalize-augmented) error message.
     let canceled = matches!(driver_outcome, DriverOutcome::Canceled);
@@ -1045,7 +1054,8 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
             )
             .await
             .ok()
-            .flatten();
+            .flatten()
+            .map(|url| sensitive_data.redact(&url));
             let screenshot_png = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 capture_failure_screenshot(&page_for_capture),
@@ -1084,7 +1094,7 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
     eprintln!("Done.");
 
     result.map_err(|err| ScrapeError {
-        message: err.to_string(),
+        message: sensitive_data.redact(&err.to_string()),
         artifacts_dir: failure_artifacts_dir,
     })
 }
@@ -1319,6 +1329,7 @@ mod tests {
             prompt_requires_override: false,
             script_options: ScriptOptions::new(),
             debug_output_sink: None,
+            sensitive_data: Arc::new(crate::scrape::js_api::SensitiveData::default()),
             session_metadata: SessionMetadata::default(),
             staged_resources: vec![StagedResource {
                 filename: "statements/2026/jan.pdf".to_string(),
@@ -1414,6 +1425,7 @@ mod tests {
             prompt_requires_override: false,
             script_options: ScriptOptions::new(),
             debug_output_sink: None,
+            sensitive_data: Arc::new(crate::scrape::js_api::SensitiveData::default()),
             session_metadata: SessionMetadata::default(),
             staged_resources: vec![StagedResource {
                 filename: "jan.pdf".to_string(),
@@ -1530,6 +1542,7 @@ mod tests {
                 secret_store: Arc::new(SecretStore::new(
                     "login/test-browser-disconnect".to_string(),
                 )),
+                sensitive_data: Arc::new(crate::scrape::js_api::SensitiveData::default()),
                 declared_secrets: Arc::new(crate::scrape::js_api::SecretDeclarations::new()),
                 download_dir,
                 target_frame_id: None,
@@ -1541,6 +1554,7 @@ mod tests {
                 prompt_requires_override: false,
                 script_options: ScriptOptions::new(),
                 debug_output_sink: None,
+                sensitive_data: Arc::new(crate::scrape::js_api::SensitiveData::default()),
                 session_metadata: SessionMetadata::default(),
                 staged_resources: Vec::new(),
                 scrape_session_id: "browser-disconnect-test".to_string(),
@@ -1730,6 +1744,7 @@ try {
             prompt_requires_override: false,
             script_options: ScriptOptions::new(),
             debug_output_sink: Some(sender),
+            sensitive_data: Arc::new(crate::scrape::js_api::SensitiveData::default()),
             session_metadata: SessionMetadata::default(),
             staged_resources: Vec::new(),
             scrape_session_id: String::new(),

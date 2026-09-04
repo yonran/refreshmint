@@ -382,8 +382,13 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
     let rt = tokio::runtime::Runtime::new()?;
     let (browser_instance, handler_handle, page_inner, refreshmint_inner, _browser_pid_guard): DebugRuntimeState =
         rt.block_on(async {
-            let secret_store =
-                crate::secret::SecretStore::new(format!("login/{}", config.login_name));
+            let secret_store = std::sync::Arc::new(crate::secret::SecretStore::new(format!(
+                "login/{}",
+                config.login_name
+            )));
+            let sensitive_data = std::sync::Arc::new(
+                super::js_api::SensitiveData::for_secret_store(&secret_store),
+            );
             let profile_dir = super::profile::resolve_profile_dir(
                 &config.ledger_dir,
                 &config.login_name,
@@ -436,7 +441,8 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                 target_id: page.target_id().as_ref().to_string(),
                 page,
                 browser: browser.clone(),
-                secret_store: Arc::new(secret_store),
+                secret_store: secret_store.clone(),
+                sensitive_data: sensitive_data.clone(),
                 declared_secrets: Arc::new(declared_secrets),
                 download_dir,
                 target_frame_id: None,
@@ -447,6 +453,7 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                 prompt_requires_override: config.prompt_requires_override,
                 script_options: super::js_api::ScriptOptions::new(),
                 debug_output_sink: None,
+                sensitive_data,
                 session_metadata: super::js_api::SessionMetadata::default(),
                 staged_resources: Vec::new(),
                 scrape_session_id: String::new(),
@@ -754,6 +761,10 @@ async fn handle_exec_request_async(
         }
     };
 
+    let sensitive_data = {
+        let refreshmint = refreshmint_inner.lock().await;
+        refreshmint.sensitive_data.clone()
+    };
     let final_frame = match final_result {
         Ok(()) => ExecStreamFrame::Result {
             ok: true,
@@ -761,7 +772,7 @@ async fn handle_exec_request_async(
         },
         Err(err) => ExecStreamFrame::Result {
             ok: false,
-            error: Some(err),
+            error: Some(sensitive_data.redact(&err)),
         },
     };
     if let Err(err) = write_exec_stream_frame_async(stream, &final_frame).await {
@@ -894,7 +905,8 @@ mod tests {
     };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
-        PromptOverrides, RefreshmintInner, ScriptOptions, SessionMetadata, StagedResource,
+        PromptOverrides, RefreshmintInner, ScriptOptions, SensitiveData, SessionMetadata,
+        StagedResource,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -967,6 +979,7 @@ mod tests {
             prompt_requires_override: false,
             script_options: ScriptOptions::new(),
             debug_output_sink: None,
+            sensitive_data: std::sync::Arc::new(SensitiveData::default()),
             session_metadata: SessionMetadata::default(),
             staged_resources: vec![StagedResource {
                 filename: "debug-smoke.bin".to_string(),
