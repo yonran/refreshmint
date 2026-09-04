@@ -522,12 +522,39 @@ async function handleLogin(context) {
         await saveDebugPageState(page, 'login-after-browser-warning');
     }
 
+    // On a retry after a rejected login, SignIn.aspx briefly renders a bare
+    // "Your login request was unsuccessful, please try again" notice instead
+    // of the credentials form (no #txtLoginName present at all) before the
+    // page's own script redirects back to the real form. Assert the field
+    // exists before touching it so that case produces a clear, actionable
+    // error instead of `fill()` crashing on a null element.
+    const loginNameSelector =
+        '#M_layout_content_PCDZ_MMCA7G7_ctl00_webInputForm_txtLoginName';
+    try {
+        await page.waitForSelector(loginNameSelector, 30000);
+    } catch (error) {
+        const bodyText = /** @type {string} */ (
+            await page.evaluate(
+                `(document.body ? document.body.innerText : '').trim()`,
+            )
+        );
+        await saveDebugPageState(page, 'login-form-missing');
+        if (/unsuccessful/i.test(bodyText)) {
+            throw new Error(
+                `Login rejected by bank: page shows "${bodyText}" instead of ` +
+                    'the login form. Credentials may be wrong, or the account ' +
+                    'may be locked/flagged; this is not a scraper selector bug.',
+            );
+        }
+        refreshmint.log(
+            `Login form field ${loginNameSelector} did not appear; page text: ${bodyText}`,
+        );
+        throw error;
+    }
+
     refreshmint.log('Filling credentials...');
     try {
-        await page.fill(
-            '#M_layout_content_PCDZ_MMCA7G7_ctl00_webInputForm_txtLoginName',
-            'providentcu_username',
-        );
+        await page.fill(loginNameSelector, 'providentcu_username');
     } catch (error) {
         refreshmint.log(`Username fill failed: ${inspect(error)}`);
         await saveDebugPageState(page, 'login-fill-username-failure');
