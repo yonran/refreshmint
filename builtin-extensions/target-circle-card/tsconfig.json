@@ -6,5 +6,5 @@
         "noUncheckedIndexedAccess": true,
         "exactOptionalPropertyTypes": true
     },
-    "include": ["./driver.mjs", "./extract.mts"]
+    "include": ["./driver.mjs", "./extract.mts", "../globals.d.ts"]
 }
