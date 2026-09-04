@@ -1418,7 +1418,7 @@ function App() {
                             }}
                             type="button"
                         >
-                            Settings
+                            Logins
                         </button>
                     </div>
 
@@ -1625,23 +1625,24 @@ function App() {
                         </div>
                     )}
 
-                    {activeTab === 'accounts' ? (
-                        <div className="table-wrap">
-                            <AccountsTable
-                                accounts={ledger.accounts}
-                                onSelectAccount={handleSelectAccount}
-                            />
-                        </div>
-                    ) : activeTab === 'bookkeeping' ? (
-                        <BookkeepingTab
-                            ledger={ledger.path}
-                            accounts={ledger.accounts}
-                        />
-                    ) : activeTab === 'transactions' ||
-                      activeRecategorizeTab !== null ? (
+                    {/* Transactions and Pipeline stay mounted at all times (just
+                        hidden) so switching back to them doesn't re-fetch GL/ML
+                        suggestion data from scratch; isActive gates their
+                        internal effects instead of mount/unmount. */}
+                    <div
+                        hidden={
+                            !(
+                                activeTab === 'transactions' ||
+                                activeRecategorizeTab !== null
+                            )
+                        }
+                    >
                         <TransactionsTab
                             ledger={ledger}
-                            isActive={true}
+                            isActive={
+                                activeTab === 'transactions' ||
+                                activeRecategorizeTab !== null
+                            }
                             hideObviousAmounts={hideObviousAmounts}
                             onLedgerRefresh={handleLedgerRefresh}
                             onRecategorizeTabsChange={(updater) => {
@@ -1665,10 +1666,11 @@ function App() {
                             session={transactionsTabSession}
                             onSessionChange={setTransactionsTabSession}
                         />
-                    ) : activeTab === 'pipeline' ? (
+                    </div>
+                    <div hidden={activeTab !== 'pipeline'}>
                         <PipelineTab
                             ledger={ledger}
-                            isActive={true}
+                            isActive={activeTab === 'pipeline'}
                             loginAccounts={loginAccounts}
                             loginConfigsByName={loginConfigsByName}
                             hasLoadedLoginConfigs={hasLoadedLoginConfigs}
@@ -1681,7 +1683,23 @@ function App() {
                             session={pipelineTabSession}
                             onSessionChange={setPipelineTabSession}
                         />
-                    ) : activeTab === 'reports' ? (
+                    </div>
+                    {activeTab === 'accounts' ? (
+                        <div className="table-wrap">
+                            <AccountsTable
+                                accounts={ledger.accounts}
+                                onSelectAccount={handleSelectAccount}
+                            />
+                        </div>
+                    ) : activeTab === 'bookkeeping' ? (
+                        <BookkeepingTab
+                            ledger={ledger.path}
+                            accounts={ledger.accounts}
+                        />
+                    ) : activeTab === 'transactions' ||
+                      activeRecategorizeTab !== null ||
+                      activeTab === 'pipeline' ? null : activeTab ===
+                      'reports' ? (
                         <ReportsTab
                             ledger={ledger.path}
                             accounts={ledger.accounts}

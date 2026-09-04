@@ -450,6 +450,7 @@ export function TransactionsTable({
                     <span className="count-label">
                         {acceptAllEdits.length} ML suggestion
                         {acceptAllEdits.length === 1 ? '' : 's'} available
+                        {' — review the breakdown by account before accepting'}
                     </span>
                     <button
                         type="button"
@@ -461,7 +462,7 @@ export function TransactionsTable({
                     >
                         {acceptSuggestionsBusy
                             ? 'Accepting…'
-                            : `Accept ${acceptAllEdits.length} suggestion${
+                            : `Review ${acceptAllEdits.length} suggestion${
                                   acceptAllEdits.length === 1 ? '' : 's'
                               }`}
                     </button>
@@ -1424,17 +1425,25 @@ export function TransactionsTable({
                             ...new Map(
                                 acceptAllConfirm.map((e) => [e.newAccount, 0]),
                             ).keys(),
-                        ].map((acct) => {
-                            const count = acceptAllConfirm.filter(
-                                (e) => e.newAccount === acct,
-                            ).length;
-                            return (
+                        ]
+                            .map((acct) => ({
+                                acct,
+                                count: acceptAllConfirm.filter(
+                                    (e) => e.newAccount === acct,
+                                ).length,
+                            }))
+                            .sort((a, b) => b.count - a.count)
+                            .map(({ acct, count }) => (
                                 <li key={acct}>
                                     {count} → {acct}
                                 </li>
-                            );
-                        })}
+                            ))}
                     </ul>
+                    <p className="pref-description">
+                        Uncertain about a bucket? Cancel here and use the
+                        per-row suggestion chip in the table to inspect (or
+                        accept) individual transactions instead.
+                    </p>
                     <div
                         style={{
                             display: 'flex',

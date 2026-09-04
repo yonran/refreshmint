@@ -1114,10 +1114,11 @@ export function SettingsTab({
             <section className="txn-form">
                 <div className="txn-form-header">
                     <div>
-                        <h2>Settings</h2>
+                        <h2>Logins</h2>
                         <p>
                             Manage scraper extensions, per-login secrets, legacy
-                            migrations, and developer tools.
+                            migrations, and developer tools. (App-wide behavior
+                            toggles live under Preferences.)
                         </p>
                     </div>
                 </div>
