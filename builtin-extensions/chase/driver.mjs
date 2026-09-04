@@ -200,11 +200,27 @@ async function handleLogin(context) {
     }
 
     if (!url.includes('/logon/')) {
+        // The homepage header's real "Sign in" link now renders as
+        // `<a>Sign in<span class="visually-hidden">Opens overlay</span></a>`,
+        // so its textContent is "Sign inOpens overlay" -- not an exact "sign
+        // in" match. Meanwhile a hidden login-flyout submit button
+        // (`#signin-button`, only revealed after the overlay opens) has
+        // textContent that *does* exactly equal "Sign in". An exact-match
+        // search finds that hidden button first; clicking it submits the
+        // login form with empty fields, which redirects to an unrelated page
+        // (observed: /digital/resources/privacy-security/security/system-requirements)
+        // instead of opening the login overlay. Require the element to be
+        // visible and match by prefix so the real header link wins.
+        const findSignInLink = `Array.from(document.querySelectorAll('a, button')).find(el => {
+                        const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                        if (!visible) return false;
+                        const text = el.textContent.trim().toLowerCase();
+                        return text.startsWith('sign in');
+                    })`;
+
         let hasSignIn = false;
         try {
-            const hasSignInResult = await page.evaluate(
-                `!!Array.from(document.querySelectorAll('a, button')).find(el => el.textContent.trim().toLowerCase() === 'sign in')`,
-            );
+            const hasSignInResult = await page.evaluate(`!!${findSignInLink}`);
             hasSignIn = assertBoolean(hasSignInResult);
         } catch (_e) {
             // Ignore if page navigated while checking
@@ -214,7 +230,7 @@ async function handleLogin(context) {
             refreshmint.log('Found "Sign in" button. Clicking...');
             try {
                 await page.evaluate(`(function() {
-                    const btn = Array.from(document.querySelectorAll('a, button')).find(el => el.textContent.trim().toLowerCase() === 'sign in');
+                    const btn = ${findSignInLink};
                     if (btn) btn.click();
                 })()`);
             } catch (_e) {
