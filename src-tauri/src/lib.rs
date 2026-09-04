@@ -215,6 +215,7 @@ pub fn run_with_context(
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_notification::init())
         .manage(PromptAnswerState::default())
         .manage(ScrapeCancelState::default())
         .invoke_handler(tauri::generate_handler![
@@ -822,6 +823,10 @@ async fn run_scrape_for_login(
         let prompt_ui_handler = {
             let app_handle = app_handle.clone();
             let login_name = login_name.clone();
+            // Only an auto-triggered run needs an OS notification: a manual run
+            // was just started by someone sitting at the app, who will see the
+            // in-app modal immediately.
+            let notify_os = source == "auto";
             std::sync::Arc::new(move |message: String, choices: Option<Vec<String>>| {
                 request_prompt_answer(
                     &app_handle,
@@ -829,6 +834,7 @@ async fn run_scrape_for_login(
                     message,
                     choices,
                     prompt_timeout,
+                    notify_os,
                 )
             })
         };
@@ -2807,6 +2813,39 @@ fn wait_for_prompt_answer(
     }
 }
 
+/// Best-effort OS notification for an auto-triggered scrape's prompt request.
+/// Never fails the scrape: notification permission may be unset/denied, or the
+/// platform may not support it, and the in-app modal/pending-prompt state is
+/// the source of truth regardless.
+fn notify_prompt_requested(app_handle: &tauri::AppHandle, login_name: &str, message: &str) {
+    use tauri_plugin_notification::NotificationExt;
+
+    let granted = match app_handle.notification().permission_state() {
+        Ok(tauri_plugin_notification::PermissionState::Granted) => true,
+        Ok(tauri_plugin_notification::PermissionState::Prompt)
+        | Ok(tauri_plugin_notification::PermissionState::PromptWithRationale) => app_handle
+            .notification()
+            .request_permission()
+            .map(|state| state == tauri_plugin_notification::PermissionState::Granted)
+            .unwrap_or(false),
+        _ => false,
+    };
+    if !granted {
+        log::warn!("skipping prompt notification for '{login_name}': OS permission not granted");
+        return;
+    }
+
+    if let Err(err) = app_handle
+        .notification()
+        .builder()
+        .title(format!("refreshmint: {login_name} needs input"))
+        .body(message)
+        .show()
+    {
+        log::warn!("failed to show prompt notification for '{login_name}': {err}");
+    }
+}
+
 fn request_prompt_answer(
     app_handle: &tauri::AppHandle,
     login_name: String,
@@ -2816,6 +2855,10 @@ fn request_prompt_answer(
     // and the listener payload in `src/App.tsx`.
     choices: Option<Vec<String>>,
     timeout: std::time::Duration,
+    // Auto-triggered runs have nobody watching the app window, so the in-app
+    // modal alone is easy to miss (e.g. an overnight MFA prompt); fire an OS
+    // notification too so it can actually reach the user.
+    notify_os: bool,
 ) -> Result<Option<String>, String> {
     let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
     {
@@ -2841,11 +2884,15 @@ fn request_prompt_answer(
             "refreshmint://prompt-requested",
             PromptRequestedPayload {
                 login_name: login_name.clone(),
-                message,
+                message: message.clone(),
                 choices,
             },
         )
         .map_err(|e| format!("prompt emit failed: {e}"))?;
+
+    if notify_os {
+        notify_prompt_requested(app_handle, &login_name, &message);
+    }
 
     let state = app_handle.state::<PromptAnswerState>();
     match wait_for_prompt_answer(&rx, &state, timeout) {
