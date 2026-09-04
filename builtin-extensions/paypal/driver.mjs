@@ -2,6 +2,8 @@
  * paypal scraper for Refreshmint.
  */
 
+import { inspect } from 'refreshmint:util';
+
 /**
  * @typedef {object} ScrapeContext
  * @property {PageApi} mainPage
@@ -19,6 +21,42 @@ async function humanPace(page, minMs, maxMs) {
     const delta = maxMs - minMs;
     const ms = minMs + Math.floor(Math.random() * (delta + 1));
     await waitMs(page, ms);
+}
+
+/**
+ * @param {unknown} x
+ * @returns {string}
+ */
+function assertString(x) {
+    if (typeof x === 'string') {
+        return x;
+    }
+    throw new Error('expected string; got ' + typeof x);
+}
+
+/**
+ * PayPal shows a cookie-consent banner ("We currently use cookies...")
+ * pinned to the bottom of the viewport, which overlaps the "Next" button on
+ * the login form directly above it. Root cause of the observed
+ * "no progress in last 20 steps" failures: the banner intercepted every
+ * click on "Next", the resulting actionability-timeout error was silently
+ * swallowed by a broad `catch (_e) { // Ignore timeout }`, and the loop kept
+ * refilling the same email field step after step with no diagnostic of why.
+ * Dismiss the banner before touching any login-form control so clicks land
+ * on the real target.
+ *
+ * @param {PageApi} page
+ * @returns {Promise<boolean>} true if a banner was found and dismissed
+ */
+async function dismissCookieBanner(page) {
+    const declineButton = page.getByRole('button', { name: 'No, I decline' });
+    if (await declineButton.isVisible()) {
+        refreshmint.log('State: cookie consent banner - declining');
+        await declineButton.click();
+        await waitMs(page, 500);
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -50,6 +88,30 @@ async function handleMfa(context) {
 }
 
 /**
+ * PayPal's anti-automation defense can replace the sign-in form with a
+ * "You have been blocked" page while the URL stays on /signin, which looks
+ * identical to the real login state from the URL alone. That page never
+ * resolves on its own, so looping on it for 20 steps only produces a
+ * generic, unhelpful "no progress" error. Detect it explicitly and fail
+ * fast with the real reason instead.
+ *
+ * @param {PageApi} page
+ * @returns {Promise<void>}
+ */
+async function checkForBotBlock(page) {
+    const text = assertString(
+        await page.evaluate(
+            `document.body ? document.body.innerText.slice(0, 300) : ''`,
+        ),
+    );
+    if (text.includes('You have been blocked')) {
+        throw new Error(
+            `PayPal blocked automated access (bot-detection page shown instead of the login form): ${text.trim()}`,
+        );
+    }
+}
+
+/**
  * @param {ScrapeContext} context
  * @returns {Promise<object>}
  */
@@ -57,14 +119,23 @@ async function handleLogin(context) {
     const page = context.mainPage;
     refreshmint.log('State: Login Page');
 
+    // Fail fast instead of looping: this page never advances on its own.
+    await checkForBotBlock(page);
+
+    // Clear the cookie-consent overlay next: it can cover the "Next"/
+    // "Log In"/"Submit" buttons below it and silently intercept clicks.
+    if (await dismissCookieBanner(page)) {
+        return { progressName: 'cookie banner dismissed' };
+    }
+
     try {
         // Check for MFA first
         const mfaInput = page.getByRole('spinbutton', { name: '1-6' });
         if (await mfaInput.isVisible()) {
             return await handleMfa(context);
         }
-    } catch (_e) {
-        // Ignore timeout
+    } catch (e) {
+        refreshmint.log(`MFA input check failed: ${inspect(e)}`);
     }
 
     try {
@@ -77,8 +148,8 @@ async function handleLogin(context) {
             await waitMs(page, 4000);
             return { progressName: 'password submitted' };
         }
-    } catch (_e) {
-        // Ignore timeout
+    } catch (e) {
+        refreshmint.log(`Password step failed: ${inspect(e)}`);
     }
 
     try {
@@ -93,10 +164,11 @@ async function handleLogin(context) {
             await waitMs(page, 2000);
             return { progressName: 'email submitted' };
         }
-    } catch (_e) {
-        // Ignore timeout
+    } catch (e) {
+        refreshmint.log(`Email step failed: ${inspect(e)}`);
     }
 
+    refreshmint.log(`Login page snapshot: ${await page.snapshot()}`);
     return { progressName: 'waiting on login page' };
 }
 
