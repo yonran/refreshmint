@@ -1307,7 +1307,23 @@ async function collectStatementEntries() {
             // Exclude legal notices (like "Change in Terms") which are not standard bank statements
             // and trigger different download behaviors that break the scraper.
             if (rowText.toLowerCase().indexOf('change in terms') !== -1) continue;
-            
+
+            // Exclude the "Adobe Reader" install-prompt link that appears inside the tax-statement
+            // disclaimer ("Tax statements can only be downloaded because they contain your Tax
+            // Identification Number..."). Its containing row matches the "download" heuristic above,
+            // but clicking it opens an external adobe.com tab rather than producing an in-page
+            // download, which previously left waitForDownload waiting for an event that never fires.
+            if (rowText.toLowerCase().indexOf('tax identification number') !== -1) continue;
+            if (lowerText.indexOf('adobe reader') !== -1) continue;
+
+            // Exclude links that navigate off the bankofamerica.com domain entirely: a real
+            // statement/PDF download always stays on-site, so an absolute external href can only
+            // be a disclaimer/help link (e.g. the Adobe Reader download above) that will not
+            // produce a page download event.
+            var isExternalHref = (href.indexOf('http://') === 0 || href.indexOf('https://') === 0)
+                && href.indexOf('bankofamerica.com') === -1;
+            if (isExternalHref) continue;
+
             if (rowText.length < 12) continue;
             var selector = cssPath(node);
             if (!selector) continue;
