@@ -7191,15 +7191,7 @@ pub(crate) async fn resolve_secret_if_applicable(
     }
 
     let declared_domains = declared_domains_for_secret(&inner.declared_secrets, referenced_name);
-    // Also check legacy store for unconfigured-but-stored names when fallback
-    // is enabled during migration rollout.
-    let legacy_known = if ENABLE_LEGACY_SECRET_FALLBACK {
-        inner.secret_store.list_legacy_entries().unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let configured_legacy = legacy_known.iter().any(|(_, name)| name == referenced_name);
-    if declared_domains.is_empty() && !configured_legacy {
+    if declared_domains.is_empty() {
         return Ok(value.to_string());
     }
 
@@ -7212,11 +7204,6 @@ pub(crate) async fn resolve_secret_if_applicable(
     }
 
     if !declared_domains.contains(&top_level_domain) {
-        if declared_domains.is_empty() {
-            return Err(js_err(format!(
-                "Secret '{referenced_name}' is configured in keychain but not declared in manifest for domain '{top_level_domain}'"
-            )));
-        }
         return Err(js_err(format!(
             "Secret '{referenced_name}' was declared for domain(s) {} but current top-level domain is '{top_level_domain}'",
             declared_domains.join(", ")
@@ -7237,6 +7224,11 @@ pub(crate) async fn resolve_secret_if_applicable(
 
     // Legacy fallback: old per-(domain, name) keychain entries.
     if ENABLE_LEGACY_SECRET_FALLBACK {
+        // Discover legacy entries only after the current-format read fails. In
+        // addition to keeping undeclared values outside the secret boundary,
+        // this avoids an extra Keychain authorization opportunity on every
+        // successful current-format lookup.
+        let legacy_known = inner.secret_store.list_legacy_entries().unwrap_or_default();
         for (domain, name) in &legacy_known {
             if name == referenced_name && domain.eq_ignore_ascii_case(&top_level_domain) {
                 let value = inner
