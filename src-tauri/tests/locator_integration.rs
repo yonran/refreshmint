@@ -289,6 +289,7 @@ fn locator_api_works() -> Result<(), Box<dyn Error>> {
         headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
+        human_challenge_ui_handler: None,
         log_listener: None,
         cancel: None,
         #[cfg(unix)]
@@ -349,6 +350,7 @@ fn get_by_role_api_works() -> Result<(), Box<dyn Error>> {
         headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
+        human_challenge_ui_handler: None,
         log_listener: None,
         cancel: None,
         #[cfg(unix)]
@@ -408,6 +410,7 @@ fn shadow_dom_api_works() -> Result<(), Box<dyn Error>> {
         headless: false,
         prompt_requires_override: false,
         prompt_ui_handler: None,
+        human_challenge_ui_handler: None,
         log_listener: None,
         cancel: None,
         #[cfg(unix)]

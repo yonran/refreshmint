@@ -1102,6 +1102,8 @@ fn run_cli_scrape_worker(
             prompt_overrides,
             prompt_requires_override: true,
             retain_failure_debug: false,
+            enable_human_challenges: false,
+            human_challenge_timeout_secs: 0,
         },
     )
     .map_err(|error| error.to_string())
@@ -1145,6 +1147,16 @@ fn run_cli_scrape_worker(
                             "missing prompt override for '{message}'"
                         ))));
                     }
+                    crate::scraper_protocol::WorkerEvent::HumanChallengeRequested {
+                        message,
+                        ..
+                    } => {
+                        return Ok(Err(crate::scrape::ScrapeError::message_only(format!(
+                            "interactive human challenge requires the Refreshmint app: {message}"
+                        ))));
+                    }
+                    crate::scraper_protocol::WorkerEvent::HumanChallengeFrame { .. }
+                    | crate::scraper_protocol::WorkerEvent::HumanChallengeClosed { .. } => {}
                     crate::scraper_protocol::WorkerEvent::FailureRetained {
                         error,
                         artifacts_dir,

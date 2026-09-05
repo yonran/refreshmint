@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::{future::Future, pin::Pin};
 
 use base64::Engine;
 use rquickjs::class::Trace;
@@ -524,7 +525,14 @@ pub struct PageInner {
     pub declared_secrets: Arc<SecretDeclarations>,
     pub download_dir: PathBuf,
     pub target_frame_id: Option<chromiumoxide::cdp::browser_protocol::page::FrameId>,
+    pub human_challenge_ui_handler: Option<HumanChallengeUiHandler>,
 }
+
+pub type HumanChallengeUiHandler = Arc<
+    dyn Fn(String, chromiumoxide::Page) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// JS-visible `page` object with Playwright-like API.
 ///
@@ -2600,6 +2608,21 @@ impl ResponseApi {
 
 #[rquickjs::methods]
 impl PageApi {
+    /// Stream this page to the trusted app and relay the user's pointer input.
+    /// This channel is installed only for app-started scrape workers; it is not
+    /// exposed by the MCP/debug protocol.
+    #[qjs(rename = "solveHumanChallenge")]
+    pub async fn solve_human_challenge(&self, message: String) -> JsResult<()> {
+        let (page, handler) = {
+            let inner = self.inner.lock().await;
+            (inner.page.clone(), inner.human_challenge_ui_handler.clone())
+        };
+        let handler = handler.ok_or_else(|| {
+            js_err("interactive human challenge requires an app-started scrape".to_string())
+        })?;
+        handler(message, page).await.map_err(js_err)
+    }
+
     /// Wait for a response matching `url_pattern` and return its body as a string.
     ///
     /// Uses `Network.getResponseBody` (CDP) which works across all frames including
@@ -5363,6 +5386,7 @@ async fn build_page_api_from_template(
         declared_secrets: template.declared_secrets.clone(),
         download_dir: template.download_dir.clone(),
         target_frame_id: None,
+        human_challenge_ui_handler: template.human_challenge_ui_handler.clone(),
     };
     PageApi::new(Arc::new(Mutex::new(page_inner)))
 }

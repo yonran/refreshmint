@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+    useCallback,
+    useEffect,
+    useRef,
+    useState,
+    type PointerEvent as ReactPointerEvent,
+} from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
@@ -54,7 +60,10 @@ import {
     repairDanglingRef,
     repairOrphanedGlTxn,
     type ConsistencyReport,
+    submitHumanChallengeInput,
+    type HumanChallengeInput,
 } from './tauri-commands.ts';
+import { mapChallengePointer } from './human-challenge-utils.ts';
 import { AccountsTable } from './components/AccountsTable.tsx';
 import { PipelineTab } from './tabs/PipelineTab.tsx';
 import { ReportsTab } from './tabs/ReportsTab.tsx';
@@ -133,6 +142,18 @@ function App() {
         message: string;
         choices: string[] | null;
     } | null>(null);
+    const [humanChallenges, setHumanChallenges] = useState<
+        {
+            loginName: string;
+            requestId: number;
+            message: string;
+            frameData: string | null;
+            deviceWidth: number;
+            deviceHeight: number;
+        }[]
+    >([]);
+    const humanChallenge = humanChallenges[0] ?? null;
+    const humanChallengeInputQueue = useRef<Promise<void>>(Promise.resolve());
     const [scrapeLogVersion, setScrapeLogVersion] = useState(0);
     const [loginAccounts, setLoginAccounts] = useState<LoginAccountRef[]>([]);
 
@@ -142,6 +163,50 @@ function App() {
         setPromptRequest(null);
         setPromptPending(null);
         void invoke('submit_prompt_answer', { answer });
+    }
+
+    function queueHumanChallengeInput(input: HumanChallengeInput) {
+        if (humanChallenge === null) return;
+        const { loginName, requestId } = humanChallenge;
+        humanChallengeInputQueue.current = humanChallengeInputQueue.current
+            .catch(() => {})
+            .then(() => submitHumanChallengeInput(loginName, requestId, input));
+    }
+
+    function relayChallengePointer(
+        event: ReactPointerEvent<HTMLImageElement>,
+        kind: 'pointerMove' | 'pointerDown' | 'pointerUp',
+    ) {
+        if (humanChallenge === null) return;
+        const point = mapChallengePointer(
+            event.clientX,
+            event.clientY,
+            event.currentTarget.getBoundingClientRect(),
+            {
+                width: humanChallenge.deviceWidth,
+                height: humanChallenge.deviceHeight,
+            },
+        );
+        if (point === null) return;
+        event.preventDefault();
+        if (kind === 'pointerDown') {
+            event.currentTarget.setPointerCapture(event.pointerId);
+            queueHumanChallengeInput({ kind, ...point });
+        } else if (kind === 'pointerUp') {
+            queueHumanChallengeInput({ kind, ...point });
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+        } else if (
+            event.buttons !== 0 ||
+            event.currentTarget.hasPointerCapture(event.pointerId)
+        ) {
+            queueHumanChallengeInput({
+                kind,
+                ...point,
+                buttons: event.buttons,
+            });
+        }
     }
     // Navigate from a GL transaction's `; source:` ref back to the originating
     // account entry's evidence rows in the Pipeline tab.
@@ -351,6 +416,77 @@ function App() {
             if (secretPromptResolverRef.current !== null) {
                 secretPromptResolverRef.current(false);
                 secretPromptResolverRef.current = null;
+            }
+        };
+    }, []);
+
+    // Interactive challenges are streamed only over the private app/worker
+    // pipe. The image is a live Chrome screencast and pointer events are
+    // relayed to the same tab; neither surface is part of the MCP protocol.
+    useEffect(() => {
+        const requestUnlisten = listen<{
+            loginName: string;
+            requestId: number;
+            message: string;
+        }>('refreshmint://human-challenge-requested', (event) => {
+            setHumanChallenges((current) => [
+                ...current.filter(
+                    (challenge) =>
+                        challenge.loginName !== event.payload.loginName ||
+                        challenge.requestId !== event.payload.requestId,
+                ),
+                {
+                    ...event.payload,
+                    frameData: null,
+                    deviceWidth: 0,
+                    deviceHeight: 0,
+                },
+            ]);
+        });
+        const frameUnlisten = listen<{
+            loginName: string;
+            requestId: number;
+            data: string;
+            deviceWidth: number;
+            deviceHeight: number;
+        }>('refreshmint://human-challenge-frame', (event) => {
+            setHumanChallenges((current) =>
+                current.map((challenge) =>
+                    challenge.loginName === event.payload.loginName &&
+                    challenge.requestId === event.payload.requestId
+                        ? {
+                              ...challenge,
+                              frameData: event.payload.data,
+                              deviceWidth: event.payload.deviceWidth,
+                              deviceHeight: event.payload.deviceHeight,
+                          }
+                        : challenge,
+                ),
+            );
+        });
+        const closeUnlisten = listen<{
+            loginName: string;
+            requestId: number;
+        }>('refreshmint://human-challenge-closed', (event) => {
+            setHumanChallenges((current) =>
+                current.filter(
+                    (challenge) =>
+                        challenge.loginName !== event.payload.loginName ||
+                        challenge.requestId !== event.payload.requestId,
+                ),
+            );
+        });
+        return () => {
+            for (const pending of [
+                requestUnlisten,
+                frameUnlisten,
+                closeUnlisten,
+            ]) {
+                pending
+                    .then((unlisten) => {
+                        unlisten();
+                    })
+                    .catch(() => {});
             }
         };
     }, []);
@@ -1872,6 +2008,68 @@ function App() {
                         />
                     )}
                 </section>
+            )}
+            {humanChallenge === null ? null : (
+                <div className="secret-prompt-overlay">
+                    <div
+                        className="human-challenge-prompt"
+                        role="dialog"
+                        aria-modal="true"
+                    >
+                        <h3>
+                            Browser verification — {humanChallenge.loginName}
+                        </h3>
+                        <p>{humanChallenge.message}</p>
+                        {humanChallenge.frameData === null ? (
+                            <div className="human-challenge-loading">
+                                Waiting for the live browser…
+                            </div>
+                        ) : (
+                            <img
+                                className="human-challenge-stream"
+                                src={`data:image/jpeg;base64,${humanChallenge.frameData}`}
+                                alt="Live browser verification"
+                                draggable={false}
+                                onPointerDown={(event) => {
+                                    relayChallengePointer(event, 'pointerDown');
+                                }}
+                                onPointerMove={(event) => {
+                                    relayChallengePointer(event, 'pointerMove');
+                                }}
+                                onPointerUp={(event) => {
+                                    relayChallengePointer(event, 'pointerUp');
+                                }}
+                                onPointerCancel={(event) => {
+                                    relayChallengePointer(event, 'pointerUp');
+                                }}
+                            />
+                        )}
+                        <div className="txn-actions">
+                            <button
+                                type="button"
+                                className="primary-button"
+                                onClick={() => {
+                                    queueHumanChallengeInput({
+                                        kind: 'complete',
+                                    });
+                                }}
+                            >
+                                Continue
+                            </button>
+                            <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => {
+                                    queueHumanChallengeInput({
+                                        kind: 'cancel',
+                                    });
+                                }}
+                            >
+                                Cancel scrape
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
             {promptRequest === null ? null : (
                 <div className="secret-prompt-overlay">

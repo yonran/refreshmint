@@ -1370,6 +1370,26 @@ export async function getPendingPrompt(): Promise<PendingPrompt | null> {
     return invoke('get_pending_prompt');
 }
 
+export type HumanChallengeInput =
+    | { kind: 'pointerMove'; x: number; y: number; buttons: number }
+    | { kind: 'pointerDown'; x: number; y: number }
+    | { kind: 'pointerUp'; x: number; y: number }
+    | { kind: 'complete' }
+    | { kind: 'cancel' };
+
+/** Relay one physical user gesture into an app-owned scrape worker. */
+export async function submitHumanChallengeInput(
+    loginName: string,
+    requestId: number,
+    input: HumanChallengeInput,
+): Promise<void> {
+    await invoke('submit_human_challenge_input', {
+        loginName,
+        requestId,
+        input,
+    });
+}
+
 /** Per-login scrape summary, mirroring `LastScrapeSummary` on the Rust side. */
 export interface LastScrapeSummary {
     lastSuccess: string | null;

@@ -110,16 +110,31 @@ async function checkForBotBlock(page) {
         );
     }
 
-    const hybridCaptcha = page.locator('#splitHybridCaptcha');
-    const passwordCaptcha = page.locator('#splitPasswordCaptcha');
-    if (
-        (await hybridCaptcha.isVisible()) ||
-        (await passwordCaptcha.isVisible())
-    ) {
-        throw new Error(
-            'PayPal requires a visible CAPTCHA; continue this login in a debug session so the user can solve it',
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        const challengeVisible =
+            (await page.evaluate(`(() => {
+                const candidates = document.querySelectorAll(
+                    '[id*="captcha" i], iframe[src*="captcha" i], iframe[src*="challenge" i]',
+                );
+                return Array.from(candidates).some((element) => {
+                    const rect = element.getBoundingClientRect();
+                    const style = getComputedStyle(element);
+                    return rect.width > 0 && rect.height > 0 &&
+                        style.display !== 'none' && style.visibility !== 'hidden' &&
+                        style.opacity !== '0';
+                });
+            })()`)) === true;
+        if (!challengeVisible) return;
+
+        refreshmint.log(
+            `PayPal requires an interactive CAPTCHA; waiting for the user (attempt ${attempt}/3)`,
         );
+        await page.solveHumanChallenge(
+            'Drag the PayPal verification slider in the live browser below, then choose Continue.',
+        );
+        await waitMs(page, 750);
     }
+    throw new Error('PayPal CAPTCHA remained visible after 3 user attempts');
 }
 
 /**

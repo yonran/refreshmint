@@ -396,6 +396,45 @@
     font-size: 0.92rem;
 }
 
+.human-challenge-prompt {
+    width: min(1000px, 100%);
+    max-height: calc(100vh - 2rem);
+    overflow: auto;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-light);
+    border-radius: 0.9rem;
+    box-shadow: 0 14px 28px rgb(0 0 0 / 20%);
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.human-challenge-prompt h3,
+.human-challenge-prompt p {
+    margin: 0;
+}
+
+.human-challenge-loading {
+    min-height: 240px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-input);
+    color: var(--color-text-muted);
+}
+
+.human-challenge-stream {
+    display: block;
+    width: 100%;
+    height: auto;
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-input);
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
+}
+
 .txn-grid {
     display: grid;
     grid-template-columns: 160px minmax(200px, 1fr) minmax(200px, 1fr);

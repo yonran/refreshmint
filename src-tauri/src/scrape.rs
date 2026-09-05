@@ -35,6 +35,9 @@ pub struct ScrapeConfig {
     /// When set, `refreshmint.prompt()` asks the host app for a response
     /// rather than reading from stdin.
     pub prompt_ui_handler: Option<js_api::PromptUiHandler>,
+    /// Streams an interactive browser challenge to the trusted host app.
+    /// Debug/MCP sessions intentionally leave this unset.
+    pub human_challenge_ui_handler: Option<js_api::HumanChallengeUiHandler>,
     /// When set, every driver log line (`refreshmint.log`/`reportValue`) is
     /// forwarded to this listener as it is emitted. The GUI uses it to stream a
     /// live log pane; the CLI uses it to preserve stderr output (see
@@ -943,6 +946,7 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
         declared_secrets: Arc::new(declared_secrets),
         download_dir,
         target_frame_id: None,
+        human_challenge_ui_handler: config.human_challenge_ui_handler.clone(),
     }));
     // Keep a handle to the page for failure-artifact capture: `page_inner` is
     // moved into the sandbox below, but the browser stays alive until step 11.
@@ -1623,6 +1627,7 @@ mod tests {
                 declared_secrets: Arc::new(crate::scrape::js_api::SecretDeclarations::new()),
                 download_dir,
                 target_frame_id: None,
+                human_challenge_ui_handler: None,
             }));
 
             let refreshmint_inner = Arc::new(Mutex::new(RefreshmintInner {

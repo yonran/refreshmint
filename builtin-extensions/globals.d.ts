@@ -188,6 +188,8 @@ interface Response {
 }
 
 interface PageApi {
+    /** Stream the live tab to the trusted app and relay the user's pointer gesture. */
+    solveHumanChallenge(message: string): Promise<void>;
     locator(selector: string): Locator;
     getByRole(role: string, options?: ByRoleOptions): Locator;
     goto(

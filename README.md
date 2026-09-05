@@ -158,6 +158,12 @@ In the **Scraping** tab you can:
 - Stop debug session
 - Copy socket
 
+When a manually app-started scraper encounters a supported interactive verification
+challenge, Refreshmint opens a live browser panel in the app. Drag or click in
+that panel and choose Continue when the site accepts the challenge. The panel
+also works when the scrape browser is headless; its frames and input are not
+exposed through MCP.
+
 The UI shows the active debug socket so it can be used by CLI/LLM tooling.
 
 ## Debug Session Smoke Test

@@ -53,6 +53,24 @@ discoverable for 30 minutes, or until a debugger stops it.
 Automatic/background scrapes are not retained. Successful and canceled scrapes
 close their browsers normally.
 
+## Interactive human challenges
+
+An app-started manual scraper can call `page.solveHumanChallenge(...)` when a site
+shows an interactive CAPTCHA or verification control. The worker temporarily
+starts a Chrome screencast and sends JPEG frames over its inherited private
+pipe. The app displays that live tab and relays the user's physical pointer
+down/move/up sequence back to Chrome with `Input.dispatchMouseEvent`; Chromium
+delivers those page events as trusted input. This works for headed and headless
+workers because it operates on the CDP page target rather than the native
+Chrome window.
+
+The stream exists only while the challenge prompt is open. Frames and pointer
+events are neither persisted as scrape artifacts nor published through the
+debug socket or MCP façade. CLI and MCP-started sessions do not install this
+app-only channel and fail clearly if a driver requests it. Automatic scrapes
+also fail instead of waiting for an unattended prompt; manual prompts use the
+scrape's configured prompt timeout.
+
 ## MCP routing
 
 Configure an MCP host to launch the bundled `refreshmint-mcp-server` executable
@@ -95,6 +113,8 @@ sandbox against an already authorized debugger:
   masked in snapshots.
 - Screenshots and downloaded documents are raw evidence and are not exposed by
   the MCP tools.
+- Live human-challenge frames and pointer events travel only over the private
+  app/worker pipe and are not available to MCP clients.
 - Owner-only Unix socket and registry permissions prevent other local OS users
   from attaching. Any process running as the same OS user can still find and
   connect to an open debug socket.

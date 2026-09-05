@@ -250,6 +250,27 @@ fn cancel_scrape_worker(state: &ScrapeWorkerState, login_name: &str) -> bool {
     })
 }
 
+#[tauri::command]
+fn submit_human_challenge_input(
+    login_name: String,
+    request_id: u64,
+    input: scraper_protocol::HumanChallengeInput,
+    state: tauri::State<'_, ScrapeWorkerState>,
+) -> Result<(), String> {
+    let login_name = require_login_name_input(login_name)?;
+    let stdin = state
+        .0
+        .lock()
+        .map_err(|error| error.to_string())?
+        .get(&login_name)
+        .map(|(_, stdin)| stdin.clone())
+        .ok_or_else(|| format!("no active scrape worker for login '{login_name}'"))?;
+    write_worker_command(
+        &stdin,
+        &scraper_protocol::WorkerCommand::HumanChallengeInput { request_id, input },
+    )
+}
+
 static UI_DEBUG_SESSION: std::sync::OnceLock<std::sync::Mutex<Option<UiDebugSession>>> =
     std::sync::OnceLock::new();
 static LOCK_METADATA_WATCHER: std::sync::OnceLock<std::sync::Mutex<Option<LockMetadataWatcher>>> =
@@ -383,6 +404,7 @@ pub fn run_with_context(
             query_transactions,
             run_hledger_report,
             submit_prompt_answer,
+            submit_human_challenge_input,
             get_pending_prompt,
             check_ledger_consistency,
             recover_ledger_consistency,
@@ -945,6 +967,8 @@ fn run_scrape_in_worker(
             prompt_overrides: scrape::js_api::PromptOverrides::new(),
             prompt_requires_override: false,
             retain_failure_debug: source != "auto",
+            enable_human_challenges: source != "auto",
+            human_challenge_timeout_secs: prompt_timeout.as_secs(),
         },
     ) {
         unregister_scrape_worker(&worker_state, login_name, cancel_token);
@@ -955,6 +979,7 @@ fn run_scrape_in_worker(
     }
 
     let mut retained_failure = false;
+    let mut active_human_challenge_request_id = None;
     let run_result = (|| {
         let mut final_result = None;
         for line in std::io::BufReader::new(stdout).lines() {
@@ -1009,6 +1034,71 @@ fn run_scrape_in_worker(
                     )
                     .map_err(scrape::ScrapeError::message_only)?;
                 }
+                scraper_protocol::WorkerEvent::HumanChallengeRequested {
+                    request_id,
+                    message,
+                } => {
+                    active_human_challenge_request_id = Some(request_id);
+                    #[derive(Clone, serde::Serialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct Payload {
+                        login_name: String,
+                        request_id: u64,
+                        message: String,
+                    }
+                    let _ = app_handle.emit(
+                        "refreshmint://human-challenge-requested",
+                        Payload {
+                            login_name: login_name.to_string(),
+                            request_id,
+                            message,
+                        },
+                    );
+                }
+                scraper_protocol::WorkerEvent::HumanChallengeFrame {
+                    request_id,
+                    data,
+                    device_width,
+                    device_height,
+                } => {
+                    #[derive(Clone, serde::Serialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct Payload {
+                        login_name: String,
+                        request_id: u64,
+                        data: String,
+                        device_width: u32,
+                        device_height: u32,
+                    }
+                    let _ = app_handle.emit(
+                        "refreshmint://human-challenge-frame",
+                        Payload {
+                            login_name: login_name.to_string(),
+                            request_id,
+                            data,
+                            device_width,
+                            device_height,
+                        },
+                    );
+                }
+                scraper_protocol::WorkerEvent::HumanChallengeClosed { request_id } => {
+                    if active_human_challenge_request_id == Some(request_id) {
+                        active_human_challenge_request_id = None;
+                    }
+                    #[derive(Clone, serde::Serialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct Payload {
+                        login_name: String,
+                        request_id: u64,
+                    }
+                    let _ = app_handle.emit(
+                        "refreshmint://human-challenge-closed",
+                        Payload {
+                            login_name: login_name.to_string(),
+                            request_id,
+                        },
+                    );
+                }
                 scraper_protocol::WorkerEvent::FailureRetained {
                     error,
                     artifacts_dir,
@@ -1048,6 +1138,22 @@ fn run_scrape_in_worker(
             ))
         })
     })();
+
+    if let Some(request_id) = active_human_challenge_request_id {
+        #[derive(Clone, serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Payload {
+            login_name: String,
+            request_id: u64,
+        }
+        let _ = app_handle.emit(
+            "refreshmint://human-challenge-closed",
+            Payload {
+                login_name: login_name.to_string(),
+                request_id,
+            },
+        );
+    }
 
     unregister_scrape_worker(&worker_state, login_name, cancel_token);
     drop(stdin);
