@@ -263,7 +263,10 @@ async function handleMfa(context) {
     // 0. Verify page state and check for errors
     const pageInfoJson = /** @type {string} */ (
         await page.evaluate(`(function() {
-        const header = document.querySelector('h1, h2, #header');
+        // Keep heading precedence aligned with the main-loop page-status probe
+        // below. querySelector('h1, h2, #header') uses document order and can
+        // select Chase's earlier, empty #header instead of the visible h1.
+        const header = document.querySelector('h1') || document.querySelector('h2') || document.querySelector('#header');
         const headerText = header ? header.innerText.trim() : '';
         const bodyText = document.body.innerText;
         return JSON.stringify({
@@ -715,7 +718,13 @@ async function main() {
             });
         })()`)
         );
-        const pageStatus = JSON.parse(pageStatusJson);
+        const parsedPageStatus = /** @type {unknown} */ (
+            JSON.parse(pageStatusJson)
+        );
+        const pageStatus =
+            /** @type {{h1: string, title: string, isLogin: boolean, isMfa: boolean, isDashboard: boolean}} */ (
+                parsedPageStatus
+            );
         const header = pageStatus.h1.toLowerCase();
         const title = pageStatus.title.toLowerCase();
         refreshmint.log(
@@ -732,6 +741,10 @@ async function main() {
                 if (
                     header.includes('confirm') ||
                     title.includes('identity') ||
+                    // UNTESTED after the 2026-09-05 retained artifact. This
+                    // body marker keeps transient MFA renders from falling
+                    // through to the dashboard/login handler.
+                    pageStatus.isMfa ||
                     urlFragment.includes('step=confirmIdentity')
                 ) {
                     stepReturn = await handleMfa(context);
