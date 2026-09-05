@@ -52,18 +52,15 @@ fn has_runnable_driver(candidate: &std::path::Path) -> bool {
 
 /// Return the directory for a built-in extension by name, or `None` if unknown.
 ///
-/// In debug builds, prefers the live source tree via `CARGO_MANIFEST_DIR` so
-/// edits to extension files are picked up without recompiling. Falls back to
+/// In debug builds, prefers the live source tree provided by the package build
+/// script so edits to extension files are picked up without recompiling. Falls back to
 /// embedded bytes extracted to a process-scoped temp directory if the source
 /// path is absent (binary moved, different machine, or release build).
 pub fn resolve_dir(name: &str) -> Option<PathBuf> {
     // Debug: try the live source tree first (edits reflected without recompile)
     #[cfg(debug_assertions)]
     {
-        let source_root = PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../builtin-extensions"
-        ));
+        let source_root = PathBuf::from(env!("REFRESHMINT_BUILTIN_EXTENSIONS_DIR"));
         let candidate = source_root.join(name);
         if has_runnable_driver(&candidate) {
             eprintln!(

@@ -12,6 +12,23 @@ pub struct DebugStartConfig {
     pub prompt_requires_override: bool,
 }
 
+#[cfg(unix)]
+pub type DebugSessionReadyListener =
+    std::sync::Arc<dyn Fn(&crate::debug_registry::DebugSessionDescriptor) + Send + Sync>;
+
+/// Configuration for exposing an already-running scrape browser through the
+/// debug socket. The caller continues to own the login lock while this future
+/// runs, so promoting a failed scrape never releases and reacquires that lock.
+#[cfg(unix)]
+pub struct ExistingDebugSessionConfig {
+    pub login_name: String,
+    pub ledger_dir: PathBuf,
+    pub socket_path: PathBuf,
+    pub kind: String,
+    pub max_duration: Option<std::time::Duration>,
+    pub ready_listener: Option<DebugSessionReadyListener>,
+}
+
 pub fn default_debug_socket_path(login_name: &str) -> Result<PathBuf, Box<dyn Error>> {
     #[cfg(unix)]
     {
@@ -335,9 +352,6 @@ fn finalize_debug_exec_resources(
 fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>> {
     use chromiumoxide::browser::Browser;
     use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio::net::UnixListener;
     use tokio::sync::Mutex;
 
     type DebugRuntimeState = (
@@ -359,24 +373,6 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
     let socket_path = match config.socket_path {
         Some(path) => path,
         None => default_debug_socket_path(&config.login_name)?,
-    };
-    let bind_socket_path = resolve_socket_bind_path(&socket_path);
-
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
-    }
-    if bind_socket_path.exists() {
-        std::fs::remove_file(&bind_socket_path)?;
-    }
-    let _cleanup = SocketCleanup {
-        paths: if bind_socket_path == socket_path {
-            vec![socket_path.clone()]
-        } else {
-            vec![socket_path.clone(), bind_socket_path.clone()]
-        },
     };
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -472,39 +468,123 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
             ))
         })?;
 
-    rt.block_on(async move {
-        let listener = UnixListener::bind(&bind_socket_path)?;
-        if bind_socket_path != socket_path {
-            std::os::unix::fs::symlink(&bind_socket_path, &socket_path)?;
+    rt.block_on(serve_existing_debug_session(
+        ExistingDebugSessionConfig {
+            login_name: config.login_name,
+            ledger_dir: config.ledger_dir,
+            socket_path,
+            kind: "manual-debug".to_string(),
+            max_duration: None,
+            ready_listener: None,
+        },
+        browser_instance,
+        handler_handle,
+        page_inner,
+        refreshmint_inner,
+    ))?;
+
+    Ok(())
+}
+
+/// Serve debugger requests against an existing browser/page pair and close the
+/// browser when stopped. This is shared by fresh debug workers and failed
+/// scrapes promoted in place.
+#[cfg(unix)]
+pub async fn serve_existing_debug_session(
+    config: ExistingDebugSessionConfig,
+    browser_instance: std::sync::Arc<tokio::sync::Mutex<chromiumoxide::browser::Browser>>,
+    handler_handle: tokio::task::JoinHandle<()>,
+    page_inner: std::sync::Arc<tokio::sync::Mutex<super::js_api::PageInner>>,
+    refreshmint_inner: std::sync::Arc<tokio::sync::Mutex<super::js_api::RefreshmintInner>>,
+) -> Result<(), Box<dyn Error>> {
+    use std::time::{Duration, Instant};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let socket_path = config.socket_path;
+    let bind_socket_path = resolve_socket_bind_path(&socket_path);
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path)?;
+    }
+    if bind_socket_path.exists() {
+        std::fs::remove_file(&bind_socket_path)?;
+    }
+    let _cleanup = SocketCleanup {
+        paths: if bind_socket_path == socket_path {
+            vec![socket_path.clone()]
+        } else {
+            vec![socket_path.clone(), bind_socket_path.clone()]
+        },
+    };
+
+    let listener = UnixListener::bind(&bind_socket_path)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bind_socket_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    if bind_socket_path != socket_path {
+        std::os::unix::fs::symlink(&bind_socket_path, &socket_path)?;
+    }
+    let (_registration, descriptor) = crate::debug_registry::DebugSessionRegistration::create(
+        &config.login_name,
+        &config.kind,
+        &socket_path,
+        &config.ledger_dir,
+    )?;
+    eprintln!("Debug session id: {}", descriptor.session_id);
+    eprintln!("Debug session socket: {}", socket_path.display());
+    if let Some(listener) = config.ready_listener {
+        listener(&descriptor);
+    }
+
+    let started = Instant::now();
+    let mut running = true;
+    while running {
+        if handler_handle.is_finished() {
+            eprintln!("Browser event handler stopped; ending debug session.");
+            break;
         }
-        println!("Debug session socket: {}", socket_path.display());
-        eprintln!("Debug session started. Press Ctrl+C to stop.");
+        if config
+            .max_duration
+            .is_some_and(|duration| started.elapsed() >= duration)
+        {
+            eprintln!("Debug session expired; closing browser.");
+            break;
+        }
 
-        let mut running = true;
-        while running {
-            if handler_handle.is_finished() {
-                eprintln!("Browser event handler stopped; ending debug session.");
-                break;
-            }
-
-            match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
-                Ok(Ok((stream, _addr))) => {
-                    let mut reader = BufReader::new(stream);
-                    let mut body = String::new();
-                    let read_result = reader.read_line(&mut body).await;
-                    let mut stream = reader.into_inner();
-                    match read_result {
-                        Ok(0) => {
-                            let response = Response {
-                                ok: false,
-                                error: Some("failed to read request: empty request".to_string()),
-                            };
-                            if let Err(err) = write_response_async(&mut stream, &response).await {
-                                eprintln!("failed to write debug response: {err}");
-                            }
+        match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
+            Ok(Ok((stream, _addr))) => {
+                let mut reader = BufReader::new(stream);
+                let mut body = String::new();
+                let read_result = reader.read_line(&mut body).await;
+                let mut stream = reader.into_inner();
+                match read_result {
+                    Ok(0) => {
+                        let response = Response {
+                            ok: false,
+                            error: Some("failed to read request: empty request".to_string()),
+                        };
+                        if let Err(err) = write_response_async(&mut stream, &response).await {
+                            eprintln!("failed to write debug response: {err}");
                         }
-                        Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
-                            Ok(Request::Exec {
+                    }
+                    Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
+                        Ok(Request::Exec {
+                            script,
+                            entry_root,
+                            entry_path,
+                            declared_secrets,
+                            prompt_overrides,
+                            prompt_requires_override,
+                            script_options,
+                        }) => {
+                            if let Err(err) = handle_exec_request_async(
+                                &mut stream,
+                                page_inner.clone(),
+                                refreshmint_inner.clone(),
                                 script,
                                 entry_root,
                                 entry_path,
@@ -512,73 +592,56 @@ fn run_debug_session_unix(config: DebugStartConfig) -> Result<(), Box<dyn Error>
                                 prompt_overrides,
                                 prompt_requires_override,
                                 script_options,
-                            }) => {
-                                if let Err(err) = handle_exec_request_async(
-                                    &mut stream,
-                                    page_inner.clone(),
-                                    refreshmint_inner.clone(),
-                                    script,
-                                    entry_root,
-                                    entry_path,
-                                    declared_secrets,
-                                    prompt_overrides,
-                                    prompt_requires_override,
-                                    script_options,
-                                )
-                                .await
-                                {
-                                    eprintln!("failed to write debug exec stream: {err}");
-                                }
+                            )
+                            .await
+                            {
+                                eprintln!("failed to write debug exec stream: {err}");
                             }
-                            Ok(Request::Stop) => {
-                                running = false;
-                                let response = Response {
-                                    ok: true,
-                                    error: None,
-                                };
-                                if let Err(err) = write_response_async(&mut stream, &response).await
-                                {
-                                    eprintln!("failed to write debug response: {err}");
-                                }
-                            }
-                            Err(err) => {
-                                let response = Response {
-                                    ok: false,
-                                    error: Some(format!("invalid request: {err}")),
-                                };
-                                if let Err(err) = write_response_async(&mut stream, &response).await
-                                {
-                                    eprintln!("failed to write debug response: {err}");
-                                }
-                            }
-                        },
-                        Err(err) => {
+                        }
+                        Ok(Request::Stop) => {
+                            running = false;
                             let response = Response {
-                                ok: false,
-                                error: Some(format!("failed to read request: {err}")),
+                                ok: true,
+                                error: None,
                             };
                             if let Err(err) = write_response_async(&mut stream, &response).await {
                                 eprintln!("failed to write debug response: {err}");
                             }
                         }
+                        Err(err) => {
+                            let response = Response {
+                                ok: false,
+                                error: Some(format!("invalid request: {err}")),
+                            };
+                            if let Err(err) = write_response_async(&mut stream, &response).await {
+                                eprintln!("failed to write debug response: {err}");
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        let response = Response {
+                            ok: false,
+                            error: Some(format!("failed to read request: {err}")),
+                        };
+                        if let Err(err) = write_response_async(&mut stream, &response).await {
+                            eprintln!("failed to write debug response: {err}");
+                        }
                     }
                 }
-                Ok(Err(err)) => return Err::<(), Box<dyn Error>>(err.into()),
-                Err(_) => continue,
             }
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) => continue,
         }
+    }
 
-        drop(listener);
-        let _ = tokio::time::timeout(Duration::from_secs(5), async {
-            let guard = browser_instance.lock().await;
-            let _ = tokio::time::timeout(Duration::from_secs(5), guard.close()).await;
-        })
-        .await;
-        drop(browser_instance);
-        let _ = tokio::time::timeout(Duration::from_secs(5), handler_handle).await;
-        Ok::<(), Box<dyn Error>>(())
-    })?;
-
+    drop(listener);
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        let guard = browser_instance.lock().await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), guard.close()).await;
+    })
+    .await;
+    drop(browser_instance);
+    let _ = tokio::time::timeout(Duration::from_secs(5), handler_handle).await;
     Ok(())
 }
 

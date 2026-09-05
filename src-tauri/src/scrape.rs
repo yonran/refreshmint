@@ -1,9 +1,18 @@
+// Explicit paths let the standalone `scraper-worker` binary reuse this module
+// without linking `app_lib`. Keep these aligned with `src/scrape/`.
+#[path = "scrape/browser.rs"]
 pub mod browser;
+#[path = "scrape/debug.rs"]
 pub mod debug;
+#[path = "scrape/diag.rs"]
 pub mod diag;
+#[path = "scrape/js_api.rs"]
 pub mod js_api;
+#[path = "scrape/locator.rs"]
 pub mod locator;
+#[path = "scrape/profile.rs"]
 pub mod profile;
+#[path = "scrape/sandbox.rs"]
 pub mod sandbox;
 
 use serde::Deserialize;
@@ -36,6 +45,22 @@ pub struct ScrapeConfig {
     /// driver future (finalize + browser close still run). Same proven-safe
     /// semantic as the debug-exec cancel path.
     pub cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    /// When present, a non-canceled driver failure keeps this exact browser
+    /// alive and exposes it as a bounded debug session. The worker continues
+    /// owning the existing login lock for the entire promoted session.
+    #[cfg(unix)]
+    pub failure_debug: Option<FailureDebugConfig>,
+}
+
+#[cfg(unix)]
+pub type FailureDebugReadyListener =
+    Arc<dyn Fn(&crate::debug_registry::DebugSessionDescriptor, &ScrapeError) + Send + Sync>;
+
+#[cfg(unix)]
+pub struct FailureDebugConfig {
+    pub socket_path: PathBuf,
+    pub max_duration: std::time::Duration,
+    pub ready_listener: Option<FailureDebugReadyListener>,
 }
 
 /// A listener invoked once per driver log line as it is emitted during a scrape.
@@ -165,7 +190,7 @@ where
 /// (not a user cancellation or a setup error), the ledger-relative path of the
 /// captured failure-artifacts directory so callers can record it in the scrape
 /// log.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ScrapeError {
     pub message: String,
     pub artifacts_dir: Option<PathBuf>,
@@ -997,7 +1022,7 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
     // outcome-combining mirrors debug exec (see combine_run_and_finalize, which
     // scrape/debug.rs also uses).
     let finalize_result = {
-        let inner = refreshmint_inner.lock().await;
+        let mut inner = refreshmint_inner.lock().await;
         if inner.staged_resources.is_empty() {
             Ok(Vec::new())
         } else {
@@ -1010,6 +1035,7 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
                 for name in names {
                     eprintln!("  -> {name}");
                 }
+                inner.staged_resources.clear();
             }
             finalized
         }
@@ -1082,6 +1108,57 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
         }
     }
 
+    let scrape_error = result.as_ref().err().map(|err| ScrapeError {
+        message: sensitive_data.redact(&err.to_string()),
+        artifacts_dir: failure_artifacts_dir.clone(),
+    });
+
+    // A failed manual app scrape can become a debug session without changing
+    // processes, tabs, profiles, or lock ownership. Notify the parent only
+    // after the socket and discovery record are ready, then remain here until
+    // MCP stops the session or its bounded lifetime expires.
+    #[cfg(unix)]
+    if !canceled {
+        if let (Some(failure_debug), Some(scrape_error)) =
+            (config.failure_debug, scrape_error.clone())
+        {
+            {
+                let mut inner = refreshmint_inner.lock().await;
+                inner.debug_output_sink = None;
+                inner.prompt_ui_handler = None;
+                inner.prompt_requires_override = true;
+            }
+            let ready_listener = failure_debug.ready_listener.map(|listener| {
+                let scrape_error = scrape_error.clone();
+                std::sync::Arc::new(
+                    move |descriptor: &crate::debug_registry::DebugSessionDescriptor| {
+                        listener(descriptor, &scrape_error);
+                    },
+                ) as debug::DebugSessionReadyListener
+            });
+            eprintln!("Keeping failed scrape browser open for debugging...");
+            if let Err(err) = debug::serve_existing_debug_session(
+                debug::ExistingDebugSessionConfig {
+                    login_name: login_name.clone(),
+                    ledger_dir: config.ledger_dir.clone(),
+                    socket_path: failure_debug.socket_path,
+                    kind: "failed-scrape".to_string(),
+                    max_duration: Some(failure_debug.max_duration),
+                    ready_listener,
+                },
+                browser,
+                handler_handle,
+                page_inner_for_capture,
+                refreshmint_inner,
+            )
+            .await
+            {
+                eprintln!("failed scrape debug session ended with an error: {err}");
+            }
+            return Err(scrape_error);
+        }
+    }
+
     // 11. Close browser
     eprintln!("Closing browser...");
     {
@@ -1093,10 +1170,10 @@ pub async fn run_scrape_async(config: ScrapeConfig) -> Result<(), ScrapeError> {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handler_handle).await;
     eprintln!("Done.");
 
-    result.map_err(|err| ScrapeError {
-        message: sensitive_data.redact(&err.to_string()),
-        artifacts_dir: failure_artifacts_dir,
-    })
+    match scrape_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Synchronous entry point that creates a tokio runtime and runs the scrape.

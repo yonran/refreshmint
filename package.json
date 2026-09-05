@@ -9,6 +9,8 @@
     ],
     "scripts": {
         "build": "npm run typecheck && vite build",
+        "build:sidecars": "node scripts/prepare-rust-sidecars.mjs",
+        "build:sidecars:debug": "node scripts/prepare-rust-sidecars.mjs --debug",
         "build:extensions": "node scripts/build-extensions.mjs",
         "dev": "vite",
         "prettier": "prettier --ignore-path .prettierignore --ignore-path .gitignore --ignore-path \"$(scripts/get-git-user-ignore-file.mts)\"",

@@ -1003,6 +1003,8 @@ fn scrape_smoke_driver_writes_output() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     scrape::run_scrape(config)?;
@@ -1068,6 +1070,8 @@ fn scrape_popup_wait_for_event_switches_tab() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     scrape::run_scrape(config)?;
@@ -1118,6 +1122,8 @@ fn scrape_screenshot_api_returns_bytes_and_writes_paths() -> Result<(), Box<dyn 
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     scrape::run_scrape(config)?;
@@ -1194,6 +1200,8 @@ fn scrape_popup_waiter_rejects_when_popup_closes() -> Result<(), Box<dyn Error>>
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     scrape::run_scrape(config)?;
@@ -1247,6 +1255,8 @@ fn scrape_click_reports_overlay_interception() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     scrape::run_scrape(config)?;
@@ -1308,6 +1318,8 @@ fn scrape_goto_handles_same_url_and_hash_navigation() -> Result<(), Box<dyn Erro
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     scrape::run_scrape(config)?;
@@ -1374,6 +1386,8 @@ fn scrape_frame_methods_switch_context() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     scrape::run_scrape(config)?;
@@ -1434,6 +1448,8 @@ fn scrape_frame_methods_switch_context_cross_origin_oopif() -> Result<(), Box<dy
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     scrape::run_scrape(config)?;
@@ -1492,6 +1508,8 @@ fn scrape_network_request_response_api_works() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     eprintln!("network scrape sandbox: {}", sandbox.path().display());
@@ -1570,6 +1588,8 @@ fn scrape_network_matchers_work() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     eprintln!(
@@ -1651,6 +1671,8 @@ fn scrape_network_wait_for_event_aliases_work() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     let (result_tx, result_rx) = mpsc::channel();
@@ -1728,6 +1750,8 @@ fn scrape_network_wait_for_event_options_work() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     let (result_tx, result_rx) = mpsc::channel();
@@ -1803,6 +1827,8 @@ fn scrape_network_lifecycle_events_work() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     let (result_tx, result_rx) = mpsc::channel();
@@ -1882,6 +1908,8 @@ fn scrape_network_redirects_work() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     let (result_tx, result_rx) = mpsc::channel();

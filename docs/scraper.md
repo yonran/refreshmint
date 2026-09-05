@@ -4,6 +4,8 @@ This document covers running scrapers, scraper runtime behavior, and scraper JS 
 
 For extension structure and manifest details, see `docs/extension.md`.
 For GUI/CLI lock coordination, see `docs/locking.md`.
+For process lifetimes, failed-scrape debugging, MCP routing, and the security
+model, see `docs/scraper-process-model.md`.
 
 ## Run a scraper
 

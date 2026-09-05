@@ -291,6 +291,8 @@ fn locator_api_works() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     scrape::run_scrape(config)?;
@@ -349,6 +351,8 @@ fn get_by_role_api_works() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     scrape::run_scrape(config)?;
@@ -406,6 +410,8 @@ fn shadow_dom_api_works() -> Result<(), Box<dyn Error>> {
         prompt_ui_handler: None,
         log_listener: None,
         cancel: None,
+        #[cfg(unix)]
+        failure_debug: None,
     };
 
     scrape::run_scrape(config)?;

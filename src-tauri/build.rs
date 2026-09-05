@@ -15,6 +15,13 @@ fn register_build_inputs() {
     println!("cargo:rerun-if-changed=../scripts/build-extensions.mjs");
     println!("cargo:rerun-if-changed=../package.json");
     println!("cargo:rerun-if-changed=../package-lock.json");
+    let builtin_extensions = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("builtin-extensions");
+    println!(
+        "cargo:rustc-env=REFRESHMINT_BUILTIN_EXTENSIONS_DIR={}",
+        builtin_extensions.display()
+    );
 }
 
 fn build_builtin_extensions() -> PathBuf {
@@ -122,8 +129,8 @@ fn collect_files_recursive(root: &Path, current: &Path, files: &mut Vec<(String,
     }
 }
 
-/// Create an empty placeholder sidecar binary so that `tauri build` does not
-/// fail during development when the real hledger binary has not been downloaded.
+/// Create empty placeholders so Cargo can compile the sidecar binaries before
+/// the pre-bundle script copies those freshly built binaries into place.
 fn ensure_sidecar_placeholder() {
     let target_triple = std::env::var("TARGET").unwrap_or_default();
     if target_triple.is_empty() {
@@ -136,12 +143,18 @@ fn ensure_sidecar_placeholder() {
         ""
     };
 
-    let name = format!("binaries/hledger-{target_triple}{ext}");
-    let path = Path::new(&name);
-    if !path.exists() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+    for binary in [
+        "hledger",
+        "refreshmint-scraper-worker",
+        "refreshmint-mcp-server",
+    ] {
+        let name = format!("binaries/{binary}-{target_triple}{ext}");
+        let path = Path::new(&name);
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, b"");
         }
-        let _ = std::fs::write(path, b"");
     }
 }

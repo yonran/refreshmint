@@ -744,16 +744,30 @@ fn run_debug_start(
         Some(path) => path,
         None => crate::scrape::debug::default_debug_socket_path(&login_name)?,
     };
-    let config = crate::scrape::debug::DebugStartConfig {
-        login_name,
-        extension_name,
-        ledger_dir,
-        profile_override: args.profile,
-        headless: args.headless,
-        socket_path: Some(socket),
-        prompt_requires_override: true,
-    };
-    crate::scrape::debug::run_debug_session(config)
+    let mut command = std::process::Command::new(crate::binpath::scraper_worker_path());
+    command
+        .arg("debug-start")
+        .arg("--ledger")
+        .arg(ledger_dir)
+        .arg("--login")
+        .arg(login_name)
+        .arg("--extension")
+        .arg(extension_name)
+        .arg("--socket")
+        .arg(socket)
+        .arg("--prompt-requires-override");
+    if let Some(profile) = args.profile {
+        command.arg("--profile").arg(profile);
+    }
+    if args.headless {
+        command.arg("--headless");
+    }
+    let status = command.status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("scraper worker exited with status {status}")).into())
+    }
 }
 
 fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
@@ -1036,6 +1050,154 @@ fn write_scrape_log_event(
     }
 }
 
+fn run_cli_scrape_worker(
+    ledger_dir: &Path,
+    login_name: &str,
+    extension_name: &str,
+    profile: Option<&Path>,
+    headless: bool,
+    prompt_overrides: crate::scrape::js_api::PromptOverrides,
+) -> Result<(), crate::scrape::ScrapeError> {
+    use std::io::{BufRead, Write};
+
+    let mut command = std::process::Command::new(crate::binpath::scraper_worker_path());
+    command
+        .arg("run-scrape")
+        .arg("--ledger")
+        .arg(ledger_dir)
+        .arg("--login")
+        .arg(login_name)
+        .arg("--extension")
+        .arg(extension_name)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    if let Some(profile) = profile {
+        command.arg("--profile").arg(profile);
+    }
+    if headless {
+        command.arg("--headless");
+    }
+
+    let mut child = command.spawn().map_err(|error| {
+        crate::scrape::ScrapeError::message_only(format!("failed to start scraper worker: {error}"))
+    })?;
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(crate::scrape::ScrapeError::message_only(
+            "scraper worker control pipe was not created",
+        ));
+    };
+    let Some(stdout) = child.stdout.take() else {
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(crate::scrape::ScrapeError::message_only(
+            "scraper worker event pipe was not created",
+        ));
+    };
+    let start_result = serde_json::to_writer(
+        &mut stdin,
+        &crate::scraper_protocol::WorkerCommand::Start {
+            prompt_overrides,
+            prompt_requires_override: true,
+            retain_failure_debug: false,
+        },
+    )
+    .map_err(|error| error.to_string())
+    .and_then(|()| {
+        stdin
+            .write_all(b"\n")
+            .and_then(|()| stdin.flush())
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = start_result {
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(crate::scrape::ScrapeError::message_only(error));
+    }
+
+    let read_result: Result<Result<(), crate::scrape::ScrapeError>, crate::scrape::ScrapeError> =
+        (|| {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let line = line.map_err(|error| {
+                    crate::scrape::ScrapeError::message_only(format!(
+                        "failed reading scraper worker event: {error}"
+                    ))
+                })?;
+                let event: crate::scraper_protocol::WorkerEvent = serde_json::from_str(&line)
+                    .map_err(|error| {
+                        crate::scrape::ScrapeError::message_only(format!(
+                            "invalid scraper worker event: {error}"
+                        ))
+                    })?;
+                match event {
+                    crate::scraper_protocol::WorkerEvent::Log { stream, line } => {
+                        write_scrape_log_event(
+                            &crate::scrape::js_api::DebugOutputEvent { stream, line },
+                            std::io::stdout(),
+                            std::io::stderr(),
+                        );
+                    }
+                    crate::scraper_protocol::WorkerEvent::PromptRequested { message, .. } => {
+                        return Ok(Err(crate::scrape::ScrapeError::message_only(format!(
+                            "missing prompt override for '{message}'"
+                        ))));
+                    }
+                    crate::scraper_protocol::WorkerEvent::FailureRetained {
+                        error,
+                        artifacts_dir,
+                        ..
+                    }
+                    | crate::scraper_protocol::WorkerEvent::Result {
+                        ok: false,
+                        error: Some(error),
+                        artifacts_dir,
+                    } => {
+                        return Ok(Err(crate::scrape::ScrapeError {
+                            message: error,
+                            artifacts_dir: artifacts_dir.map(PathBuf::from),
+                        }));
+                    }
+                    crate::scraper_protocol::WorkerEvent::Result { ok: true, .. } => {
+                        return Ok(Ok(()));
+                    }
+                    crate::scraper_protocol::WorkerEvent::Result {
+                        ok: false,
+                        error: None,
+                        artifacts_dir,
+                    } => {
+                        return Ok(Err(crate::scrape::ScrapeError {
+                            message: "scraper worker failed".to_string(),
+                            artifacts_dir: artifacts_dir.map(PathBuf::from),
+                        }));
+                    }
+                }
+            }
+            Err(crate::scrape::ScrapeError::message_only(
+                "scraper worker exited without a result",
+            ))
+        })();
+    drop(stdin);
+    if read_result.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|error| {
+        crate::scrape::ScrapeError::message_only(format!(
+            "failed waiting for scraper worker: {error}"
+        ))
+    })?;
+    let result = read_result?;
+    if status.success() || result.is_err() {
+        result
+    } else {
+        Err(crate::scrape::ScrapeError::message_only(format!(
+            "scraper worker exited with status {status}"
+        )))
+    }
+}
+
 fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(), Box<dyn Error>> {
     let ledger_dir = match args.ledger.as_ref() {
         Some(path) => crate::ledger::ensure_refreshmint_extension(path.clone())?,
@@ -1052,31 +1214,15 @@ fn run_scrape(args: ScrapeArgs, context: tauri::Context<tauri::Wry>) -> Result<(
     let login_name_str = login_name.clone();
     let ledger_dir_clone = ledger_dir.clone();
 
-    let config = crate::scrape::ScrapeConfig {
-        login_name,
-        extension_name,
-        ledger_dir,
-        profile_override: args.profile,
-        headless: args.headless,
-        prompt_overrides,
-        prompt_requires_override: true,
-        prompt_ui_handler: None,
-        // Preserve the pre-sink CLI behaviour: once run_scrape_async attaches an
-        // mpsc sink, js_api::emit_debug_output routes driver output to the sink
-        // instead of the stdout/stderr fallback, so without this listener the CLI
-        // would print no driver log lines. Restore the per-stream destinations
-        // (reportValue -> stdout, log -> stderr) and swallow write errors so a
-        // closed pipe can't panic the run.
-        log_listener: Some(std::sync::Arc::new(
-            |event: &crate::scrape::js_api::DebugOutputEvent| {
-                write_scrape_log_event(event, std::io::stdout(), std::io::stderr());
-            },
-        )),
-        cancel: None,
-    };
-
     let timestamp = crate::operations::now_timestamp();
-    let result = crate::scrape::run_scrape(config);
+    let result = run_cli_scrape_worker(
+        &ledger_dir,
+        &login_name,
+        &extension_name,
+        args.profile.as_deref(),
+        args.headless,
+        prompt_overrides,
+    );
     let entry = crate::operations::ScrapeLogEntry {
         login_name: login_name_str,
         timestamp,

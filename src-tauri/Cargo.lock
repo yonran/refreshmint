@@ -4278,6 +4278,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "refreshmint-scraper-runtime"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chromey",
+ "chrono",
+ "clap",
+ "dirs",
+ "fs2",
+ "futures",
+ "keyring",
+ "libc",
+ "llrt_buffer",
+ "llrt_console",
+ "llrt_stream_web",
+ "llrt_util",
+ "lopdf",
+ "regex",
+ "rquickjs",
+ "security-framework 3.7.0",
+ "serde",
+ "serde_json",
+ "spider_chromiumoxide_cdp",
+ "swc_common",
+ "swc_ecma_ast",
+ "swc_ecma_parser",
+ "swc_ecma_visit",
+ "tokio",
+ "uuid",
+ "which 7.0.3",
+ "xattr",
+]
+
+[[package]]
 name = "regex"
 version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

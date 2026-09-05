@@ -1,6 +1,9 @@
 pub mod cli;
+#[allow(dead_code)]
+mod debug_registry;
 pub mod hledger;
 pub mod scrape;
+mod scraper_protocol;
 pub mod secret;
 
 pub mod account_config;
@@ -36,7 +39,7 @@ use tauri::{Emitter, Manager};
 
 struct UiDebugSession {
     socket_path: std::path::PathBuf,
-    join_handle: std::thread::JoinHandle<()>,
+    child: std::process::Child,
 }
 
 struct LockMetadataWatcher {
@@ -130,6 +133,20 @@ pub struct ScrapeCancelState(
     >,
 );
 
+/// Writable control pipes for scrape workers. The existing cancel registry
+/// remains the single-owner gate; this state adds the cross-process transport
+/// used after a worker has started.
+#[derive(Default)]
+pub struct ScrapeWorkerState(std::sync::Mutex<ScrapeWorkerMap>);
+
+type ScrapeWorkerMap = std::collections::HashMap<
+    String,
+    (
+        u64,
+        std::sync::Arc<std::sync::Mutex<std::process::ChildStdin>>,
+    ),
+>;
+
 /// Monotonic owner-token source for `ScrapeCancelState` entries. Each successful
 /// `register_scrape_cancel` mints a fresh token so `unregister_scrape_cancel` can
 /// tell the owning run apart from a later same-login run.
@@ -183,6 +200,56 @@ fn trigger_scrape_cancel(state: &ScrapeCancelState, login_name: &str) -> bool {
     }
 }
 
+fn register_scrape_worker(
+    state: &ScrapeWorkerState,
+    login_name: &str,
+    token: u64,
+    stdin: std::process::ChildStdin,
+) -> Result<std::sync::Arc<std::sync::Mutex<std::process::ChildStdin>>, String> {
+    let stdin = std::sync::Arc::new(std::sync::Mutex::new(stdin));
+    let mut guard = state.0.lock().map_err(|err| err.to_string())?;
+    if guard.contains_key(login_name) {
+        return Err(format!(
+            "a scrape for login '{login_name}' is already running"
+        ));
+    }
+    guard.insert(login_name.to_string(), (token, stdin.clone()));
+    Ok(stdin)
+}
+
+fn unregister_scrape_worker(state: &ScrapeWorkerState, login_name: &str, token: u64) {
+    if let Ok(mut guard) = state.0.lock() {
+        if guard
+            .get(login_name)
+            .is_some_and(|(owner, _)| *owner == token)
+        {
+            guard.remove(login_name);
+        }
+    }
+}
+
+fn write_worker_command(
+    stdin: &std::sync::Arc<std::sync::Mutex<std::process::ChildStdin>>,
+    command: &scraper_protocol::WorkerCommand,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut stdin = stdin.lock().map_err(|err| err.to_string())?;
+    serde_json::to_writer(&mut *stdin, command).map_err(|err| err.to_string())?;
+    stdin.write_all(b"\n").map_err(|err| err.to_string())?;
+    stdin.flush().map_err(|err| err.to_string())
+}
+
+fn cancel_scrape_worker(state: &ScrapeWorkerState, login_name: &str) -> bool {
+    let stdin = match state.0.lock() {
+        Ok(guard) => guard.get(login_name).map(|(_, stdin)| stdin.clone()),
+        Err(_) => None,
+    };
+    stdin.as_ref().is_some_and(|stdin| {
+        write_worker_command(stdin, &scraper_protocol::WorkerCommand::Cancel).is_ok()
+    })
+}
+
 static UI_DEBUG_SESSION: std::sync::OnceLock<std::sync::Mutex<Option<UiDebugSession>>> =
     std::sync::OnceLock::new();
 static LOCK_METADATA_WATCHER: std::sync::OnceLock<std::sync::Mutex<Option<LockMetadataWatcher>>> =
@@ -218,6 +285,7 @@ pub fn run_with_context(
         .plugin(tauri_plugin_notification::init())
         .manage(PromptAnswerState::default())
         .manage(ScrapeCancelState::default())
+        .manage(ScrapeWorkerState::default())
         .invoke_handler(tauri::generate_handler![
             new_ledger,
             open_ledger,
@@ -366,6 +434,37 @@ fn run_shutdown_cleanup() {
     let killed = scrape::browser::kill_active_browsers();
     if killed > 0 {
         eprintln!("[shutdown] killed {killed} browser process(es) to avoid orphans");
+    }
+    if let Ok(mut guard) = ui_debug_session_state().lock() {
+        if let Some(session) = guard.take() {
+            let _ = stop_debug_worker(session, std::time::Duration::from_secs(5));
+        }
+    }
+}
+
+/// Ask a debug worker to close its browser, then bound how long shutdown may
+/// wait before forcefully terminating the worker. The worker owns the login
+/// lock and browser process, so the app must not acquire or duplicate that lock.
+fn stop_debug_worker(
+    mut session: UiDebugSession,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let stop_result = crate::scrape::debug::stop_debug_session(&session.socket_path)
+        .map_err(|err| err.to_string());
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match session.child.try_wait() {
+            Ok(Some(_)) => return stop_result,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = session.child.kill();
+                let _ = session.child.wait();
+                return stop_result;
+            }
+            Err(err) => return Err(format!("failed to wait for scraper worker: {err}")),
+        }
     }
 }
 
@@ -567,8 +666,13 @@ fn start_scrape_debug_session_for_login(
         .lock()
         .map_err(|_| "failed to acquire debug session lock".to_string())?;
 
-    if let Some(session) = guard.as_ref() {
-        if !session.join_handle.is_finished() {
+    if let Some(session) = guard.as_mut() {
+        if session
+            .child
+            .try_wait()
+            .map_err(|err| err.to_string())?
+            .is_none()
+        {
             return Err(format!(
                 "a debug session is already running at {}",
                 session.socket_path.display()
@@ -576,29 +680,29 @@ fn start_scrape_debug_session_for_login(
         }
     }
 
-    if let Some(finished) = guard.take() {
-        let _ = finished.join_handle.join();
-    }
+    let _ = guard.take();
 
-    let config = crate::scrape::debug::DebugStartConfig {
-        login_name,
-        extension_name: extension,
-        ledger_dir: target_dir,
-        profile_override: None,
-        headless,
-        socket_path: Some(socket_path.clone()),
-        prompt_requires_override: false,
-    };
-    let socket_for_thread = socket_path.clone();
-    let join_handle = std::thread::spawn(move || {
-        if let Err(err) = crate::scrape::debug::run_debug_session(config) {
-            eprintln!("debug session exited with error: {err}");
-        }
-    });
+    let mut command = std::process::Command::new(binpath::scraper_worker_path());
+    command
+        .arg("debug-start")
+        .arg("--ledger")
+        .arg(&target_dir)
+        .arg("--login")
+        .arg(&login_name)
+        .arg("--extension")
+        .arg(&extension)
+        .arg("--socket")
+        .arg(&socket_path);
+    if headless {
+        command.arg("--headless");
+    }
+    let child = command
+        .spawn()
+        .map_err(|err| format!("failed to start scraper worker: {err}"))?;
 
     *guard = Some(UiDebugSession {
-        socket_path: socket_for_thread,
-        join_handle,
+        socket_path: socket_path.clone(),
+        child,
     });
 
     Ok(socket_path.to_string_lossy().to_string())
@@ -624,13 +728,7 @@ fn stop_scrape_debug_session() -> Result<(), String> {
         return Ok(());
     };
 
-    let stop_result = crate::scrape::debug::stop_debug_session(&session.socket_path);
-    let _ = session.join_handle.join();
-
-    if let Err(err) = stop_result {
-        return Err(err.to_string());
-    }
-    Ok(())
+    stop_debug_worker(session, std::time::Duration::from_secs(10))
 }
 
 #[tauri::command]
@@ -640,18 +738,21 @@ fn get_scrape_debug_session_socket() -> Result<Option<String>, String> {
         let mut guard = state
             .lock()
             .map_err(|_| "failed to acquire debug session lock".to_string())?;
-        let Some(session) = guard.as_ref() else {
+        let Some(session) = guard.as_mut() else {
             return Ok(None);
         };
-        if session.join_handle.is_finished() {
+        if session
+            .child
+            .try_wait()
+            .map_err(|err| err.to_string())?
+            .is_some()
+        {
             guard.take()
         } else {
             return Ok(Some(session.socket_path.to_string_lossy().to_string()));
         }
     };
-    if let Some(session) = finished {
-        let _ = session.join_handle.join();
-    }
+    drop(finished);
     Ok(None)
 }
 
@@ -782,6 +883,196 @@ fn resolve_prompt_timeout_secs(prompt_timeout_secs: Option<u64>) -> u64 {
         .max(MIN_PROMPT_TIMEOUT_SECS)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_scrape_in_worker(
+    app_handle: &tauri::AppHandle,
+    ledger_dir: &std::path::Path,
+    login_name: &str,
+    extension_name: &str,
+    source: &str,
+    headless: bool,
+    prompt_timeout: std::time::Duration,
+    cancel_token: u64,
+) -> Result<(), scrape::ScrapeError> {
+    use std::io::BufRead;
+    use tauri::Emitter;
+
+    let mut command = std::process::Command::new(binpath::scraper_worker_path());
+    command
+        .arg("run-scrape")
+        .arg("--ledger")
+        .arg(ledger_dir)
+        .arg("--login")
+        .arg(login_name)
+        .arg("--extension")
+        .arg(extension_name)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    if headless {
+        command.arg("--headless");
+    }
+
+    let mut child = command.spawn().map_err(|err| {
+        scrape::ScrapeError::message_only(format!("failed to start scraper worker: {err}"))
+    })?;
+    let Some(stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(scrape::ScrapeError::message_only(
+            "scraper worker control pipe was not created",
+        ));
+    };
+    let Some(stdout) = child.stdout.take() else {
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(scrape::ScrapeError::message_only(
+            "scraper worker event pipe was not created",
+        ));
+    };
+    let worker_state = app_handle.state::<ScrapeWorkerState>();
+    let stdin = match register_scrape_worker(&worker_state, login_name, cancel_token, stdin) {
+        Ok(stdin) => stdin,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(scrape::ScrapeError::message_only(error));
+        }
+    };
+    if let Err(error) = write_worker_command(
+        &stdin,
+        &scraper_protocol::WorkerCommand::Start {
+            prompt_overrides: scrape::js_api::PromptOverrides::new(),
+            prompt_requires_override: false,
+            retain_failure_debug: source != "auto",
+        },
+    ) {
+        unregister_scrape_worker(&worker_state, login_name, cancel_token);
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(scrape::ScrapeError::message_only(error));
+    }
+
+    let mut retained_failure = false;
+    let run_result = (|| {
+        let mut final_result = None;
+        for line in std::io::BufReader::new(stdout).lines() {
+            let line = line.map_err(|err| {
+                scrape::ScrapeError::message_only(format!(
+                    "failed reading scraper worker event: {err}"
+                ))
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: scraper_protocol::WorkerEvent =
+                serde_json::from_str(&line).map_err(|err| {
+                    scrape::ScrapeError::message_only(format!(
+                        "invalid scraper worker event: {err}"
+                    ))
+                })?;
+            match event {
+                scraper_protocol::WorkerEvent::Log { stream, line } => {
+                    let _ = app_handle.emit(
+                        "refreshmint://scrape-output",
+                        scrape_output_payload(
+                            login_name,
+                            &scrape::js_api::DebugOutputEvent { stream, line },
+                        ),
+                    );
+                }
+                scraper_protocol::WorkerEvent::PromptRequested {
+                    request_id,
+                    message,
+                    choices,
+                } => {
+                    let response = request_prompt_answer(
+                        app_handle,
+                        login_name.to_string(),
+                        message,
+                        choices,
+                        prompt_timeout,
+                        source == "auto",
+                    );
+                    let (answer, error) = match response {
+                        Ok(answer) => (answer, None),
+                        Err(error) => (None, Some(error)),
+                    };
+                    write_worker_command(
+                        &stdin,
+                        &scraper_protocol::WorkerCommand::PromptAnswer {
+                            request_id,
+                            answer,
+                            error,
+                        },
+                    )
+                    .map_err(scrape::ScrapeError::message_only)?;
+                }
+                scraper_protocol::WorkerEvent::FailureRetained {
+                    error,
+                    artifacts_dir,
+                    debug_session,
+                } => {
+                    retained_failure = true;
+                    log::info!(
+                        "failed scrape for login '{login_name}' retained as debug session '{}'",
+                        debug_session.session_id
+                    );
+                    final_result = Some(Err(scrape::ScrapeError {
+                        message: error,
+                        artifacts_dir: artifacts_dir.map(std::path::PathBuf::from),
+                    }));
+                    break;
+                }
+                scraper_protocol::WorkerEvent::Result {
+                    ok,
+                    error,
+                    artifacts_dir,
+                } => {
+                    final_result = Some(if ok {
+                        Ok(())
+                    } else {
+                        Err(scrape::ScrapeError {
+                            message: error.unwrap_or_else(|| "scraper worker failed".to_string()),
+                            artifacts_dir: artifacts_dir.map(std::path::PathBuf::from),
+                        })
+                    });
+                    break;
+                }
+            }
+        }
+        final_result.unwrap_or_else(|| {
+            Err(scrape::ScrapeError::message_only(
+                "scraper worker exited without a result",
+            ))
+        })
+    })();
+
+    unregister_scrape_worker(&worker_state, login_name, cancel_token);
+    drop(stdin);
+    if retained_failure {
+        // Dropping Child detaches it. The worker still owns the browser and the
+        // original login lock; MCP discovers it through the session registry.
+        // Its bounded debug lifetime closes both if nobody attaches.
+        drop(child);
+        return run_result;
+    }
+    if run_result.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|err| {
+        scrape::ScrapeError::message_only(format!("failed waiting for scraper worker: {err}"))
+    })?;
+    if status.success() || run_result.is_err() {
+        run_result
+    } else {
+        Err(scrape::ScrapeError::message_only(format!(
+            "scraper worker exited with status {status}"
+        )))
+    }
+}
+
 #[tauri::command]
 async fn run_scrape_for_login(
     app_handle: tauri::AppHandle,
@@ -814,70 +1105,41 @@ async fn run_scrape_for_login(
     // `None` means another run of this login already owns the cancel entry; this
     // run gets no cancel channel (it fail-fasts on the login lock) and must not
     // unregister the owner's entry on exit.
-    let cancel_token = cancel_registration.as_ref().map(|(token, _)| *token);
-    let cancel_receiver = cancel_registration.map(|(_, receiver)| receiver);
+    let Some((cancel_token, _cancel_receiver)) = cancel_registration else {
+        return Err(format!(
+            "a scrape for login '{login_name}' is already running"
+        ));
+    };
 
     let result: Result<(), scrape::ScrapeError> = async {
         let extension = login_config::resolve_login_extension(&target_dir, &login_name)
             .map_err(|err| err.to_string())?;
-        let prompt_ui_handler = {
-            let app_handle = app_handle.clone();
-            let login_name = login_name.clone();
-            // Only an auto-triggered run needs an OS notification: a manual run
-            // was just started by someone sitting at the app, who will see the
-            // in-app modal immediately.
-            let notify_os = source == "auto";
-            std::sync::Arc::new(move |message: String, choices: Option<Vec<String>>| {
-                request_prompt_answer(
-                    &app_handle,
-                    login_name.clone(),
-                    message,
-                    choices,
-                    prompt_timeout,
-                    notify_os,
-                )
-            })
-        };
-
-        // Stream every driver log line to the GUI's live scrape console. The
-        // sink attached in run_scrape_async invokes this once per line.
-        let log_listener: scrape::ScrapeLogListener = {
-            let app_handle = app_handle.clone();
-            let login_name = login_name.clone();
-            std::sync::Arc::new(move |event: &scrape::js_api::DebugOutputEvent| {
-                let _ = app_handle.emit(
-                    "refreshmint://scrape-output",
-                    scrape_output_payload(&login_name, event),
-                );
-            })
-        };
-
-        let config = scrape::ScrapeConfig {
-            login_name: login_name.clone(),
-            extension_name: extension,
-            ledger_dir: target_dir.clone(),
-            profile_override: None,
-            headless,
-            prompt_overrides: scrape::js_api::PromptOverrides::new(),
-            prompt_requires_override: false,
-            prompt_ui_handler: Some(prompt_ui_handler),
-            log_listener: Some(log_listener),
-            cancel: cancel_receiver,
-        };
-
-        tokio::task::spawn_blocking(move || scrape::run_scrape(config))
-            .await
-            .map_err(|err| scrape::ScrapeError::message_only(err.to_string()))?
+        let app_for_worker = app_handle.clone();
+        let ledger_for_worker = target_dir.clone();
+        let login_for_worker = login_name.clone();
+        let source_for_worker = source.clone();
+        tokio::task::spawn_blocking(move || {
+            run_scrape_in_worker(
+                &app_for_worker,
+                &ledger_for_worker,
+                &login_for_worker,
+                &extension,
+                &source_for_worker,
+                headless,
+                prompt_timeout,
+                cancel_token,
+            )
+        })
+        .await
+        .map_err(|err| scrape::ScrapeError::message_only(err.to_string()))?
     }
     .await;
 
     // Remove the cancel channel now that the run has finished (any exit path),
     // but only if this run owns the entry (a denied second run leaves the
     // owner's channel intact).
-    if let Some(token) = cancel_token {
-        let cancel_state = app_handle.state::<ScrapeCancelState>();
-        unregister_scrape_cancel(&cancel_state, &login_name, token);
-    }
+    let cancel_state = app_handle.state::<ScrapeCancelState>();
+    unregister_scrape_cancel(&cancel_state, &login_name, cancel_token);
 
     let artifacts_dir = result
         .as_ref()
@@ -938,10 +1200,12 @@ fn cancel_scrape(
     app_handle: tauri::AppHandle,
     login_name: String,
     cancel_state: tauri::State<'_, ScrapeCancelState>,
+    worker_state: tauri::State<'_, ScrapeWorkerState>,
     prompt_state: tauri::State<'_, PromptAnswerState>,
 ) -> Result<(), String> {
     let login_name = require_login_name_input(login_name)?;
     trigger_scrape_cancel(&cancel_state, &login_name);
+    cancel_scrape_worker(&worker_state, &login_name);
     // Only answer a pending prompt that belongs to THIS login, so canceling one
     // scrape can't unwind another login's concurrent MFA prompt. When we do
     // clear it, notify the frontend so its modal + re-open pill disappear

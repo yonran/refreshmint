@@ -6,6 +6,7 @@
         "lib": ["ES2023"],
         "module": "ESNext",
         "types": ["node"],
+        "allowJs": true,
         "skipLibCheck": true,
 
         /* Bundler mode */
@@ -25,6 +26,7 @@
     "include": [
         "vite.config.ts",
         "eslint.config.mts",
+        "scripts/**/*.mjs",
         "scripts/**/*.mts",
         "eslint-plugin-import-x.d.ts",
         "eslint-plugin-react-hooks.d.ts"

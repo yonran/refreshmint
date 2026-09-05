@@ -1,0 +1,61 @@
+[package]
+name = "refreshmint-scraper-runtime"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+publish = false
+
+[[bin]]
+name = "scraper-worker"
+path = "src/scraper-worker.rs"
+test = false
+
+[[bin]]
+name = "refreshmint-mcp"
+path = "src/refreshmint-mcp.rs"
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chromiumoxide = { package = "chromey", git = "https://github.com/yonran/chromey", rev = "6c0db7204092fdcb23825399ef1c8733790df9be" }
+clap = { version = "4.5.58", features = ["derive"] }
+dirs = "6"
+fs2 = "0.4"
+futures = "0.3"
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+llrt_buffer = { git = "https://github.com/awslabs/llrt", package = "llrt_buffer", rev = "7d3953f7ccea72bc72b7bf01ca480e22106c6ecb" }
+llrt_console = { git = "https://github.com/awslabs/llrt", package = "llrt_console", rev = "7d3953f7ccea72bc72b7bf01ca480e22106c6ecb" }
+llrt_stream_web = { git = "https://github.com/awslabs/llrt", package = "llrt_stream_web", rev = "7d3953f7ccea72bc72b7bf01ca480e22106c6ecb" }
+llrt_util = { git = "https://github.com/awslabs/llrt", package = "llrt_util", rev = "7d3953f7ccea72bc72b7bf01ca480e22106c6ecb" }
+lopdf = "0.35"
+regex = "1.12"
+rquickjs = { version = "0.11", features = ["array-buffer", "classes", "futures", "loader", "macro", "parallel"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+spider_chromiumoxide_cdp = { package = "spider_chromiumoxide_cdp", git = "https://github.com/yonran/chromey", rev = "6c0db7204092fdcb23825399ef1c8733790df9be" }
+swc_common = "19.0.0"
+swc_ecma_ast = "21.0.0"
+swc_ecma_parser = "36.0.0"
+swc_ecma_visit = "21.0.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+which = "7"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.182"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3.6.0", features = ["OSX_10_13"] }
+xattr = "1.6.1"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
