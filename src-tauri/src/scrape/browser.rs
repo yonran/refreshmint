@@ -61,6 +61,7 @@ impl Drop for BrowserPidGuard {
 ///
 /// Intended for the app shutdown hook. A PID that has already exited simply
 /// yields `ESRCH`, which is ignored.
+#[cfg(unix)]
 #[allow(unsafe_code)]
 pub fn kill_active_browsers() -> usize {
     let pids: Vec<u32> = match active_browser_pids().lock() {
@@ -77,16 +78,25 @@ pub fn kill_active_browsers() -> usize {
     pids.len()
 }
 
+/// Windows has no `kill(2)`/PID-signal equivalent wired up here; orphaned
+/// browser processes are not reclaimed on this platform.
+#[cfg(not(unix))]
+pub fn kill_active_browsers() -> usize {
+    0
+}
+
 /// Parse the PID from a Chrome `SingletonLock` symlink target.
 ///
 /// The target has the form `<hostname>-<pid>` (e.g. `my-host.local-48732`).
 /// The hostname can itself contain hyphens, so split on the last one.
+#[cfg(unix)]
 fn parse_singleton_lock_pid(target: &str) -> Option<u32> {
     let (_, pid) = target.rsplit_once('-')?;
     pid.parse::<u32>().ok()
 }
 
 /// Whether a PID currently exists (alive, or alive-but-not-ours).
+#[cfg(unix)]
 #[allow(unsafe_code)]
 fn process_is_alive(pid: u32) -> bool {
     // Safety: `kill(pid, 0)` sends no signal; it only probes existence.
@@ -102,6 +112,7 @@ fn process_is_alive(pid: u32) -> bool {
 /// (i.e. a Chrome we launched with `--user-data-dir=<profile_dir>`). Used to
 /// confirm a live SingletonLock owner is really our orphaned browser before
 /// killing it.
+#[cfg(unix)]
 fn process_uses_profile(pid: u32, profile_dir: &Path) -> bool {
     let output = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
@@ -127,6 +138,11 @@ fn process_uses_profile(pid: u32, profile_dir: &Path) -> bool {
 /// so a *live* browser on this profile cannot belong to a concurrent scrape — it
 /// is an orphan we may kill. We still confirm via `ps` that the live PID is a
 /// process using this exact profile, to avoid signalling an unrelated reused PID.
+///
+/// Unix-only: Chrome's `SingletonLock` is a symlink to `<hostname>-<pid>` on
+/// Linux/macOS. Windows uses a different (mutex-based) singleton mechanism, so
+/// there is no equivalent lock file to reclaim here.
+#[cfg(unix)]
 #[allow(unsafe_code)]
 fn reclaim_orphaned_profile_lock(profile_dir: &Path) {
     let lock_path = profile_dir.join("SingletonLock");
@@ -157,6 +173,9 @@ fn reclaim_orphaned_profile_lock(profile_dir: &Path) {
     }
     let _ = std::fs::remove_file(&lock_path);
 }
+
+#[cfg(not(unix))]
+fn reclaim_orphaned_profile_lock(_profile_dir: &Path) {}
 
 /// Find the Chrome or Edge binary on the system.
 pub fn find_chrome_binary() -> Result<PathBuf, Box<dyn Error>> {

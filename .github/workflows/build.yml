@@ -40,6 +40,15 @@ jobs:
               with:
                   node-version: 20
 
+            - name: Install lld (aarch64 macOS)
+              # src-tauri/.cargo/config.toml forces `-fuse-ld=lld` for this
+              # target only, to work around a legacy ld64 crash (see that
+              # file's comment). Homebrew's llvm formula bundles lld/ld64.lld.
+              if: matrix.target == 'aarch64-apple-darwin'
+              run: |
+                  brew install llvm
+                  echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
             - name: Install Linux dependencies
               if: runner.os == 'Linux'
               run: |

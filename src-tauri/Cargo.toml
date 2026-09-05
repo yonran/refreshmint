@@ -88,8 +88,10 @@ dbg_macro = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2.182"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 xattr = "1.6.1"
 security-framework = { version = "3.6.0", features = ["OSX_10_13"] }
 # in tests, it is ok to #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
