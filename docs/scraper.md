@@ -479,8 +479,7 @@ means a mid-run failure finalizes documents whose sidecars overstate coverage.
 - if `value` is declared in manifest `secrets.<domain>` for current top-level page domain, it is resolved from keychain
 - on the first username or password fill for a domain, refreshmint reads both fields in one Keychain operation (one authorization prompt on macOS) and caches them only for that worker session
 - if declared only for a different domain, `fill`/`frameFill` throws
-- if keychain secret exists but is not declared for current domain, `fill`/`frameFill` throws
-- otherwise `value` is treated literally
+- if `value` is not declared for any domain, it is treated literally and Keychain is not consulted
 
 Secret substitution does not alter values returned by `evaluate`, `jsonValue`,
 or locator evaluation inside the trusted driver runtime. Resolved credentials
