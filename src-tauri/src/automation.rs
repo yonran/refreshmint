@@ -1583,19 +1583,18 @@ fn validate_resolution_input(input: &NewResolutionInput) -> io::Result<()> {
             "subjectRefs is required",
         ));
     }
-    match input.kind {
+    if matches!(
+        input.kind,
         ResolutionKind::Category
-        | ResolutionKind::PostingSplit
-        | ResolutionKind::IgnoreSource
-        | ResolutionKind::PendingRetired => {
-            if input.subject_refs.len() != 1 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "this resolution kind requires exactly one subject ref",
-                ));
-            }
-        }
-        _ => {}
+            | ResolutionKind::PostingSplit
+            | ResolutionKind::IgnoreSource
+            | ResolutionKind::PendingRetired
+    ) && input.subject_refs.len() != 1
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "this resolution kind requires exactly one subject ref",
+        ));
     }
     match input.kind {
         ResolutionKind::Category => {

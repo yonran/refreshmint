@@ -83,7 +83,7 @@ pub fn migrate_ledger(
             outcome.warnings.push(format!(
                 "skipping extension group '{extension}': derived login name '{login_name}' is invalid: {err}"
             ));
-            outcome.skipped.extend(account_group.into_iter());
+            outcome.skipped.extend(account_group);
             continue;
         }
 
