@@ -481,14 +481,11 @@ impl Default for SensitiveData {
 }
 
 impl SensitiveData {
-    pub fn for_secret_store(secret_store: &SecretStore) -> Self {
-        let sensitive = Self::default();
-        if let Ok(usernames) = secret_store.all_usernames() {
-            for username in usernames {
-                sensitive.register(&username);
-            }
-        }
-        sensitive
+    pub fn for_secret_store(_secret_store: &SecretStore) -> Self {
+        // Credential values are registered together when the first declared
+        // secret is resolved. Eagerly enumerating usernames here caused an
+        // extra macOS Keychain authorization before a login was even needed.
+        Self::default()
     }
 
     pub fn register(&self, value: &str) {
@@ -7229,15 +7226,14 @@ pub(crate) async fn resolve_secret_if_applicable(
     // Try new domain-credential scheme first.
     let username_role =
         is_username_role(&inner.declared_secrets, &top_level_domain, referenced_name);
-    if username_role {
-        if let Ok(v) = inner.secret_store.get_username(&top_level_domain) {
-            inner.sensitive_data.register(&v);
-            return Ok(v);
+    let credential_error = match inner.secret_store.get_credentials(&top_level_domain) {
+        Ok((username, password)) => {
+            inner.sensitive_data.register(&username);
+            inner.sensitive_data.register(&password);
+            return Ok(if username_role { username } else { password });
         }
-    } else if let Ok(v) = inner.secret_store.get_password(&top_level_domain) {
-        inner.sensitive_data.register(&v);
-        return Ok(v);
-    }
+        Err(error) => error.to_string(),
+    };
 
     // Legacy fallback: old per-(domain, name) keychain entries.
     if ENABLE_LEGACY_SECRET_FALLBACK {
@@ -7258,7 +7254,7 @@ pub(crate) async fn resolve_secret_if_applicable(
     }
 
     Err(js_err(format!(
-        "Secret '{referenced_name}' was declared for '{top_level_domain}' but is not stored for that domain"
+        "Failed to read secret '{referenced_name}' for '{top_level_domain}' from Keychain: {credential_error}"
     )))
 }
 

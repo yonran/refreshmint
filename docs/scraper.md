@@ -477,8 +477,7 @@ means a mid-run failure finalizes documents whose sidecars overstate coverage.
 `page.fill(selector, value)` performs secret substitution:
 
 - if `value` is declared in manifest `secrets.<domain>` for current top-level page domain, it is resolved from keychain
-- if `value` matches the declared `username` role, refreshmint reads the keychain Account field (no biometric prompt on macOS)
-- if `value` matches the declared `password` role, refreshmint reads keychain secret data (biometric prompt on macOS)
+- on the first username or password fill for a domain, refreshmint reads both fields in one Keychain operation (one authorization prompt on macOS) and caches them only for that worker session
 - if declared only for a different domain, `fill`/`frameFill` throws
 - if keychain secret exists but is not declared for current domain, `fill`/`frameFill` throws
 - otherwise `value` is treated literally

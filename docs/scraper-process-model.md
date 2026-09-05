@@ -108,6 +108,9 @@ sandbox against an already authorized debugger:
 
 - Keychain values are resolved only inside `scraper-worker`; neither the Tauri
   app nor `refreshmint-mcp` receives the resolved credential as protocol data.
+- A worker lazily reads both fields for a domain in one Keychain operation and
+  caches them only for that worker session, avoiding separate index, username,
+  and password authorization prompts.
 - Known credentials and free-text prompt answers are redacted from logs,
   errors, debug output, failure URLs, and MCP results. Password fields are
   masked in snapshots.

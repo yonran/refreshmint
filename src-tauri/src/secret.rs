@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::error::Error;
+use std::sync::Mutex;
 
 /// Per-domain credential stored as a keychain entry.
 ///
@@ -16,6 +18,10 @@ use std::error::Error;
 ///   service=`refreshmint/<login>`, account=`_domains_index`, data=JSON (no biometric).
 pub struct SecretStore {
     login_name: String,
+    /// Session-local cache used by scraper workers. A credential is fetched as
+    /// one unit so macOS does not authorize separate username and password
+    /// reads for every fill operation.
+    credential_cache: Mutex<BTreeMap<String, (String, String)>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -37,7 +43,10 @@ struct DomainIndexEntry {
 
 impl SecretStore {
     pub fn new(login_name: String) -> Self {
-        Self { login_name }
+        Self {
+            login_name,
+            credential_cache: Mutex::new(BTreeMap::new()),
+        }
     }
 
     fn service_for_domain(&self, domain: &str) -> String {
@@ -49,6 +58,18 @@ impl SecretStore {
     }
 
     const INDEX_ACCOUNT: &'static str = "_domains_index";
+    fn cached_credentials(&self, domain: &str) -> Option<(String, String)> {
+        self.credential_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(domain).cloned())
+    }
+
+    fn remember_credentials(&self, domain: &str, credentials: &(String, String)) {
+        if let Ok(mut cache) = self.credential_cache.lock() {
+            cache.insert(domain.to_string(), credentials.clone());
+        }
+    }
 
     fn read_domains_index(&self) -> Result<Vec<DomainIndexEntry>, Box<dyn Error + Send + Sync>> {
         let entry = keyring::Entry::new(&self.index_service(), Self::INDEX_ACCOUNT)?;
@@ -183,6 +204,29 @@ impl SecretStore {
         {
             self.get_password_other(domain)
         }
+    }
+
+    /// Read a domain's username and password together and retain them only for
+    /// this `SecretStore`'s lifetime. Scraper workers use this instead of two
+    /// Keychain queries, avoiding repeated authorization prompts.
+    pub fn get_credentials(
+        &self,
+        domain: &str,
+    ) -> Result<(String, String), Box<dyn Error + Send + Sync>> {
+        if let Some(credentials) = self.cached_credentials(domain) {
+            return Ok(credentials);
+        }
+
+        #[cfg(target_os = "macos")]
+        let credentials = self.get_credentials_macos(domain)?;
+        #[cfg(not(target_os = "macos"))]
+        let credentials = (
+            self.get_username_other(domain)?,
+            self.get_password_other(domain)?,
+        );
+
+        self.remember_credentials(domain, &credentials);
+        Ok(credentials)
     }
 
     /// List all configured domains with their credential status.
@@ -353,6 +397,36 @@ impl SecretStore {
             }
         }
         Err(format!("no password found for domain '{domain}'").into())
+    }
+
+    /// Fetch both fields with one SecItem query so one domain causes at most
+    /// one Keychain authorization prompt per worker session.
+    #[cfg(target_os = "macos")]
+    fn get_credentials_macos(
+        &self,
+        domain: &str,
+    ) -> Result<(String, String), Box<dyn Error + Send + Sync>> {
+        use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+
+        let service = self.service_for_domain(domain);
+        let results = ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(&service)
+            .load_attributes(true)
+            .load_data(true)
+            .limit(Limit::Max(1))
+            .search()?;
+
+        for result in results {
+            if let Some(attributes) = result.simplify_dict() {
+                let username = attributes.get("acct").cloned();
+                let password = attributes.get("v_Data").cloned();
+                if let (Some(username), Some(password)) = (username, password) {
+                    return Ok((username, password));
+                }
+            }
+        }
+        Err(format!("no credential entry found for domain '{domain}'").into())
     }
 
     /// Delete all keychain entries for this domain service.
@@ -565,6 +639,20 @@ mod tests {
     }
 
     #[test]
+    fn credentials_are_cached_by_domain_for_one_store_session() {
+        let store = SecretStore::new("login/example".to_string());
+        let credentials = ("user".to_string(), "password".to_string());
+        store.remember_credentials("example.com", &credentials);
+
+        assert_eq!(store.cached_credentials("example.com"), Some(credentials));
+        assert_eq!(store.cached_credentials("other.example"), None);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "uses the interactive macOS Keychain; run explicitly when needed"
+    )]
     fn set_get_credentials_roundtrip() {
         let store = SecretStore::new(test_login());
         let result = store.set_credentials("example.com", "alice", "hunter2");
@@ -583,6 +671,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "uses the interactive macOS Keychain; run explicitly when needed"
+    )]
     fn list_domains_returns_configured_entries() {
         let store = SecretStore::new(test_login());
         if store.set_credentials("a.com", "user_a", "pass_a").is_err() {
@@ -600,6 +692,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "uses the interactive macOS Keychain; run explicitly when needed"
+    )]
     fn delete_domain_removes_entry() {
         let store = SecretStore::new(test_login());
         if store.set_credentials("x.com", "user", "pass").is_err() {
@@ -615,6 +711,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "uses the interactive macOS Keychain; run explicitly when needed"
+    )]
     fn all_usernames_returns_username() {
         let store = SecretStore::new(test_login());
         if store
@@ -634,6 +734,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "uses the interactive macOS Keychain; run explicitly when needed"
+    )]
     fn set_credentials_replaces_existing() {
         let store = SecretStore::new(test_login());
         if store
