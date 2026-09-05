@@ -84,16 +84,38 @@ pub fn list_sessions() -> Vec<DebugSessionDescriptor> {
     };
     let mut sessions = entries
         .filter_map(Result::ok)
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-        .filter_map(|json| serde_json::from_str::<DebugSessionDescriptor>(&json).ok())
-        .filter(is_reachable)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let json = std::fs::read_to_string(&path).ok()?;
+            let session = serde_json::from_str::<DebugSessionDescriptor>(&json).ok()?;
+            if is_reachable(&session) {
+                Some(session)
+            } else {
+                // A worker killed without unwinding cannot drop its registry
+                // guard. Remove the record once its socket has disappeared so
+                // clients do not keep offering a known-dead session.
+                let _ = std::fs::remove_file(path);
+                None
+            }
+        })
         .collect::<Vec<_>>();
     sessions.sort_by(|left, right| left.started_at.cmp(&right.started_at));
     sessions
 }
 
 fn is_reachable(session: &DebugSessionDescriptor) -> bool {
-    session.socket_path.exists()
+    let Ok(metadata) = std::fs::metadata(&session.socket_path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        metadata.file_type().is_socket()
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
+    }
 }
 
 #[cfg(test)]

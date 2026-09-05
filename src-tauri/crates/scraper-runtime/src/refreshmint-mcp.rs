@@ -10,6 +10,9 @@
 #[path = "../../../src/debug_registry.rs"]
 #[allow(dead_code)]
 mod debug_registry;
+#[path = "../../../src/login_config.rs"]
+#[allow(dead_code)]
+mod login_config;
 
 use debug_registry::DebugSessionDescriptor;
 use serde_json::{json, Value};
@@ -20,6 +23,7 @@ use std::process::{Child, Command, Stdio};
 
 struct Facade {
     selected_session: Option<String>,
+    selection_is_explicit: bool,
     owned_workers: HashMap<String, Child>,
 }
 
@@ -27,23 +31,39 @@ impl Facade {
     fn new() -> Self {
         Self {
             selected_session: None,
+            selection_is_explicit: false,
             owned_workers: HashMap::new(),
         }
     }
 
     fn sessions(&mut self) -> Vec<DebugSessionDescriptor> {
+        // Reap workers that this façade launched but that have since exited on
+        // their own (for example after browser failure).
+        self.owned_workers
+            .retain(|_, child| !matches!(child.try_wait(), Ok(Some(_))));
         let sessions = debug_registry::list_sessions();
-        if sessions.len() == 1 && self.selected_session.is_none() {
-            self.selected_session = Some(sessions[0].session_id.clone());
-        }
+        self.reconcile_selection(&sessions);
+        sessions
+    }
+
+    fn reconcile_selection(&mut self, sessions: &[DebugSessionDescriptor]) {
         if self.selected_session.as_ref().is_some_and(|selected| {
             !sessions
                 .iter()
                 .any(|session| &session.session_id == selected)
         }) {
             self.selected_session = None;
+            self.selection_is_explicit = false;
         }
-        sessions
+        if sessions.len() == 1 && self.selected_session.is_none() {
+            self.selected_session = Some(sessions[0].session_id.clone());
+            self.selection_is_explicit = false;
+        } else if sessions.len() != 1 && !self.selection_is_explicit {
+            // An automatic selection is only safe while it remains the sole
+            // choice. If another browser appears, require the client to make
+            // the target explicit instead of silently using the older tab.
+            self.selected_session = None;
+        }
     }
 
     fn selected(&mut self, requested: Option<&str>) -> Result<DebugSessionDescriptor, String> {
@@ -72,19 +92,21 @@ impl Facade {
             .find(|session| session.session_id == session_id)
             .ok_or_else(|| format!("unknown debug session '{session_id}'"))?;
         self.selected_session = Some(session_id.to_string());
+        self.selection_is_explicit = true;
         Ok(session)
     }
 
     fn start_debug(&mut self, arguments: &Value) -> Result<DebugSessionDescriptor, String> {
         let ledger = required_string(arguments, "ledger")?;
         let login_name = required_string(arguments, "loginName")?;
-        validate_label(&login_name)?;
+        login_config::validate_label(&login_name)?;
         let headless = arguments
             .get("headless")
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let profile = arguments.get("profile").and_then(Value::as_str);
-        let extension_name = resolve_login_extension(Path::new(&ledger), &login_name)?;
+        let extension_name =
+            login_config::resolve_login_extension(Path::new(&ledger), &login_name)?;
         let socket_path =
             std::env::temp_dir().join(format!("rm-debug-{}.sock", uuid::Uuid::new_v4().simple()));
 
@@ -120,10 +142,18 @@ impl Facade {
             {
                 break session;
             }
-            if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-                return Err(format!(
-                    "scraper worker exited before its browser was ready ({status})"
-                ));
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!(
+                        "scraper worker exited before its browser was ready ({status})"
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("failed to inspect scraper worker: {error}"));
+                }
             }
             if std::time::Instant::now() >= deadline {
                 let _ = child.kill();
@@ -133,6 +163,7 @@ impl Facade {
             std::thread::sleep(std::time::Duration::from_millis(100));
         };
         self.selected_session = Some(descriptor.session_id.clone());
+        self.selection_is_explicit = true;
         self.owned_workers
             .insert(descriptor.session_id.clone(), child);
         Ok(descriptor)
@@ -158,6 +189,7 @@ impl Facade {
         }
         if self.selected_session.as_deref() == Some(&session.session_id) {
             self.selected_session = None;
+            self.selection_is_explicit = false;
         }
         Ok(session)
     }
@@ -221,13 +253,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn handle_request(facade: &mut Facade, request: &Value, id: Value) -> Value {
+    const LEGACY_PROTOCOL_VERSION: &str = "2025-06-18";
+
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     match method {
         "initialize" => json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": {
-                "protocolVersion": request.pointer("/params/protocolVersion").and_then(Value::as_str).unwrap_or("2025-06-18"),
+                // Per MCP version negotiation, echo the requested version only
+                // when supported; otherwise advertise the version we implement.
+                "protocolVersion": request.pointer("/params/protocolVersion")
+                    .and_then(Value::as_str)
+                    .filter(|version| *version == LEGACY_PROTOCOL_VERSION)
+                    .unwrap_or(LEGACY_PROTOCOL_VERSION),
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "refreshmint", "version": env!("CARGO_PKG_VERSION") }
             }
@@ -272,8 +311,8 @@ fn handle_request(facade: &mut Facade, request: &Value, id: Value) -> Value {
 fn call_tool(facade: &mut Facade, name: &str, arguments: &Value) -> Result<Value, String> {
     match name {
         "refreshmint_list_sessions" => {
-            let selected = facade.selected_session.clone();
             let sessions = facade.sessions();
+            let selected = facade.selected_session.clone();
             Ok(json!({"selectedSessionId": selected, "sessions": sessions}))
         }
         "refreshmint_select_session" => {
@@ -334,34 +373,6 @@ fn required_string(arguments: &Value, name: &str) -> Result<String, String> {
         .filter(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| format!("{name} is required"))
-}
-
-fn validate_label(label: &str) -> Result<(), String> {
-    if label.is_empty()
-        || label == "."
-        || label == ".."
-        || label.len() > 255
-        || label
-            .chars()
-            .any(|ch| !ch.is_alphanumeric() && ch != '-' && ch != '_' && ch != '.')
-    {
-        return Err(format!("invalid loginName '{label}'"));
-    }
-    Ok(())
-}
-
-fn resolve_login_extension(ledger: &Path, login_name: &str) -> Result<String, String> {
-    let path = ledger.join("logins").join(login_name).join("config.json");
-    let json = std::fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-    let value: Value = serde_json::from_str(&json)
-        .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
-    value
-        .get("extension")
-        .and_then(Value::as_str)
-        .filter(|extension| !extension.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("login '{login_name}' has no extension configured"))
 }
 
 fn worker_path() -> Result<PathBuf, String> {
@@ -462,8 +473,20 @@ fn write_json(output: &mut impl Write, value: &Value) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_request, Facade};
+    use super::{handle_request, DebugSessionDescriptor, Facade};
     use serde_json::json;
+
+    fn session(id: &str) -> DebugSessionDescriptor {
+        DebugSessionDescriptor {
+            session_id: id.to_string(),
+            login_name: id.to_string(),
+            kind: "manual-debug".to_string(),
+            pid: 1,
+            socket_path: format!("/tmp/{id}.sock").into(),
+            ledger_dir: "/tmp/test.refreshmint".into(),
+            started_at: "now".to_string(),
+        }
+    }
 
     #[test]
     fn initialize_advertises_tools() {
@@ -474,6 +497,35 @@ mod tests {
         );
         assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(response["result"]["serverInfo"]["name"], "refreshmint");
+    }
+
+    #[test]
+    fn initialize_negotiates_unknown_versions_to_supported_version() {
+        let response = handle_request(
+            &mut Facade::new(),
+            &json!({"method":"initialize","params":{"protocolVersion":"2099-01-01"}}),
+            json!(1),
+        );
+        assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
+    }
+
+    #[test]
+    fn automatic_selection_is_revoked_when_a_second_session_appears() {
+        let mut facade = Facade::new();
+        facade.reconcile_selection(&[session("first")]);
+        assert_eq!(facade.selected_session.as_deref(), Some("first"));
+
+        facade.reconcile_selection(&[session("first"), session("second")]);
+        assert_eq!(facade.selected_session, None);
+    }
+
+    #[test]
+    fn explicit_selection_survives_additional_sessions() {
+        let mut facade = Facade::new();
+        facade.selected_session = Some("first".to_string());
+        facade.selection_is_explicit = true;
+        facade.reconcile_selection(&[session("first"), session("second")]);
+        assert_eq!(facade.selected_session.as_deref(), Some("first"));
     }
 
     #[test]

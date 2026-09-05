@@ -68,16 +68,20 @@ small stdio façade with these tools:
 - `refreshmint_stop_debug` closes the selected browser and releases its login
   lock.
 
-If exactly one session exists, the façade selects it automatically. With more
-than one, the client must list and select a session (or pass `sessionId` to an
-exec/stop call). Selection is local to one MCP façade process; it does not
-change another MCP client's selection.
+If exactly one session exists, the façade selects it automatically. That
+automatic selection is cleared if another session appears, preventing a later
+command from silently targeting an old tab. With more than one, the client must
+list and explicitly select a session (or pass `sessionId` to an exec/stop call).
+An explicit selection remains stable while that session exists. Selection is
+local to one MCP façade process; it does not change another MCP client's
+selection.
 
 Workers publish credential-free routing records under the user's cache
 directory at `refreshmint/debug-sessions/`. Each record contains a random
 session ID, login name, kind, PID, ledger path, and Unix socket path. Registry
 directories are mode `0700`, records and sockets are mode `0600`, and records
-are removed when sessions end.
+are removed when sessions end. Discovery also removes records whose socket has
+disappeared after an unclean worker exit.
 
 ## Security model
 
@@ -109,4 +113,6 @@ The app-to-worker protocol is line-delimited typed JSON over inherited pipes;
 debug workers use a private Unix socket. HTTP would add routing and streaming
 machinery without providing a stronger local authorization boundary for these
 one-parent/one-worker lifetimes. MCP remains standard JSON-RPC over stdio at the
-client-facing boundary.
+client-facing boundary. The current façade implements the legacy MCP
+`2025-06-18` initialization lifecycle and negotiates unsupported requested
+versions back to that version.
