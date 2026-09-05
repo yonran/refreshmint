@@ -153,15 +153,25 @@ async function handleLogin(context) {
     }
 
     const currentUsername = await page.inputValue('input#username');
-    if (currentUsername.trim() === '') {
+    const currentPassword = await page.inputValue('input#password');
+    if (currentUsername.trim() === '' || currentPassword === '') {
         refreshmint.log('target-circle-card login branch: filling credentials');
         // page.type() fires CDP key events that React/framework event handlers
         // pick up; secret substitution resolves these literal values from the
         // keychain per manifest.json `secrets.mytargetcirclecard.target.com`.
-        await page.type('input#username', 'target_circle_card_username');
-        await humanPace(page, 300, 700);
-        await page.fill('input#password', 'target_circle_card_password');
+        if (currentUsername.trim() === '') {
+            await page.type('input#username', 'target_circle_card_username');
+            await humanPace(page, 300, 700);
+        }
+        if (currentPassword === '') {
+            // UNTESTED after the 2026-09-05 failure artifact showed fill()
+            // leaving this React-controlled field empty.
+            await page.type('input#password', 'target_circle_card_password');
+        }
         await humanPace(page, 400, 900);
+        if ((await page.inputValue('input#password')) === '') {
+            throw new Error('Target Circle Card password field remained empty');
+        }
         await page.locator('button#login').click();
         try {
             await waitMs(page, 4000);

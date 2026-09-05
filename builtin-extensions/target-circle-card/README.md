@@ -25,7 +25,9 @@ home, statements, or transaction history without restarting the browser.
     - username: `input#username`
     - password: `input#password`
     - submit: `button#login`
-- `page.type(...)` worked more reliably than `fill(...)` on this site.
+- `page.type(...)` worked more reliably than `fill(...)` on this site for both
+  username and password. Refill either field independently when React preserves
+  only one of them after an unsuccessful submission.
 - A pre-submit screenshot is useful because the site can appear to ignore
   login even when the fields were actually populated.
 - Password secret access can pause on macOS keychain / Touch ID approval.
