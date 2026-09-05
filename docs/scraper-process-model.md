@@ -57,8 +57,8 @@ close their browsers normally.
 
 An app-started manual scraper can call `page.solveHumanChallenge(...)` when a site
 shows an interactive CAPTCHA or verification control. The worker temporarily
-starts a Chrome screencast and sends JPEG frames over its inherited private
-pipe. The app displays that live tab and relays the user's physical pointer
+captures viewport JPEG frames and sends them over its inherited private pipe.
+The app displays that live tab and relays the user's physical pointer
 down/move/up sequence back to Chrome with `Input.dispatchMouseEvent`; Chromium
 delivers those page events as trusted input. This works for headed and headless
 workers because it operates on the CDP page target rather than the native

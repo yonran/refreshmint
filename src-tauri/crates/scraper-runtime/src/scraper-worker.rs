@@ -123,26 +123,39 @@ async fn run_human_challenge_stream(
         DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
     };
     use chromiumoxide::cdp::browser_protocol::page::{
-        EventScreencastFrame, ScreencastFrameAckParams, StartScreencastFormat,
-        StartScreencastParams, StopScreencastParams,
+        CaptureScreenshotFormat, CaptureScreenshotParams, Viewport,
     };
-    use futures::StreamExt;
 
-    let mut frames = page
-        .event_listener::<EventScreencastFrame>()
+    page.bring_to_front()
         .await
-        .map_err(|error| format!("failed to listen for challenge frames: {error}"))?;
-    page.start_screencast(
-        StartScreencastParams::builder()
-            .format(StartScreencastFormat::Jpeg)
-            .quality(80)
-            .max_width(1280)
-            .max_height(900)
-            .every_nth_frame(1)
-            .build(),
-    )
-    .await
-    .map_err(|error| format!("failed to start challenge stream: {error}"))?;
+        .map_err(|error| format!("failed to activate challenge page: {error}"))?;
+    let metrics = page
+        .layout_metrics()
+        .await
+        .map_err(|error| format!("failed to measure challenge page: {error}"))?;
+    let viewport = metrics.css_visual_viewport;
+    let device_width = viewport.client_width.max(1.0).round() as u32;
+    let device_height = viewport.client_height.max(1.0).round() as u32;
+    let scale = (1280.0 / viewport.client_width)
+        .min(900.0 / viewport.client_height)
+        .min(1.0);
+    let screenshot_params = CaptureScreenshotParams::builder()
+        .format(CaptureScreenshotFormat::Jpeg)
+        .quality(80)
+        .from_surface(true)
+        .capture_beyond_viewport(false)
+        .optimize_for_speed(true)
+        .clip(
+            Viewport::builder()
+                .x(viewport.page_x)
+                .y(viewport.page_y)
+                .width(viewport.client_width)
+                .height(viewport.client_height)
+                .scale(scale)
+                .build()
+                .map_err(|error| format!("invalid challenge viewport: {error}"))?,
+        )
+        .build();
 
     write_event(
         &output,
@@ -154,30 +167,28 @@ async fn run_human_challenge_stream(
 
     let timeout = tokio::time::sleep(timeout);
     tokio::pin!(timeout);
+    let mut frame_interval = tokio::time::interval(std::time::Duration::from_millis(50));
+    frame_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         tokio::select! {
             () = &mut timeout => {
                 break Err("human challenge timed out".to_string());
             }
-            frame = frames.next() => {
-                let Some(frame) = frame else {
-                    break Err("human challenge frame stream closed".to_string());
-                };
+            _ = frame_interval.tick() => {
+                let frame = page
+                    .execute(screenshot_params.clone())
+                    .await
+                    .map_err(|error| format!("failed to capture challenge frame: {error}"))?;
+                let data: String = frame.result.data.clone().into();
                 write_event(
                     &output,
                     &scraper_protocol::WorkerEvent::HumanChallengeFrame {
                         request_id,
-                        data: frame.data.0.clone(),
-                        device_width: frame.metadata.device_width.max(0.0).round() as u32,
-                        device_height: frame.metadata.device_height.max(0.0).round() as u32,
+                        data,
+                        device_width,
+                        device_height,
                     },
                 );
-                if let Err(error) = page
-                    .ack_screencast(ScreencastFrameAckParams::new(frame.session_id))
-                    .await
-                {
-                    break Err(format!("failed to acknowledge challenge frame: {error}"));
-                }
             }
             input = inputs.recv() => {
                 let Some(input) = input else {
@@ -230,7 +241,6 @@ async fn run_human_challenge_stream(
         }
     };
 
-    let _ = page.stop_screencast(StopScreencastParams::default()).await;
     write_event(
         &output,
         &scraper_protocol::WorkerEvent::HumanChallengeClosed { request_id },
