@@ -109,6 +109,17 @@ async function checkForBotBlock(page) {
             `PayPal blocked automated access (bot-detection page shown instead of the login form): ${text.trim()}`,
         );
     }
+
+    const hybridCaptcha = page.locator('#splitHybridCaptcha');
+    const passwordCaptcha = page.locator('#splitPasswordCaptcha');
+    if (
+        (await hybridCaptcha.isVisible()) ||
+        (await passwordCaptcha.isVisible())
+    ) {
+        throw new Error(
+            'PayPal requires a visible CAPTCHA; continue this login in a debug session so the user can solve it',
+        );
+    }
 }
 
 /**
@@ -150,6 +161,7 @@ async function handleLogin(context) {
         }
     } catch (e) {
         refreshmint.log(`Password step failed: ${inspect(e)}`);
+        throw e;
     }
 
     try {
@@ -166,6 +178,7 @@ async function handleLogin(context) {
         }
     } catch (e) {
         refreshmint.log(`Email step failed: ${inspect(e)}`);
+        throw e;
     }
 
     refreshmint.log(`Login page snapshot: ${await page.snapshot()}`);
