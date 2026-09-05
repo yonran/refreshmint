@@ -495,12 +495,15 @@ fn acquire_lock_file(
     // that spawn window. A genuine holder keeps the lock for its whole
     // operation (a GL write + git commit takes many ms, a scrape minutes), so
     // this still fails fast against real contention; any non-WouldBlock error
-    // propagates immediately.
-    for _ in 0..5 {
+    // propagates immediately. Budget widened from 5×10ms after
+    // acquire_login_lock_survives_transient_holder flaked on a slow/contended
+    // CI runner (macos-15-intel) — scheduler jitter there can stretch a 15ms
+    // simulated holder past a 50ms retry window.
+    for _ in 0..10 {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(15));
             }
             Err(err) => return Err(err.into()),
         }
@@ -891,7 +894,7 @@ mod tests {
         let lock2 = acquire_login_lock(&dir, "chase");
         assert!(
             lock2.is_ok(),
-            "retry should absorb a <50ms transient holder"
+            "retry should absorb a <150ms transient holder"
         );
         dropper.join().unwrap();
         drop(lock2);
