@@ -58,6 +58,7 @@ impl SecretStore {
     }
 
     const INDEX_ACCOUNT: &'static str = "_domains_index";
+    const LEGACY_INDEX_ACCOUNT: &'static str = "_index";
     fn cached_credentials(&self, domain: &str) -> Option<(String, String)> {
         self.credential_cache
             .lock()
@@ -531,8 +532,8 @@ impl SecretStore {
     pub fn list_legacy_entries(
         &self,
     ) -> Result<Vec<(String, String)>, Box<dyn Error + Send + Sync>> {
-        let old_service = format!("refreshmint/{}", self.login_name);
-        let entry = keyring::Entry::new(&old_service, Self::INDEX_ACCOUNT)?;
+        let old_service = self.index_service();
+        let entry = keyring::Entry::new(&old_service, Self::LEGACY_INDEX_ACCOUNT)?;
         let json = match entry.get_password() {
             Ok(j) => j,
             Err(keyring::Error::NoEntry) => return Ok(Vec::new()),
@@ -564,7 +565,7 @@ impl SecretStore {
         domain: &str,
         name: &str,
     ) -> Result<String, Box<dyn Error + Send + Sync>> {
-        let old_service = format!("refreshmint/{}", self.login_name);
+        let old_service = self.index_service();
         let account = format!("{domain}/{name}");
         let entry = keyring::Entry::new(&old_service, &account)?;
         Ok(entry.get_password()?)
@@ -576,7 +577,7 @@ impl SecretStore {
         domain: &str,
         name: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let old_service = format!("refreshmint/{}", self.login_name);
+        let old_service = self.index_service();
         let account = format!("{domain}/{name}");
         let entry = keyring::Entry::new(&old_service, &account)?;
         match entry.delete_credential() {
@@ -589,8 +590,8 @@ impl SecretStore {
 
     /// Delete the legacy domains index entry.
     pub fn delete_legacy_index(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let old_service = format!("refreshmint/{}", self.login_name);
-        let entry = keyring::Entry::new(&old_service, Self::INDEX_ACCOUNT)?;
+        let old_service = self.index_service();
+        let entry = keyring::Entry::new(&old_service, Self::LEGACY_INDEX_ACCOUNT)?;
         match entry.delete_credential() {
             Ok(()) => {}
             Err(keyring::Error::NoEntry) => {}
@@ -646,6 +647,13 @@ mod tests {
 
         assert_eq!(store.cached_credentials("example.com"), Some(credentials));
         assert_eq!(store.cached_credentials("other.example"), None);
+    }
+
+    #[test]
+    fn legacy_entries_use_the_original_service_and_index_names() {
+        let store = SecretStore::new("login/example".to_string());
+        assert_eq!(store.index_service(), "refreshmint/login/example");
+        assert_eq!(SecretStore::LEGACY_INDEX_ACCOUNT, "_index");
     }
 
     #[test]
