@@ -59,6 +59,7 @@ impl SecretStore {
 
     const INDEX_ACCOUNT: &'static str = "_domains_index";
     const LEGACY_INDEX_ACCOUNT: &'static str = "_index";
+
     fn cached_credentials(&self, domain: &str) -> Option<(String, String)> {
         self.credential_cache
             .lock()
