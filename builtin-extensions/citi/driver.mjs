@@ -12,6 +12,11 @@ const ACCOUNT_STATEMENTS_URL_PREFIX =
     'https://online.citi.com/US/nga/accstatement';
 const REWARDS_DETAILS_URL_PREFIX =
     'https://online.citi.com/US/nga/reward/dashboard/costco/';
+// Citi redirects here (with an `errorCase` query param, e.g. `branding`,
+// `timeout`) whenever it force-signs-off the session — a stale/expired
+// cookie, a mid-flow redirect it didn't like, etc. It's a dead end with no
+// login form, so treat it like any other signed-out state and restart login.
+const SIGN_OFF_URL_PREFIX = 'https://online.citi.com/US/ag/sign-off';
 const DOWNLOAD_LIMIT = 2;
 
 function utf8Bytes(text) {
@@ -1314,6 +1319,13 @@ async function main() {
             refreshmint.log('Navigating to Citi landing page...');
             await context.mainPage.goto(LOGIN_URL);
             stepReturn = { progressName: 'navigated to citi landing page' };
+        } else if (url.startsWith(SIGN_OFF_URL_PREFIX)) {
+            refreshmint.log(
+                'Citi force-signed-off (sign-off page). Returning to explicit login URL: ' +
+                    url,
+            );
+            await context.mainPage.goto(LOGIN_URL);
+            stepReturn = { progressName: 'recovered from citi sign-off page' };
         } else if (url.startsWith(REWARDS_DETAILS_URL_PREFIX)) {
             stepReturn = await handleRewardsDetailsPage(context);
         } else if (url.startsWith(ACCOUNT_STATEMENTS_URL_PREFIX)) {
