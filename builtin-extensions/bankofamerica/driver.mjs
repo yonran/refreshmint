@@ -2610,6 +2610,26 @@ try {
         try {
             completed = await dispatchCurrentState();
         } catch (e) {
+            // A page.evaluate() call that raced a navigation triggered by the
+            // same handler (a click that itself redirects) throws this exact
+            // CDP error rather than the useful result the handler wanted. The
+            // navigation succeeded — only the evaluate lost the race — so
+            // this isn't a real failure: skip straight to the next iteration
+            // and let it re-classify the (now-settled) page. The waitForLoadState
+            // above didn't eliminate every such race (see e.g. the modal-dismiss
+            // click on the homepage), so handle it here as a backstop instead
+            // of chasing every individual click site.
+            if (
+                String(e).indexOf('Inspected target navigated or closed') !== -1
+            ) {
+                refreshmint.log(
+                    'State iteration raced a navigation at signature: ' +
+                        beforeSignature +
+                        '. Retrying next iteration. Error: ' +
+                        String(e),
+                );
+                continue;
+            }
             refreshmint.log(
                 'State iteration failed at signature: ' + beforeSignature,
             );
