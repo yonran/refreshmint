@@ -139,6 +139,7 @@ async function handleLogin(context) {
             refreshmint.log(
                 'Inline error detected. Proceeding to retry credentials from secrets...',
             );
+            context.loginAttempted = false;
             // Wait a moment for any animations, then continue to the credential filling logic
             await waitMs(page, 1000);
         }
@@ -181,6 +182,22 @@ async function handleLogin(context) {
     }
 
     if (await page.locator(userSelector).isVisible()) {
+        if (context.loginAttempted) {
+            // Already submitted once, no error banner was detected above,
+            // and yet the login fields are still visible -- Chase's
+            // post-submit redirect/device-check is just slow (well over the
+            // 5s wait below). Re-filling and re-clicking Sign In here would
+            // double-submit the form on every subsequent iteration, which
+            // is what produced "no progress in last 3 steps (last: login
+            // submitted)" -- the progress tracker treats every iteration's
+            // identical 'login submitted' as no progress. Wait instead.
+            refreshmint.log(
+                'Login already submitted; waiting for navigation instead of resubmitting...',
+            );
+            await waitMs(page, 5000);
+            return { progressName: 'login submitted' };
+        }
+
         refreshmint.log('Filling login fields from secrets...');
         await page.click(userSelector);
         await page.type(userSelector, 'chase_username');
@@ -192,6 +209,7 @@ async function handleLogin(context) {
 
         refreshmint.log('Clicking Sign in button...');
         await page.click('#signin-button');
+        context.loginAttempted = true;
 
         if (targetFrame) await page.switchToMainFrame();
 
