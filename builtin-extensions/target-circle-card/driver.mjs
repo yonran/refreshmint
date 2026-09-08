@@ -221,18 +221,12 @@ async function handleMfa(context) {
         refreshmint.log(
             'target-circle-card mfa branch: method-selection screen',
         );
-        // refreshmint.promptChoice() is documented in docs/scraper.md but is not
-        // yet implemented in the Rust runtime (only refreshmint.prompt() exists
-        // as of this writing), so list the visible choices in a free-text prompt
-        // instead and match the reply back to the option whose text starts with it.
         const choices = radios.map((r) => r.text);
-        const reply = await refreshmint.prompt(
-            `Select MFA delivery method (type the exact text): ${choices.join(' | ')}`,
+        const reply = await refreshmint.promptChoice(
+            'Select MFA delivery method:',
+            choices,
         );
-        const chosen =
-            radios.find((r) => r.text === reply.trim()) ??
-            radios.find((r) => r.text.startsWith(reply.trim())) ??
-            radios[0];
+        const chosen = radios.find((r) => r.text === reply) ?? radios[0];
         await page.locator(`#${chosen.id}`).click();
         await humanPace(page, 300, 600);
         await page.getByRole('button', { name: 'Continue' }).first().click();
