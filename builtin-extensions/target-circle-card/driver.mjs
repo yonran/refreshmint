@@ -94,6 +94,22 @@ async function evaluateJsonArray(page, script) {
 }
 
 /**
+ * Clicks the element with the given `id` via `getElementById`, avoiding CSS
+ * selector syntax entirely — ids observed on third-party pages can contain
+ * characters (colons, leading digits) that are invalid in a `#id` selector.
+ *
+ * @param {PageApi} page
+ * @param {string} id
+ */
+async function clickById(page, id) {
+    await page.evaluate(`(function() {
+        const el = document.getElementById(${JSON.stringify(id)});
+        if (!el) throw new Error(${JSON.stringify(`element not found: #${id}`)});
+        el.click();
+    })()`);
+}
+
+/**
  * @param {PageApi} page
  * @param {string} selector
  * @param {string} value
@@ -227,7 +243,7 @@ async function handleMfa(context) {
             choices,
         );
         const chosen = radios.find((r) => r.text === reply) ?? radios[0];
-        await page.locator(`#${chosen.id}`).click();
+        await clickById(page, chosen.id);
         await humanPace(page, 300, 600);
         await page.getByRole('button', { name: 'Continue' }).first().click();
         await waitMs(page, 1500);
