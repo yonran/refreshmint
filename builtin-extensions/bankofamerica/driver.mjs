@@ -194,6 +194,13 @@ async function handleHomepage() {
     );
     refreshmint.log('Modal result: ' + modalRes);
 
+    // The modal-dismiss click above can itself trigger a navigation (e.g.
+    // "Continue to Log In" goes straight to the secure login page). Settle
+    // before the next evaluate so it doesn't race that navigation and throw
+    // "Inspected target navigated or closed" — same class of bug as the
+    // homepage-settle fix above, but for a navigation that can happen here too.
+    await page.waitForLoadState('domcontentloaded', 15000).catch(() => {});
+
     refreshmint.log('Clicking Log in control');
     var clickRes = /** @type {string} */ (
         await page.evaluate(
