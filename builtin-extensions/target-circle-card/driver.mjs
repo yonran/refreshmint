@@ -94,18 +94,29 @@ async function evaluateJsonArray(page, script) {
 }
 
 /**
- * Clicks the element with the given `id` via `getElementById`, avoiding CSS
- * selector syntax entirely — ids observed on third-party pages can contain
- * characters (colons, leading digits) that are invalid in a `#id` selector.
+ * Re-queries the live DOM for a radio button whose label text matches `text`
+ * and clicks it, all in one evaluate call. Matching by label text (rather
+ * than an id captured earlier and passed in) tolerates a re-render between
+ * when the choices were read and when the user's answer comes back, and
+ * clicking via `getElementById`/direct `.click()` avoids both CSS selector
+ * syntax issues (ids can contain characters invalid in a `#id` selector) and
+ * Playwright's viewport-visibility actionability checks.
  *
  * @param {PageApi} page
- * @param {string} id
+ * @param {string} text
  */
-async function clickById(page, id) {
+async function clickRadioByLabelText(page, text) {
     await page.evaluate(`(function() {
-        const el = document.getElementById(${JSON.stringify(id)});
-        if (!el) throw new Error(${JSON.stringify(`element not found: #${id}`)});
-        el.click();
+        const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
+        const match = radios.find(function(radio) {
+            const label = radio.closest('label') ||
+                document.querySelector('label[for="' + radio.id + '"]');
+            const labelText = (label ? label.textContent : '').replace(/\\s+/g, ' ').trim();
+            return labelText === ${JSON.stringify(text)};
+        });
+        const chosen = match || radios[0];
+        if (!chosen) throw new Error('no MFA radio button found to click');
+        chosen.click();
     })()`);
 }
 
@@ -242,8 +253,14 @@ async function handleMfa(context) {
             'Select MFA delivery method:',
             choices,
         );
-        const chosen = radios.find((r) => r.text === reply) ?? radios[0];
-        await clickById(page, chosen.id);
+        // refreshmint.promptChoice() blocks until the user responds, which can
+        // take real time. If the page re-renders in that window (React et al.
+        // commonly regenerate element ids on re-render), the ids captured in
+        // `radios` above go stale and clicking by a cached id throws instead
+        // of matching anything -- silently killing the scrape before it ever
+        // reaches the code-entry prompt. Re-query live and match by the
+        // (stable) label text instead of a possibly-stale id.
+        await clickRadioByLabelText(page, reply);
         await humanPace(page, 300, 600);
         await page.getByRole('button', { name: 'Continue' }).first().click();
         await waitMs(page, 1500);
