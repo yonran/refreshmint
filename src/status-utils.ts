@@ -29,3 +29,15 @@ export function shouldCloseOnKey(
 ): boolean {
     return closeOnEscape && key === 'Escape' && !defaultPrevented;
 }
+
+/**
+ * True when an extraction error is the "no glAccount is configured" failure:
+ * the extractor didn't supply explicit tpostings, the login/label has no
+ * prior journal entries to infer an account from, and no GL account is
+ * mapped for it in Settings. Keep this substring in sync with the error text
+ * raised in src-tauri/src/lib.rs (run_login_account_extraction) and
+ * src-tauri/src/cli.rs (the `account extract` subcommand).
+ */
+export function isMissingGlAccountError(error: unknown): boolean {
+    return String(error).includes('no glAccount is configured');
+}

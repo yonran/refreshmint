@@ -64,6 +64,7 @@ import {
     type HumanChallengeInput,
 } from './tauri-commands.ts';
 import { mapChallengePointer } from './human-challenge-utils.ts';
+import { isMissingGlAccountError } from './status-utils.ts';
 import { AccountsTable } from './components/AccountsTable.tsx';
 import { PipelineTab } from './tabs/PipelineTab.tsx';
 import { ReportsTab } from './tabs/ReportsTab.tsx';
@@ -124,6 +125,12 @@ function App() {
     );
     const [autoEtlStatus, setAutoEtlStatus] = useState<string | null>(null);
     const [autoEtlErrors, setAutoEtlErrors] = useState<string | null>(null);
+    // Missing-glAccount extraction failures get their own state (rather than
+    // being folded into the autoEtlErrors string) so the banner can render a
+    // "Set GL account" button that jumps straight to the fix in Settings.
+    const [autoEtlMissingGlAccounts, setAutoEtlMissingGlAccounts] = useState<
+        { loginName: string; label: string }[]
+    >([]);
     const [consistencyReport, setConsistencyReport] =
         useState<ConsistencyReport | null>(null);
     const [consistencyRepairing, setConsistencyRepairing] = useState(false);
@@ -677,6 +684,9 @@ function App() {
             );
 
             setAutoEtlErrors(null);
+            setAutoEtlMissingGlAccounts([]);
+            const missingGlAccounts: { loginName: string; label: string }[] =
+                [];
 
             // Phase 1: Extract documents → account journal entries
             const extractErrors: string[] = [];
@@ -702,8 +712,17 @@ function App() {
                         `Auto-ETL extract failed ${loginName}/${label}:`,
                         err,
                     );
-                    extractErrors.push(`${loginName}/${label}: ${String(err)}`);
+                    if (isMissingGlAccountError(err)) {
+                        missingGlAccounts.push({ loginName, label });
+                    } else {
+                        extractErrors.push(
+                            `${loginName}/${label}: ${String(err)}`,
+                        );
+                    }
                 }
+            }
+            if (missingGlAccounts.length > 0) {
+                setAutoEtlMissingGlAccounts(missingGlAccounts);
             }
 
             // Phase 2: Post unposted entries → GL
@@ -1121,14 +1140,13 @@ function App() {
         loginName: string,
         label: string,
         glAccount: string,
+        statusMessage = `Loaded '${loginName}/${label}' from conflicts. Update GL account or clear it to resolve.`,
     ) {
         setActiveTab('settings');
         setSelectedLoginName(loginName);
         setEditingMappingLabel(label);
         setEditingMappingGlAccountDraft(glAccount);
-        setLoginConfigStatus(
-            `Loaded '${loginName}/${label}' from conflicts. Update GL account or clear it to resolve.`,
-        );
+        setLoginConfigStatus(statusMessage);
     }
 
     async function handleIgnoreLoginAccountMapping(
@@ -1634,6 +1652,52 @@ function App() {
                             </button>
                         </div>
                     )}
+                    {autoEtlMissingGlAccounts.length > 0 && (
+                        <div className="auto-scrape-banner auto-scrape-banner--error">
+                            <div>
+                                <strong>No GL account configured</strong>
+                                <div className="text-muted">
+                                    These accounts have transactions to extract
+                                    but no GL account mapped yet, so nothing can
+                                    be posted until one is set.
+                                </div>
+                                <ul>
+                                    {autoEtlMissingGlAccounts.map(
+                                        ({ loginName, label }) => (
+                                            <li key={`${loginName}/${label}`}>
+                                                <span className="mono">
+                                                    {loginName}/{label}
+                                                </span>{' '}
+                                                <button
+                                                    type="button"
+                                                    className="ghost-button"
+                                                    onClick={() => {
+                                                        handleLoadConflictMapping(
+                                                            loginName,
+                                                            label,
+                                                            '',
+                                                            `'${loginName}/${label}' has no GL account set, so its transactions can't be extracted or posted yet. Enter one below.`,
+                                                        );
+                                                    }}
+                                                >
+                                                    Set GL account →
+                                                </button>
+                                            </li>
+                                        ),
+                                    )}
+                                </ul>
+                            </div>
+                            <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => {
+                                    setAutoEtlMissingGlAccounts([]);
+                                }}
+                            >
+                                Dismiss
+                            </button>
+                        </div>
+                    )}
                     {consistencyReport !== null && (
                         <div className="auto-scrape-banner auto-scrape-banner--error">
                             <div>
@@ -1815,6 +1879,14 @@ function App() {
                             onViewGlTransaction={(id) => {
                                 setPendingTransactionSearch(id);
                                 setActiveTab('transactions');
+                            }}
+                            onGoToGlAccountMapping={(loginName, label) => {
+                                handleLoadConflictMapping(
+                                    loginName,
+                                    label,
+                                    '',
+                                    `'${loginName}/${label}' has no GL account set, so its transactions can't be extracted or posted yet. Enter one below.`,
+                                );
                             }}
                             session={pipelineTabSession}
                             onSessionChange={setPipelineTabSession}

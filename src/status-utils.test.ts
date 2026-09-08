@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { classifyStatusMessage, shouldCloseOnKey } from './status-utils.ts';
+import {
+    classifyStatusMessage,
+    isMissingGlAccountError,
+    shouldCloseOnKey,
+} from './status-utils.ts';
 
 describe('classifyStatusMessage', () => {
     it('classifies messages mentioning "failed" as errors', () => {
@@ -37,5 +41,34 @@ describe('shouldCloseOnKey', () => {
 
     it('does not close when closeOnEscape is disabled', () => {
         expect(shouldCloseOnKey('Escape', false, false)).toBe(false);
+    });
+});
+
+describe('isMissingGlAccountError', () => {
+    it('matches the raw backend error string', () => {
+        expect(
+            isMissingGlAccountError(
+                "login 'bankofamerica' label '_default': extractor produced a transaction without explicit tpostings but no glAccount is configured; set a GL account or fix the extractor",
+            ),
+        ).toBe(true);
+    });
+
+    it('matches an Error object wrapping the backend message', () => {
+        expect(
+            isMissingGlAccountError(
+                new Error(
+                    "login 'x' label 'y': ... no glAccount is configured; set a GL account or fix the extractor",
+                ),
+            ),
+        ).toBe(true);
+    });
+
+    it('does not match unrelated extraction errors', () => {
+        expect(isMissingGlAccountError('document is currently in use')).toBe(
+            false,
+        );
+        expect(
+            isMissingGlAccountError('failed to open PDF document foo.pdf'),
+        ).toBe(false);
     });
 });

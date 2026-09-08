@@ -71,7 +71,10 @@ import {
 import { AccountInput } from '../components/AccountInput.tsx';
 import { Modal } from '../components/Modal.tsx';
 import { StatusBanner } from '../components/StatusBanner.tsx';
-import { classifyStatusMessage } from '../status-utils.ts';
+import {
+    classifyStatusMessage,
+    isMissingGlAccountError,
+} from '../status-utils.ts';
 import { AttachmentLightbox } from '../components/AttachmentLightbox.tsx';
 import { useAttachmentLightbox } from '../components/useAttachmentLightbox.ts';
 import {
@@ -101,6 +104,7 @@ interface PipelineTabProps {
     onLedgerRefresh: () => void;
     onLoginConfigChanged: () => void;
     onViewGlTransaction: (glTxnId: string) => void;
+    onGoToGlAccountMapping: (loginName: string, label: string) => void;
     session: PipelineTabSession;
     onSessionChange: (
         updater: (current: PipelineTabSession) => PipelineTabSession,
@@ -172,6 +176,7 @@ export function PipelineTab({
     onLedgerRefresh,
     onLoginConfigChanged,
     onViewGlTransaction,
+    onGoToGlAccountMapping,
     session,
     onSessionChange,
 }: PipelineTabProps) {
@@ -189,6 +194,13 @@ export function PipelineTab({
     const [pipelineStatus, setPipelineStatus] = useState<string | null>(
         session.pipelineStatus,
     );
+    // Set alongside pipelineStatus when a "no GL account is configured"
+    // extraction failure hits, so the status banner can offer a direct link
+    // to the fix instead of just showing the raw error text.
+    const [pipelineMissingGlAccount, setPipelineMissingGlAccount] = useState<{
+        loginName: string;
+        label: string;
+    } | null>(null);
     const [pipelineSubTab, setPipelineSubTab] = useState<PipelineSubTab>(
         session.pipelineSubTab,
     );
@@ -779,6 +791,7 @@ export function PipelineTab({
         const { loginName, label } = selectedLoginAccount;
         setIsRunningExtraction(true);
         setPipelineStatus(`Running extraction for ${documentName}...`);
+        setPipelineMissingGlAccount(null);
         try {
             const result = await runLoginAccountExtraction(
                 ledgerPath,
@@ -818,7 +831,14 @@ export function PipelineTab({
             );
             void refreshPipelineBulkStats();
         } catch (error) {
-            setPipelineStatus(`Extraction failed: ${String(error)}`);
+            if (isMissingGlAccountError(error)) {
+                setPipelineStatus(
+                    `Extraction failed: '${loginName}/${label}' has no GL account configured.`,
+                );
+                setPipelineMissingGlAccount({ loginName, label });
+            } else {
+                setPipelineStatus(`Extraction failed: ${String(error)}`);
+            }
         } finally {
             setIsRunningExtraction(false);
         }
@@ -1195,6 +1215,7 @@ export function PipelineTab({
 
     async function handlePipelineExtractAllLedger() {
         setIsPipelineExtractingAllLedger(true);
+        setPipelineMissingGlAccount(null);
         try {
             const stats = await refreshPipelineBulkStats();
             const candidates = stats.accounts.filter(
@@ -1213,6 +1234,8 @@ export function PipelineTab({
             let locked = 0;
             let totalNew = 0;
             let refreshSelected = false;
+            const missingGlAccounts: { loginName: string; label: string }[] =
+                [];
             const selectedKey =
                 selectedLoginAccount === null
                     ? null
@@ -1246,6 +1269,12 @@ export function PipelineTab({
                 } catch (error) {
                     if (String(error).includes('currently in use')) {
                         locked += 1;
+                    } else if (isMissingGlAccountError(error)) {
+                        failed += 1;
+                        missingGlAccounts.push({
+                            loginName: account.loginName,
+                            label: account.label,
+                        });
                     } else {
                         failed += 1;
                     }
@@ -1262,8 +1291,12 @@ export function PipelineTab({
             }
             await refreshPipelineBulkStats();
             setPipelineStatus(
-                `Extract All complete. ${succeeded} account(s) extracted, ${failed} failed, ${locked} locked, ${totalNew} new entr${totalNew === 1 ? 'y' : 'ies'} added.`,
+                `Extract All complete. ${succeeded} account(s) extracted, ${failed} failed, ${locked} locked, ${totalNew} new entr${totalNew === 1 ? 'y' : 'ies'} added.` +
+                    (missingGlAccounts.length > 0
+                        ? ` ${missingGlAccounts.length} of the failures have no GL account configured (${missingGlAccounts.map(({ loginName, label }) => `${loginName}/${label}`).join(', ')}).`
+                        : ''),
             );
+            setPipelineMissingGlAccount(missingGlAccounts[0] ?? null);
         } finally {
             setIsPipelineExtractingAllLedger(false);
         }
@@ -1741,6 +1774,7 @@ export function PipelineTab({
                                 isPipelinePostingAllLedger
                             }
                             onChange={(event) => {
+                                setPipelineMissingGlAccount(null);
                                 const value = event.target.value;
                                 if (!value) {
                                     setSelectedLoginAccount(null);
@@ -1827,6 +1861,19 @@ export function PipelineTab({
                         <StatusBanner
                             level={classifyStatusMessage(pipelineStatus)}
                             message={pipelineStatus}
+                            action={
+                                pipelineMissingGlAccount === null
+                                    ? undefined
+                                    : {
+                                          label: 'Set GL account →',
+                                          onClick: () => {
+                                              onGoToGlAccountMapping(
+                                                  pipelineMissingGlAccount.loginName,
+                                                  pipelineMissingGlAccount.label,
+                                              );
+                                          },
+                                      }
+                            }
                         />
                     )}
                     {pipelineBulkStats !== null && (
