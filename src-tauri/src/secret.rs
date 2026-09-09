@@ -300,9 +300,23 @@ impl SecretStore {
         };
 
         let service = self.service_for_domain(domain);
+        let stale_entry_hint = format!(
+            "This usually means a keychain entry from a previous app build is \
+             blocking access (an ad-hoc code signature changes on every dev \
+             rebuild, and macOS ties an item's access control to the exact \
+             signature that created it). Delete the 'refreshmint/{}/{domain}' \
+             entry in Keychain Access.app and try again.",
+            self.login_name,
+        );
 
         // Delete any existing entry (account name may differ if username changed).
-        self.delete_domain_macos(domain).ok();
+        // Do NOT swallow this: delete_domain_macos already maps "item not
+        // found" to Ok(()), so a real Err here means the OS refused the
+        // delete outright -- exactly the case that otherwise surfaces later
+        // as a confusing, prompt-less "user name or passphrase not correct"
+        // from the write below.
+        self.delete_domain_macos(domain)
+            .map_err(|err| format!("Failed to remove existing keychain entry for '{domain}' before re-saving: {err}. {stale_entry_hint}"))?;
 
         // Create new entry with biometric-protected password and username as account.
         let mut options = PasswordOptions::new_generic_password(&service, username);
@@ -316,13 +330,24 @@ impl SecretStore {
                     &service,
                     username,
                     password.as_bytes(),
-                )?;
+                )
+                .map_err(|fallback_err| {
+                    format!(
+                        "Biometric keychain write failed for '{domain}': {err}. \
+                         Dev fallback (plain write) also failed: {fallback_err}. {stale_entry_hint}"
+                    )
+                })?;
                 return Ok(());
             }
             // Retry with USER_PRESENCE fallback
             let mut options2 = PasswordOptions::new_generic_password(&service, username);
             options2.set_access_control_options(AccessControlOptions::USER_PRESENCE);
-            set_generic_password_options(password.as_bytes(), options2)?;
+            set_generic_password_options(password.as_bytes(), options2).map_err(|retry_err| {
+                format!(
+                    "Biometric keychain write failed for '{domain}': {err}. \
+                     USER_PRESENCE fallback also failed: {retry_err}. {stale_entry_hint}"
+                )
+            })?;
         }
         Ok(())
     }
