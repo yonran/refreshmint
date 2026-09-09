@@ -94,33 +94,6 @@ async function evaluateJsonArray(page, script) {
 }
 
 /**
- * Re-queries the live DOM for a radio button whose label text matches `text`
- * and clicks it, all in one evaluate call. Matching by label text (rather
- * than an id captured earlier and passed in) tolerates a re-render between
- * when the choices were read and when the user's answer comes back, and
- * clicking via `getElementById`/direct `.click()` avoids both CSS selector
- * syntax issues (ids can contain characters invalid in a `#id` selector) and
- * Playwright's viewport-visibility actionability checks.
- *
- * @param {PageApi} page
- * @param {string} text
- */
-async function clickRadioByLabelText(page, text) {
-    await page.evaluate(`(function() {
-        const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
-        const match = radios.find(function(radio) {
-            const label = radio.closest('label') ||
-                document.querySelector('label[for="' + radio.id + '"]');
-            const labelText = (label ? label.textContent : '').replace(/\\s+/g, ' ').trim();
-            return labelText === ${JSON.stringify(text)};
-        });
-        const chosen = match || radios[0];
-        if (!chosen) throw new Error('no MFA radio button found to click');
-        chosen.click();
-    })()`);
-}
-
-/**
  * @param {PageApi} page
  * @param {string} selector
  * @param {string} value
@@ -256,11 +229,14 @@ async function handleMfa(context) {
         // refreshmint.promptChoice() blocks until the user responds, which can
         // take real time. If the page re-renders in that window (React et al.
         // commonly regenerate element ids on re-render), the ids captured in
-        // `radios` above go stale and clicking by a cached id throws instead
-        // of matching anything -- silently killing the scrape before it ever
-        // reaches the code-entry prompt. Re-query live and match by the
-        // (stable) label text instead of a possibly-stale id.
-        await clickRadioByLabelText(page, reply);
+        // `radios` above go stale. getByRole re-resolves live against the
+        // page's accessible name (labels included), so it isn't affected by
+        // that, and its click is a trusted CDP mouse click that scrolls the
+        // element into view first -- unlike a raw evaluate()-driven
+        // getElementById().click(), which previously threw on a stale id and,
+        // even when the id matched, produced an untrusted synthetic click
+        // that some sites' React state doesn't treat as a real selection.
+        await page.getByRole('radio', { name: reply }).first().click();
         await humanPace(page, 300, 600);
         await page.getByRole('button', { name: 'Continue' }).first().click();
         await waitMs(page, 1500);
