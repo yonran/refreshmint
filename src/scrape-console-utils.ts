@@ -23,6 +23,7 @@ export function formatScrapeOutputLine(entry: ScrapeOutputLine): string {
 /** Minimal shape of a per-login scrape summary needed to judge staleness. */
 export interface StaleSummaryLike {
     lastSuccess?: string | null;
+    lastRun?: { timestamp: string } | null;
 }
 
 /**
@@ -30,6 +31,13 @@ export interface StaleSummaryLike {
  * most recent success is older than `intervalHours`. Pure so the scheduler's
  * source-of-truth logic (backed by scrape-log.jsonl via getLastScrapeSummaries)
  * is unit-testable.
+ *
+ * A login stuck failing every attempt has no `lastSuccess`, so it would
+ * otherwise re-qualify as stale on every 5-minute re-check for as long as the
+ * app is open (Effect 1 in App.tsx), hammering the same broken login instead
+ * of respecting `intervalHours`. Once a login has been attempted at all,
+ * apply the same interval as a cooldown since that attempt (success or
+ * failure) before it's eligible again.
  */
 export function computeStaleLogins(
     summaries: Record<string, StaleSummaryLike>,
@@ -40,8 +48,20 @@ export function computeStaleLogins(
     return Object.entries(summaries)
         .filter(([, summary]) => {
             const lastSuccess = summary.lastSuccess ?? null;
-            if (lastSuccess === null) return true;
-            return now - new Date(lastSuccess).getTime() > intervalMs;
+            if (
+                lastSuccess !== null &&
+                now - new Date(lastSuccess).getTime() <= intervalMs
+            ) {
+                return false;
+            }
+            const lastRunTimestamp = summary.lastRun?.timestamp ?? null;
+            if (
+                lastRunTimestamp !== null &&
+                now - new Date(lastRunTimestamp).getTime() <= intervalMs
+            ) {
+                return false;
+            }
+            return true;
         })
         .map(([loginName]) => loginName);
 }

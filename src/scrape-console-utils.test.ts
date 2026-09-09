@@ -25,6 +25,22 @@ describe('computeStaleLogins', () => {
         };
         expect(computeStaleLogins(summaries, 24, now)).toEqual(['stale']);
     });
+
+    it('does not re-queue a login that failed recently, only once the interval has passed since that attempt', () => {
+        const summaries = {
+            justFailed: {
+                lastSuccess: null,
+                lastRun: { timestamp: '2026-07-07T11:00:00Z' }, // 1h ago
+            },
+            failedLongAgo: {
+                lastSuccess: null,
+                lastRun: { timestamp: '2026-07-05T06:00:00Z' }, // ~54h ago
+            },
+        };
+        expect(computeStaleLogins(summaries, 24, now)).toEqual([
+            'failedLongAgo',
+        ]);
+    });
 });
 
 describe('shouldStickToBottom', () => {
