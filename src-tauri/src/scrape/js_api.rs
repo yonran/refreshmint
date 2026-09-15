@@ -419,6 +419,24 @@ struct OpenTab {
     opener_target_id: Option<String>,
 }
 
+/// Move the first item matching `is_initial` to index 0, preserving the
+/// relative order of everything else.
+///
+/// `browser.pages()` otherwise follows Chrome's `Target.getTargets` order,
+/// which is not stable: a headed Chrome also opens its own
+/// `chrome://new-tab-page` tab at launch, and that tab sometimes lists before
+/// the `about:blank` tab the worker created for the driver. Every built-in
+/// driver does `(await browser.pages())[0]`, so an unstable order sends the
+/// driver into the background new-tab-page tab (observed in
+/// `providentcu/driver.mjs` failure logs as "URL at failure:
+/// chrome://new-tab-page/", and in headed debug sessions where trusted clicks
+/// on the hidden tab were silently dropped).
+fn move_initial_tab_first<T>(items: &mut [T], is_initial: impl Fn(&T) -> bool) {
+    if let Some(index) = items.iter().position(is_initial) {
+        items[..=index].rotate_right(1);
+    }
+}
+
 /// Per-domain credential role declaration from the manifest.
 ///
 /// A manifest may declare one or both of these names.  The `username` name
@@ -4203,9 +4221,17 @@ impl PageApi {
 #[rquickjs::methods]
 impl BrowserApi {
     /// Return all currently open pages in this browser context.
+    ///
+    /// The worker's initial page (the script-global `page`) is always first so
+    /// that `pages[0]` is deterministic; see `move_initial_tab_first`.
     pub async fn pages(&self) -> JsResult<Vec<PageApi>> {
         let page = PageApi::new(self.page_inner.clone());
-        let tabs = page.fetch_open_tabs().await?;
+        let initial_target_id = {
+            let inner = self.page_inner.lock().await;
+            inner.page.target_id().as_ref().to_string()
+        };
+        let mut tabs = page.fetch_open_tabs().await?;
+        move_initial_tab_first(&mut tabs, |tab| tab.target_id == initial_target_id);
         let mut out = Vec::with_capacity(tabs.len());
         for tab in tabs {
             out.push(build_page_api_from_template(&self.page_inner, tab.page).await);
@@ -8281,6 +8307,32 @@ pub fn register_globals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn move_initial_tab_first_moves_match_to_front_keeping_order() {
+        let mut tabs = vec!["ntp", "blank", "popup"];
+        move_initial_tab_first(&mut tabs, |t| *t == "blank");
+        assert_eq!(tabs, vec!["blank", "ntp", "popup"]);
+
+        let mut tabs = vec!["a", "b", "initial"];
+        move_initial_tab_first(&mut tabs, |t| *t == "initial");
+        assert_eq!(tabs, vec!["initial", "a", "b"]);
+    }
+
+    #[test]
+    fn move_initial_tab_first_is_noop_without_match_or_when_already_first() {
+        let mut tabs = vec!["blank", "ntp"];
+        move_initial_tab_first(&mut tabs, |t| *t == "blank");
+        assert_eq!(tabs, vec!["blank", "ntp"]);
+
+        let mut tabs = vec!["ntp", "other"];
+        move_initial_tab_first(&mut tabs, |t| *t == "missing");
+        assert_eq!(tabs, vec!["ntp", "other"]);
+
+        let mut empty: Vec<&str> = vec![];
+        move_initial_tab_first(&mut empty, |t| *t == "x");
+        assert!(empty.is_empty());
+    }
 
     #[test]
     fn extract_domain_https() {
