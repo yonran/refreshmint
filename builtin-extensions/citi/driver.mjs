@@ -17,6 +17,14 @@ const REWARDS_DETAILS_URL_PREFIX =
 // cookie, a mid-flow redirect it didn't like, etc. It's a dead end with no
 // login form, so treat it like any other signed-out state and restart login.
 const SIGN_OFF_URL_PREFIX = 'https://online.citi.com/US/ag/sign-off';
+// Transient full-page loader Citi shows right after sign-on (observed
+// 2026-09-15 as `parent-interstitial?nextRoute=dashboard`). The DOM is just a
+// `LoaderFullPage` spinner with no login/dashboard markers, so the generic
+// classifier below can't name it; wait for Citi to route onward instead.
+// UNTESTED: the 2026-09-15 debug runs resumed an already signed-on session and
+// never passed through this page.
+const PARENT_INTERSTITIAL_URL_PREFIX =
+    'https://online.citi.com/US/ag/parent-interstitial';
 const DOWNLOAD_LIMIT = 2;
 
 function utf8Bytes(text) {
@@ -1326,6 +1334,20 @@ async function main() {
             );
             await context.mainPage.goto(LOGIN_URL);
             stepReturn = { progressName: 'recovered from citi sign-off page' };
+        } else if (url.startsWith(PARENT_INTERSTITIAL_URL_PREFIX)) {
+            refreshmint.log(
+                'Citi parent-interstitial loader; waiting for it to route onward: ' +
+                    url,
+            );
+            try {
+                await context.mainPage.waitForNavigation(30000);
+            } catch (e) {
+                refreshmint.log(
+                    'parent-interstitial did not navigate within 30s: ' +
+                        /** @type {Error} */ (e).message,
+                );
+            }
+            stepReturn = { progressName: 'waited on citi parent-interstitial' };
         } else if (url.startsWith(REWARDS_DETAILS_URL_PREFIX)) {
             stepReturn = await handleRewardsDetailsPage(context);
         } else if (url.startsWith(ACCOUNT_STATEMENTS_URL_PREFIX)) {
