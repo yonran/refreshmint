@@ -35,7 +35,9 @@ const DOWNLOAD_LIMIT = 0;
 /**
  * @typedef {object} MfaRadioChoice
  * @property {string} id
- * @property {string} text
+ * @property {string} text the radio's accessible name (`aria-label` when
+ *   present, else its label text). Shown to the user as the prompt choice and
+ *   used verbatim for `getByRole('radio', { name })`, so the two can't drift.
  */
 
 /**
@@ -185,6 +187,9 @@ async function handleLogin(context) {
     return { progressName: 'waiting after login submit' };
 }
 
+const CODE_INPUT_SELECTOR =
+    'input[type="tel"], input[type="text"][name*="code" i], input[type="password"][name*="code" i], input#passcode';
+
 /**
  * Expected page conditions:
  * - URL is under `/ecs/auth/multi-factor-auth`.
@@ -211,7 +216,9 @@ async function handleMfa(context) {
                     const text = label
                         ? label.textContent
                         : (document.querySelector('label[for="' + radio.id + '"]') || {}).textContent;
-                    return { id: radio.id, text: (text || '').replace(/\\s+/g, ' ').trim() };
+                    const visibleText = (text || '').replace(/\\s+/g, ' ').trim();
+                    const ariaLabel = (radio.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+                    return { id: radio.id, text: ariaLabel || visibleText };
                 }).filter(function(r) { return r.text !== ''; }));
             })()`,
         )
@@ -236,15 +243,50 @@ async function handleMfa(context) {
         // getElementById().click(), which previously threw on a stale id and,
         // even when the id matched, produced an untrusted synthetic click
         // that some sites' React state doesn't treat as a real selection.
-        await page.getByRole('radio', { name: reply }).first().click();
+        //
+        // Two things about these radios (verified 2026-09-15 in a debug
+        // session):
+        // - Their accessible name comes from `aria-label` ("Email address
+        //   starting with Y@GMAIL.COM"), which differs from the visible
+        //   label text ("EmailY*******@GMAIL.COM"); `radios[].text` is the
+        //   accessible name so the prompt reply maps back exactly.
+        // - The `<input type="radio">` itself is parked offscreen
+        //   (`position:absolute; left:-9901px`), so a trusted click on it
+        //   fails with "Element is outside of the viewport". The visible,
+        //   clickable control is its `<label for=...>`, so re-resolve the
+        //   radio's current id by accessible name and click that label.
+        const chosenId = /** @type {string} */ (
+            await page.evaluate(
+                `(function() {
+                    const wanted = ${JSON.stringify(reply)};
+                    const radio = Array.from(document.querySelectorAll('input[type="radio"]')).find(function(r) {
+                        return (r.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim() === wanted;
+                    });
+                    return radio ? radio.id : '';
+                })()`,
+            )
+        );
+        if (!chosenId) {
+            throw new Error('MFA method radio not found for reply: ' + reply);
+        }
+        await page.locator('label[for="' + chosenId + '"]').click();
         await humanPace(page, 300, 600);
         await page.getByRole('button', { name: 'Continue' }).first().click();
-        await waitMs(page, 1500);
+        // The code-entry screen can take several seconds to replace the
+        // method list. With a fixed 1.5s wait the next iteration saw the
+        // radios still present and re-selected the method, which sends the
+        // user a second passcode (observed 2026-09-15). Poll for the code
+        // input instead.
+        for (let i = 0; i < 10; i++) {
+            await waitMs(page, 1000);
+            if (await page.locator(CODE_INPUT_SELECTOR).first().isVisible()) {
+                break;
+            }
+        }
         return { progressName: 'selected mfa method' };
     }
 
-    const codeInputSelector =
-        'input[type="tel"], input[type="text"][name*="code" i], input[type="password"][name*="code" i], input#passcode';
+    const codeInputSelector = CODE_INPUT_SELECTOR;
     const codeInputVisible = await page
         .locator(codeInputSelector)
         .first()
