@@ -182,6 +182,39 @@ async function handleLogin(context) {
     }
 
     if (await page.locator(userSelector).isVisible()) {
+        // The rejection banner renders *inside* the `logonbox` iframe
+        // (`#logon-error-accessible-text`, observed 2026-09-15: "Important:
+        // We can't find that username and password. Try again."), so the
+        // main-frame check in step 1 never sees it. Once we've submitted and
+        // Chase rejected the credentials, stop: re-submitting the same
+        // Keychain values on every auto-scrape risks a lockout, and the
+        // generic "no progress" error hid the real cause for weeks.
+        const frameErrorText = /** @type {string} */ (
+            await page.evaluate(`(function() {
+            const el = document.querySelector('#logon-error-accessible-text, #logon-error-header, .logon-error');
+            if (el && el.offsetHeight > 0 && el.offsetWidth > 0) {
+                return el.innerText.trim();
+            }
+            return '';
+        })()`)
+        );
+        if (frameErrorText !== '' && context.loginAttempted) {
+            if (targetFrame !== null) await page.switchToMainFrame();
+            throw new Error(
+                'Login rejected by Chase: ' +
+                    frameErrorText +
+                    ' -- check the chase_username/chase_password Keychain entries; this is not a scraper selector bug.',
+            );
+        }
+        if (frameErrorText !== '') {
+            // Stale banner from an earlier session; the fields are empty and
+            // we have not submitted anything yet in this run.
+            refreshmint.log(
+                'Login iframe shows a pre-existing error banner: ' +
+                    frameErrorText,
+            );
+        }
+
         if (context.loginAttempted) {
             // Already submitted once, no error banner was detected above,
             // and yet the login fields are still visible -- Chase's
@@ -218,16 +251,33 @@ async function handleLogin(context) {
     }
 
     if (!url.includes('/logon/')) {
-        // The homepage header's real "Sign in" link now renders as
-        // `<a>Sign in<span class="visually-hidden">Opens overlay</span></a>`,
-        // so its textContent is "Sign inOpens overlay" -- not an exact "sign
-        // in" match. Meanwhile a hidden login-flyout submit button
-        // (`#signin-button`, only revealed after the overlay opens) has
-        // textContent that *does* exactly equal "Sign in". An exact-match
-        // search finds that hidden button first; clicking it submits the
-        // login form with empty fields, which redirects to an unrelated page
-        // (observed: /digital/resources/privacy-security/security/system-requirements)
-        // instead of opening the login overlay. Require the element to be
+        // The homepage header "Sign in" link (`a[data-pt-name="hd_fs_sign-in"]`,
+        // href https://secure.chase.com) must get a *trusted* click. A
+        // synthetic `el.click()` from page.evaluate() lands on
+        // /digital/resources/privacy-security/security/system-requirements
+        // every time (observed 2026-09-09 .. 2026-09-15), whereas a real
+        // pointer click via the locator navigates to
+        // https://secure.chase.com/web/auth/dashboard#/dashboard/overview,
+        // which hosts the `#logonbox` login iframe (verified 2026-09-15 in a
+        // debug session).
+        const headerSignIn = page.locator('a[data-pt-name="hd_fs_sign-in"]');
+        if ((await headerSignIn.count()) > 0) {
+            refreshmint.log(
+                'Found header "Sign in" link. Clicking (trusted)...',
+            );
+            await headerSignIn.click();
+            await waitMs(page, 3000);
+            return { progressName: 'clicked sign in' };
+        }
+
+        // Fallback when the header link's analytics attribute is gone. The
+        // link renders as `<a>Sign in<span class="visually-hidden">Opens
+        // overlay</span></a>`, so its textContent is "Sign inOpens overlay"
+        // -- not an exact "sign in" match. Meanwhile a hidden login-flyout
+        // submit button (`#signin-button`, only revealed after the overlay
+        // opens) has textContent that *does* exactly equal "Sign in". An
+        // exact-match search finds that hidden button first; clicking it
+        // submits the login form with empty fields. Require the element to be
         // visible and match by prefix so the real header link wins.
         const findSignInLink = `Array.from(document.querySelectorAll('a, button')).find(el => {
                         const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
@@ -245,7 +295,9 @@ async function handleLogin(context) {
         }
 
         if (hasSignIn) {
-            refreshmint.log('Found "Sign in" button. Clicking...');
+            refreshmint.log(
+                'Found "Sign in" button by text (fallback). Clicking...',
+            );
             try {
                 await page.evaluate(`(function() {
                     const btn = ${findSignInLink};
