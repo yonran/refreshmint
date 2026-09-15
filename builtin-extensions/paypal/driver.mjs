@@ -13,8 +13,23 @@ import { inspect } from 'refreshmint:util';
  * @property {number} lastProgressStep
  */
 
+/**
+ * @param {PageApi} page
+ * @param {number} ms
+ */
 async function waitMs(page, ms) {
-    await page.evaluate(`new Promise(r => setTimeout(r, ${ms}))`);
+    try {
+        await page.evaluate(`new Promise(r => setTimeout(r, ${ms}))`);
+    } catch (e) {
+        // A full-page navigation (e.g. the post-login redirect after
+        // "Log In") tears down the execution context mid-sleep with
+        // "Inspected target navigated or closed"; that is the outcome we
+        // were waiting for, not a failure.
+        refreshmint.log(
+            'waitMs interrupted (likely by navigation): ' +
+                /** @type {Error} */ (e).message,
+        );
+    }
 }
 
 async function humanPace(page, minMs, maxMs) {
@@ -110,6 +125,28 @@ async function checkForBotBlock(page) {
         );
     }
 
+    // DataDome "device check": /signin renders nothing but a full-page
+    // `<iframe title="DataDome Device Check">` plus a hidden
+    // `form#ads-dd-captcha` (observed in the 2026-09-15 auto-scrape failure
+    // artifacts). The iframe carries no captcha/challenge in its src, so the
+    // selector scan below does not see it, and the old loop just re-logged
+    // the same snapshot for 20 steps. Give it a short window to self-resolve,
+    // then fail with the real cause. UNTESTED: only seen in retained
+    // artifacts, not reproduced in a debug session yet.
+    const deviceCheckSelector = 'iframe[title="DataDome Device Check"]';
+    for (let attempt = 1; attempt <= 5; attempt++) {
+        if (!(await page.locator(deviceCheckSelector).isVisible())) break;
+        if (attempt === 5) {
+            throw new Error(
+                'PayPal DataDome device check is blocking the sign-in page (iframe "DataDome Device Check" never went away); run a manual scrape from the app to clear it',
+            );
+        }
+        refreshmint.log(
+            `State: DataDome device check on sign-in page; waiting (attempt ${attempt}/5)`,
+        );
+        await waitMs(page, 3000);
+    }
+
     for (let attempt = 1; attempt <= 3; attempt++) {
         const challengeVisible =
             (await page.evaluate(`(() => {
@@ -154,6 +191,21 @@ async function handleLogin(context) {
         return { progressName: 'cookie banner dismissed' };
     }
 
+    // After a successful password login PayPal can park the URL on /signin
+    // with a passkey enrollment interstitial ("Next time, log in with Face ID
+    // or Touch ID", `#passkeyOptin` / `#optIn_start`, observed 2026-09-15).
+    // Its only control is "Continue", which starts WebAuthn enrollment; the
+    // "not now" slot (`#optIn_notNow`) renders empty. The session is already
+    // authenticated at this point, so just leave for the account summary.
+    if (await page.locator('#passkeyOptin #optIn_start').isVisible()) {
+        refreshmint.log(
+            'State: passkey opt-in interstitial after login; skipping to summary',
+        );
+        await page.goto('https://www.paypal.com/myaccount/summary');
+        await waitMs(page, 2000);
+        return { progressName: 'skipped passkey opt-in' };
+    }
+
     try {
         // Check for MFA first
         const mfaInput = page.getByRole('spinbutton', { name: '1-6' });
@@ -164,13 +216,20 @@ async function handleLogin(context) {
         refreshmint.log(`MFA input check failed: ${inspect(e)}`);
     }
 
+    // The split login form keeps every step's controls in the DOM at once
+    // (email step, password step, OTP/passkey/app alternatives), so role+name
+    // lookups are ambiguous: `getByRole('textbox', { name: 'Password' })`
+    // matched 5 elements on 2026-09-15 and failed with a strict-mode
+    // violation. Use the stable ids observed on the form instead:
+    // `#email` (name=login_email) / `#btnNext`, `#password`
+    // (name=login_password) / `#btnLogin`.
     try {
-        const passwordInput = page.getByRole('textbox', { name: 'Password' });
+        const passwordInput = page.locator('#password');
         if (await passwordInput.isVisible()) {
             refreshmint.log('Filling password...');
             await passwordInput.fill('paypal_password');
             await humanPace(page, 500, 1000);
-            await page.getByRole('button', { name: 'Log In' }).click();
+            await page.locator('#btnLogin').click();
             await waitMs(page, 4000);
             return { progressName: 'password submitted' };
         }
@@ -180,14 +239,12 @@ async function handleLogin(context) {
     }
 
     try {
-        const emailInput = page.getByRole('textbox', {
-            name: 'Email or mobile number',
-        });
+        const emailInput = page.locator('#email');
         if (await emailInput.isVisible()) {
             refreshmint.log('Filling email...');
             await emailInput.fill('paypal_username');
             await humanPace(page, 200, 500);
-            await page.getByRole('button', { name: 'Next' }).click();
+            await page.locator('#btnNext').click();
             await waitMs(page, 2000);
             return { progressName: 'email submitted' };
         }
