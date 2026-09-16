@@ -290,6 +290,60 @@ fn chrome_candidates() -> Vec<PathBuf> {
     ]
 }
 
+/// Frozen platform token Chrome puts in its user agent (reduced UA, see
+/// https://www.chromium.org/updates/ua-reduction/). Must match what a headed
+/// Chrome on this OS reports so the override is indistinguishable from it.
+#[cfg(target_os = "macos")]
+const USER_AGENT_PLATFORM: &str = "Macintosh; Intel Mac OS X 10_15_7";
+#[cfg(target_os = "windows")]
+const USER_AGENT_PLATFORM: &str = "Windows NT 10.0; Win64; x64";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const USER_AGENT_PLATFORM: &str = "X11; Linux x86_64";
+
+/// Build the user agent a *headed* Chrome of the version printed by
+/// `chrome --version` (e.g. `Google Chrome 152.0.7977.83`) would send.
+///
+/// Headless Chrome (old and `--headless=new` alike) reports
+/// `HeadlessChrome/<ver>` in `navigator.userAgent` and the `User-Agent`
+/// header. Banks key on that: Chase's homepage "Sign in" link redirects to
+/// /digital/resources/privacy-security/security/system-requirements instead of
+/// the login page, and PayPal's DataDome device check never clears (both
+/// observed 2026-09-16 with the GUI "headless" preference on). The reduced UA
+/// only exposes the major version, so `<major>.0.0.0` is exactly what headed
+/// Chrome sends.
+fn headed_user_agent_from_version_output(version_output: &str) -> Option<String> {
+    let major: String = version_output
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|s| !s.is_empty())?
+        .to_string();
+    Some(format!(
+        "Mozilla/5.0 ({USER_AGENT_PLATFORM}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    ))
+}
+
+/// Ask the Chrome binary for its version and derive the headed user agent to
+/// pass as `--user-agent` when launching headless. Returns `None` (and logs)
+/// when the binary does not answer, so a launch never fails just because the
+/// version probe did.
+fn headed_user_agent_for_binary(chrome_path: &Path) -> Option<String> {
+    let output = match std::process::Command::new(chrome_path)
+        .arg("--version")
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => {
+            diag_eprintln!("[browser] --version probe failed: {e}");
+            return None;
+        }
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let ua = headed_user_agent_from_version_output(&text);
+    if ua.is_none() {
+        diag_eprintln!("[browser] --version output had no version number: {text:?}");
+    }
+    ua
+}
+
 /// Launch a Chrome/Edge instance with the given profile directory.
 ///
 /// Returns the `Browser` handle and a `tokio::task::JoinHandle` that drives
@@ -324,6 +378,12 @@ pub async fn launch_browser(
     if use_headless {
         diag_eprintln!("[browser] Launch mode: headless=old");
         builder = builder.headless_mode(HeadlessMode::True);
+        // Hide the `HeadlessChrome/` UA marker; see
+        // `headed_user_agent_from_version_output` for which sites reject it.
+        if let Some(ua) = headed_user_agent_for_binary(chrome_path) {
+            diag_eprintln!("[browser] Overriding headless user agent: {ua}");
+            builder = builder.arg(format!("--user-agent={ua}"));
+        }
         if cfg!(target_os = "linux") {
             diag_eprintln!("[browser] Launch flags: --no-sandbox --disable-dev-shm-usage");
             builder = builder.no_sandbox().arg("--disable-dev-shm-usage");
@@ -506,5 +566,21 @@ mod tests {
             "killed process should not report success: {status:?}"
         );
         assert!(!active_browser_pids().lock().unwrap().contains(&pid));
+    }
+
+    #[test]
+    fn headed_user_agent_uses_major_version_and_drops_headless_marker() {
+        let ua = headed_user_agent_from_version_output("Google Chrome 152.0.7977.83 \n").unwrap();
+        assert!(ua.contains(" Chrome/152.0.0.0 "), "{ua}");
+        assert!(ua.starts_with("Mozilla/5.0 ("), "{ua}");
+        assert!(ua.ends_with(" Safari/537.36"), "{ua}");
+        assert!(!ua.contains("Headless"), "{ua}");
+
+        assert_eq!(
+            headed_user_agent_from_version_output("Chromium 131.0.6778.85").unwrap(),
+            headed_user_agent_from_version_output("Google Chrome 131.0.1.1").unwrap()
+        );
+        assert!(headed_user_agent_from_version_output("").is_none());
+        assert!(headed_user_agent_from_version_output("no digits here").is_none());
     }
 }
