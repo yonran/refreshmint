@@ -168,8 +168,7 @@ syntax that can be stripped without code generation.
 
 Avoid downloading everything every time by tracking progress and checking existing files.
 
-- **Deduplicate downloads against the _stored_ name, not the name you passed to `saveResource`:** `listAccountDocuments()` reports finalized names, and the runtime finalizes `saveResource(name, ..., {coverageEndDate})` as `{coverageEndDate}-{name}` (scrape date when no coverage date is given; see `date_prefixed_filename` in `src-tauri/src/scrape.rs`). `existing.has('statements/statement-2026-03-03.pdf')` never matches `2026-03-03-statements/statement-2026-03-03.pdf`, so the check silently passes and every run re-downloads (target-circle-card and citi both did this for months, unnoticed because the run still "succeeded"). Build the expected stored name (`${coverageEndDate}-${name}`, as `hasSavedDocument` in providentcu and `storedDocumentName` in target-circle-card do) or match on a suffix.
-- **`listAccountDocuments()` does not include resources staged earlier in the same run.** Load the set once, keep it in the scrape context, and add each name you stage. Re-reading it every step re-downloads the same file until the no-progress guard trips (8 copies of one OFX, target-circle-card 2026-09-17).
+- **Deduplicate with `await refreshmint.hasDocument(name, {label, coverageEndDate})`,** passing the same `name` you would give `saveResource` (the filter is optional and has the same shape as `listAccountDocuments`'s; always pass `label` on multi-account logins). It matches finalized documents from earlier runs _and_ resources staged earlier in this run. Do not compare `saveResource` names against `listAccountDocuments()` `filename`s: those are the stored, date-prefixed names (`{coverageEndDate}-{name}`, scrape date when no coverage date was given; see `date_prefixed_filename` in `src-tauri/src/scrape.rs`), so `existing.has('statements/statement-2026-03-03.pdf')` never matches `2026-03-03-statements/statement-2026-03-03.pdf` and every run silently re-downloads (target-circle-card and citi both did this for months). If you need the listing, each entry now carries `originalFilename` and `staged` too.
 - **A run that downloads nothing is a failure to investigate, not a success.** Log the discovered counts (`N year tabs`, `N rows`, `N periods`) and treat "found []" on a page that visibly has data as a selector bug. Never leave a `continue` that can skip every row (e.g. `if (row.linkId == null) continue;` when the links have no id) without a log line saying why.
 - **Deduplicate per account label when applicable:** If a login can expose multiple accounts, query and compare existing documents within the account label you are currently scraping.
 - **Filter by date:** Implement a "since" date check (e.g., `skip before 2026-01-01`).
@@ -196,17 +195,19 @@ const SKIP_BEFORE_DATE = '2026-01-01';
 
 async function handleStatements(context) {
     // ... discovery ...
-    const existing = new Set(
-        JSON.parse(await refreshmint.listAccountDocuments()).map(
-            (d) => d.filename,
-        ),
-    );
     let downloaded = 0;
 
     for (const row of rows) {
         if (DOWNLOAD_LIMIT > 0 && downloaded >= DOWNLOAD_LIMIT) break;
         if (row.date < SKIP_BEFORE_DATE) continue;
-        if (existing.has(row.filename)) continue;
+        // Same `filename` you pass to saveResource; matches finalized and
+        // same-run staged documents alike.
+        if (
+            await refreshmint.hasDocument(row.filename, {
+                coverageEndDate: row.date,
+            })
+        )
+            continue;
 
         // ... download ...
         downloaded++;
@@ -476,6 +477,7 @@ async function logSnapshot(tag, track = 'state-loop') {
 | `await refreshmint.saveResource(filename, data, options?)`            | Write bytes to extension output dir and stage for account-doc finalization.                                                                                                                                                               |
 | `await refreshmint.saveDownloadedResource(path, filename?, options?)` | Read a completed local download file and stage it as a resource.                                                                                                                                                                          |
 | `await refreshmint.listAccountDocuments()`                            | Return JSON list of existing account documents (with optional sidecar info).                                                                                                                                                              |
+| `await refreshmint.hasDocument(filename, filter?)`                    | Whether a document saved under that `saveResource` name already exists (finalized earlier, or staged in this run); `filter` as in `listAccountDocuments`. Use for download dedupe.                                                        |
 | `await refreshmint.setSessionMetadata(metadata)`                      | Set optional sidecar metadata (`dateRangeStart`, `dateRangeEnd`).                                                                                                                                                                         |
 | `refreshmint.reportValue(key, value)`                                 | Print key/value status line.                                                                                                                                                                                                              |
 | `refreshmint.log(message)`                                            | Log message to stderr.                                                                                                                                                                                                                    |

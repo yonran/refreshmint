@@ -516,6 +516,16 @@ pub struct DocumentInfo {
         skip_serializing_if = "is_zero_u32"
     )]
     pub extraction_attempts: u32,
+    /// The name the driver passed to `saveResource` / `saveDownloadedResource`,
+    /// before `date_prefixed_filename` prefixed it. Drivers dedupe on this via
+    /// `refreshmint.hasDocument(...)`; sidecars written before it existed
+    /// fall back to `original_filename_from_stored`.
+    #[serde(
+        rename = "originalFilename",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub original_filename: Option<String>,
 }
 
 fn default_document_label() -> String {
@@ -669,6 +679,7 @@ pub fn finalize_staged_resources(
             metadata: resource.metadata.clone(),
             extraction_error: None,
             extraction_attempts: carry_over_attempts,
+            original_filename: Some(resource.filename.clone()),
         };
 
         let sidecar_path = documents_dir.join(format!("{final_filename}-info.json"));
@@ -718,6 +729,28 @@ pub fn finalize_staged_resources(
 }
 
 /// Generate a date-prefixed filename, handling collisions with incrementing suffix.
+/// Inverse of `date_prefixed_filename` for sidecars that predate
+/// `DocumentInfo::original_filename`: strips the leading `YYYY-MM-DD-`. The
+/// `-N` collision suffix is left in place (it cannot be told apart from a name
+/// that legitimately ends in `-N`), so such names simply won't dedupe.
+pub fn original_filename_from_stored(stored: &str) -> String {
+    let bytes = stored.as_bytes();
+    let is_date_prefix = bytes.len() > 11
+        && bytes[..11].iter().enumerate().all(|(i, b)| match i {
+            4 | 7 | 10 => *b == b'-',
+            _ => b.is_ascii_digit(),
+        });
+    if is_date_prefix {
+        stored[11..].to_string()
+    } else {
+        stored.to_string()
+    }
+}
+
+/// Stored name for a `saveResource(original, {coverageEndDate})` call:
+/// `{date}-{original}`, with an incrementing suffix if that path exists. The
+/// staged-resource entries in `listAccountDocuments` predict this name (see
+/// `js_api::staged_document_summary`), so keep the two in sync.
 fn date_prefixed_filename(date: &str, original: &str, dir: &Path) -> String {
     let candidate = format!("{date}-{original}");
     if !dir.join(&candidate).exists() {
@@ -1191,9 +1224,10 @@ mod tests {
     use super::{
         clear_staged_output_dir, combine_run_and_finalize, finalize_staged_resources,
         list_runnable_extensions, load_manifest, load_manifest_secret_declarations,
-        normalize_manifest_domain, resolve_driver_script_path, run_driver_cancellable,
-        run_log_forwarder, scrape_failure_dir_relative, write_failure_artifacts, DriverOutcome,
-        FailureArtifacts, ScrapeLogTail, SCRAPE_CANCELED_MESSAGE,
+        normalize_manifest_domain, original_filename_from_stored, resolve_driver_script_path,
+        run_driver_cancellable, run_log_forwarder, scrape_failure_dir_relative,
+        write_failure_artifacts, DriverOutcome, FailureArtifacts, ScrapeLogTail,
+        SCRAPE_CANCELED_MESSAGE,
     };
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
@@ -1448,8 +1482,23 @@ mod tests {
             .unwrap_or_else(|err| panic!("failed to read sidecar file: {err}"));
         assert!(sidecar.contains("\"loginName\": \"chase-personal\""));
         assert!(sidecar.contains("\"label\": \"checking\""));
+        assert!(sidecar.contains("\"originalFilename\": \"statements/2026/jan.pdf\""));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn original_filename_from_stored_strips_the_finalize_date_prefix() {
+        assert_eq!(
+            original_filename_from_stored("2026-03-03-statement-2026-03-03.pdf"),
+            "statement-2026-03-03.pdf"
+        );
+        assert_eq!(
+            original_filename_from_stored("2026-09-16-rewards/2026-summary.json"),
+            "rewards/2026-summary.json"
+        );
+        assert_eq!(original_filename_from_stored("jan.pdf"), "jan.pdf");
+        assert_eq!(original_filename_from_stored("2026-03-03-"), "2026-03-03-");
     }
 
     #[test]

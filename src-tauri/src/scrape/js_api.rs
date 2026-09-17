@@ -7575,8 +7575,67 @@ impl RefreshmintApi {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AccountDocumentSummary {
+    /// Stored (date-prefixed) name relative to the account's documents dir.
     filename: String,
+    /// The name the driver passed to `saveResource`; what `hasDocument` matches.
+    original_filename: String,
+    /// True for a resource staged by this run that finalize has not written yet.
+    staged: bool,
     metadata: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Listing entry for a resource staged in this run, under the name
+/// `finalize_staged_resources` will give it (`{coverage or today}-{filename}`;
+/// see `date_prefixed_filename` in `src-tauri/src/scrape.rs`). The listing
+/// otherwise reads only finalized sidecars, so without this a driver that
+/// re-reads the listing mid-run cannot see its own earlier downloads.
+fn staged_document_summary(
+    resource: &StagedResource,
+    fallback_date: &str,
+) -> (crate::scrape::DocumentInfo, AccountDocumentSummary) {
+    let coverage = resource
+        .coverage_end_date
+        .clone()
+        .unwrap_or_else(|| fallback_date.to_string());
+    let label = resource
+        .label
+        .clone()
+        .unwrap_or_else(|| "_default".to_string());
+    let info = crate::scrape::DocumentInfo {
+        mime_type: resource.mime_type.clone().unwrap_or_default(),
+        original_url: resource.original_url.clone(),
+        scraped_at: String::new(),
+        extension_name: String::new(),
+        login_name: String::new(),
+        label: label.clone(),
+        scrape_session_id: String::new(),
+        coverage_end_date: coverage.clone(),
+        date_range_start: None,
+        date_range_end: None,
+        metadata: resource.metadata.clone(),
+        extraction_error: None,
+        extraction_attempts: 0,
+        original_filename: Some(resource.filename.clone()),
+    };
+    let mut metadata = resource.metadata.clone();
+    metadata.insert("label".to_string(), serde_json::Value::String(label));
+    metadata.insert(
+        "coverageEndDate".to_string(),
+        serde_json::Value::String(coverage.clone()),
+    );
+    if let Some(mime) = &resource.mime_type {
+        metadata.insert(
+            "mimeType".to_string(),
+            serde_json::Value::String(mime.clone()),
+        );
+    }
+    let summary = AccountDocumentSummary {
+        filename: format!("{coverage}-{}", resource.filename),
+        original_filename: resource.filename.clone(),
+        staged: true,
+        metadata,
+    };
+    (info, summary)
 }
 
 fn missing_prompt_override_error(message: &str) -> String {
@@ -7752,8 +7811,13 @@ fn collect_account_documents_in_dir(
                         serde_json::Value::Number(info.extraction_attempts.into()),
                     );
                 }
+                let original_filename = info
+                    .original_filename
+                    .unwrap_or_else(|| crate::scrape::original_filename_from_stored(&relative));
                 docs.push(AccountDocumentSummary {
                     filename: relative,
+                    original_filename,
+                    staged: false,
                     metadata,
                 });
             }
@@ -7764,7 +7828,9 @@ fn collect_account_documents_in_dir(
                 serde_json::Value::String(acct_label.to_string()),
             );
             docs.push(AccountDocumentSummary {
+                original_filename: crate::scrape::original_filename_from_stored(&relative),
                 filename: relative,
+                staged: false,
                 metadata,
             });
         }
@@ -8018,65 +8084,29 @@ impl RefreshmintApi {
         &self,
         filter_val: Opt<rquickjs::Value<'_>>,
     ) -> JsResult<String> {
-        let (ledger_dir, login_name) = {
-            let inner = self.inner.lock().await;
-            (inner.ledger_dir.clone(), inner.login_name.clone())
-        };
-
         let filter = parse_document_filter(filter_val.0);
-        let label_filter = filter
-            .get("label")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let mut docs = Vec::new();
-        let target_labels = if let Some(l) = label_filter {
-            vec![l]
-        } else {
-            // List all accounts in logins/<login>/accounts/
-            let accounts_dir = ledger_dir.join("logins").join(&login_name).join("accounts");
-            let mut labels = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&accounts_dir) {
-                for entry in entries.flatten() {
-                    if entry.path().is_dir() {
-                        labels.push(entry.file_name().to_string_lossy().to_string());
-                    }
-                }
-            }
-            if labels.is_empty() {
-                // Fallback to _default if no accounts dir (backward compat)
-                vec!["_default".to_string()]
-            } else {
-                labels
-            }
-        };
-
-        for acct_label in target_labels {
-            let documents_dir = crate::login_config::login_account_documents_dir(
-                &ledger_dir,
-                &login_name,
-                &acct_label,
-            );
-
-            if documents_dir.exists() {
-                collect_account_documents_in_dir(
-                    &documents_dir,
-                    &documents_dir,
-                    "",
-                    &filter,
-                    &acct_label,
-                    &mut docs,
-                )
-                .map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?;
-            }
-        }
-        docs.sort_by(|a, b| {
-            let a_date = a.metadata.get("coverageEndDate").and_then(|v| v.as_str());
-            let b_date = b.metadata.get("coverageEndDate").and_then(|v| v.as_str());
-            b_date.cmp(&a_date)
-        });
+        let docs = self.account_documents(&filter).await?;
         serde_json::to_string(&docs)
             .map_err(|e| js_err(format!("listAccountDocuments serialization failed: {e}")))
+    }
+
+    /// Whether a document named `filename` (as passed to `saveResource`) has
+    /// already been saved for this login -- finalized by an earlier run or
+    /// staged by this one. `filter` takes the same shape as
+    /// `listAccountDocuments` (a label string, or `{label, coverageEndDate,
+    /// ...}`) and narrows the match; multi-account logins should pass the
+    /// label so identically named documents of other accounts don't count.
+    /// Drivers should use this for download dedupe instead of comparing
+    /// `saveResource` names against the date-prefixed stored names.
+    #[qjs(rename = "hasDocument")]
+    pub async fn js_has_document(
+        &self,
+        filename: String,
+        filter_val: Opt<rquickjs::Value<'_>>,
+    ) -> JsResult<bool> {
+        let filter = parse_document_filter(filter_val.0);
+        let docs = self.account_documents(&filter).await?;
+        Ok(docs.iter().any(|doc| doc.original_filename == filename))
     }
 
     /// Save binary data to a file in the extension output directory.
@@ -8230,6 +8260,78 @@ impl RefreshmintApi {
 }
 
 impl RefreshmintApi {
+    async fn account_documents(
+        &self,
+        filter: &BTreeMap<String, serde_json::Value>,
+    ) -> JsResult<Vec<AccountDocumentSummary>> {
+        let (ledger_dir, login_name, staged) = {
+            let inner = self.inner.lock().await;
+            let fallback_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let staged = inner
+                .staged_resources
+                .iter()
+                .map(|resource| staged_document_summary(resource, &fallback_date))
+                .filter(|(info, _)| matches_filter(info, filter))
+                .map(|(_, summary)| summary)
+                .collect::<Vec<_>>();
+            (inner.ledger_dir.clone(), inner.login_name.clone(), staged)
+        };
+
+        let label_filter = filter
+            .get("label")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let mut docs = Vec::new();
+        let target_labels = if let Some(l) = label_filter {
+            vec![l]
+        } else {
+            // List all accounts in logins/<login>/accounts/
+            let accounts_dir = ledger_dir.join("logins").join(&login_name).join("accounts");
+            let mut labels = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&accounts_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        labels.push(entry.file_name().to_string_lossy().to_string());
+                    }
+                }
+            }
+            if labels.is_empty() {
+                // Fallback to _default if no accounts dir (backward compat)
+                vec!["_default".to_string()]
+            } else {
+                labels
+            }
+        };
+
+        for acct_label in target_labels {
+            let documents_dir = crate::login_config::login_account_documents_dir(
+                &ledger_dir,
+                &login_name,
+                &acct_label,
+            );
+
+            if documents_dir.exists() {
+                collect_account_documents_in_dir(
+                    &documents_dir,
+                    &documents_dir,
+                    "",
+                    filter,
+                    &acct_label,
+                    &mut docs,
+                )
+                .map_err(|e| js_err(format!("listAccountDocuments failed: {e}")))?;
+            }
+        }
+        docs.extend(staged);
+        docs.sort_by(|a, b| {
+            let a_date = a.metadata.get("coverageEndDate").and_then(|v| v.as_str());
+            let b_date = b.metadata.get("coverageEndDate").and_then(|v| v.as_str());
+            b_date.cmp(&a_date)
+        });
+        Ok(docs)
+    }
+
     fn emit_debug_output(&self, stream: DebugOutputStream, line: String) -> bool {
         let sender = match self.inner.try_lock() {
             Ok(inner) => inner.debug_output_sink.clone(),
@@ -9103,6 +9205,7 @@ mod tests {
             metadata,
             extraction_error: None,
             extraction_attempts: 0,
+            original_filename: None,
         };
 
         // Exact match
@@ -9208,6 +9311,145 @@ mod tests {
             ledger_dir: PathBuf::new(),
             prompt_ui_handler: None,
         }
+    }
+
+    fn temp_ledger_dir(prefix: &str) -> PathBuf {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "refreshmint-jsapi-{prefix}-{}-{now}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("mkdir failed: {err}"));
+        dir
+    }
+
+    /// Write a finalized-looking document (file + sidecar) under
+    /// `logins/<login>/accounts/<label>/documents/<stored>`.
+    fn write_finalized_document(
+        ledger_dir: &std::path::Path,
+        login: &str,
+        label: &str,
+        stored: &str,
+        original_filename: Option<&str>,
+        coverage_end_date: &str,
+    ) {
+        let documents_dir =
+            crate::login_config::login_account_documents_dir(ledger_dir, login, label);
+        let path = documents_dir.join(stored);
+        std::fs::create_dir_all(path.parent().unwrap_or(&documents_dir))
+            .unwrap_or_else(|err| panic!("mkdir failed: {err}"));
+        std::fs::write(&path, b"x").unwrap_or_else(|err| panic!("write failed: {err}"));
+        let info = crate::scrape::DocumentInfo {
+            mime_type: "application/pdf".to_string(),
+            original_url: None,
+            scraped_at: "2026-09-17T00:00:00Z".to_string(),
+            extension_name: "ext".to_string(),
+            login_name: login.to_string(),
+            label: label.to_string(),
+            scrape_session_id: "s".to_string(),
+            coverage_end_date: coverage_end_date.to_string(),
+            date_range_start: None,
+            date_range_end: None,
+            metadata: BTreeMap::new(),
+            extraction_error: None,
+            extraction_attempts: 0,
+            original_filename: original_filename.map(str::to_string),
+        };
+        std::fs::write(
+            documents_dir.join(format!("{stored}-info.json")),
+            serde_json::to_string(&info).unwrap_or_default(),
+        )
+        .unwrap_or_else(|err| panic!("sidecar write failed: {err}"));
+    }
+
+    #[tokio::test]
+    async fn list_account_documents_reports_original_filename_and_staged_resources() {
+        let ledger_dir = temp_ledger_dir("list-docs");
+        // A sidecar written before `originalFilename` existed: the original
+        // name is recovered by stripping the finalize date prefix.
+        write_finalized_document(
+            &ledger_dir,
+            "target",
+            "_default",
+            "2026-03-03-statement-2026-03-03.pdf",
+            None,
+            "2026-03-03",
+        );
+        // A sidecar that records the original name explicitly.
+        write_finalized_document(
+            &ledger_dir,
+            "target",
+            "_default",
+            "2026-09-16-rewards/2026-summary.json",
+            Some("rewards/2026-summary.json"),
+            "2026-09-16",
+        );
+
+        let mut inner = test_refreshmint_inner(PromptOverrides::new());
+        inner.ledger_dir = ledger_dir.clone();
+        inner.login_name = "target".to_string();
+        inner.staged_resources.push(StagedResource {
+            filename: "statement-2026-09-02.pdf".to_string(),
+            staging_path: PathBuf::from("/nonexistent"),
+            coverage_end_date: Some("2026-09-02".to_string()),
+            original_url: None,
+            mime_type: Some("application/pdf".to_string()),
+            label: None,
+            metadata: BTreeMap::new(),
+        });
+        let api = RefreshmintApi::new(Arc::new(Mutex::new(inner)));
+
+        let json = api
+            .js_list_account_documents(Opt(None))
+            .await
+            .unwrap_or_else(|err| panic!("listAccountDocuments failed: {err}"));
+        let docs: Vec<serde_json::Value> =
+            serde_json::from_str(&json).unwrap_or_else(|err| panic!("invalid listing json: {err}"));
+        let find = |stored: &str| {
+            docs.iter()
+                .find(|d| d["filename"] == stored)
+                .unwrap_or_else(|| panic!("missing {stored} in {json}"))
+                .clone()
+        };
+
+        let legacy = find("2026-03-03-statement-2026-03-03.pdf");
+        assert_eq!(legacy["originalFilename"], "statement-2026-03-03.pdf");
+        assert_eq!(legacy["staged"], false);
+
+        let explicit = find("2026-09-16-rewards/2026-summary.json");
+        assert_eq!(explicit["originalFilename"], "rewards/2026-summary.json");
+
+        // Staged in this run: listed under the name finalize will give it, so
+        // a driver that re-reads the listing mid-run sees its own downloads.
+        let staged = find("2026-09-02-statement-2026-09-02.pdf");
+        assert_eq!(staged["originalFilename"], "statement-2026-09-02.pdf");
+        assert_eq!(staged["staged"], true);
+        assert_eq!(staged["metadata"]["coverageEndDate"], "2026-09-02");
+        assert_eq!(staged["metadata"]["label"], "_default");
+
+        // hasDocument matches on the original name across finalized and
+        // staged documents alike. (Filtering by label/coverageEndDate goes
+        // through `matches_filter`, covered by `test_matches_filter_metadata`;
+        // building a JS filter value needs a runtime, so only the unfiltered
+        // path is exercised here.)
+        let has = |name: &str| {
+            let api = &api;
+            let name = name.to_string();
+            async move {
+                api.js_has_document(name, Opt(None))
+                    .await
+                    .unwrap_or_else(|err| panic!("hasDocument failed: {err}"))
+            }
+        };
+        assert!(has("statement-2026-03-03.pdf").await);
+        assert!(has("rewards/2026-summary.json").await);
+        assert!(has("statement-2026-09-02.pdf").await);
+        assert!(!has("statement-2026-10-02.pdf").await);
+
+        let _ = std::fs::remove_dir_all(&ledger_dir);
     }
 
     #[test]

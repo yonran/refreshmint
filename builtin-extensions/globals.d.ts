@@ -304,6 +304,12 @@ interface RefreshmintApi {
         filename?: string,
         options?: SaveResourceOptions,
     ): Promise<void>;
+    /**
+     * JSON array of `{filename, originalFilename, staged, metadata}`.
+     * `filename` is the stored (date-prefixed) name; `originalFilename` is the
+     * name passed to `saveResource`; `staged` entries were saved earlier in
+     * this run and are listed under the name finalize will give them.
+     */
     listAccountDocuments(
         filter?:
             | string
@@ -312,6 +318,23 @@ interface RefreshmintApi {
                   [key: string]: string | number | boolean | null | undefined;
               },
     ): Promise<string>;
+    /**
+     * Whether `filename` (as passed to `saveResource`) is already saved for
+     * this login -- finalized by an earlier run or staged by this one. The
+     * optional filter has the same shape as `listAccountDocuments`'s; pass
+     * `{label, coverageEndDate}` on multi-account logins. Use this for
+     * download dedupe.
+     */
+    hasDocument(
+        filename: string,
+        filter?:
+            | string
+            | {
+                  label?: string;
+                  coverageEndDate?: string;
+                  [key: string]: string | number | boolean | null | undefined;
+              },
+    ): Promise<boolean>;
     setSessionMetadata(metadata: SessionMetadata): Promise<void>;
     reportValue(key: string, value: string): void;
     log(message: string): void;

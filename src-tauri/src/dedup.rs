@@ -1632,6 +1632,7 @@ mod tests {
             metadata: std::collections::BTreeMap::new(),
             extraction_error: None,
             extraction_attempts: 0,
+            original_filename: None,
         };
         fs::write(
             docs_dir.join(format!("{filename}-info.json")),
@@ -2047,6 +2048,7 @@ mod tests {
             )]),
             extraction_error: None,
             extraction_attempts: 0,
+            original_filename: None,
         };
         fs::write(docs_dir.join(attachment_file), b"img").expect("write attachment doc");
         fs::write(
@@ -2114,6 +2116,7 @@ mod tests {
             )]),
             extraction_error: None,
             extraction_attempts: 0,
+            original_filename: None,
         };
         fs::write(docs_dir.join(attachment_file), b"img").expect("write attachment doc");
         fs::write(
