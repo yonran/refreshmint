@@ -7239,10 +7239,34 @@ pub(crate) async fn resolve_secret_if_applicable(
     // Try new domain-credential scheme first.
     let username_role =
         is_username_role(&inner.declared_secrets, &top_level_domain, referenced_name);
+    let was_cached = inner.secret_store.has_cached_credentials(&top_level_domain);
     let credential_error = match inner.secret_store.get_credentials(&top_level_domain) {
         Ok((username, password)) => {
             inner.sensitive_data.register(&username);
             inner.sensitive_data.register(&password);
+            if !was_cached {
+                // First current-format read this session: sweep any legacy
+                // entries that carry this domain's declared secret names,
+                // under whatever legacy domain alias they were stored
+                // (`bankofamerica.com` next to `secure.bankofamerica.com`).
+                // Once the legacy index is gone this costs one silent
+                // not-found lookup per session.
+                let declared_names =
+                    declared_secret_names(&inner.declared_secrets, &top_level_domain);
+                match inner
+                    .secret_store
+                    .purge_legacy_entries(|_, name| declared_names.iter().any(|n| n == name))
+                {
+                    Ok(0) => {}
+                    Ok(removed) => eprintln!(
+                        "Removed {removed} legacy Keychain entr{} for '{top_level_domain}' (already migrated)",
+                        if removed == 1 { "y" } else { "ies" }
+                    ),
+                    Err(err) => eprintln!(
+                        "Warning: could not remove legacy Keychain entries for '{top_level_domain}': {err}"
+                    ),
+                }
+            }
             return Ok(if username_role { username } else { password });
         }
         Err(error) => error.to_string(),
@@ -7285,13 +7309,7 @@ pub(crate) async fn resolve_secret_if_applicable(
         ) {
             // Only the two adopted role entries are removed; any other legacy
             // name for the domain (`extra_names`) keeps resolving via this path.
-            let adopted_names: Vec<String> = inner
-                .declared_secrets
-                .get(&top_level_domain)
-                .into_iter()
-                .flat_map(|creds| [creds.username.clone(), creds.password.clone()])
-                .flatten()
-                .collect();
+            let adopted_names = declared_secret_names(&inner.declared_secrets, &top_level_domain);
             // A failed write must never fail the scrape: the legacy values
             // are already in hand, so just report it and carry on.
             if let Err(err) = inner.secret_store.adopt_legacy_credentials(
@@ -7355,6 +7373,16 @@ fn legacy_credentials_for_domain(
             .map(|(_, value)| value.clone())
     };
     Some((value_of(username_name)?, value_of(password_name)?))
+}
+
+/// The username and password secret names the manifest declares for `domain`.
+fn declared_secret_names(declared: &SecretDeclarations, domain: &str) -> Vec<String> {
+    declared
+        .get(domain)
+        .into_iter()
+        .flat_map(|creds| [creds.username.clone(), creds.password.clone()])
+        .flatten()
+        .collect()
 }
 
 /// Whether `secret_name` is the username role for `domain` in the declarations.
@@ -9032,6 +9060,35 @@ mod tests {
         }))
         .unwrap_or_else(|err| panic!("subresource event should deserialize: {err}"));
         assert!(!is_navigation_request(&subresource_event));
+    }
+
+    #[test]
+    fn declared_secret_names_lists_username_and_password_for_the_domain_only() {
+        let mut declared = SecretDeclarations::new();
+        declared.insert(
+            "secure.bankofamerica.com".to_string(),
+            DomainCredentials {
+                username: Some("bofa_username".to_string()),
+                password: Some("bofa_password".to_string()),
+                extra_names: vec!["bofa_otp".to_string()],
+            },
+        );
+        declared.insert(
+            "other.example".to_string(),
+            DomainCredentials {
+                password: Some("other_password".to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            declared_secret_names(&declared, "secure.bankofamerica.com"),
+            vec!["bofa_username".to_string(), "bofa_password".to_string()]
+        );
+        assert_eq!(
+            declared_secret_names(&declared, "other.example"),
+            vec!["other_password".to_string()]
+        );
+        assert!(declared_secret_names(&declared, "missing.example").is_empty());
     }
 
     #[test]

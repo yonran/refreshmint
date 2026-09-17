@@ -67,6 +67,10 @@ impl SecretStore {
             .and_then(|cache| cache.get(domain).cloned())
     }
 
+    pub fn has_cached_credentials(&self, domain: &str) -> bool {
+        self.cached_credentials(domain).is_some()
+    }
+
     fn remember_credentials(&self, domain: &str, credentials: &(String, String)) {
         if let Ok(mut cache) = self.credential_cache.lock() {
             cache.insert(domain.to_string(), credentials.clone());
@@ -251,19 +255,43 @@ impl SecretStore {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.remember_credentials(domain, &credentials);
         self.set_credentials(domain, &credentials.0, &credentials.1)?;
-        for name in legacy_names {
-            self.delete_legacy_entry(domain, name)?;
+        self.purge_legacy_entries(|d, n| d == domain && legacy_names.iter().any(|l| l == n))?;
+        Ok(())
+    }
+
+    /// Delete every legacy entry for which `doomed(domain, name)` is true and
+    /// drop it from the legacy index (deleting the index when it is empty).
+    /// Returns how many entries were removed. With no legacy index present
+    /// this is a single item-not-found lookup, which macOS does not prompt for.
+    ///
+    /// Used both when a legacy credential is adopted and, on every first
+    /// current-format read in a session, to sweep leftovers: the Settings-tab
+    /// migration deleted legacy entries only best-effort, so several logins
+    /// kept their old entries next to the migrated ones (audit 2026-09-17).
+    pub fn purge_legacy_entries(
+        &self,
+        doomed: impl Fn(&str, &str) -> bool,
+    ) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        let entries = self.list_legacy_entries()?;
+        if entries.is_empty() {
+            return Ok(0);
         }
-        let remaining: Vec<(String, String)> = self
-            .list_legacy_entries()?
-            .into_iter()
-            .filter(|(d, n)| !(d == domain && legacy_names.contains(n)))
-            .collect();
+        let mut removed = 0;
+        let mut remaining = Vec::new();
+        for (domain, name) in entries {
+            if doomed(&domain, &name) {
+                self.delete_legacy_entry(&domain, &name)?;
+                removed += 1;
+            } else {
+                remaining.push((domain, name));
+            }
+        }
         if remaining.is_empty() {
-            self.delete_legacy_index()
-        } else {
-            self.write_legacy_index(&remaining)
+            self.delete_legacy_index()?;
+        } else if removed > 0 {
+            self.write_legacy_index(&remaining)?;
         }
+        Ok(removed)
     }
 
     /// List all configured domains with their credential status.
@@ -723,9 +751,11 @@ mod tests {
     fn credentials_are_cached_by_domain_for_one_store_session() {
         let store = SecretStore::new("login/example".to_string());
         let credentials = ("user".to_string(), "password".to_string());
+        assert!(!store.has_cached_credentials("example.com"));
         store.remember_credentials("example.com", &credentials);
 
         assert_eq!(store.cached_credentials("example.com"), Some(credentials));
+        assert!(store.has_cached_credentials("example.com"));
         assert_eq!(store.cached_credentials("other.example"), None);
     }
 
