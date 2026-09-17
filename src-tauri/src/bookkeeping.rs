@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 const BOOKKEEPING_DIR: &str = "bookkeeping";
@@ -1227,7 +1227,12 @@ fn read_optional_json<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<O
         return Ok(None);
     }
     let file = OpenOptions::new().read(true).open(path)?;
-    let value = serde_json::from_reader(file).map_err(io::Error::other)?;
+    // serde_json::from_reader falls back to Read::bytes() (one read(2) syscall
+    // per byte) on an unbuffered reader; BufReader amortizes that. With
+    // hundreds of small bookkeeping files read per call (list_import_anomalies
+    // etc.), the unbuffered version made per-syscall sandbox/IPC overhead
+    // dominate and turned a sub-second scan into a many-minute CPU-bound hang.
+    let value = serde_json::from_reader(BufReader::new(file)).map_err(io::Error::other)?;
     Ok(Some(value))
 }
 
