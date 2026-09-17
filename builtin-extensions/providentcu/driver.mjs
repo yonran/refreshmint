@@ -477,6 +477,9 @@ async function humanPace(page, minMs, maxMs) {
     await waitMs(page, ms);
 }
 
+/**
+ * @param {PageApi} page
+ */
 async function navigateToSignIn(page) {
     refreshmint.log(`Navigating to sign-in URL: ${SIGN_IN_URL}`);
     try {
@@ -484,6 +487,20 @@ async function navigateToSignIn(page) {
             waitUntil: 'domcontentloaded',
             timeout: 90000,
         });
+        // When the previous scrape's server session is still alive (the
+        // browser closed without signing off), the first request to
+        // SignIn.aspx is answered by LoggedOut.aspx -- a bare page with no
+        // form -- while the server ends that session. A second request gets
+        // the real form (observed 2026-09-16 on back-to-back runs).
+        if ((await page.url()).includes('LoggedOut.aspx')) {
+            refreshmint.log(
+                'Landed on LoggedOut.aspx (stale session ended); reloading sign-in page',
+            );
+            await page.goto(SIGN_IN_URL, {
+                waitUntil: 'domcontentloaded',
+                timeout: 90000,
+            });
+        }
         await page.waitForSelector('input[id$="txtLoginName"]', 90000);
     } catch (error) {
         refreshmint.log(
