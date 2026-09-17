@@ -1,12 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import {
+    buildCategoryRuleInput,
+    categoryRuleFormValuesFromResolution,
+    categoryRuleSummary,
     categoryRulesFromBulkRows,
+    EMPTY_CATEGORY_RULE_FORM,
     resolutionInputFromProposal,
 } from './automation-utils.ts';
 import type {
     AutomationProposal,
     AutomationProposalKind,
     ProposalResult,
+    Resolution,
 } from './tauri-commands.ts';
 
 function makeProposal(
@@ -120,5 +125,147 @@ describe('categoryRulesFromBulkRows', () => {
         ]);
         expect(rules).toHaveLength(1);
         expect(rules[0]?.predicate?.normalizedPayee).toBe('COSTCO');
+    });
+});
+
+function makeRule(overrides: Partial<Resolution> = {}): Resolution {
+    return {
+        id: 'r1',
+        kind: 'category-rule',
+        status: 'active',
+        subjectRefs: [],
+        parts: [
+            {
+                account: 'Expenses:Groceries',
+                amount: null,
+                ref: null,
+                notes: null,
+            },
+        ],
+        notes: 'Created from Rules panel',
+        predicate: { normalizedPayee: 'SAFEWAY' },
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+        ...overrides,
+    };
+}
+
+describe('buildCategoryRuleInput', () => {
+    it('rejects an empty account', () => {
+        expect(
+            buildCategoryRuleInput({
+                ...EMPTY_CATEGORY_RULE_FORM,
+                normalizedPayee: 'SAFEWAY',
+            }),
+        ).toBeNull();
+    });
+
+    it('rejects a form with no predicate field set', () => {
+        expect(
+            buildCategoryRuleInput({
+                ...EMPTY_CATEGORY_RULE_FORM,
+                account: 'Expenses:Groceries',
+            }),
+        ).toBeNull();
+    });
+
+    it('builds a global rule from a normalizedPayee match', () => {
+        const input = buildCategoryRuleInput({
+            ...EMPTY_CATEGORY_RULE_FORM,
+            normalizedPayee: '  SAFEWAY  ',
+            account: '  Expenses:Groceries  ',
+        });
+        expect(input).toEqual({
+            kind: 'category-rule',
+            subjectRefs: [],
+            parts: [
+                {
+                    account: 'Expenses:Groceries',
+                    amount: null,
+                    ref: null,
+                    notes: null,
+                },
+            ],
+            notes: 'Created from Rules panel',
+            predicate: {
+                descriptionRegex: null,
+                normalizedPayee: 'SAFEWAY',
+                amountMin: null,
+                amountMax: null,
+            },
+        });
+    });
+
+    it('accepts a descriptionRegex-only match and carries amount bounds + scope', () => {
+        const scope = {
+            kind: 'login-entry' as const,
+            loginName: 'chase',
+            label: 'checking',
+        };
+        const input = buildCategoryRuleInput({
+            ...EMPTY_CATEGORY_RULE_FORM,
+            descriptionRegex: 'STARBUCKS.*',
+            account: 'Expenses:Dining',
+            amountMin: '1',
+            amountMax: '50',
+            notes: 'coffee',
+            scope,
+        });
+        expect(input?.subjectRefs).toEqual([scope]);
+        expect(input?.notes).toBe('coffee');
+        expect(input?.predicate).toEqual({
+            descriptionRegex: 'STARBUCKS.*',
+            normalizedPayee: null,
+            amountMin: '1',
+            amountMax: '50',
+        });
+    });
+});
+
+describe('categoryRuleFormValuesFromResolution', () => {
+    it('round-trips a rule into editable form fields', () => {
+        const rule = makeRule({
+            predicate: {
+                normalizedPayee: 'SAFEWAY',
+                descriptionRegex: null,
+                amountMin: '1',
+                amountMax: null,
+            },
+        });
+        expect(categoryRuleFormValuesFromResolution(rule)).toEqual({
+            normalizedPayee: 'SAFEWAY',
+            descriptionRegex: '',
+            amountMin: '1',
+            amountMax: '',
+            account: 'Expenses:Groceries',
+            notes: 'Created from Rules panel',
+            scope: null,
+        });
+    });
+});
+
+describe('categoryRuleSummary', () => {
+    it('summarizes a payee-matched rule', () => {
+        expect(categoryRuleSummary(makeRule())).toBe(
+            '"SAFEWAY" → Expenses:Groceries',
+        );
+    });
+
+    it('includes amount bounds when set', () => {
+        const rule = makeRule({
+            predicate: {
+                normalizedPayee: 'STARBUCKS',
+                amountMin: '1',
+                amountMax: '10',
+            },
+        });
+        expect(categoryRuleSummary(rule)).toBe(
+            '"STARBUCKS" amount 1–10 → Expenses:Groceries',
+        );
+    });
+
+    it('falls back to (any) when no predicate field is set', () => {
+        const rule = makeRule({ predicate: null });
+        expect(categoryRuleSummary(rule)).toBe('(any) → Expenses:Groceries');
     });
 });

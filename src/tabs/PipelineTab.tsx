@@ -55,6 +55,7 @@ import { postButtonLabel } from '../categorize-utils.ts';
 import {
     createTransferLinkResolution,
     loginEntryRef,
+    loginScopeRef,
     resolutionInputFromProposal,
 } from '../automation-utils.ts';
 import {
@@ -109,17 +110,6 @@ interface PipelineTabProps {
     onSessionChange: (
         updater: (current: PipelineTabSession) => PipelineTabSession,
     ) => void;
-}
-
-// Login-account scope ref for a CategoryRule (no entryId — matches the Rust
-// automation::is_login_scope_ref check). Restricts a rule to one bank account.
-function loginScopeRef(loginName: string, label: string): TypedRef {
-    return {
-        kind: 'login-entry',
-        locator: `logins/${loginName}/accounts/${label}`,
-        loginName,
-        label,
-    };
 }
 
 function evidenceRef(ref: string): TypedRef {

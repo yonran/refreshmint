@@ -21,6 +21,19 @@ export function loginEntryRef(
     };
 }
 
+// Login-account scope ref for a CategoryRule (no entryId — matches the Rust
+// automation::is_login_scope_ref check via category_rule_matches_scope). Restricts
+// a rule to one bank account. Shared by PipelineTab's "Always" action and the
+// Rules panel.
+export function loginScopeRef(loginName: string, label: string): TypedRef {
+    return {
+        kind: 'login-entry',
+        locator: `logins/${loginName}/accounts/${label}`,
+        loginName,
+        label,
+    };
+}
+
 /**
  * Record a transfer decision as a durable transfer-link resolution. Idempotent
  * via backend fingerprint dedup; creating it disables any active
@@ -147,4 +160,110 @@ export function categoryRulesFromBulkRows(
         });
     }
     return rules;
+}
+
+/** Editable form state for a CategoryRule, used by the Rules panel. */
+export interface CategoryRuleFormValues {
+    normalizedPayee: string;
+    descriptionRegex: string;
+    amountMin: string;
+    amountMax: string;
+    account: string;
+    notes: string;
+    /** Read-only in the Rules panel today: carried over from the rule being
+     * edited, or null (global) when creating a new rule. */
+    scope: TypedRef | null;
+}
+
+export const EMPTY_CATEGORY_RULE_FORM: CategoryRuleFormValues = {
+    normalizedPayee: '',
+    descriptionRegex: '',
+    amountMin: '',
+    amountMax: '',
+    account: '',
+    notes: '',
+    scope: null,
+};
+
+/** Populate Rules-panel edit-form fields from an existing CategoryRule resolution. */
+export function categoryRuleFormValuesFromResolution(
+    rule: Resolution,
+): CategoryRuleFormValues {
+    const predicate = rule.predicate;
+    return {
+        normalizedPayee: predicate?.normalizedPayee ?? '',
+        descriptionRegex: predicate?.descriptionRegex ?? '',
+        amountMin: predicate?.amountMin ?? '',
+        amountMax: predicate?.amountMax ?? '',
+        account:
+            rule.parts.find((p) => p.account != null && p.account !== '')
+                ?.account ?? '',
+        notes: rule.notes ?? '',
+        scope: rule.subjectRefs[0] ?? null,
+    };
+}
+
+/**
+ * Build a NewResolutionInput (kind: 'category-rule') from Rules-panel form
+ * values, or null if the form doesn't meet the backend's validation (mirrors
+ * Rust automation::validate_category_rule_input): an account and at least one
+ * of normalizedPayee/descriptionRegex are required.
+ *
+ * Pure so it can be vitest-tested. The Rules panel saves an edit by disabling
+ * the resolution being edited (if active) and creating a new one from this
+ * input — CategoryRule ids are content-addressed by (kind, subjectRefs, parts,
+ * predicate), so an in-place field change is a new id, not an update.
+ */
+export function buildCategoryRuleInput(
+    form: CategoryRuleFormValues,
+): NewResolutionInput | null {
+    const account = form.account.trim();
+    const normalizedPayee = form.normalizedPayee.trim();
+    const descriptionRegex = form.descriptionRegex.trim();
+    if (account === '' || (normalizedPayee === '' && descriptionRegex === '')) {
+        return null;
+    }
+    const amountMin = form.amountMin.trim();
+    const amountMax = form.amountMax.trim();
+    const notes = form.notes.trim();
+    return {
+        kind: 'category-rule',
+        subjectRefs: form.scope ? [form.scope] : [],
+        parts: [{ account, amount: null, ref: null, notes: null }],
+        notes: notes === '' ? 'Created from Rules panel' : notes,
+        predicate: {
+            descriptionRegex: descriptionRegex === '' ? null : descriptionRegex,
+            normalizedPayee: normalizedPayee === '' ? null : normalizedPayee,
+            amountMin: amountMin === '' ? null : amountMin,
+            amountMax: amountMax === '' ? null : amountMax,
+        },
+    };
+}
+
+/** One-line human-readable summary of a CategoryRule for the Rules panel list. */
+export function categoryRuleSummary(rule: Resolution): string {
+    const predicate = rule.predicate;
+    const account =
+        rule.parts.find((p) => p.account != null && p.account !== '')
+            ?.account ?? '(no account)';
+    const matchParts: string[] = [];
+    if (
+        predicate?.normalizedPayee != null &&
+        predicate.normalizedPayee !== ''
+    ) {
+        matchParts.push(`"${predicate.normalizedPayee}"`);
+    }
+    if (
+        predicate?.descriptionRegex != null &&
+        predicate.descriptionRegex !== ''
+    ) {
+        matchParts.push(`/${predicate.descriptionRegex}/`);
+    }
+    if (predicate?.amountMin != null || predicate?.amountMax != null) {
+        matchParts.push(
+            `amount ${predicate.amountMin ?? ''}–${predicate.amountMax ?? ''}`,
+        );
+    }
+    const match = matchParts.length > 0 ? matchParts.join(' ') : '(any)';
+    return `${match} → ${account}`;
 }
