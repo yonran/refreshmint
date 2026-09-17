@@ -81,3 +81,4 @@ operation (milliseconds to minutes), so contention is still reported promptly.
 - If metadata exists but the backend reports the lock is free, the metadata was stale and will be cleaned up.
 - `Extract All` is login-scoped and can still run for unlocked accounts while other accounts are busy.
 - `Post All` depends on the GL lock and may also need one or more login locks depending on the entries being posted.
+- A debug session (`debug start`, or a retained failed-scrape session) holds a login's lock for the entire life of the process that opened it, and only that -- releasing it requires that process to exit (`debug stop`, its own timeout, the browser window being closed, or a crash), not just the socket file being removed or a differently-named socket being used for a new session. Verified 2026-09-17: attempting `debug start` for a login that is genuinely still held by another live process is refused with `"login '<name>' is currently in use by another operation"`.

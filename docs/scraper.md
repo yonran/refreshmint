@@ -222,6 +222,38 @@ continue;` skipped every Target statement because the links have no id.
   the app; the worker now logs a warning when it is older than the app.
 - Leaving "remember this device" unticked, so every unattended auto-scrape
   stalls on the MFA prompt. Auto success rates were 10-25% across logins.
+- Polling a blocking bot-check/verification interstitial for a few seconds and
+  then throwing "run a manual scrape from the app to clear it" -- when a
+  manual (app-started) scrape is exactly what is already running, and the
+  thrown error gives the user no way to act. If the driver already calls
+  `page.solveHumanChallenge(message)` for a CAPTCHA elsewhere (it forwards the
+  live page to the app's popup and waits), reuse it for the interstitial too
+  instead of failing past it (PayPal's DataDome device-check, 2026-09-17).
+
+**Investigating Keychain state**
+
+- `security dump-keychain | grep -A N '"svce"<blob>="refreshmint/..."'` can
+  bleed past the end of one item's attribute block into the next item's
+  `"acct"` line if `N` is larger than that item has attributes, making an
+  unrelated entry look like it belongs to the wrong service. This produced a
+  false "misplaced credential" report during the 2026-09-17 audit (a legacy
+  `paypal.com/paypal_username` entry under `refreshmint/login/paypal`, its own
+  correct service, was misread as living under `refreshmint/login/chase`).
+  Match `"svce"` and `"acct"` pairs from the same block (grep `-B` back to the
+  nearest `"svce"` line, or parse per-item) rather than trusting a fixed
+  window.
+- After the first successful current-format Keychain read for a domain in a
+  session, `resolve_secret_if_applicable` (`src-tauri/src/scrape/js_api.rs`)
+  now sweeps and deletes any leftover legacy entries for that domain's
+  declared secret names (added 2026-09-17, `secret.rs`
+  `purge_legacy_entries`). This is a one-time cost: a login whose Settings-tab
+  migration left legacy entries behind (best-effort delete) can see 1-3 extra
+  Keychain authorization prompts on the very next scrape (the deletes, in
+  addition to the read), then drops to the usual single prompt for good.
+  Don't mistake a multi-prompt run right after this shipped for the migration
+  being broken -- check whether the legacy entries are actually gone
+  afterward (`security dump-keychain`, or list_legacy_entries via the
+  Settings tab) before concluding it failed.
 
 ## Cross-bank lessons
 

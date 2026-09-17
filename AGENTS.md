@@ -26,6 +26,7 @@ Also read [AGENTS.local.md](./AGENTS.local.md) if it exists for machine-local de
 - Keep `debug start` running while iterating on scraper code.
 - After script edits, re-run `debug exec`; do not restart `debug start` unless the socket/session is broken or login state must be reset.
 - If a debug run is interrupted/aborted, verify whether partial staged resources were finalized before re-running.
+- **Always run `debug stop` as the last step once you are done with a session** -- do not just `rm -f` a socket path and start a new one, and do not leave a session for the model to abandon at the end of a turn. A login's `.lock` (see `docs/locking.md`) is held for the whole life of the process that opened it, and it is released only when that process exits -- a clean `debug stop`, a retained-failure session's 30-minute timeout, its browser window being closed, or a crash. Verified 2026-09-17: a second `debug start`/scrape for a login that is genuinely still held is refused with `"login '<name>' is currently in use by another operation"`, so an unstopped session from an earlier turn can silently block (or, once it exits on its own, silently stop blocking) a later one in a way that looks like a locking bug but is really just leftover session hygiene.
 
 ## Rust Serialization
 
