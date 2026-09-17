@@ -336,7 +336,13 @@ async function ensureRememberDevice(page) {
         );
         return;
     }
-    await page.locator('label[for="rememberMe"]').click();
+    // The checkbox input is hidden behind a styled span, and its <label>
+    // wraps it rather than pointing at it with `for` (verified 2026-09-17:
+    // `<label class="checkbox_label rememberMe_label"><input id="rememberMe">
+    // <span class="checkmark"></span><span>Do you want to remember this
+    // device?</span></label>`), so a `label[for="rememberMe"]` locator never
+    // matches and times out. Click the wrapping label instead.
+    await page.locator('label:has(> #rememberMe)').click();
     const after = /** @type {string} */ (
         await page.evaluate(
             `(function() {
