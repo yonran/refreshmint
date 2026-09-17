@@ -19,7 +19,6 @@ import {
     listScrapeExtensions,
     loadScrapeExtension,
     migrateLedger,
-    migrateLoginSecrets,
     removeLoginDomain,
     repairLoginAccountLabels,
     setLoginAccount,
@@ -866,30 +865,6 @@ export function SettingsTab({
             } catch {
                 setSecretUsername('');
             }
-        }
-    }
-
-    async function handleMigrateLoginSecrets() {
-        const loginName = activeSecretsLoginName;
-        if (loginName === null) {
-            setSecretsStatus('Select a login first.');
-            return;
-        }
-        setIsSavingAccountSecret(true);
-        try {
-            const migrated = await migrateLoginSecrets(loginName);
-            await refreshLoginSecrets(loginName);
-            if (migrated.length === 0) {
-                setSecretsStatus('No legacy credentials to migrate.');
-            } else {
-                setSecretsStatus(
-                    `Migrated ${migrated.length} domain${migrated.length === 1 ? '' : 's'}: ${migrated.join(', ')}.`,
-                );
-            }
-        } catch (error) {
-            setSecretsStatus(`Migration failed: ${String(error)}`);
-        } finally {
-            setIsSavingAccountSecret(false);
         }
     }
 
@@ -1849,20 +1824,6 @@ export function SettingsTab({
                                             : currentDomainExists
                                               ? 'Update credentials'
                                               : 'Save credentials'}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="ghost-button"
-                                        onClick={() => {
-                                            void handleMigrateLoginSecrets();
-                                        }}
-                                        disabled={
-                                            !hasActiveSecretsLogin ||
-                                            isSavingAccountSecret ||
-                                            busySecretKey !== null
-                                        }
-                                    >
-                                        Migrate legacy
                                     </button>
                                 </div>
                                 <p className="hint">

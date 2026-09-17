@@ -398,7 +398,6 @@ pub fn run_with_context(
             set_login_password,
             remove_login_domain,
             get_login_username,
-            migrate_login_secrets,
             clear_login_profile,
             migrate_ledger,
             query_transactions,
@@ -2261,78 +2260,6 @@ fn get_login_username(login_name: String, domain: String) -> Result<String, Stri
     let domain = require_non_empty_input("domain", domain)?;
     let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
     store.get_username(&domain).map_err(|err| err.to_string())
-}
-
-/// Migrate legacy keychain entries (service=`refreshmint/<login>`, account=`<domain>/<name>`)
-/// to the new scheme (service=`refreshmint/login/<login>/<domain>`, account=username).
-///
-/// Returns a list of domains that were migrated.
-///
-/// Behavior notes:
-/// - Idempotent: returns an empty list when no legacy entries remain.
-/// - Reads each legacy secret value first; on read failure it aborts with an error.
-/// - Writes new entries per domain, then best-effort removes migrated legacy entries.
-/// - See `scrape/js_api.rs` `ENABLE_LEGACY_SECRET_FALLBACK` for runtime fallback policy.
-#[tauri::command]
-fn migrate_login_secrets(login_name: String) -> Result<Vec<String>, String> {
-    let login_name = require_login_name_input(login_name)?;
-    let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
-    let legacy = store.list_legacy_entries().map_err(|err| err.to_string())?;
-    if legacy.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Group by domain: collect all (domain, name, value) triples
-    let mut by_domain: std::collections::BTreeMap<String, Vec<(String, String)>> =
-        std::collections::BTreeMap::new();
-    for (domain, name) in &legacy {
-        let value = store
-            .get_legacy_value(domain, name)
-            .map_err(|err| format!("failed to read legacy secret '{domain}/{name}': {err}"))?;
-        by_domain
-            .entry(domain.clone())
-            .or_default()
-            .push((name.clone(), value));
-    }
-
-    let mut migrated = Vec::new();
-    for (domain, name_values) in &by_domain {
-        // Heuristic: name containing "username"/"user"/"login" → username role, else password
-        let username = name_values
-            .iter()
-            .find(|(n, _)| {
-                n.to_ascii_lowercase().contains("username")
-                    || n.to_ascii_lowercase().contains("_user")
-            })
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default();
-        let password = name_values
-            .iter()
-            .find(|(n, _)| {
-                n.to_ascii_lowercase().contains("password")
-                    || n.to_ascii_lowercase().contains("_pass")
-            })
-            .or_else(|| name_values.last())
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default();
-
-        store
-            .set_credentials(domain, &username, &password)
-            .map_err(|err| format!("failed to migrate domain '{domain}': {err}"))?;
-
-        // Clean up legacy entries for this domain
-        for (name, _) in name_values {
-            let _ = store.delete_legacy_entry(domain, name);
-        }
-        migrated.push(domain.clone());
-    }
-
-    // Clean up legacy index if all entries were migrated
-    if migrated.len() == by_domain.len() {
-        let _ = store.delete_legacy_index();
-    }
-
-    Ok(migrated)
 }
 
 #[tauri::command]

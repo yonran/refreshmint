@@ -1328,13 +1328,6 @@ export async function getLoginUsername(
     return invoke('get_login_username', { loginName, domain });
 }
 
-/** Migrate legacy keychain entries to the new per-domain scheme. */
-export async function migrateLoginSecrets(
-    loginName: string,
-): Promise<string[]> {
-    return invoke('migrate_login_secrets', { loginName });
-}
-
 export async function clearLoginProfile(
     ledger: string,
     loginName: string,

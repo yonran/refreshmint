@@ -464,6 +464,4 @@ Should go to Payment Center (https://accountmanager.providentcu.org/ProvidentOnl
 - Remove `ENABLE_LEGACY_SECRET_FALLBACK` and legacy keychain resolution in
   `src-tauri/src/scrape/js_api.rs`.
 - Remove no-longer-needed legacy keychain helper APIs after cutover.
-- Remove `migrate_login_secrets` once the migration window closes.
-- Remove legacy-credentials migration UI affordances.
 - Add release notes for the breaking change (legacy secret format unsupported).

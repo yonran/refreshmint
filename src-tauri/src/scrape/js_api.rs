@@ -461,9 +461,9 @@ pub type SecretDeclarations = BTreeMap<String, DomainCredentials>;
 pub type PromptOverrides = BTreeMap<String, String>;
 pub type ScriptOptions = serde_json::Map<String, serde_json::Value>;
 
-// Transitional policy: keep legacy secret fallback enabled until the
-// `migrate_login_secrets` flow is considered fully rolled out.
-// See `src-tauri/src/lib.rs` `migrate_login_secrets` command.
+// Transitional policy: keep legacy secret fallback enabled until every login
+// has been scraped once on the new format (the fallback migrates a domain's
+// legacy entries on first use; see `resolve_secret_if_applicable`).
 const ENABLE_LEGACY_SECRET_FALLBACK: bool = true;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
