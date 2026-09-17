@@ -193,13 +193,10 @@ async function saveDashboardAccountSnapshot(page) {
         refreshmint.log('Could not derive Citi dashboard account snapshot.');
         return null;
     }
-    const existingDocs = JSON.parse(
-        await refreshmint.listAccountDocuments({ label: snapshot.label }),
-    );
     const summaryFilename = 'account-summary.json';
-    const summaryExists = existingDocs.some((doc) =>
-        String(doc.filename || '').endsWith(`-${summaryFilename}`),
-    );
+    const summaryExists = await refreshmint.hasDocument(summaryFilename, {
+        label: snapshot.label,
+    });
     if (!summaryExists) {
         const payload =
             JSON.stringify(
@@ -392,12 +389,10 @@ async function saveRewardsSummary(page) {
 
     const rewardsYear = summary.rewardsYear || todayIsoDate().slice(0, 4);
     const filename = `rewards/${rewardsYear}-costco-rewards-summary.json`;
-    const existingDocs = new Set(
-        JSON.parse(
-            await refreshmint.listAccountDocuments({ label: summary.label }),
-        ).map((doc) => doc.filename),
-    );
-    if (!existingDocs.has(filename)) {
+    // hasDocument compares against the saveResource name; the stored name is
+    // date-prefixed, so comparing listAccountDocuments() filenames against
+    // `filename` never matched and this was re-saved on every run.
+    if (!(await refreshmint.hasDocument(filename, { label: summary.label }))) {
         const payload =
             JSON.stringify(
                 {
@@ -947,13 +942,6 @@ async function scrapeDashboardActivityCsvs(page) {
         return null;
     }
 
-    const existingDocs = new Set(
-        JSON.parse(
-            await refreshmint.listAccountDocuments({
-                label: accountInfo.label,
-            }),
-        ).map((doc) => doc.filename),
-    );
     let downloadedCount = 0;
 
     for (const optionText of targetPeriods) {
@@ -965,7 +953,12 @@ async function scrapeDashboardActivityCsvs(page) {
             continue;
         }
         const { filename, coverageEndDate } = fileInfo;
-        if (existingDocs.has(filename)) {
+        if (
+            await refreshmint.hasDocument(filename, {
+                label: accountInfo.label,
+                ...(coverageEndDate == null ? {} : { coverageEndDate }),
+            })
+        ) {
             refreshmint.log('Skipping existing Citi activity CSV: ' + filename);
             continue;
         }
@@ -1003,7 +996,6 @@ async function scrapeDashboardActivityCsvs(page) {
             period: optionText,
         });
         refreshmint.log('Saved Citi activity CSV: ' + filename);
-        existingDocs.add(filename);
         downloadedCount++;
         await humanPace(page, 800, 1400);
     }
@@ -1204,13 +1196,6 @@ async function handleAccountStatementsPage(context) {
         };
     }
 
-    const existingDocs = new Set(
-        JSON.parse(
-            await refreshmint.listAccountDocuments(
-                accountLabel == null ? undefined : { label: accountLabel },
-            ),
-        ).map((doc) => doc.filename),
-    );
     let downloadedCount = 0;
     let skippedExistingCount = 0;
 
@@ -1223,7 +1208,14 @@ async function handleAccountStatementsPage(context) {
         const { coverageEndDate, filename } = deriveStatementFile(
             target.rowText,
         );
-        if (filename && existingDocs.has(filename)) {
+        if (
+            filename != null &&
+            filename !== '' &&
+            (await refreshmint.hasDocument(filename, {
+                ...(accountLabel == null ? {} : { label: accountLabel }),
+                ...(coverageEndDate == null ? {} : { coverageEndDate }),
+            }))
+        ) {
             skippedExistingCount++;
             refreshmint.log('Skipping existing Citi statement: ' + filename);
             continue;
@@ -1280,7 +1272,6 @@ async function handleAccountStatementsPage(context) {
             options,
         );
         refreshmint.log('Saved Citi statement: ' + outputFilename);
-        existingDocs.add(outputFilename);
         downloadedCount++;
         await humanPace(page, 800, 1400);
     }

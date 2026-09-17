@@ -34,7 +34,6 @@ const DOWNLOAD_LIMIT =
  * @property {number} lastProgressStep
  * @property {boolean} statementsDone
  * @property {boolean} activityDone
- * @property {Set<string> | null} existingDocuments stored document names, see `knownDocuments`
  */
 
 /**
@@ -119,59 +118,6 @@ async function setSelectValue(page, selector, value) {
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
-}
-
-/**
- * @returns {Promise<Set<string>>}
- */
-async function existingDocumentFilenames() {
-    const docsJson = await refreshmint.listAccountDocuments();
-    /** @type {unknown} */
-    const parsed = JSON.parse(docsJson === '' ? '[]' : docsJson);
-    const docs = Array.isArray(parsed) ? /** @type {unknown[]} */ (parsed) : [];
-    /** @type {Set<string>} */
-    const filenames = new Set();
-    for (const item of docs) {
-        if (item == null || typeof item !== 'object') {
-            continue;
-        }
-        const doc = /** @type {{filename?: unknown}} */ (item);
-        if (typeof doc.filename === 'string') {
-            filenames.add(doc.filename);
-        }
-    }
-    return filenames;
-}
-
-/**
- * Stored document names for dedupe, loaded once per run and extended as
- * downloads are staged. `listAccountDocuments()` only reports finalized
- * documents, not resources staged earlier in this run, so re-reading it on
- * every step re-downloaded the same file each step (8 copies of one OFX on
- * 2026-09-17) until the progress guard tripped.
- *
- * @param {ScrapeContext} context
- * @returns {Promise<Set<string>>}
- */
-async function knownDocuments(context) {
-    if (context.existingDocuments == null) {
-        context.existingDocuments = await existingDocumentFilenames();
-    }
-    return context.existingDocuments;
-}
-
-/**
- * `saveDownloadedResource(path, original, {coverageEndDate})` finalizes as
- * `{coverageEndDate}-{original}` (see `date_prefixed_filename` in
- * `src-tauri/src/scrape.rs`), and `listAccountDocuments()` reports that
- * stored name. Dedupe must compare against the stored form, not `original`.
- *
- * @param {string} coverageEndDate
- * @param {string} original
- * @returns {string}
- */
-function storedDocumentName(coverageEndDate, original) {
-    return `${coverageEndDate}-${original}`;
 }
 
 /**
@@ -575,7 +521,6 @@ async function handleStatements(context) {
         );
     }
 
-    const existing = await knownDocuments(context);
     const yearIds = await discoverStatementYearIds(page);
     refreshmint.log(
         `target-circle-card statements: found year tabs ${JSON.stringify(yearIds)}`,
@@ -616,7 +561,11 @@ async function handleStatements(context) {
             // Matches the pre-existing on-disk naming
             // (`2026-03-03-statement-2026-03-03.pdf`).
             const original = `statement-${closeDate}.pdf`;
-            if (existing.has(storedDocumentName(closeDate, original))) {
+            if (
+                await refreshmint.hasDocument(original, {
+                    coverageEndDate: closeDate,
+                })
+            ) {
                 continue;
             }
 
@@ -633,7 +582,6 @@ async function handleStatements(context) {
                 coverageEndDate: closeDate,
                 mimeType: 'application/pdf',
             });
-            existing.add(storedDocumentName(closeDate, original));
             downloaded++;
             progressed = true;
             await humanPace(page, 500, 900);
@@ -704,10 +652,9 @@ function activityExportOriginalName(period, ext) {
  *
  * @param {PageApi} page
  * @param {StatementPeriod} period
- * @param {Set<string>} existing
  * @returns {Promise<boolean>} whether any file was downloaded
  */
-async function downloadActivityExports(page, period, existing) {
+async function downloadActivityExports(page, period) {
     const formats = [
         { value: 'CSV', ext: 'csv' },
         { value: 'OFX', ext: 'ofx' },
@@ -716,8 +663,11 @@ async function downloadActivityExports(page, period, existing) {
 
     for (const format of formats) {
         const original = activityExportOriginalName(period, format.ext);
-        const stored = storedDocumentName(period.value, original);
-        if (existing.has(stored)) {
+        if (
+            await refreshmint.hasDocument(original, {
+                coverageEndDate: period.value,
+            })
+        ) {
             continue;
         }
 
@@ -779,7 +729,6 @@ async function downloadActivityExports(page, period, existing) {
             // Extra scalar options land in the sidecar's `metadata` map.
             period: period.label,
         });
-        existing.add(stored);
         downloaded = true;
         // The modal closes itself after each successful download; if it
         // lingers, dismiss it so the next trigger click isn't intercepted.
@@ -829,7 +778,6 @@ async function handleTransactionHistory(context) {
         );
     }
 
-    const existing = await knownDocuments(context);
     const periods = await discoverStatementPeriods(page);
     refreshmint.log(
         `target-circle-card activity: found periods ${JSON.stringify(periods.map((p) => p.value))}`,
@@ -840,14 +788,17 @@ async function handleTransactionHistory(context) {
         if (DOWNLOAD_LIMIT > 0 && downloaded >= DOWNLOAD_LIMIT) {
             break;
         }
-        const haveAll = ['csv', 'ofx'].every((ext) =>
-            existing.has(
-                storedDocumentName(
-                    period.value,
+        let haveAll = true;
+        for (const ext of ['csv', 'ofx']) {
+            if (
+                !(await refreshmint.hasDocument(
                     activityExportOriginalName(period, ext),
-                ),
-            ),
-        );
+                    { coverageEndDate: period.value },
+                ))
+            ) {
+                haveAll = false;
+            }
+        }
         if (haveAll) {
             continue;
         }
@@ -859,7 +810,7 @@ async function handleTransactionHistory(context) {
         await waitMs(page, 1200);
         await page.waitForLoadState('networkidle', undefined);
 
-        const gotAny = await downloadActivityExports(page, period, existing);
+        const gotAny = await downloadActivityExports(page, period);
         if (gotAny) {
             downloaded++;
             return {
@@ -897,7 +848,6 @@ async function main() {
         lastProgressStep: 0,
         statementsDone: false,
         activityDone: false,
-        existingDocuments: null,
     };
 
     while (true) {
