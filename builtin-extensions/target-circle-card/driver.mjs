@@ -271,6 +271,7 @@ async function handleMfa(context) {
         }
         await page.locator('label[for="' + chosenId + '"]').click();
         await humanPace(page, 300, 600);
+        await ensureRememberDevice(page);
         await page.getByRole('button', { name: 'Continue' }).first().click();
         // The code-entry screen can take several seconds to replace the
         // method list. With a fixed 1.5s wait the next iteration saw the
@@ -298,6 +299,7 @@ async function handleMfa(context) {
         );
         await page.locator(codeInputSelector).first().fill(code);
         await humanPace(page, 300, 600);
+        await ensureRememberDevice(page);
         await page.getByRole('button', { name: 'Submit' }).first().click();
         await waitMs(page, 2000);
         return { progressName: 'submitted mfa code' };
@@ -305,6 +307,48 @@ async function handleMfa(context) {
 
     refreshmint.log('target-circle-card mfa branch: transient/loading state');
     return { progressName: 'waiting for mfa screen' };
+}
+
+/**
+ * Tick the "Do you want to remember this device?" checkbox (`#rememberMe`)
+ * when it is present and unchecked. Without it Target asks for a one-time
+ * passcode on every login, so unattended auto-scrapes always stalled on the
+ * MFA prompt (every run 2026-06-26 .. 2026-09-16). Like the method radios,
+ * the input itself is offscreen and its `<label for>` is the clickable
+ * control; the checkbox appears on both the method-selection and the
+ * code-entry screens, so call this before each Continue/Submit.
+ *
+ * @param {PageApi} page
+ */
+async function ensureRememberDevice(page) {
+    const state = /** @type {string} */ (
+        await page.evaluate(
+            `(function() {
+                const box = document.getElementById('rememberMe');
+                if (!box) return 'absent';
+                return box.checked ? 'checked' : 'unchecked';
+            })()`,
+        )
+    );
+    if (state !== 'unchecked') {
+        refreshmint.log(
+            'target-circle-card remember-device checkbox: ' + state,
+        );
+        return;
+    }
+    await page.locator('label[for="rememberMe"]').click();
+    const after = /** @type {string} */ (
+        await page.evaluate(
+            `(function() {
+                const box = document.getElementById('rememberMe');
+                return box && box.checked ? 'checked' : 'unchecked';
+            })()`,
+        )
+    );
+    refreshmint.log(
+        'target-circle-card remember-device checkbox: clicked label, now ' +
+            after,
+    );
 }
 
 /**
