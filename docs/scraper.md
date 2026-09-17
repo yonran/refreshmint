@@ -143,6 +143,11 @@ syntax that can be stripped without code generation.
 - **Prioritize Trusted Interactions:** You SHOULD generally use native Playwright-style APIs (`Locator.click()`, `Locator.fill()`, `ElementHandle.click()`) for interacting with elements, as these perform OS-level trusted actions. Do not default to synthetic JavaScript events (e.g., `el.click()` inside `page.evaluate()`), as security-conscious sites routinely ignore them.
 - **Provide all arguments to JS APIs:** The QuickJS runtime requires every non-optional argument to be explicitly passed. If a method like `waitForLoadState(state, timeoutMs)` is called, even if you want the default timeout, pass `undefined`: `await page.waitForLoadState('networkidle', undefined)`.
 - **Use standard CSS selectors:** Underlying engine does not support Playwright-specific selectors like `:has-text()`. Use standard CSS or `page.evaluate()` to find elements by text.
+- **Ids that start with a digit are not valid `#id` selectors:** `#2026` never matches; use `[id="2026"]`. Likewise `label[for=...]` only works when the label points at the input -- many sites wrap the input in the label instead, so check the real markup (`label:has(> #rememberMe)`).
+- **`getByRole('button')` does not match `<a href="#">` or `<div role="button">` unless the role is set:** dump `document.querySelectorAll('button, a, [role=button]')` from the live page before choosing a role locator. Target's modal submit is a plain `<a class="downbtn">`; its year tabs are `<div role="button">`.
+- **Wait for async content before discovering it:** SPAs render the shell first and fill tables/selects seconds later (sometimes in two stages -- Target's period select gets the placeholder + current period first, closed periods after). Poll for the specific element you are about to read (`waitForPageCondition`-style, with a timeout and a log on failure) instead of reading immediately after `goto`/click.
+- **`fill()` does not always drive framework-controlled inputs:** React-style inputs keep the DOM value but their submit button stays disabled. If the button doesn't enable after `fill()`, use `page.type()` (real key events). This bit both the login fields and the MFA code field on target-circle-card, months apart.
+- **Sessions expire mid-run:** Target logs out ~20 min after login and pages silently degrade to "No data available" / bounce to sign-in. If a handler that was working starts timing out late in a run, check `page.url()` before hunting for selector bugs.
 - **Handle "Busy" states:** Banking sites often use global loading overlays (e.g. `div#busy-div`). Implement a `waitForBusy` helper to ensure the page is interactive before clicking.
 - **Prefer `evaluate` for tricky clicks:** If `page.click()` fails due to visibility or pointer-event interception, use `page.evaluate('document.querySelector(selector).click()')`.
 - **Robust account discovery:** Search for account patterns (e.g., `x\d{4}`) across all relevant tags (`button`, `a`, `span`) to build a pending account list.
@@ -163,10 +168,13 @@ syntax that can be stripped without code generation.
 
 Avoid downloading everything every time by tracking progress and checking existing files.
 
-- **Deduplicate downloads:** Use `await refreshmint.listAccountDocuments()` to get a list of already saved files. Compare filenames before initiating a download.
+- **Deduplicate downloads against the _stored_ name, not the name you passed to `saveResource`:** `listAccountDocuments()` reports finalized names, and the runtime finalizes `saveResource(name, ..., {coverageEndDate})` as `{coverageEndDate}-{name}` (scrape date when no coverage date is given; see `date_prefixed_filename` in `src-tauri/src/scrape.rs`). `existing.has('statements/statement-2026-03-03.pdf')` never matches `2026-03-03-statements/statement-2026-03-03.pdf`, so the check silently passes and every run re-downloads (target-circle-card and citi both did this for months, unnoticed because the run still "succeeded"). Build the expected stored name (`${coverageEndDate}-${name}`, as `hasSavedDocument` in providentcu and `storedDocumentName` in target-circle-card do) or match on a suffix.
+- **`listAccountDocuments()` does not include resources staged earlier in the same run.** Load the set once, keep it in the scrape context, and add each name you stage. Re-reading it every step re-downloads the same file until the no-progress guard trips (8 copies of one OFX, target-circle-card 2026-09-17).
+- **A run that downloads nothing is a failure to investigate, not a success.** Log the discovered counts (`N year tabs`, `N rows`, `N periods`) and treat "found []" on a page that visibly has data as a selector bug. Never leave a `continue` that can skip every row (e.g. `if (row.linkId == null) continue;` when the links have no id) without a log line saying why.
 - **Deduplicate per account label when applicable:** If a login can expose multiple accounts, query and compare existing documents within the account label you are currently scraping.
 - **Filter by date:** Implement a "since" date check (e.g., `skip before 2026-01-01`).
-- **Debugging limits:** Use a `DOWNLOAD_LIMIT` variable during development to only fetch 1-2 items per run.
+- **Debugging limits:** Use a `DOWNLOAD_LIMIT` variable during development to only fetch 1-2 items per run; reading it from `refreshmint.getOptions()['downloadLimit']` lets `debug exec --option downloadLimit=1` set it without editing the file.
+- **Run the whole driver end-to-end in a live session before committing a fix.** Six consecutive target-circle-card commits each fixed one MFA symptom in isolation; none noticed that the handlers after login downloaded nothing. `debug exec --extension-dir <ext>` against a retained failed-scrape session (see "Attaching to a failed app scrape") is the cheapest way to see the next failure.
 - **Track progress across subflows, not just pages:** A scraper may need to complete rewards, activity, and statements in separate branches before it is actually "done."
 
 ## Date semantics
@@ -320,6 +328,18 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 `debug start` remains focused on hosting the browser/session and startup diagnostics.
 If the `debug exec` client disconnects before completion, the server cancels the in-flight script.
 This is useful when a run is hung or stuck in a loop: you can disconnect to stop it early, edit the script, and immediately try again.
+
+### Attaching to a failed app scrape
+
+A failed _manual_ scrape from the app keeps its worker and browser alive for
+30 minutes as a retained debug session (it is not hung -- the app already
+reported the error). Its socket path is in
+`~/Library/Caches/refreshmint/debug-sessions/*.json`. Attach with
+`debug exec --socket <that socketPath> --extension-dir builtin-extensions/<ext>`
+to re-run the real driver from the page it died on, or `--script probe.mjs`
+to dump the live DOM (`document.querySelectorAll('button, a, [role=button]')`,
+the wrapping `<label>`, the select's options, ...). Prompts in a retained
+session must be answered with `--prompt "<message>=<answer>"`.
 
 ### Live iteration loop
 
