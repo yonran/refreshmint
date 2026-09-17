@@ -437,6 +437,28 @@ async function availableMfaMethods() {
     return Array.isArray(parsed) ? parsed.map((m) => String(m)) : [];
 }
 
+/**
+ * Select a delivery-method radio by id. The input itself has no rendered box
+ * (see handleMfaChoice), so a locator click on it would wait for visibility
+ * and time out; click its <label> when there is one.
+ * @param {string} id
+ */
+async function clickMfaRadio(id) {
+    var clicked = assertBoolean(
+        await page.evaluate(`(function() {
+            var label = document.querySelector('label[for="${id}"]');
+            if (label) { label.click(); }
+            var input = document.getElementById(${JSON.stringify(id)});
+            if (!input) return false;
+            if (!input.checked) input.click();
+            return input.checked;
+        })()`),
+    );
+    if (!clicked) {
+        throw new Error('Unable to select MFA radio #' + id);
+    }
+}
+
 async function selectMfaMethod(methodInput) {
     var methods = await availableMfaMethods();
     if (!methods.length) {
@@ -463,12 +485,12 @@ async function selectMfaMethod(methodInput) {
     }
 
     if (method === 'text') {
-        await page.click('#rbText');
+        await clickMfaRadio('rbText');
         refreshmint.log('Selected MFA method: text');
         return;
     }
     if (method === 'voice') {
-        await page.click('#rbVoice');
+        await clickMfaRadio('rbVoice');
         refreshmint.log('Selected MFA method: voice');
         return;
     }
@@ -720,8 +742,29 @@ async function handleMfaChoice() {
         throw new Error('Expected MFA choice page URL, got: ' + url);
     }
     refreshmint.log(await page.snapshot({}));
-    var hasMethodSelect = await page.isVisible('#rbText');
-    refreshmint.log('Has method selector: ' + hasMethodSelect);
+    // The delivery-method radios (#rbText/#rbVoice/#rbEmail) are styled
+    // inputs with no box of their own (their <label> draws the control), so
+    // page.isVisible('#rbText') is false even while the "How would you like to
+    // receive it?" page is showing. Observed 2026-09-16 on bankofamerica-noel:
+    // the driver fell through to the code prompt on the method page. Decide by
+    // presence instead, and click the label rather than the input.
+    var hasMethodSelect = assertBoolean(
+        await page.evaluate(
+            '!!document.querySelector("#rbText, #rbVoice, #rbEmail")',
+        ),
+    );
+    var hasCodeInput = assertBoolean(
+        await page.evaluate('!!document.querySelector("#tlpvt-acw-authnum")'),
+    );
+    refreshmint.log(
+        `Has method selector: ${String(hasMethodSelect)}, has code input: ${String(hasCodeInput)}`,
+    );
+    if (!hasMethodSelect && !hasCodeInput) {
+        throw new Error(
+            'MFA page shows neither the delivery-method radios nor the code input; URL: ' +
+                url,
+        );
+    }
 
     if (hasMethodSelect) {
         // Step 1: choose a method and request code. Offer the delivery methods
