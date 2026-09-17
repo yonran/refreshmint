@@ -130,21 +130,35 @@ async function checkForBotBlock(page) {
     // `form#ads-dd-captcha` (observed in the 2026-09-15 auto-scrape failure
     // artifacts). The iframe carries no captcha/challenge in its src, so the
     // selector scan below does not see it, and the old loop just re-logged
-    // the same snapshot for 20 steps. Give it a short window to self-resolve,
-    // then fail with the real cause. UNTESTED: only seen in retained
-    // artifacts, not reproduced in a debug session yet.
+    // the same snapshot for 20 steps. Give it a short window to self-resolve
+    // (DataDome sometimes clears itself from a passing device fingerprint);
+    // if it is still up, hand the live page to the user via
+    // `solveHumanChallenge` the same way the CAPTCHA branch below does,
+    // instead of failing and telling them to start a manual run by hand --
+    // on a manual (app-started) scrape this *is* the manual run, and the
+    // popup lets them clear the check without leaving the app.
     const deviceCheckSelector = 'iframe[title="DataDome Device Check"]';
     for (let attempt = 1; attempt <= 5; attempt++) {
         if (!(await page.locator(deviceCheckSelector).isVisible())) break;
-        if (attempt === 5) {
-            throw new Error(
-                'PayPal DataDome device check is blocking the sign-in page (iframe "DataDome Device Check" never went away); run a manual scrape from the app to clear it',
-            );
-        }
         refreshmint.log(
             `State: DataDome device check on sign-in page; waiting (attempt ${attempt}/5)`,
         );
         await waitMs(page, 3000);
+    }
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        if (!(await page.locator(deviceCheckSelector).isVisible())) return;
+        refreshmint.log(
+            `PayPal DataDome device check needs the user; opening popup (attempt ${attempt}/3)`,
+        );
+        await page.solveHumanChallenge(
+            'PayPal is verifying this device. Complete any check shown in the live browser below (it may clear on its own after a few seconds), then choose Continue.',
+        );
+        await waitMs(page, 1000);
+    }
+    if (await page.locator(deviceCheckSelector).isVisible()) {
+        throw new Error(
+            'PayPal DataDome device check is still blocking the sign-in page after 3 user attempts (iframe "DataDome Device Check" never went away)',
+        );
     }
 
     for (let attempt = 1; attempt <= 3; attempt++) {
