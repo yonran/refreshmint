@@ -2114,10 +2114,22 @@ async function handleStatements(context) {
 
     await waitForBusy(page);
     await page.waitForSelector('h2', undefined);
+    // The statement table is filled in after the heading renders; sampling
+    // it right away found 0 sections on 2 of 3 runs on 2026-09-16 (both
+    // headed and headless) and silently skipped statements. Wait for the
+    // per-account links, tolerating a genuine empty table.
+    const statementLinkSelector = 'table a[aria-haspopup="true"][aria-owns]';
+    try {
+        await page.waitForSelector(statementLinkSelector, 20000);
+    } catch (error) {
+        refreshmint.log(
+            `No statement links appeared within 20s: ${inspect(error)}`,
+        );
+    }
 
     const linksJson = /** @type {string} */ (
         await page.evaluate(`(function() {
-            const links = Array.from(document.querySelectorAll('table a[aria-haspopup="true"][aria-owns]'));
+            const links = Array.from(document.querySelectorAll(${JSON.stringify(statementLinkSelector)}));
             return JSON.stringify(links.map(link => ({
                 dialogId: link.getAttribute('aria-owns'),
                 name: link.closest('tr').cells[0].textContent.trim(),
@@ -2126,8 +2138,31 @@ async function handleStatements(context) {
         })()`)
     );
 
-    const sections = JSON.parse(linksJson);
+    /** @typedef {{dialogId: string, name: string, accountNumber: string}} StatementSection */
+    const parsedSections = /** @type {unknown} */ (JSON.parse(linksJson));
+    if (!Array.isArray(parsedSections)) {
+        throw new Error('statement sections did not parse to an array');
+    }
+    const sections = parsedSections.map(
+        (/** @type {unknown} */ section) =>
+            /** @type {StatementSection} */ (section),
+    );
     refreshmint.log(`Found ${sections.length} statement sections`);
+    if (sections.length === 0) {
+        // Surface the bank's own notice so an empty result is attributable.
+        // 2026-09-16: "e-Document enrollment and deactivation are
+        // temporarily unavailable. Please try again later." with no table.
+        const notice = /** @type {string} */ (
+            await page.evaluate(
+                `(document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').match(/.{0,80}(unavailable|try again later).{0,60}/i)?.[0] ?? ''`,
+            )
+        );
+        if (notice !== '') {
+            refreshmint.log(
+                `Statements page shows a bank notice instead of the table: ${notice}`,
+            );
+        }
+    }
 
     let totalDownloaded = 0;
 
