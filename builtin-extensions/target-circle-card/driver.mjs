@@ -15,11 +15,15 @@ const AUTH_URL_PREFIX = `${ORIGIN}/ecs/auth/`;
 const MFA_URL_PREFIX = `${ORIGIN}/ecs/auth/multi-factor-auth`;
 const HOME_URL = `${ORIGIN}/home`;
 const STATEMENTS_URL = `${ORIGIN}/statements`;
+const STATEMENT_DOWNLOAD_LINK_SELECTOR = 'a.statement-download-link';
+const ACTIVITY_MODAL_SELECTOR = '.r_modal_container.download_popup';
 const TRANSACTION_HISTORY_URL = `${ORIGIN}/account/transaction-history`;
 
 // Set > 0 during development to only fetch N items per run.
 /** @type {number} */
-const DOWNLOAD_LIMIT = 0;
+// `--option downloadLimit=N` (debug exec) caps downloads per subflow; 0 = no limit.
+const DOWNLOAD_LIMIT =
+    Number(refreshmint.getOptions()['downloadLimit'] ?? 0) || 0;
 
 /**
  * @typedef {object} ScrapeContext
@@ -30,6 +34,7 @@ const DOWNLOAD_LIMIT = 0;
  * @property {number} lastProgressStep
  * @property {boolean} statementsDone
  * @property {boolean} activityDone
+ * @property {Set<string> | null} existingDocuments stored document names, see `knownDocuments`
  */
 
 /**
@@ -41,9 +46,15 @@ const DOWNLOAD_LIMIT = 0;
  */
 
 /**
+ * @typedef {object} StatementPeriod
+ * @property {string} value ISO date; today's date for the open statement
+ * @property {string} label `Current Statement` or `MM-DD-YYYY`
+ */
+
+/**
  * @typedef {object} StatementRow
  * @property {string} closeDateText
- * @property {string | null} linkId
+ * @property {number} linkIndex
  */
 
 /**
@@ -130,6 +141,59 @@ async function existingDocumentFilenames() {
         }
     }
     return filenames;
+}
+
+/**
+ * Stored document names for dedupe, loaded once per run and extended as
+ * downloads are staged. `listAccountDocuments()` only reports finalized
+ * documents, not resources staged earlier in this run, so re-reading it on
+ * every step re-downloaded the same file each step (8 copies of one OFX on
+ * 2026-09-17) until the progress guard tripped.
+ *
+ * @param {ScrapeContext} context
+ * @returns {Promise<Set<string>>}
+ */
+async function knownDocuments(context) {
+    if (context.existingDocuments == null) {
+        context.existingDocuments = await existingDocumentFilenames();
+    }
+    return context.existingDocuments;
+}
+
+/**
+ * `saveDownloadedResource(path, original, {coverageEndDate})` finalizes as
+ * `{coverageEndDate}-{original}` (see `date_prefixed_filename` in
+ * `src-tauri/src/scrape.rs`), and `listAccountDocuments()` reports that
+ * stored name. Dedupe must compare against the stored form, not `original`.
+ *
+ * @param {string} coverageEndDate
+ * @param {string} original
+ * @returns {string}
+ */
+function storedDocumentName(coverageEndDate, original) {
+    return `${coverageEndDate}-${original}`;
+}
+
+/**
+ * Poll until `script` (evaluated in the page) returns true, or `timeoutMs`
+ * elapses. Returns whether the condition was met.
+ *
+ * @param {PageApi} page
+ * @param {string} script
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>}
+ */
+async function waitForPageCondition(page, script, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        if ((await page.evaluate(script)) === true) {
+            return true;
+        }
+        if (Date.now() >= deadline) {
+            return false;
+        }
+        await waitMs(page, 500);
+    }
 }
 
 /**
@@ -418,7 +482,7 @@ async function discoverStatementYearIds(page) {
         `(function() {
             const ids = [];
             const candidates = Array.from(
-                document.querySelectorAll('[role="tab"], button, a'),
+                document.querySelectorAll('[role="tab"], [role="button"], button, a'),
             );
             for (const el of candidates) {
                 if (/^(19|20)\\d{2}$/.test(el.id || '')) {
@@ -436,38 +500,32 @@ async function discoverStatementYearIds(page) {
  * @returns {Promise<StatementRow[]>}
  */
 async function discoverStatementRows(page) {
+    // Each row is `<tr><td>09-02-2026</td>...<td><a class="statement-download-link"
+    // href="#">Download pdf</a></td>...</tr>` (verified 2026-09-17). The
+    // links carry no id, so a row is addressed by its index among
+    // `STATEMENT_DOWNLOAD_LINK_SELECTOR` matches in document order, which is
+    // what `handleStatements` clicks via `locator(...).nth(index)`.
     const rows = /** @type {StatementRow[]} */ (
         await evaluateJsonArray(
             page,
             `(function() {
                 const dateRe = /^\\d{2}-\\d{2}-\\d{4}$/;
-                const seen = new Set();
+                const links = Array.from(
+                    document.querySelectorAll(${JSON.stringify(STATEMENT_DOWNLOAD_LINK_SELECTOR)}),
+                );
                 const rows = [];
-                for (const el of Array.from(document.querySelectorAll('body *'))) {
-                    const text = (el.textContent || '').trim();
-                    if (!dateRe.test(text) || el.children.length > 0) {
-                        continue;
-                    }
-                    const container =
-                        el.closest('tr') || el.closest('li') || el.parentElement;
-                    if (!container) {
-                        continue;
-                    }
-                    const link = Array.from(
-                        container.querySelectorAll('a, button'),
-                    ).find(function (a) {
-                        return /download pdf/i.test((a.textContent || '').trim());
+                links.forEach(function (link, index) {
+                    const tr = link.closest('tr');
+                    if (!tr) return;
+                    const dateCell = Array.from(tr.querySelectorAll('td')).find(function (td) {
+                        return dateRe.test((td.textContent || '').trim());
                     });
-                    if (!link) {
-                        continue;
-                    }
-                    const key = text + '|' + (link.id || link.getAttribute('href') || '');
-                    if (seen.has(key)) {
-                        continue;
-                    }
-                    seen.add(key);
-                    rows.push({ closeDateText: text, linkId: link.id || null });
-                }
+                    if (!dateCell) return;
+                    rows.push({
+                        closeDateText: (dateCell.textContent || '').trim(),
+                        linkIndex: index,
+                    });
+                });
                 return JSON.stringify(rows);
             })()`,
         )
@@ -490,7 +548,9 @@ function statementCloseDateToIso(text) {
 /**
  * Expected page conditions:
  * - URL is `/statements`.
- * - Year tabs are exposed as DOM ids like `2026`, `2025`, `2024`.
+ * - Year tabs are `<div id="2026" role="button" class="years">` (verified
+ *   2026-09-17; they are not `<button>`/`<a>`), rendered a few seconds after
+ *   navigation along with the statements table.
  * - Each statement row shows a close-date and a `Download pdf` control.
  *
  * @param {ScrapeContext} context
@@ -501,7 +561,21 @@ async function handleStatements(context) {
     refreshmint.log('State: Statements');
     await logStateSnapshot(page, 'target-circle-card statements snapshot');
 
-    const existing = await existingDocumentFilenames();
+    // The year tabs and table render asynchronously after navigation; without
+    // this wait discovery ran against an empty shell and reported no tabs
+    // and no rows (every run through 2026-09-17).
+    const tableReady = await waitForPageCondition(
+        page,
+        `document.querySelectorAll(${JSON.stringify(STATEMENT_DOWNLOAD_LINK_SELECTOR)}).length > 0`,
+        15000,
+    );
+    if (!tableReady) {
+        refreshmint.log(
+            'target-circle-card statements: table did not render within 15s',
+        );
+    }
+
+    const existing = await knownDocuments(context);
     const yearIds = await discoverStatementYearIds(page);
     refreshmint.log(
         `target-circle-card statements: found year tabs ${JSON.stringify(yearIds)}`,
@@ -520,33 +594,46 @@ async function handleStatements(context) {
             refreshmint.log(
                 `target-circle-card statements: opening year tab ${yearId}`,
             );
-            await page.locator(`#${yearId}`).click();
+            // `#2026` is not a valid CSS selector (ids can't start with a
+            // digit unescaped), so the old `#${yearId}` locator never matched.
+            await page.locator(`[id="${yearId}"]`).click();
             await waitMs(page, 1200);
             await page.waitForLoadState('networkidle', undefined);
         }
 
         const rows = await discoverStatementRows(page);
+        refreshmint.log(
+            `target-circle-card statements: ${rows.length} row(s) in ${yearId ?? 'default'} tab`,
+        );
         for (const row of rows) {
             if (DOWNLOAD_LIMIT > 0 && downloaded >= DOWNLOAD_LIMIT) {
                 break;
             }
             const closeDate = statementCloseDateToIso(row.closeDateText);
-            const filename = `statements/statement-${closeDate ?? row.closeDateText}.pdf`;
-            if (existing.has(filename) || row.linkId == null) {
+            if (closeDate == null) {
+                continue;
+            }
+            // Matches the pre-existing on-disk naming
+            // (`2026-03-03-statement-2026-03-03.pdf`).
+            const original = `statement-${closeDate}.pdf`;
+            if (existing.has(storedDocumentName(closeDate, original))) {
                 continue;
             }
 
             refreshmint.log(
-                `target-circle-card statements: downloading ${filename}`,
+                `target-circle-card statements: downloading ${original}`,
             );
             const downloadPromise = page.waitForDownload(30000);
-            await page.locator(`#${row.linkId}`).click();
+            await page
+                .locator(STATEMENT_DOWNLOAD_LINK_SELECTOR)
+                .nth(row.linkIndex)
+                .click();
             const download = await downloadPromise;
-            await refreshmint.saveDownloadedResource(download.path, filename, {
-                coverageEndDate: closeDate ?? undefined,
+            await refreshmint.saveDownloadedResource(download.path, original, {
+                coverageEndDate: closeDate,
                 mimeType: 'application/pdf',
             });
-            existing.add(filename);
+            existing.add(storedDocumentName(closeDate, original));
             downloaded++;
             progressed = true;
             await humanPace(page, 500, 900);
@@ -567,22 +654,47 @@ async function handleStatements(context) {
 
 /**
  * @param {PageApi} page
- * @returns {Promise<string[]>}
+ * @returns {Promise<StatementPeriod[]>}
  */
-async function discoverStatementPeriodValues(page) {
-    const values = await evaluateJsonArray(
-        page,
-        `(function() {
-            const select = document.querySelector('select#security_q');
-            if (!select) return JSON.stringify([]);
-            return JSON.stringify(
-                Array.from(select.options).map(function (o) {
-                    return o.value;
-                }),
-            );
-        })()`,
+async function discoverStatementPeriods(page) {
+    // `select#security_q` (name=statementDates) options are
+    // `<option value="">Select Statement</option>`,
+    // `<option value="2026-09-17">Current Statement</option>` (value is
+    // today's date and changes daily), then one ISO-valued option per closed
+    // statement labelled `MM-DD-YYYY` (verified 2026-09-17).
+    const periods = /** @type {StatementPeriod[]} */ (
+        await evaluateJsonArray(
+            page,
+            `(function() {
+                const select = document.querySelector('select#security_q');
+                if (!select) return JSON.stringify([]);
+                return JSON.stringify(
+                    Array.from(select.options)
+                        .filter(function (o) { return o.value !== ''; })
+                        .map(function (o) {
+                            return { value: o.value, label: (o.textContent || '').trim() };
+                        }),
+                );
+            })()`,
+        )
     );
-    return values.filter((value) => typeof value === 'string');
+    return periods;
+}
+
+/**
+ * Original (pre-date-prefix) filename for one activity export, matching the
+ * pre-existing on-disk naming (`2026-03-03-transactions-2026-03-03.csv`,
+ * `2026-03-26-transactions-current-statement.csv`).
+ *
+ * @param {StatementPeriod} period
+ * @param {string} ext
+ * @returns {string}
+ */
+function activityExportOriginalName(period, ext) {
+    const slug = /current statement/i.test(period.label)
+        ? 'current-statement'
+        : period.value;
+    return `transactions-${slug}.${ext}`;
 }
 
 /**
@@ -591,7 +703,7 @@ async function discoverStatementPeriodValues(page) {
  * skipped as redundant with OFX (see README.md "Activity Export Comparison").
  *
  * @param {PageApi} page
- * @param {string} period
+ * @param {StatementPeriod} period
  * @param {Set<string>} existing
  * @returns {Promise<boolean>} whether any file was downloaded
  */
@@ -603,32 +715,82 @@ async function downloadActivityExports(page, period, existing) {
     let downloaded = false;
 
     for (const format of formats) {
-        const filename = `activity/${period}.${format.ext}`;
-        if (existing.has(filename)) {
+        const original = activityExportOriginalName(period, format.ext);
+        const stored = storedDocumentName(period.value, original);
+        if (existing.has(stored)) {
             continue;
         }
 
         refreshmint.log(
-            `target-circle-card activity: opening download modal for ${period} (${format.value})`,
+            `target-circle-card activity: opening download modal for ${period.label} (${format.value})`,
         );
-        await page
-            .getByRole('button', { name: 'Download transactions' })
-            .first()
-            .click();
-        await waitMs(page, 800);
+        // Modal markup (verified 2026-09-17): the trigger is
+        // `<a role="button" class="download_btn popup_click">Download
+        // transactions</a>`; it shows `.r_modal_container.download_popup`
+        // (display:block) with a `.modal_bg` overlay, `select#user`, and a
+        // plain `<a download="Transactions.CSV" href="blob:..."
+        // class="downbtn">Download</a>` whose `download` attribute follows the
+        // selected format. Clicking the trigger while the modal is already up
+        // fails with "div intercepts pointer events", so only click it when
+        // the modal is hidden.
+        const modalOpenScript = `(function() {
+            const modal = document.querySelector(${JSON.stringify(ACTIVITY_MODAL_SELECTOR)});
+            return !!modal && getComputedStyle(modal).display !== 'none';
+        })()`;
+        if ((await page.evaluate(modalOpenScript)) !== true) {
+            await page.locator('a.download_btn.popup_click').first().click();
+            if (!(await waitForPageCondition(page, modalOpenScript, 10000))) {
+                throw new Error(
+                    'Target Circle Card download-transactions modal did not open',
+                );
+            }
+        }
         await setSelectValue(page, 'select#user', format.value);
+        // For CSV the link is `<a download="Transactions.CSV" href="blob:...">`
+        // and the attribute lags the select change; for OFX (and QBO/QFX)
+        // it is `<a href="#" role="button">` with no download attribute and
+        // the file is produced on click. Wait for whichever shape applies.
+        const linkReady = await waitForPageCondition(
+            page,
+            `(function() {
+                const link = document.querySelector(${JSON.stringify(ACTIVITY_MODAL_SELECTOR + ' a.downbtn')});
+                if (!link) return false;
+                const name = link.getAttribute('download');
+                return name == null || /\\.${format.ext}$/i.test(name);
+            })()`,
+            10000,
+        );
+        if (!linkReady) {
+            throw new Error(
+                `Target Circle Card download link did not switch to ${format.value}`,
+            );
+        }
         await humanPace(page, 300, 600);
 
         const downloadPromise = page.waitForDownload(30000);
-        await page.getByRole('button', { name: 'Download' }).first().click();
+        await page
+            .locator(ACTIVITY_MODAL_SELECTOR + ' a.downbtn')
+            .first()
+            .click();
         const download = await downloadPromise;
-        await refreshmint.saveDownloadedResource(download.path, filename, {
+        await refreshmint.saveDownloadedResource(download.path, original, {
+            coverageEndDate: period.value,
             mimeType: format.ext === 'csv' ? 'text/csv' : 'application/x-ofx',
+            // Extra scalar options land in the sidecar's `metadata` map.
+            period: period.label,
         });
-        existing.add(filename);
+        existing.add(stored);
         downloaded = true;
-        // The modal closes itself after each successful download.
+        // The modal closes itself after each successful download; if it
+        // lingers, dismiss it so the next trigger click isn't intercepted.
         await humanPace(page, 500, 900);
+        if ((await page.evaluate(modalOpenScript)) === true) {
+            await page
+                .locator(ACTIVITY_MODAL_SELECTOR + ' a.modal-close')
+                .first()
+                .click();
+            await waitMs(page, 500);
+        }
     }
 
     return downloaded;
@@ -651,10 +813,26 @@ async function handleTransactionHistory(context) {
         'target-circle-card transaction history snapshot',
     );
 
-    const existing = await existingDocumentFilenames();
-    const periods = await discoverStatementPeriodValues(page);
+    // Like the statements table, the period select is populated a few
+    // seconds after navigation; discovery without this wait found nothing.
+    // The placeholder and "Current Statement" options appear first and the
+    // closed periods are appended a moment later, so wait for at least one
+    // closed period (3+ options) rather than for the select to merely exist.
+    const selectReady = await waitForPageCondition(
+        page,
+        `(document.querySelector('select#security_q') || { options: [] }).options.length > 2`,
+        15000,
+    );
+    if (!selectReady) {
+        refreshmint.log(
+            'target-circle-card activity: period select did not populate within 15s',
+        );
+    }
+
+    const existing = await knownDocuments(context);
+    const periods = await discoverStatementPeriods(page);
     refreshmint.log(
-        `target-circle-card activity: found periods ${JSON.stringify(periods)}`,
+        `target-circle-card activity: found periods ${JSON.stringify(periods.map((p) => p.value))}`,
     );
 
     let downloaded = 0;
@@ -662,16 +840,22 @@ async function handleTransactionHistory(context) {
         if (DOWNLOAD_LIMIT > 0 && downloaded >= DOWNLOAD_LIMIT) {
             break;
         }
-        const csvFilename = `activity/${period}.csv`;
-        const ofxFilename = `activity/${period}.ofx`;
-        if (existing.has(csvFilename) && existing.has(ofxFilename)) {
+        const haveAll = ['csv', 'ofx'].every((ext) =>
+            existing.has(
+                storedDocumentName(
+                    period.value,
+                    activityExportOriginalName(period, ext),
+                ),
+            ),
+        );
+        if (haveAll) {
             continue;
         }
 
         refreshmint.log(
-            `target-circle-card activity: selecting period ${period}`,
+            `target-circle-card activity: selecting period ${period.label}`,
         );
-        await setSelectValue(page, 'select#security_q', period);
+        await setSelectValue(page, 'select#security_q', period.value);
         await waitMs(page, 1200);
         await page.waitForLoadState('networkidle', undefined);
 
@@ -679,7 +863,7 @@ async function handleTransactionHistory(context) {
         if (gotAny) {
             downloaded++;
             return {
-                progressName: `downloaded activity exports for ${period}`,
+                progressName: `downloaded activity exports for ${period.label}`,
             };
         }
     }
@@ -713,6 +897,7 @@ async function main() {
         lastProgressStep: 0,
         statementsDone: false,
         activityDone: false,
+        existingDocuments: null,
     };
 
     while (true) {

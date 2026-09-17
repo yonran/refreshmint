@@ -79,27 +79,28 @@ Verified statements URL:
 
 - `https://mytargetcirclecard.target.com/statements`
 
-Observed behavior:
+Observed behavior (re-verified 2026-09-17):
 
-- year tabs are exposed as DOM ids like:
-    - `2026`
-    - `2025`
-    - `2024`
-- statement rows include:
-    - statement close date text like `03-03-2026`
-    - `Download pdf`
-    - `View`
+- the year tabs and table render a few seconds after navigation; discovery
+  must wait for `a.statement-download-link` to appear
+- year tabs are `<div id="2026" role="button" class="years">` -- not
+  `<button>`/`<a>`, and `#2026` is not a valid CSS selector, so click them
+  via `[id="2026"]`
+- statement rows are `<tr>` with:
+    - a `<td>` holding the close date like `03-03-2026`
+    - `<a class="statement-download-link" href="#">Download pdf</a>` (no id;
+      addressed by index among all such links)
+    - `<a class="statement-view-link">View</a>`
 
 Current scraper behavior:
 
 - iterates all discovered year ids
 - extracts visible rows from the statements table
-- saves PDFs using the statement close date
-- deduplicates with `listAccountDocuments()`
-
-Verified saved filename pattern:
-
-- `statement-YYYY-MM-DD.pdf`
+- saves PDFs as `statement-YYYY-MM-DD.pdf` with `coverageEndDate`, which the
+  runtime finalizes as `YYYY-MM-DD-statement-YYYY-MM-DD.pdf`
+- deduplicates against that stored name via `listAccountDocuments()`, held in
+  the scrape context for the whole run (the listing excludes resources staged
+  earlier in the same run)
 
 ## Transaction History Page
 
@@ -131,13 +132,26 @@ Important site behavior:
 
 ## Download Transactions Modal
 
-Clicking `Download transactions` does not immediately start a browser download.
-It opens a modal with:
+`select#security_q` (name `statementDates`) is populated in two stages after
+navigation: the `Select Statement` placeholder and `Current Statement` first,
+then one option per closed statement. Option values are ISO dates; the
+`Current Statement` value is today's date. Wait for 3+ options before reading
+it. Exports are saved as `transactions-<value>.<ext>` (or
+`transactions-current-statement.<ext>`) with `coverageEndDate = value`.
+
+Clicking `Download transactions` (`<a role="button" class="download_btn
+popup_click">`) does not immediately start a browser download. It shows
+`.r_modal_container.download_popup` (with a `.modal_bg` overlay that
+intercepts clicks on the trigger while open) containing:
 
 - modal file-type selector:
     - `select#user`
-- modal submit action:
-    - visible `Download`
+- modal submit action `a.downbtn`, labelled `Download`, whose shape depends on
+  the selected format:
+    - CSV: `<a download="Transactions.CSV" href="blob:...">` -- the `download`
+      attribute lags the select change, so wait for it to match
+    - OFX / QBO / QFX: `<a href="#" role="button">`, file generated on click
+- close control `a.modal-close`
 
 Verified format choices:
 
