@@ -297,10 +297,16 @@ async function handleMfa(context) {
         const code = await refreshmint.prompt(
             'Enter Target Circle Card MFA code',
         );
-        await page.locator(codeInputSelector).first().fill(code);
+        // Same React-controlled-input quirk as the login fields above:
+        // fill() sets the value but the framework never sees an input event,
+        // so the Continue button stays disabled (verified 2026-09-17 in the
+        // retained failed-scrape session). type() sends real key events.
+        await page.type(codeInputSelector, code);
         await humanPace(page, 300, 600);
         await ensureRememberDevice(page);
-        await page.getByRole('button', { name: 'Submit' }).first().click();
+        // The code-entry screen's button is labelled "Continue", not
+        // "Submit" (2026-09-17); it is disabled until the input has a value.
+        await page.getByRole('button', { name: 'Continue' }).first().click();
         await waitMs(page, 2000);
         return { progressName: 'submitted mfa code' };
     }
