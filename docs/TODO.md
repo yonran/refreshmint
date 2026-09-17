@@ -1,5 +1,33 @@
 # TODO
 
+## Import anomalies: unbounded O(n) dedup scan (2026-09-17)
+
+`bookkeeping::create_import_anomaly` dedups by scanning every existing anomaly
+via `list_import_anomalies` before writing a new one (the dedup key is `(kind,
+login_name, label, source_entry_id, coverage_document)`, and there's no index
+keyed by it). Coverage-lifecycle checks in `dedup.rs` call this once per
+missing entry per document per account, so cost is roughly
+`O(anomalies_on_disk * candidates_checked_this_run)`.
+
+Fixed 2026-09-17: `read_optional_json` read each file through a raw
+`std::fs::File` (no `BufReader`), so `serde_json::from_reader` fell back to
+`Read::bytes()` — one `read(2)` syscall per byte. At 989 accumulated anomaly
+files (~1.6MB) this turned a single `list_import_anomalies` scan into ~1.6M
+syscalls; observed in production as a 20+ minute CPU-pegged hang during
+`provident-yonran` extraction (holding the login lock the whole time, so the
+GUI showed the login stuck/failed even though the underlying scrape had
+already succeeded). `read_optional_json` now wraps the file in a `BufReader`,
+which fixes the constant factor.
+
+Still open: the scan is still algorithmically O(n) per anomaly candidate, and
+the anomaly directory is never pruned/archived — it will keep growing forever.
+At some file count the buffered version will get slow again. Options if it
+recurs: index anomalies by dedup key (e.g. a lookup file keyed by a hash of
+`(kind, login_name, label, source_entry_id, coverage_document)`), load the
+existing anomaly set once per extraction run and reuse it across the multiple
+`create_import_anomaly` calls in that run instead of rescanning per call, or
+archive/prune reviewed anomalies out of the live directory.
+
 ## Chip-action safety residuals (accepted from the 2026-07-07 feedback-safety batch)
 
 - Undo-of-categorize is a blind overwrite: runUndoPlan recategorizes the row back
