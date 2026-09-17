@@ -154,6 +154,71 @@ syntax that can be stripped without code generation.
 - **Scope attachment interactions tightly:** For statement/check/image scraping, avoid global page-wide control scans. Anchor actions to the selected row/container first, then use guarded fallbacks.
 - **Avoid generic attachment URL capture:** Do not treat broad `a[href]` matches as evidence attachments without contextual checks, or you'll capture unrelated links and miss real artifacts.
 
+## Common mistakes
+
+Every item here was found in a shipped driver (audit of 2026-09-17). Check a
+driver against this list before declaring it fixed.
+
+**Silent success**
+
+- A run that saves nothing but exits cleanly. Target, Provident, and PayPal
+  all reported `success: true` for months while their document dirs stayed
+  frozen (PayPal never created one). Log discovered counts per subflow and
+  fail -- or at least log loudly -- when a page that visibly has rows yields
+  zero.
+- `continue` in a download loop with no log line. `if (row.linkId == null)
+continue;` skipped every Target statement because the links have no id.
+- Dedupe that can never match. Comparing the `saveResource` name against
+  `listAccountDocuments()` `filename`s (which are date-prefixed) skips
+  nothing and re-downloads everything; use `refreshmint.hasDocument`.
+- Re-reading the document listing every step and re-downloading what this run
+  already staged (twelve copies of one Citi CSV in a day). `hasDocument` now
+  sees staged resources; keep per-run state in the scrape context regardless.
+
+**Selectors written from assumptions**
+
+- `#2026` -- ids that start with a digit are not valid CSS. Use `[id="2026"]`.
+- `label[for="x"]` when the label wraps the input instead. Check the markup.
+- `getByRole('button', ...)` for `<a href="#">` or `<div>` without
+  `role="button"`. Dump `button, a, [role=button]` from the live page first.
+- Reading a select/table immediately after `goto`/click. SPAs render the
+  shell first; poll for the element you are about to read. Some selects fill
+  in two stages (placeholder + current period, then the rest).
+- `fill()` on a framework-controlled input: the DOM value changes but the
+  submit button stays disabled. Use `page.type()`.
+- Locator matched several elements ("Strict mode violation" on
+  `wait_for(visible)`, PayPal). Add `.first()` or tighten the selector.
+
+**State and identity**
+
+- Account labels derived differently over time, so one account owns several
+  document dirs (`membership_savings_6500` and `6500_membership_savings`;
+  one Provident label even embeds a balance:
+  `super_reward_checking_6590available_61_131_92`). Derive labels from a
+  stable identifier only (product name + last4) and never from a balance,
+  a heading with punctuation, or an element whose text can vary.
+- Referencing a secret while on a different host than the manifest declares
+  ("Secret 'chase_username' was declared for 'secure.chase.com' but current
+  top-level domain is ..."). Navigate first, then fill.
+- Storing one login's credential under another login's keychain service
+  (a `paypal.com/paypal_username` entry lived under `refreshmint/login/chase`).
+- Assuming the session lasts. Target logs out ~20 min after login and pages
+  degrade to "No data available" / bounce to sign-in; check `page.url()`
+  before hunting a selector bug late in a run.
+
+**Process**
+
+- Fixing one symptom from the failure screenshot and committing without
+  running the driver through to the end. Six Target commits in a row did this.
+  Attach to the retained session and run `--extension-dir` (see "Attaching to
+  a failed app scrape").
+- Testing runtime (Rust) changes via the app without rebuilding the sidecar:
+  the app spawns `target/debug/refreshmint-scraper-worker`, which `cargo run
+--bin app` does not rebuild. Run `npm run build:sidecars:debug` and restart
+  the app; the worker now logs a warning when it is older than the app.
+- Leaving "remember this device" unticked, so every unattended auto-scrape
+  stalls on the MFA prompt. Auto success rates were 10-25% across logins.
+
 ## Cross-bank lessons
 
 - **Make resumed sessions deterministic:** Live debug sessions often resume on the last visited page, not the login page. Handlers should recover cleanly from statements, rewards, stale shells, and other mid-flow states.
