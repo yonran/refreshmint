@@ -91,3 +91,78 @@ fn is_usable_sidecar(path: &Path) -> bool {
 
     true
 }
+
+/// Warning text when the scraper worker on disk is older than the running app
+/// binary, or `None` when it is current (or either mtime is unavailable).
+///
+/// `cargo run --bin app` rebuilds the app but not the separately linked
+/// worker, so a runtime change can sit untested for hours while the app keeps
+/// spawning the stale worker (2026-09-17). The app emits this into the scrape
+/// output so the mismatch is visible where the scrape is watched.
+pub fn stale_worker_warning(worker: &Path, app_exe: &Path) -> Option<String> {
+    let worker_mtime = std::fs::metadata(worker).ok()?.modified().ok()?;
+    let app_mtime = std::fs::metadata(app_exe).ok()?.modified().ok()?;
+    let lag = app_mtime.duration_since(worker_mtime).ok()?;
+    // Sub-minute skew is just the two link steps of one build.
+    if lag.as_secs() < 60 {
+        return None;
+    }
+    Some(format!(
+        "Warning: scraper worker {} is {} min older than the app; runtime changes since then are not in effect. Run `npm run build:sidecars:debug` and restart the app.",
+        worker.display(),
+        lag.as_secs() / 60
+    ))
+}
+
+pub fn stale_worker_warning_for_current_app() -> Option<String> {
+    let app_exe = std::env::current_exe().ok()?;
+    stale_worker_warning(Path::new(scraper_worker_path()), &app_exe)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stale_worker_warning;
+    use std::time::{Duration, SystemTime};
+
+    fn touch(path: &std::path::Path, mtime: SystemTime) {
+        std::fs::write(path, b"x").unwrap_or_else(|err| panic!("write failed: {err}"));
+        let file = std::fs::File::open(path).unwrap_or_else(|err| panic!("open failed: {err}"));
+        file.set_modified(mtime)
+            .unwrap_or_else(|err| panic!("set_modified failed: {err}"));
+    }
+
+    #[test]
+    fn stale_worker_warning_only_when_worker_is_much_older_than_app() {
+        let dir = std::env::temp_dir().join(format!(
+            "refreshmint-binpath-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("mkdir failed: {err}"));
+        let worker = dir.join("scraper-worker");
+        let app = dir.join("app");
+        let now = SystemTime::now();
+
+        touch(&app, now);
+        touch(&worker, now - Duration::from_secs(3 * 3600));
+        let warning = stale_worker_warning(&worker, &app).unwrap_or_default();
+        assert!(warning.contains("180 min older"), "{warning}");
+        assert!(warning.contains("build:sidecars:debug"), "{warning}");
+
+        // Same build, seconds apart: no warning.
+        touch(&worker, now - Duration::from_secs(20));
+        assert_eq!(stale_worker_warning(&worker, &app), None);
+
+        // Worker newer than app: no warning.
+        touch(&worker, now + Duration::from_secs(3600));
+        assert_eq!(stale_worker_warning(&worker, &app), None);
+
+        // Missing worker: no warning (the spawn itself will fail loudly).
+        assert_eq!(stale_worker_warning(&dir.join("missing"), &app), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

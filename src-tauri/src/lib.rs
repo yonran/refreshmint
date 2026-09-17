@@ -877,6 +877,17 @@ struct ScrapeOutputPayload {
 /// Build the `refreshmint://scrape-output` payload for a single driver log
 /// event. Extracted as a pure function so the mapping is unit-tested; the emit
 /// wiring itself is exercised by the UI.
+/// Error text for a manual scrape whose worker and browser were kept alive as
+/// a debug session. Without this the open Chrome window reads as a hung
+/// scrape; the app has already received the failure at this point.
+fn retained_failure_message(error: &str, socket_path: &std::path::Path) -> String {
+    format!(
+        "{error}\n\nThe browser is kept open for 30 minutes so the failure can be inspected \
+         (this is not a hang). Attach with: debug exec --socket {} --extension-dir <ext>",
+        socket_path.display()
+    )
+}
+
 fn scrape_output_payload(
     login_name: &str,
     event: &scrape::js_api::DebugOutputEvent,
@@ -917,6 +928,19 @@ fn run_scrape_in_worker(
 ) -> Result<(), scrape::ScrapeError> {
     use std::io::BufRead;
     use tauri::Emitter;
+
+    if let Some(warning) = binpath::stale_worker_warning_for_current_app() {
+        let _ = app_handle.emit(
+            "refreshmint://scrape-output",
+            scrape_output_payload(
+                login_name,
+                &scrape::js_api::DebugOutputEvent {
+                    stream: scrape::js_api::DebugOutputStream::Stderr,
+                    line: warning,
+                },
+            ),
+        );
+    }
 
     let mut command = std::process::Command::new(binpath::scraper_worker_path());
     command
@@ -1109,7 +1133,7 @@ fn run_scrape_in_worker(
                         debug_session.session_id
                     );
                     final_result = Some(Err(scrape::ScrapeError {
-                        message: error,
+                        message: retained_failure_message(&error, &debug_session.socket_path),
                         artifacts_dir: artifacts_dir.map(std::path::PathBuf::from),
                     }));
                     break;
@@ -3252,10 +3276,11 @@ mod tests {
         cancel_prompt_for_login, delete_login_account, evidence_ref_matches_document,
         inspect_login_extraction_support, register_scrape_cancel, require_existing_login,
         require_label_input, require_login_name_input, require_non_empty_input,
-        resolve_artifact_dir, resolve_prompt_timeout_secs, run_login_account_extraction_blocking,
-        scrape_output_payload, send_prompt_answer, summarize_scrape_log, trigger_scrape_cancel,
-        unregister_scrape_cancel, validate_artifact_filename, wait_for_prompt_answer,
-        PendingPrompt, PromptAnswerInner, PromptAnswerState, PromptWaitOutcome, ScrapeCancelState,
+        resolve_artifact_dir, resolve_prompt_timeout_secs, retained_failure_message,
+        run_login_account_extraction_blocking, scrape_output_payload, send_prompt_answer,
+        summarize_scrape_log, trigger_scrape_cancel, unregister_scrape_cancel,
+        validate_artifact_filename, wait_for_prompt_answer, PendingPrompt, PromptAnswerInner,
+        PromptAnswerState, PromptWaitOutcome, ScrapeCancelState,
     };
     use crate::operations::ScrapeLogEntry;
     use crate::scrape::js_api::{DebugOutputEvent, DebugOutputStream};
@@ -3275,6 +3300,17 @@ mod tests {
             panic!("failed to create temp dir: {err}");
         }
         dir
+    }
+
+    #[test]
+    fn retained_failure_message_explains_the_open_browser() {
+        let message = retained_failure_message(
+            "driver script failed: boom",
+            std::path::Path::new("/tmp/rm-1-x.sock"),
+        );
+        assert!(message.starts_with("driver script failed: boom\n"));
+        assert!(message.contains("not a hang"));
+        assert!(message.contains("debug exec --socket /tmp/rm-1-x.sock"));
     }
 
     #[test]

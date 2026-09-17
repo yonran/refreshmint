@@ -35,15 +35,29 @@ fn maybe_diag(options: SandboxRunOptions, message: &str) {
     }
 }
 
+/// Prefix rquickjs's `Display` adds to every error built with
+/// `js_err` (`Error::new_from_js_message("Error", "Error", msg)` in
+/// `js_api.rs`). Once such an error surfaces as a JS exception its message
+/// carries this text verbatim, which says nothing to a driver author.
+const JS_ERR_DISPLAY_PREFIX: &str = "Error converting from js 'Error' into type 'Error': ";
+
+pub(crate) fn strip_js_err_prefix(message: &str) -> String {
+    message
+        .strip_prefix(JS_ERR_DISPLAY_PREFIX)
+        .unwrap_or(message)
+        .to_string()
+}
+
 fn format_caught_js_error(caught: CaughtError<'_>) -> String {
-    match caught {
+    let message = match caught {
         CaughtError::Exception(exception) => exception
             .message()
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| "JavaScript exception".to_string()),
         CaughtError::Value(_) => "JavaScript exception (non-Error value thrown)".to_string(),
         CaughtError::Error(error) => error.to_string(),
-    }
+    };
+    strip_js_err_prefix(&message)
 }
 
 fn source_uses_static_module_syntax(source: &str) -> bool {
@@ -463,6 +477,17 @@ mod tests {
             CaughtError::Value(_) => "JavaScript exception (non-Error value thrown)".to_string(),
             CaughtError::Error(error) => error.to_string(),
         }
+    }
+
+    #[test]
+    fn strip_js_err_prefix_removes_the_rquickjs_conversion_noise() {
+        assert_eq!(
+            strip_js_err_prefix(
+                "Error converting from js 'Error' into type 'Error': TimeoutError: waiting for locator"
+            ),
+            "TimeoutError: waiting for locator"
+        );
+        assert_eq!(strip_js_err_prefix("plain message"), "plain message");
     }
 
     async fn drive_runtime_idle(runtime: &AsyncRuntime) {
