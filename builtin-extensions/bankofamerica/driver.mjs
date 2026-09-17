@@ -237,8 +237,13 @@ async function handleHomepage() {
 
     await humanPace(500, 1100);
     refreshmint.log('URL before waitForURL: ' + (await page.url()));
+    // waitForURL globs follow Playwright: a single `*` does not cross `/`, so
+    // every `*foo*` pattern in this driver silently timed out against full
+    // URLs (2026-03-10 .. 2026-09-16) and only the fallbacks kept it working.
+    // Use `**` throughout; see glob_to_regex_pattern in
+    // src-tauri/src/scrape/js_api.rs.
     try {
-        await page.waitForURL('*secure.bankofamerica.com*', 30000);
+        await page.waitForURL('**secure.bankofamerica.com**', 30000);
     } catch (e) {
         refreshmint.log('waitForURL threw: ' + e);
         refreshmint.log('Popup events: ' + (await page.popupEvents()));
@@ -247,7 +252,7 @@ async function handleHomepage() {
             await page.goto(
                 'https://secure.bankofamerica.com/login/sign-in/signOnV2Screen.go',
             );
-            await page.waitForURL('*secure.bankofamerica.com/login/*', 45000);
+            await page.waitForURL('**secure.bankofamerica.com/login/**', 45000);
         }
     }
     refreshmint.log('After homepage, URL: ' + (await page.url()));
@@ -362,11 +367,11 @@ async function handleLogin() {
     await humanPace(600, 1300);
 
     var postLoginPatterns = [
-        '*secure.bankofamerica.com/auth/*',
-        '*secure.bankofamerica.com/myaccounts*',
-        '*secure.bankofamerica.com/customer-uci/*',
+        '**secure.bankofamerica.com/auth/**',
+        '**secure.bankofamerica.com/myaccounts**',
+        '**secure.bankofamerica.com/customer-uci/**',
         '**secure.bankofamerica.com/mycommunications/statements**',
-        '*secure.bankofamerica.com/login/signIn.go*',
+        '**secure.bankofamerica.com/login/signIn.go**',
     ];
     var matchedPostLoginPattern = '';
     for (var pi = 0; pi < postLoginPatterns.length; pi++) {
@@ -801,7 +806,7 @@ async function handleMfaChoice() {
         refreshmint.log('Clicked continue-auth-number');
         // Wait for navigation to accounts page
         try {
-            await page.waitForURL('*myaccounts*', 30000);
+            await page.waitForURL('**myaccounts**', 30000);
             refreshmint.log('Navigated to accounts!');
             return false;
         } catch (e) {
@@ -869,7 +874,7 @@ async function handleMfa() {
     );
     refreshmint.log('Clicked SUBMIT');
 
-    await page.waitForURL('*myaccounts*');
+    await page.waitForURL('**myaccounts**');
     refreshmint.log('After MFA, URL: ' + (await page.url()));
     return false;
 }
@@ -2256,7 +2261,7 @@ async function handleStatementsPage() {
         );
         if (activityClicked) {
             refreshmint.log('Clicked Activity tab from statements page');
-            await page.waitForURL('*account-details*', 30000);
+            await page.waitForURL('**account-details**', 30000);
             return false;
         }
     } catch (activityErr) {
@@ -2275,7 +2280,7 @@ async function handleStatementsPage() {
     );
     try {
         await page.goto(activityUrl);
-        await page.waitForURL('*account-details*', 30000);
+        await page.waitForURL('**account-details**', 30000);
         return false;
     } catch (gotoErr) {
         refreshmint.log('Statements->activity URL fallback failed: ' + gotoErr);
@@ -2307,7 +2312,7 @@ async function handleAccountsOverview() {
         await page.click('[name="CCA_seeAllTransactions"]');
         refreshmint.log('Navigating to account activity...');
         try {
-            await page.waitForURL('*account-details*', 15000);
+            await page.waitForURL('**account-details**', 15000);
             refreshmint.log('At: ' + (await page.url()));
         } catch (e) {
             refreshmint.log(
@@ -2356,7 +2361,7 @@ async function handleSecurityCenter() {
                 } catch (e) {
                     refreshmint.log('accounts_overview click skipped: ' + e);
                 }
-                await page.waitForURL('*myaccounts*', 30000);
+                await page.waitForURL('**myaccounts**', 30000);
                 refreshmint.log(
                     'Navigated from security center to myaccounts via top nav',
                 );
@@ -2420,7 +2425,7 @@ async function handleSecurityCenter() {
         }
         refreshmint.log('Security-center nav target: ' + targetUrl);
         await page.goto(targetUrl);
-        await page.waitForURL('*myaccounts*', 30000);
+        await page.waitForURL('**myaccounts**', 30000);
         refreshmint.log('Navigated from security center to myaccounts');
         return false;
     } catch (e) {
@@ -2512,7 +2517,7 @@ async function dispatchCurrentState() {
             refreshmint.log('goto warning: ' + e);
         }
         try {
-            await page.waitForURL('*bankofamerica.com*', 45000);
+            await page.waitForURL('**bankofamerica.com**', 45000);
         } catch (e) {
             refreshmint.log('waitForURL bankofamerica warning: ' + e);
         }
@@ -2532,7 +2537,7 @@ async function dispatchCurrentState() {
             }
             try {
                 await page.waitForURL(
-                    '*secure.bankofamerica.com/login/*',
+                    '**secure.bankofamerica.com/login/**',
                     45000,
                 );
             } catch (e) {
