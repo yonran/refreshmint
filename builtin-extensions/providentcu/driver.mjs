@@ -2359,7 +2359,12 @@ async function handleZelle(context) {
     if (hasSavedDocument(existingFilenames, today, filename)) {
         refreshmint.log('Zelle activity already downloaded today, skipping');
         context.zelleDone = true;
-        await page.goto(SUMMARY_URL);
+        // handleAccountSummary dispatches here from
+        // AccountSummary.aspx#AccountSummary, so a goto(SUMMARY_URL) is a
+        // same-document (fragment-only) navigation: no load event fires and
+        // goto times out after 30s (second run of the day, 2026-09-16 x2).
+        // The other branches return from the Zelle shell, a real navigation.
+        // We are already on the summary page; just report progress.
         return { progressName: 'zelle already downloaded' };
     }
 
