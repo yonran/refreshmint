@@ -161,11 +161,13 @@ driver against this list before declaring it fixed.
 
 **Silent success**
 
-- A run that saves nothing but exits cleanly. Target, Provident, and PayPal
-  all reported `success: true` for months while their document dirs stayed
-  frozen (PayPal never created one). Log discovered counts per subflow and
-  fail -- or at least log loudly -- when a page that visibly has rows yields
-  zero.
+- A run that saves nothing but exits cleanly. Target reported
+  `success: true` for six months while its document dir stayed frozen, and
+  PayPal's successful runs never created one. Log discovered counts per
+  subflow and fail -- or at least log loudly -- when a page that visibly has
+  rows yields zero. (Provident's per-account
+  `Activity summary (...): attempted=5, downloaded=0, existing=5` line is the
+  model: it makes "nothing new" distinguishable from "found nothing".)
 - `continue` in a download loop with no log line. `if (row.linkId == null)
 continue;` skipped every Target statement because the links have no id.
 - Dedupe that can never match. Comparing the `saveResource` name against
@@ -192,11 +194,13 @@ continue;` skipped every Target statement because the links have no id.
 **State and identity**
 
 - Account labels derived differently over time, so one account owns several
-  document dirs (`membership_savings_6500` and `6500_membership_savings`;
-  one Provident label even embeds a balance:
-  `super_reward_checking_6590available_61_131_92`). Derive labels from a
-  stable identifier only (product name + last4) and never from a balance,
-  a heading with punctuation, or an element whose text can vary.
+  document dirs. Provident has `6500_membership_savings` (2026-02),
+  `membership_savings_6500` (current) and, from one bad derivation,
+  `super_reward_checking_6590available_61_131_92` -- a balance baked into the
+  label. Old dirs are never merged, so dedupe by label cannot see history
+  saved under the previous scheme. Derive labels from a stable identifier
+  only (product name + last4), never from a balance or an element whose text
+  can vary, and treat a label change as a migration.
 - Referencing a secret while on a different host than the manifest declares
   ("Secret 'chase_username' was declared for 'secure.chase.com' but current
   top-level domain is ..."). Navigate first, then fill.
