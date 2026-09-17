@@ -7258,10 +7258,8 @@ pub(crate) async fn resolve_secret_if_applicable(
         // Every legacy read is a separate (prompting) Keychain query, so read
         // all of this domain's legacy values in one pass and, when they cover
         // the declared username and password roles, adopt them as a
-        // current-format credential. The next scrape then takes the single
-        // cached `get_credentials` read above. This is the same conversion
-        // the Settings tab's "Migrate legacy" button performs via
-        // `migrate_login_secrets` in `src-tauri/src/lib.rs`.
+        // current-format credential and delete the legacy entries. The next
+        // scrape then takes the single cached `get_credentials` read above.
         let legacy_known = inner.secret_store.list_legacy_entries().unwrap_or_default();
         let mut legacy_values: Vec<(String, String)> = Vec::new();
         for (domain, name) in &legacy_known {
@@ -7285,12 +7283,22 @@ pub(crate) async fn resolve_secret_if_applicable(
             &top_level_domain,
             &legacy_values,
         ) {
+            // Only the two adopted role entries are removed; any other legacy
+            // name for the domain (`extra_names`) keeps resolving via this path.
+            let adopted_names: Vec<String> = inner
+                .declared_secrets
+                .get(&top_level_domain)
+                .into_iter()
+                .flat_map(|creds| [creds.username.clone(), creds.password.clone()])
+                .flatten()
+                .collect();
             // A failed write must never fail the scrape: the legacy values
             // are already in hand, so just report it and carry on.
-            if let Err(err) = inner
-                .secret_store
-                .adopt_legacy_credentials(&top_level_domain, (username, password))
-            {
+            if let Err(err) = inner.secret_store.adopt_legacy_credentials(
+                &top_level_domain,
+                (username, password),
+                &adopted_names,
+            ) {
                 eprintln!(
                     "Warning: could not migrate legacy Keychain credentials for '{top_level_domain}' to the per-domain format: {err}"
                 );

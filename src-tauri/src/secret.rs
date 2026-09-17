@@ -238,13 +238,32 @@ impl SecretStore {
     /// filled before the write: a failed write still leaves the scrape with
     /// working credentials and merely defers the migration to the next run.
     /// See `resolve_secret_if_applicable` in `src-tauri/src/scrape/js_api.rs`.
+    ///
+    /// Once the current-format entry is written, the legacy entries named in
+    /// `legacy_names` are deleted and dropped from the legacy index (the index
+    /// itself is deleted when nothing remains), so the fallback never runs
+    /// for this domain again.
     pub fn adopt_legacy_credentials(
         &self,
         domain: &str,
         credentials: (String, String),
+        legacy_names: &[String],
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.remember_credentials(domain, &credentials);
-        self.set_credentials(domain, &credentials.0, &credentials.1)
+        self.set_credentials(domain, &credentials.0, &credentials.1)?;
+        for name in legacy_names {
+            self.delete_legacy_entry(domain, name)?;
+        }
+        let remaining: Vec<(String, String)> = self
+            .list_legacy_entries()?
+            .into_iter()
+            .filter(|(d, n)| !(d == domain && legacy_names.contains(n)))
+            .collect();
+        if remaining.is_empty() {
+            self.delete_legacy_index()
+        } else {
+            self.write_legacy_index(&remaining)
+        }
     }
 
     /// List all configured domains with their credential status.
@@ -599,6 +618,25 @@ impl SecretStore {
             }
         }
         Ok(pairs)
+    }
+
+    /// Rewrite the legacy index to list only `entries`, in the same
+    /// `{key: "domain/name", has_value: true}` shape `list_legacy_entries` reads.
+    fn write_legacy_index(
+        &self,
+        entries: &[(String, String)],
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let json = serde_json::to_string(
+            &entries
+                .iter()
+                .map(|(domain, name)| {
+                    serde_json::json!({ "key": format!("{domain}/{name}"), "has_value": true })
+                })
+                .collect::<Vec<_>>(),
+        )?;
+        let entry = keyring::Entry::new(&self.index_service(), Self::LEGACY_INDEX_ACCOUNT)?;
+        entry.set_password(&json)?;
+        Ok(())
     }
 
     /// Read a single legacy secret value (for migration).  Triggers biometric on macOS.
