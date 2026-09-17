@@ -2,6 +2,7 @@ import { copyFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
+import { resolveSidecarTarget } from './sidecar-target.mjs';
 
 const debug = process.argv.includes('--debug');
 /**
@@ -22,10 +23,14 @@ if (rustc.status !== 0) {
     );
 }
 const host = rustc.stdout.match(/^host: (.+)$/m)?.[1];
-const target = explicitTarget ?? host;
-if (target === undefined || target.length === 0) {
-    throw new Error('could not determine Rust target triple');
+if (host === undefined || host.length === 0) {
+    throw new Error('could not determine Rust host triple');
 }
+// See resolveSidecarTarget for why a host build must not pass `--target`.
+const { target, cargoTargetArg, builtSubdir } = resolveSidecarTarget({
+    explicitTarget,
+    host,
+});
 
 const cargoArgs = [
     'build',
@@ -37,7 +42,7 @@ const cargoArgs = [
     'refreshmint-mcp',
 ];
 if (!debug) cargoArgs.push('--release');
-if (explicitTarget !== undefined) cargoArgs.push('--target', explicitTarget);
+if (cargoTargetArg !== undefined) cargoArgs.push('--target', cargoTargetArg);
 
 const cargo = spawnSync('cargo', cargoArgs, {
     cwd: resolve('src-tauri'),
@@ -54,10 +59,7 @@ const targetRoot =
     cargoTargetDir !== undefined
         ? resolve(cargoTargetDir)
         : resolve('src-tauri/target');
-const builtRoot =
-    explicitTarget !== undefined
-        ? resolve(targetRoot, target, profile)
-        : resolve(targetRoot, profile);
+const builtRoot = resolve(targetRoot, ...builtSubdir, profile);
 const destinationRoot = resolve('src-tauri/binaries');
 mkdirSync(destinationRoot, { recursive: true });
 

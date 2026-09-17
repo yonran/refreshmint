@@ -28,6 +28,7 @@
         "eslint.config.mts",
         "scripts/**/*.mjs",
         "scripts/**/*.mts",
+        "scripts/**/*.test.ts",
         "eslint-plugin-import-x.d.ts",
         "eslint-plugin-react-hooks.d.ts"
     ]
