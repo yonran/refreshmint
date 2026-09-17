@@ -7254,20 +7254,54 @@ pub(crate) async fn resolve_secret_if_applicable(
         // addition to keeping undeclared values outside the secret boundary,
         // this avoids an extra Keychain authorization opportunity on every
         // successful current-format lookup.
+        //
+        // Every legacy read is a separate (prompting) Keychain query, so read
+        // all of this domain's legacy values in one pass and, when they cover
+        // the declared username and password roles, adopt them as a
+        // current-format credential. The next scrape then takes the single
+        // cached `get_credentials` read above. This is the same conversion
+        // the Settings tab's "Migrate legacy" button performs via
+        // `migrate_login_secrets` in `src-tauri/src/lib.rs`.
         let legacy_known = inner.secret_store.list_legacy_entries().unwrap_or_default();
+        let mut legacy_values: Vec<(String, String)> = Vec::new();
         for (domain, name) in &legacy_known {
-            if name == referenced_name && domain.eq_ignore_ascii_case(&top_level_domain) {
-                let value = inner
-                    .secret_store
-                    .get_legacy_value(domain, name)
-                    .map_err(|e| {
-                        js_err(format!(
-                            "failed to read secret '{name}' for domain '{domain}': {e}"
-                        ))
-                    })?;
-                inner.sensitive_data.register(&value);
-                return Ok(value);
+            if !domain.eq_ignore_ascii_case(&top_level_domain) {
+                continue;
             }
+            let value = inner
+                .secret_store
+                .get_legacy_value(domain, name)
+                .map_err(|e| {
+                    js_err(format!(
+                        "failed to read secret '{name}' for domain '{domain}': {e}"
+                    ))
+                })?;
+            inner.sensitive_data.register(&value);
+            legacy_values.push((name.clone(), value));
+        }
+
+        if let Some((username, password)) = legacy_credentials_for_domain(
+            &inner.declared_secrets,
+            &top_level_domain,
+            &legacy_values,
+        ) {
+            // A failed write must never fail the scrape: the legacy values
+            // are already in hand, so just report it and carry on.
+            if let Err(err) = inner
+                .secret_store
+                .adopt_legacy_credentials(&top_level_domain, (username, password))
+            {
+                eprintln!(
+                    "Warning: could not migrate legacy Keychain credentials for '{top_level_domain}' to the per-domain format: {err}"
+                );
+            }
+        }
+
+        if let Some((_, value)) = legacy_values
+            .into_iter()
+            .find(|(name, _)| name == referenced_name)
+        {
+            return Ok(value);
         }
     }
 
@@ -7292,6 +7326,27 @@ fn declared_domains_for_secret(declared: &SecretDeclarations, secret_name: &str)
         .collect::<Vec<_>>();
     domains.sort();
     domains
+}
+
+/// Pair a domain's legacy `(secret name, value)` entries with the roles the
+/// manifest declares for that domain. Returns `(username, password)` only when
+/// both roles are declared and present, so a partial legacy set is left for
+/// the per-name fallback rather than adopted as an incomplete credential.
+fn legacy_credentials_for_domain(
+    declared: &SecretDeclarations,
+    domain: &str,
+    legacy_values: &[(String, String)],
+) -> Option<(String, String)> {
+    let creds = declared.get(domain)?;
+    let username_name = creds.username.as_deref()?;
+    let password_name = creds.password.as_deref()?;
+    let value_of = |wanted: &str| {
+        legacy_values
+            .iter()
+            .find(|(name, _)| name == wanted)
+            .map(|(_, value)| value.clone())
+    };
+    Some((value_of(username_name)?, value_of(password_name)?))
 }
 
 /// Whether `secret_name` is the username role for `domain` in the declarations.
@@ -8867,6 +8922,39 @@ mod tests {
         }))
         .unwrap_or_else(|err| panic!("subresource event should deserialize: {err}"));
         assert!(!is_navigation_request(&subresource_event));
+    }
+
+    #[test]
+    fn legacy_credentials_for_domain_pairs_declared_roles() {
+        let mut declared = SecretDeclarations::new();
+        declared.insert(
+            "secure.chase.com".to_string(),
+            DomainCredentials {
+                username: Some("chase_username".to_string()),
+                password: Some("chase_password".to_string()),
+                ..Default::default()
+            },
+        );
+        let values = vec![
+            ("chase_password".to_string(), "hunter2".to_string()),
+            ("chase_username".to_string(), "yon".to_string()),
+        ];
+        assert_eq!(
+            legacy_credentials_for_domain(&declared, "secure.chase.com", &values),
+            Some(("yon".to_string(), "hunter2".to_string()))
+        );
+
+        // Both roles must be present before we adopt the pair as a
+        // current-format credential; otherwise the legacy path stays as-is.
+        let only_password = vec![("chase_password".to_string(), "hunter2".to_string())];
+        assert_eq!(
+            legacy_credentials_for_domain(&declared, "secure.chase.com", &only_password),
+            None
+        );
+        assert_eq!(
+            legacy_credentials_for_domain(&declared, "other.example", &values),
+            None
+        );
     }
 
     #[test]

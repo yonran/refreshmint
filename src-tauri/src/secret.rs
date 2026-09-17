@@ -231,6 +231,22 @@ impl SecretStore {
         Ok(credentials)
     }
 
+    /// Convert a credential read via the legacy per-name entries into a
+    /// current-format entry, and cache it for this session either way.
+    ///
+    /// Callers have already paid the (prompting) legacy reads, so the cache is
+    /// filled before the write: a failed write still leaves the scrape with
+    /// working credentials and merely defers the migration to the next run.
+    /// See `resolve_secret_if_applicable` in `src-tauri/src/scrape/js_api.rs`.
+    pub fn adopt_legacy_credentials(
+        &self,
+        domain: &str,
+        credentials: (String, String),
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.remember_credentials(domain, &credentials);
+        self.set_credentials(domain, &credentials.0, &credentials.1)
+    }
+
     /// List all configured domains with their credential status.
     pub fn list_domains(&self) -> Result<Vec<DomainEntry>, Box<dyn Error + Send + Sync>> {
         let index = self.read_domains_index()?;
