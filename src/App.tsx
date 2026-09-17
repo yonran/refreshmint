@@ -68,6 +68,7 @@ import { isMissingGlAccountError } from './status-utils.ts';
 import { AccountsTable } from './components/AccountsTable.tsx';
 import { PipelineTab } from './tabs/PipelineTab.tsx';
 import { ReportsTab } from './tabs/ReportsTab.tsx';
+import { RulesTab } from './tabs/RulesTab.tsx';
 import { ScrapeTab } from './tabs/ScrapeTab.tsx';
 import { SettingsTab } from './tabs/SettingsTab.tsx';
 import { BookkeepingTab } from './tabs/BookkeepingTab.tsx';
@@ -1028,6 +1029,7 @@ function App() {
             activeTab === 'settings' ||
             activeTab === 'pipeline' ||
             activeTab === 'reports' ||
+            activeTab === 'rules' ||
             activeTab === 'preferences'
                 ? activeTab
                 : 'transactions';
@@ -1528,6 +1530,17 @@ function App() {
                         </button>
                         <button
                             className={
+                                activeTab === 'rules' ? 'tab active' : 'tab'
+                            }
+                            onClick={() => {
+                                setActiveTab('rules');
+                            }}
+                            type="button"
+                        >
+                            Rules
+                        </button>
+                        <button
+                            className={
                                 activeTab === 'bookkeeping'
                                     ? 'tab active'
                                     : 'tab'
@@ -1916,6 +1929,11 @@ function App() {
                             onNavigateToTransactions={
                                 handleNavigateToTransactionsSearch
                             }
+                        />
+                    ) : activeTab === 'rules' ? (
+                        <RulesTab
+                            ledger={ledger.path}
+                            accountNames={ledger.accounts.map((a) => a.name)}
                         />
                     ) : activeTab === 'preferences' ? (
                         <div className="preferences-panel">

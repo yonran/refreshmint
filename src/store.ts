@@ -12,6 +12,7 @@ export type ActiveTab =
     | 'settings'
     | 'pipeline'
     | 'reports'
+    | 'rules'
     | 'preferences';
 
 async function getStore() {
@@ -81,6 +82,7 @@ export async function getLastActiveTab(): Promise<ActiveTab | null> {
         value === 'settings' ||
         value === 'pipeline' ||
         value === 'reports' ||
+        value === 'rules' ||
         value === 'preferences'
     ) {
         return value;
