@@ -149,6 +149,16 @@ pub(crate) fn run_hledger_print_with_query(
     }
 }
 
+/// Splits a search-box query into hledger argv entries.
+///
+/// POSIX-shell-style quoting: tokens are separated by spaces/tabs; `'…'` is
+/// fully literal; inside `"…"`, `\\` -> `\` and `\"` -> `"` while any other
+/// `\x` is kept as-is (so regex escapes like `\*` survive). Quotes only group
+/// whitespace -- the contents are still whatever hledger expects for that
+/// prefix (a regex for desc:/acct:/…).
+///
+/// This is the inverse of `quoteHledgerValue` in `src/search-utils.ts`; keep
+/// the two in sync.
 pub(crate) fn tokenize_query(query: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -160,13 +170,27 @@ pub(crate) fn tokenize_query(query: &str) -> Vec<String> {
                     tokens.push(std::mem::take(&mut current));
                 }
             }
-            '"' | '\'' => {
-                let q = ch;
+            '\'' => {
                 for inner in chars.by_ref() {
-                    if inner == q {
+                    if inner == '\'' {
                         break;
                     }
                     current.push(inner);
+                }
+            }
+            '"' => {
+                while let Some(inner) = chars.next() {
+                    match inner {
+                        '"' => break,
+                        '\\' => match chars.peek() {
+                            Some(&next @ ('\\' | '"')) => {
+                                current.push(next);
+                                chars.next();
+                            }
+                            _ => current.push('\\'),
+                        },
+                        _ => current.push(inner),
+                    }
                 }
             }
             _ => current.push(ch),
@@ -644,6 +668,23 @@ mod tests {
             tokenize_query(r#"desc:"amazon prime" date:2024"#),
             vec!["desc:amazon prime", "date:2024"]
         );
+    }
+
+    #[test]
+    fn tokenize_double_quoted_backslash_escapes() {
+        // POSIX double-quote rules: `\"` and `\\` are unescaped, any other
+        // `\x` (e.g. a regex escape) passes through untouched.
+        assert_eq!(tokenize_query(r#"desc:"a \" b""#), vec![r#"desc:a " b"#]);
+        assert_eq!(tokenize_query(r#"desc:"a \\ b""#), vec![r"desc:a \ b"]);
+        assert_eq!(tokenize_query(r#"desc:"x \* y""#), vec![r"desc:x \* y"]);
+        // A trailing backslash inside quotes is kept literally.
+        assert_eq!(tokenize_query(r#"desc:"x \"#), vec![r"desc:x \"]);
+    }
+
+    #[test]
+    fn tokenize_single_quoted_is_literal() {
+        // POSIX single quotes: no escapes at all.
+        assert_eq!(tokenize_query(r#"desc:'a \" b'"#), vec![r#"desc:a \" b"#]);
     }
 
     #[test]
