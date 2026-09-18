@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { getCurrentToken, getSearchSuggestions } from './search-utils.ts';
+import {
+    escapeHledgerRegex,
+    getCurrentToken,
+    getSearchSuggestions,
+    quoteHledgerRegex,
+    quoteHledgerValue,
+} from './search-utils.ts';
 import type { AccountRow } from './tauri-commands.ts';
 
 const NO_ACCOUNTS: AccountRow[] = [];
@@ -36,6 +42,57 @@ describe('getCurrentToken', () => {
             start: 0,
             end: 0,
         });
+    });
+    it('does not end a double-quoted token at an escaped quote', () => {
+        // desc:"a \" b" x  -- cursor inside the quoted span
+        expect(getCurrentToken('desc:"a \\" b" x', 8)).toEqual({
+            token: 'desc:"a \\" b"',
+            start: 0,
+            end: 13,
+        });
+    });
+});
+
+// Mirror of the grammar in src-tauri/src/ledger_open.rs tokenize_query.
+describe('quoteHledgerValue', () => {
+    it('leaves plain values alone', () => {
+        expect(quoteHledgerValue('amazon')).toBe('amazon');
+        expect(quoteHledgerValue('Expenses:Food')).toBe('Expenses:Food');
+    });
+    it('single-quotes values with whitespace so backslashes stay readable', () => {
+        expect(quoteHledgerValue('amazon prime')).toBe("'amazon prime'");
+        expect(quoteHledgerValue('x \\* y')).toBe("'x \\* y'");
+    });
+    it('falls back to double quotes with escapes when value has a single quote', () => {
+        expect(quoteHledgerValue("Trader Joe's")).toBe('"Trader Joe\'s"');
+        expect(quoteHledgerValue('it\'s "x" \\ y')).toBe(
+            '"it\'s \\"x\\" \\\\ y"',
+        );
+    });
+    it('quotes a value containing a double quote', () => {
+        expect(quoteHledgerValue('a"b')).toBe("'a\"b'");
+    });
+});
+
+describe('escapeHledgerRegex', () => {
+    it('escapes every regex metacharacter', () => {
+        expect(escapeHledgerRegex('a+b(c)[d]{e}|f^g$h?i.j*k\\l')).toBe(
+            'a\\+b\\(c\\)\\[d\\]\\{e\\}\\|f\\^g\\$h\\?i\\.j\\*k\\\\l',
+        );
+    });
+    it('leaves plain text alone', () => {
+        expect(escapeHledgerRegex('OPENAI CHATGPT')).toBe('OPENAI CHATGPT');
+    });
+});
+
+describe('quoteHledgerRegex', () => {
+    it('regex-escapes then quotes a bank description', () => {
+        expect(
+            quoteHledgerRegex('OPENAI *CHATGPT SUBSCR   OPENAI.COM   CA'),
+        ).toBe("'OPENAI \\*CHATGPT SUBSCR   OPENAI\\.COM   CA'");
+    });
+    it('does not quote when no whitespace or quotes', () => {
+        expect(quoteHledgerRegex('OPENAI.COM')).toBe('OPENAI\\.COM');
     });
 });
 

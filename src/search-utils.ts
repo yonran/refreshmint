@@ -1,18 +1,44 @@
 import type { AccountRow } from './tauri-commands.ts';
 
 /**
- * Quotes a value for use in an hledger query predicate (e.g. `desc:VALUE`).
+ * Quotes a value for use in an hledger query predicate (e.g. `desc:VALUE`)
+ * so that the search-box tokenizer yields it back verbatim as one token.
  *
- * hledger tokenizes queries like a POSIX shell command line: predicates are
- * separated by whitespace, and a value containing whitespace must be wrapped
- * in double or single quotes.  Double-quote wrapping is used here; internal
- * backslashes and double quotes are backslash-escaped.
+ * The grammar is POSIX-shell-style and is defined by the tokenizer in
+ * `src-tauri/src/ledger_open.rs` (`tokenize_query`); keep the two in sync:
+ * tokens are separated by whitespace; `'…'` is fully literal; inside `"…"`
+ * only `\\` and `\"` are escapes, any other `\x` is kept as-is.
  *
- * Reference: https://hledger.org/hledger.html#queries (section "Query arguments")
+ * Single quotes are preferred so that regex escapes (see
+ * `quoteHledgerRegex`) stay readable: `desc:'OPENAI \*CHATGPT'`. Double
+ * quotes are used only when the value itself contains a single quote.
+ *
+ * Note that quoting only groups whitespace -- the value is still interpreted
+ * by hledger as whatever the prefix expects (a regex for desc:/acct:/…).
+ * Reference: https://hledger.org/hledger.html#queries
  */
 export function quoteHledgerValue(value: string): string {
-    if (!/[\s"]/.test(value)) return value;
+    if (!/[\s"']/.test(value)) return value;
+    if (!value.includes("'")) return "'" + value + "'";
     return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+}
+
+/**
+ * Escapes a string so that it matches itself literally when used as an
+ * hledger regex (regex-tdfa, POSIX ERE). hledger's `desc:`, `acct:`,
+ * `payee:`, `note:`, `code:`, `cur:`, and `tag:` values are all regexes.
+ */
+export function escapeHledgerRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Builds a query value that matches `value` literally in a regex-valued
+ * predicate (e.g. `desc:` for a raw bank description such as
+ * `OPENAI *CHATGPT SUBSCR   OPENAI.COM   CA`), quoted for the tokenizer.
+ */
+export function quoteHledgerRegex(value: string): string {
+    return quoteHledgerValue(escapeHledgerRegex(value));
 }
 
 export const QUERY_PREFIXES = [
@@ -55,7 +81,9 @@ const DATE_SMART_TERMS = [
  * under the cursor along with its start and end character indices.
  *
  * Tokens are whitespace-separated; single- and double-quoted strings
- * are treated as a single token (quotes are included in the span).
+ * are treated as a single token (quotes are included in the span). Inside
+ * double quotes a backslash escapes the next character, matching the
+ * grammar described on `quoteHledgerValue`.
  *
  * When the cursor lands on whitespace between tokens, the NEXT token
  * is returned (forward preference, so autocomplete suggests for the
@@ -84,7 +112,11 @@ export function getCurrentToken(
             if (ch === '"' || ch === "'") {
                 const q = ch;
                 i++;
-                while (i < value.length && value[i] !== q) i++;
+                while (i < value.length && value[i] !== q) {
+                    // `\x` inside double quotes never closes the span
+                    if (q === '"' && value[i] === '\\') i++;
+                    i++;
+                }
                 if (i < value.length) i++; // consume closing quote
             } else {
                 i++;
