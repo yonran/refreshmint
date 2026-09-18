@@ -37,7 +37,7 @@ import {
 import {
     getCurrentToken,
     getSearchSuggestions,
-    quoteHledgerValue,
+    quoteHledgerRegex,
 } from '../search-utils.ts';
 import {
     filterGlTransferCandidates,
@@ -72,9 +72,9 @@ function buildRecategorizeSeedQuery(
     balancingAccount: string,
 ): string {
     return joinQueryClauses(
-        `desc:${quoteHledgerValue(description)}`,
+        `desc:${quoteHledgerRegex(description)}`,
         balancingAccount.length > 0
-            ? `acct:${quoteHledgerValue(balancingAccount)}`
+            ? `acct:${quoteHledgerRegex(balancingAccount)}`
             : '',
     );
 }

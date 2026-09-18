@@ -12,7 +12,7 @@ import {
     type TransactionRow,
     UNCATEGORIZED_GL_ACCOUNT,
 } from '../tauri-commands.ts';
-import { quoteHledgerValue } from '../search-utils.ts';
+import { quoteHledgerRegex } from '../search-utils.ts';
 import { parseGlSourceRefs, type GlSourceRef } from '../evidence-nav-utils.ts';
 import type { SimilarRecategorizeSeed } from '../types.ts';
 import {
@@ -692,10 +692,10 @@ export function TransactionsTable({
                                                 const items: ContextMenuItem[] =
                                                     [
                                                         {
-                                                            label: `Filter: desc:${quoteHledgerValue(txn.description)}`,
+                                                            label: `Filter: desc:${quoteHledgerRegex(txn.description)}`,
                                                             action: () =>
                                                                 onAddSearchTerm?.(
-                                                                    `desc:${quoteHledgerValue(txn.description)}`,
+                                                                    `desc:${quoteHledgerRegex(txn.description)}`,
                                                                 ),
                                                         },
                                                     ];
@@ -779,10 +779,10 @@ export function TransactionsTable({
                                                             const postingMenuItems: ContextMenuItem[] =
                                                                 [
                                                                     {
-                                                                        label: `Filter: acct:${quoteHledgerValue(p.account)}`,
+                                                                        label: `Filter: acct:${quoteHledgerRegex(p.account)}`,
                                                                         action: () =>
                                                                             onAddSearchTerm?.(
-                                                                                `acct:${quoteHledgerValue(p.account)}`,
+                                                                                `acct:${quoteHledgerRegex(p.account)}`,
                                                                             ),
                                                                     },
                                                                 ];
