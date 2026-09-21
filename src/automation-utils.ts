@@ -162,6 +162,21 @@ export function categoryRulesFromBulkRows(
     return rules;
 }
 
+/**
+ * Build the standing CategoryRule (if any) to persist when a single-row
+ * recategorize requests "Create rule". Thin wrapper around
+ * categoryRulesFromBulkRows for the one-row case, kept as its own named entry
+ * point so the Transactions row-level "Create rule" checkbox has a pure,
+ * independently testable function in front of it (Tauri call sites like
+ * TransactionsTab.tsx aren't unit-testable here).
+ */
+export function categoryRuleFromSingleRow(
+    normalizedPayee: string,
+    account: string,
+): NewResolutionInput | null {
+    return categoryRulesFromBulkRows([{ normalizedPayee, account }])[0] ?? null;
+}
+
 /** Editable form state for a CategoryRule, used by the Rules panel. */
 export interface CategoryRuleFormValues {
     normalizedPayee: string;

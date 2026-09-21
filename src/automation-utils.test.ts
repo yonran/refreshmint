@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
     buildCategoryRuleInput,
     categoryRuleFormValuesFromResolution,
+    categoryRuleFromSingleRow,
     categoryRuleSummary,
     categoryRulesFromBulkRows,
     EMPTY_CATEGORY_RULE_FORM,
@@ -125,6 +126,25 @@ describe('categoryRulesFromBulkRows', () => {
         ]);
         expect(rules).toHaveLength(1);
         expect(rules[0]?.predicate?.normalizedPayee).toBe('COSTCO');
+    });
+});
+
+describe('categoryRuleFromSingleRow', () => {
+    it('builds a rule for a single payee/account pair', () => {
+        const rule = categoryRuleFromSingleRow('SAFEWAY', 'Expenses:Groceries');
+        expect(rule).toMatchObject({
+            kind: 'category-rule',
+            parts: [{ account: 'Expenses:Groceries' }],
+            predicate: { normalizedPayee: 'SAFEWAY' },
+        });
+    });
+
+    it('returns null for an empty payee', () => {
+        expect(categoryRuleFromSingleRow('', 'Expenses:Groceries')).toBeNull();
+    });
+
+    it('returns null for an empty account', () => {
+        expect(categoryRuleFromSingleRow('SAFEWAY', '  ')).toBeNull();
     });
 });
 
