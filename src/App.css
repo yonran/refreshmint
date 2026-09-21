@@ -516,7 +516,9 @@
 
 .txn-actions {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: 0.5rem;
 }
 
 .primary-button {
@@ -1070,6 +1072,15 @@ details[open] > .disclosure-summary::before {
     font-size: 0.875rem;
     color: #555;
     margin-right: auto;
+}
+
+.txn-actions .count-label,
+.postings-item .count-label {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.875rem;
+    color: #555;
 }
 
 /* Transfer matching modal */

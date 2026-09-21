@@ -22,7 +22,10 @@ import {
     validateTransactionText,
 } from '../tauri-commands.ts';
 import { formatTotals } from '../amount-utils.ts';
-import { categoryRulesFromBulkRows } from '../automation-utils.ts';
+import {
+    categoryRuleFromSingleRow,
+    categoryRulesFromBulkRows,
+} from '../automation-utils.ts';
 import {
     type AcceptAllEdit,
     buildUndoPlan,
@@ -118,6 +121,8 @@ type RecategorizeSelectionEntry = {
     txnId: string;
     postingIndex: number;
     oldAccount: string;
+    // Raw bank description, used to build a CategoryRule when createRule is set.
+    description: string;
 };
 
 function getRecategorizePostingOptions(
@@ -341,7 +346,11 @@ export function TransactionsTab({
     const [recategorizeBulkConfirm, setRecategorizeBulkConfirm] = useState<{
         entries: RecategorizeSelectionEntry[];
         newAccount: string;
+        createRule: boolean;
     } | null>(null);
+    // "Create rule" checkbox for the similar-transactions Recategorize tab's
+    // Apply action.
+    const [recategorizeCreateRule, setRecategorizeCreateRule] = useState(false);
     // Single surfaced status for user-initiated actions in this tab
     // (recategorize, merge/unmerge, bulk, accept-suggestions, standing-rule
     // save). Errors were previously the only case (bulkRecategorizeError);
@@ -820,6 +829,8 @@ export function TransactionsTab({
         postingIndex: number,
         newAccount: string,
         oldAccount: string,
+        description = '',
+        createRule = false,
     ) {
         // Guard against a double-click firing a second concurrent recategorize
         // (matching the transfer handlers): the second races the first's GL
@@ -866,8 +877,31 @@ export function TransactionsTab({
                 level: 'error',
                 message: `Categorize failed: ${String(error)}`,
             });
+            return;
         } finally {
             setRecategorizeBusy(false);
+        }
+        // The GL edit landed. Optionally persist a standing CategoryRule for this
+        // payee so future matches post here automatically. Repeated saves are
+        // idempotent (backend dedups by fingerprint); kept after the recategorize
+        // (never create a rule for an edit that failed).
+        if (createRule) {
+            try {
+                const normalizedPayee = await normalizePayee(description);
+                const rule = categoryRuleFromSingleRow(
+                    normalizedPayee,
+                    newAccount,
+                );
+                if (rule !== null) {
+                    await createResolution(ledgerPath, rule);
+                }
+            } catch (error) {
+                console.error('recategorize rule creation failed:', error);
+                setActionStatus({
+                    level: 'error',
+                    message: `Categorized, but saving the standing rule failed: ${String(error)}`,
+                });
+            }
         }
     }
 
@@ -984,7 +1018,7 @@ export function TransactionsTab({
     }
 
     async function handleBulkRecategorize(
-        entries: Array<RecategorizeSelectionEntry & { description?: string }>,
+        entries: RecategorizeSelectionEntry[],
         newAccount: string,
         createRule = false,
     ) {
@@ -1019,9 +1053,7 @@ export function TransactionsTab({
             try {
                 const rows = await Promise.all(
                     entries.map(async ({ description }) => ({
-                        normalizedPayee: await normalizePayee(
-                            description ?? '',
-                        ),
+                        normalizedPayee: await normalizePayee(description),
                         account: newAccount,
                     })),
                 );
@@ -1079,13 +1111,15 @@ export function TransactionsTab({
     function applyRecategorizeSelection(
         entries: RecategorizeSelectionEntry[],
         newAccount: string,
+        createRule: boolean,
     ) {
         const accounts = new Set(entries.map((entry) => entry.oldAccount));
         if (accounts.size > 1) {
-            setRecategorizeBulkConfirm({ entries, newAccount });
+            setRecategorizeBulkConfirm({ entries, newAccount, createRule });
             return;
         }
-        void handleBulkRecategorize(entries, newAccount);
+        void handleBulkRecategorize(entries, newAccount, createRule);
+        setRecategorizeCreateRule(false);
         closeActiveRecategorizeTab();
     }
 
@@ -1265,6 +1299,8 @@ export function TransactionsTab({
                               txnId: txn.id,
                               postingIndex,
                               oldAccount: posting.account,
+                              description:
+                                  txn.descriptionRaw || txn.description,
                           },
                       ];
             });
@@ -1692,11 +1728,27 @@ export function TransactionsTab({
                                         applyRecategorizeSelection(
                                             selectedRecategorizeEntries,
                                             activeRecategorizeTab.plan.newAccount.trim(),
+                                            recategorizeCreateRule,
                                         );
                                     }}
                                 >
                                     Apply
                                 </button>
+                                <label
+                                    className="count-label"
+                                    title="Also create a standing rule for each selected payee, so future matches post here automatically."
+                                >
+                                    <input
+                                        type="checkbox"
+                                        checked={recategorizeCreateRule}
+                                        onChange={(e) => {
+                                            setRecategorizeCreateRule(
+                                                e.target.checked,
+                                            );
+                                        }}
+                                    />{' '}
+                                    Create rule
+                                </label>
                             </div>
                             {recategorizeBulkConfirm !== null && (
                                 <BulkRecategorizeConfirmModal
@@ -1711,7 +1763,9 @@ export function TransactionsTab({
                                         void handleBulkRecategorize(
                                             recategorizeBulkConfirm.entries,
                                             recategorizeBulkConfirm.newAccount,
+                                            recategorizeBulkConfirm.createRule,
                                         );
+                                        setRecategorizeCreateRule(false);
                                         closeActiveRecategorizeTab();
                                     }}
                                 />
@@ -2294,12 +2348,16 @@ export function TransactionsTab({
                     postingIndex,
                     newAccount,
                     oldAccount,
+                    description,
+                    createRule,
                 ) => {
                     void handleRecategorizeGlTransaction(
                         txnId,
                         postingIndex,
                         newAccount,
                         oldAccount,
+                        description,
+                        createRule,
                     );
                 }}
                 onMergeTransfer={(txnId1, txnId2) => {

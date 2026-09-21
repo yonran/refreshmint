@@ -180,6 +180,9 @@ export function TransactionsTable({
         newAccount: string,
         // Current account of the posting, so callers can build an exact Undo.
         oldAccount: string,
+        // Raw bank description, used to build a CategoryRule when createRule is set.
+        description: string,
+        createRule: boolean,
     ) => void;
     onMergeTransfer?: (txnId1: string, txnId2: string) => void;
     onOpenLinkTransfer?: (txnId: string) => void;
@@ -224,6 +227,8 @@ export function TransactionsTable({
     >(new Set());
     const [editingKey, setEditingKey] = useState<string | null>(null); // `${txnId}:${postingIndex}`
     const [categoryDraft, setCategoryDraft] = useState('');
+    // When set, also create a standing CategoryRule for this row's payee on apply.
+    const [rowCreateRule, setRowCreateRule] = useState(false);
     const [uncontrolledSelectedIds, setUncontrolledSelectedIds] = useState<
         ReadonlySet<string>
     >(new Set());
@@ -800,6 +805,9 @@ export function TransactionsTable({
                                                                                     ? suggested
                                                                                     : '',
                                                                             );
+                                                                            setRowCreateRule(
+                                                                                false,
+                                                                            );
                                                                             setEditingKey(
                                                                                 key,
                                                                             );
@@ -949,9 +957,15 @@ export function TransactionsTable({
                                                                                             postingIndex,
                                                                                             categoryDraft.trim(),
                                                                                             p.account,
+                                                                                            txn.descriptionRaw ||
+                                                                                                txn.description,
+                                                                                            rowCreateRule,
                                                                                         );
                                                                                         setEditingKey(
                                                                                             null,
+                                                                                        );
+                                                                                        setRowCreateRule(
+                                                                                            false,
                                                                                         );
                                                                                     } else if (
                                                                                         e.key ===
@@ -985,9 +999,15 @@ export function TransactionsTable({
                                                                                             postingIndex,
                                                                                             categoryDraft.trim(),
                                                                                             p.account,
+                                                                                            txn.descriptionRaw ||
+                                                                                                txn.description,
+                                                                                            rowCreateRule,
                                                                                         );
                                                                                         setEditingKey(
                                                                                             null,
+                                                                                        );
+                                                                                        setRowCreateRule(
+                                                                                            false,
                                                                                         );
                                                                                     }
                                                                                 }}
@@ -1001,10 +1021,35 @@ export function TransactionsTable({
                                                                                     setEditingKey(
                                                                                         null,
                                                                                     );
+                                                                                    setRowCreateRule(
+                                                                                        false,
+                                                                                    );
                                                                                 }}
                                                                             >
                                                                                 Cancel
                                                                             </button>
+                                                                            <label
+                                                                                className="count-label"
+                                                                                title="Also create a standing rule for this payee, so future matches post here automatically."
+                                                                            >
+                                                                                <input
+                                                                                    type="checkbox"
+                                                                                    checked={
+                                                                                        rowCreateRule
+                                                                                    }
+                                                                                    onChange={(
+                                                                                        e,
+                                                                                    ) => {
+                                                                                        setRowCreateRule(
+                                                                                            e
+                                                                                                .target
+                                                                                                .checked,
+                                                                                        );
+                                                                                    }}
+                                                                                />{' '}
+                                                                                Create
+                                                                                rule
+                                                                            </label>
                                                                             {canShowSimilarPill && (
                                                                                 <button
                                                                                     type="button"
@@ -1042,6 +1087,9 @@ export function TransactionsTable({
                                                                                         null
                                                                                         ? suggested
                                                                                         : '',
+                                                                                );
+                                                                                setRowCreateRule(
+                                                                                    false,
                                                                                 );
                                                                                 setEditingKey(
                                                                                     key,
@@ -1158,6 +1206,9 @@ export function TransactionsTable({
                                                                                             postingIndex,
                                                                                             suggested,
                                                                                             p.account,
+                                                                                            txn.descriptionRaw ||
+                                                                                                txn.description,
+                                                                                            false,
                                                                                         );
                                                                                     }}
                                                                                 >
