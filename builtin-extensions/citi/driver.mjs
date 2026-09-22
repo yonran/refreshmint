@@ -1349,31 +1349,80 @@ async function main() {
             CITI_ORIGINS.some((origin) => url.startsWith(origin + '/'))
         ) {
             // UNTESTED: refine these state checks once we have real Citi snapshots.
-            const stateJson = /** @type {string} */ (
-                await context.mainPage.evaluate(`(function() {
+            // Citi's login shell is a client-rendered app: right after a goto()
+            // resolves, the DOM can still be an empty shell with none of the
+            // known-state markers present. Poll for a few seconds before
+            // concluding the page is an unrecognized public-site shell --
+            // otherwise every reload races the SPA hydration and the driver
+            // bounces between "unmatched" and "returned to explicit citi
+            // login url" until it hits the no-progress limit (observed
+            // 2026-09-20/21).
+            /**
+             * @typedef {{
+             *   hasUsername: boolean,
+             *   hasPassword: boolean,
+             *   hasSignOff: boolean,
+             *   hasAccountsMenu: boolean,
+             *   hasOtpField: boolean,
+             *   hasMfaText: boolean,
+             *   bodyHasInactivityHome: boolean,
+             * }} CitiPageState
+             */
+            // Returns the flags as a fixed-order array (rather than an
+            // object) so the parsed JSON only ever needs narrowing via
+            // Array.isArray + Boolean(), matching this codebase's
+            // established unknown-narrowing pattern for page.evaluate results
+            // (see availableMfaMethods in the bankofamerica driver).
+            const evalCitiStateFlags = async () => {
+                const raw = /** @type {string} */ (
+                    await context.mainPage.evaluate(`(function() {
                     const bodyText = document.body ? document.body.innerText.toLowerCase() : '';
-                    return JSON.stringify({
-                        hasUsername: !!document.querySelector('#username'),
-                        hasPassword: !!document.querySelector('#citi-input2-0'),
-                        hasSignOff: !!document.querySelector('#signOffmainAnchor'),
-                        hasAccountsMenu:
-                            !!document.querySelector('#accountsmainAnchor0, #accountsMainLI'),
-                        hasOtpField: !!document.querySelector(
+                    return JSON.stringify([
+                        !!document.querySelector('#username'),
+                        !!document.querySelector('#citi-input2-0'),
+                        !!document.querySelector('#signOffmainAnchor'),
+                        !!document.querySelector('#accountsmainAnchor0, #accountsMainLI'),
+                        !!document.querySelector(
                             'input[name="otp"], input[name="code"], input[inputmode="numeric"]',
                         ),
-                        hasMfaText:
-                            bodyText.includes('verification code') ||
+                        bodyText.includes('verification code') ||
                             bodyText.includes('security code') ||
                             bodyText.includes('one-time passcode') ||
                             bodyText.includes('multi-factor'),
-                        bodyHasInactivityHome:
-                            bodyText.includes('we are sorry, our system is currently unavailable') ||
+                        bodyText.includes('we are sorry, our system is currently unavailable') ||
                             bodyText.includes('inactivity') ||
                             bodyText.includes('sign on and continue where you left off'),
-                    });
+                    ]);
                 })()`)
-            );
-            const state = JSON.parse(stateJson);
+                );
+                const parsed = /** @type {unknown} */ (JSON.parse(raw));
+                const flags = Array.isArray(parsed) ? parsed : [];
+                return /** @type {CitiPageState} */ ({
+                    hasUsername: Boolean(flags[0]),
+                    hasPassword: Boolean(flags[1]),
+                    hasSignOff: Boolean(flags[2]),
+                    hasAccountsMenu: Boolean(flags[3]),
+                    hasOtpField: Boolean(flags[4]),
+                    hasMfaText: Boolean(flags[5]),
+                    bodyHasInactivityHome: Boolean(flags[6]),
+                });
+            };
+            let state = await evalCitiStateFlags();
+            for (
+                let pollStep = 0;
+                pollStep < 8 &&
+                !state.hasUsername &&
+                !state.hasPassword &&
+                !state.hasSignOff &&
+                !state.hasAccountsMenu &&
+                !state.hasOtpField &&
+                !state.hasMfaText &&
+                !state.bodyHasInactivityHome;
+                pollStep++
+            ) {
+                await humanPace(context.mainPage, 700, 1000);
+                state = await evalCitiStateFlags();
+            }
 
             if (state.hasSignOff || state.hasAccountsMenu) {
                 stepReturn = await handleLoggedIn(context);
