@@ -753,14 +753,30 @@ async function handleMfaChoice() {
     // receive it?" page is showing. Observed 2026-09-16 on bankofamerica-noel:
     // the driver fell through to the code prompt on the method page. Decide by
     // presence instead, and click the label rather than the input.
-    var hasMethodSelect = assertBoolean(
-        await page.evaluate(
-            '!!document.querySelector("#rbText, #rbVoice, #rbEmail")',
-        ),
-    );
-    var hasCodeInput = assertBoolean(
-        await page.evaluate('!!document.querySelector("#tlpvt-acw-authnum")'),
-    );
+    //
+    // The page also renders behind Akamai bot-manager sensor iframes, so
+    // domcontentloaded can fire before either control has been injected into
+    // the DOM (observed 2026-09-19/21 on bankofamerica: a blank page with only
+    // header/footer chrome). Poll for a few seconds before concluding neither
+    // control is present.
+    var hasMethodSelect = false;
+    var hasCodeInput = false;
+    for (var mfaWait = 0; mfaWait < 10; mfaWait++) {
+        hasMethodSelect = assertBoolean(
+            await page.evaluate(
+                '!!document.querySelector("#rbText, #rbVoice, #rbEmail")',
+            ),
+        );
+        hasCodeInput = assertBoolean(
+            await page.evaluate(
+                '!!document.querySelector("#tlpvt-acw-authnum")',
+            ),
+        );
+        if (hasMethodSelect || hasCodeInput) {
+            break;
+        }
+        await humanPace(700, 1200);
+    }
     refreshmint.log(
         `Has method selector: ${String(hasMethodSelect)}, has code input: ${String(hasCodeInput)}`,
     );
