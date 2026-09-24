@@ -597,6 +597,24 @@ export async function getScrapeDebugSessionSocket(): Promise<string | null> {
     return invoke('get_scrape_debug_session_socket');
 }
 
+export interface DebugSessionView {
+    sessionId: string;
+    loginName: string;
+    kind: string;
+    pid: number;
+    startedAt: string;
+}
+
+export async function listDebugSessions(
+    ledger: string,
+): Promise<DebugSessionView[]> {
+    return invoke('list_debug_sessions', { ledger });
+}
+
+export async function stopDebugSessionById(sessionId: string): Promise<void> {
+    await invoke('stop_debug_session_by_id', { sessionId });
+}
+
 export async function startLockMetadataWatch(ledger: string): Promise<void> {
     await invoke('start_lock_metadata_watch', { ledger });
 }

@@ -14,7 +14,10 @@ import {
     getLockStatusSnapshot,
     startLockMetadataWatch,
     stopLockMetadataWatch,
+    listDebugSessions,
+    stopDebugSessionById,
     type LockStatusSnapshot,
+    type DebugSessionView,
 } from '../tauri-commands.ts';
 import {
     appendLogLine,
@@ -133,6 +136,15 @@ export function ScrapeTab({
         Record<string, LastScrapeSummary>
     >({});
     const [lockStatus, setLockStatus] = useState<LockStatusSnapshot | null>(
+        null,
+    );
+    // Debug/retained-scrape sessions discovered for this ledger, keyed by
+    // login below. A session here but `running` false means a session this
+    // tab isn't tracking (e.g. a retained failed-scrape session, or one
+    // started before this app instance launched) -- the only handle the UI
+    // has on those is Stop-by-session-id.
+    const [debugSessions, setDebugSessions] = useState<DebugSessionView[]>([]);
+    const [stoppingSessionId, setStoppingSessionId] = useState<string | null>(
         null,
     );
 
@@ -268,21 +280,31 @@ export function ScrapeTab({
     useEffect(() => {
         if (ledgerPath === null || loginNames.length === 0) {
             setLockStatus(null);
+            setDebugSessions([]);
             return;
         }
         let cancelled = false;
         let unlisten: (() => void) | null = null;
-        const loadLocks = () =>
-            getLockStatusSnapshot(ledgerPath, loginNames)
+        const loadLocks = () => {
+            void getLockStatusSnapshot(ledgerPath, loginNames)
                 .then((s) => {
                     if (!cancelled) setLockStatus(s);
                 })
                 .catch(() => {});
-        void loadLocks();
+            // A locked login may be held by a debug/retained-scrape session
+            // this tab never started, so refresh alongside lock status
+            // rather than only after the tab's own Run/Cancel actions.
+            void listDebugSessions(ledgerPath)
+                .then((sessions) => {
+                    if (!cancelled) setDebugSessions(sessions);
+                })
+                .catch(() => {});
+        };
+        loadLocks();
         void startLockMetadataWatch(ledgerPath)
             .then(() =>
                 listen('refreshmint://lock-status-changed', () => {
-                    void loadLocks();
+                    loadLocks();
                 }),
             )
             .then((listener) => {
@@ -396,6 +418,20 @@ export function ScrapeTab({
             setScrapeStatus(`Canceling scrape for ${loginName}...`);
         } catch (error) {
             setScrapeStatus(`Cancel failed: ${String(error)}`);
+        }
+    }
+
+    async function handleStopDebugSession(session: DebugSessionView) {
+        setStoppingSessionId(session.sessionId);
+        try {
+            await stopDebugSessionById(session.sessionId);
+            setDebugSessions((current) =>
+                current.filter((s) => s.sessionId !== session.sessionId),
+            );
+        } catch (error) {
+            setScrapeStatus(`Stop failed: ${String(error)}`);
+        } finally {
+            setStoppingSessionId(null);
         }
     }
 
@@ -560,6 +596,11 @@ export function ScrapeTab({
                                         | undefined = summaries[login];
                                     const lock = lockStatus?.logins[login];
                                     const running = runningLoginName === login;
+                                    const orphanedSession = running
+                                        ? undefined
+                                        : debugSessions.find(
+                                              (s) => s.loginName === login,
+                                          );
                                     return (
                                         <tr key={login}>
                                             <td>{login}</td>
@@ -581,6 +622,28 @@ export function ScrapeTab({
                                                 {lock?.locked === true
                                                     ? 'Locked'
                                                     : ''}
+                                                {orphanedSession !==
+                                                    undefined && (
+                                                    <button
+                                                        type="button"
+                                                        className="link-button"
+                                                        disabled={
+                                                            stoppingSessionId ===
+                                                            orphanedSession.sessionId
+                                                        }
+                                                        title={`${orphanedSession.kind} session (pid ${String(orphanedSession.pid)}), started ${new Date(orphanedSession.startedAt).toLocaleString()}`}
+                                                        onClick={() => {
+                                                            void handleStopDebugSession(
+                                                                orphanedSession,
+                                                            );
+                                                        }}
+                                                    >
+                                                        {stoppingSessionId ===
+                                                        orphanedSession.sessionId
+                                                            ? 'Stopping…'
+                                                            : 'Stop'}
+                                                    </button>
+                                                )}
                                             </td>
                                             <td>
                                                 {running ? (
@@ -602,7 +665,15 @@ export function ScrapeTab({
                                                         disabled={
                                                             isRunningScrape ||
                                                             autoScrapeActive !==
-                                                                null
+                                                                null ||
+                                                            orphanedSession !==
+                                                                undefined
+                                                        }
+                                                        title={
+                                                            orphanedSession !==
+                                                            undefined
+                                                                ? 'Stop the session holding this login before running again'
+                                                                : undefined
                                                         }
                                                         onClick={() => {
                                                             void runScrapeFor(

@@ -320,6 +320,8 @@ pub fn run_with_context(
             start_scrape_debug_session,
             stop_scrape_debug_session,
             get_scrape_debug_session_socket,
+            list_debug_sessions,
+            stop_debug_session_by_id,
             start_lock_metadata_watch,
             stop_lock_metadata_watch,
             get_lock_status_snapshot,
@@ -775,6 +777,82 @@ fn get_scrape_debug_session_socket() -> Result<Option<String>, String> {
     };
     drop(finished);
     Ok(None)
+}
+
+/// A debug/retained-scrape session as seen by the frontend, keyed by
+/// `sessionId` so `stop_debug_session_by_id` can target it without needing to
+/// know the socket path. Mirrors `debug_registry::DebugSessionDescriptor`
+/// (filtered to the requesting ledger) minus the on-disk `ledgerDir`, which the
+/// frontend has no use for.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DebugSessionView {
+    session_id: String,
+    login_name: String,
+    kind: String,
+    pid: u32,
+    started_at: String,
+}
+
+impl From<&crate::debug_registry::DebugSessionDescriptor> for DebugSessionView {
+    fn from(descriptor: &crate::debug_registry::DebugSessionDescriptor) -> Self {
+        DebugSessionView {
+            session_id: descriptor.session_id.clone(),
+            login_name: descriptor.login_name.clone(),
+            kind: descriptor.kind.clone(),
+            pid: descriptor.pid,
+            started_at: descriptor.started_at.clone(),
+        }
+    }
+}
+
+/// Pure filtering step behind `list_debug_sessions`, split out so it's
+/// testable without touching the real on-disk session registry: a session
+/// belongs to this ledger only when its recorded `ledger_dir` matches
+/// exactly, so sessions started against a different ledger never leak into
+/// this one's Scrape tab.
+fn filter_debug_sessions_for_ledger(
+    sessions: &[crate::debug_registry::DebugSessionDescriptor],
+    ledger_dir: &std::path::Path,
+) -> Vec<DebugSessionView> {
+    sessions
+        .iter()
+        .filter(|descriptor| descriptor.ledger_dir == ledger_dir)
+        .map(DebugSessionView::from)
+        .collect()
+}
+
+/// Lists live debug sessions for this ledger: both sessions the app itself
+/// started (manual `debug start`, or the browser this app's own `Scrape`
+/// button spawned) and sessions kept alive independently after a failed
+/// scrape (see "Attaching to a failed app scrape" in docs/scraper.md). The
+/// latter hold their login's lock for up to 30 minutes with nothing in the
+/// frontend tracking them, so this is the only way the UI can discover one
+/// exists in order to offer a Stop button for it.
+#[tauri::command]
+fn list_debug_sessions(ledger: String) -> Result<Vec<DebugSessionView>, String> {
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+
+    Ok(filter_debug_sessions_for_ledger(
+        &crate::debug_registry::list_sessions(),
+        &target_dir,
+    ))
+}
+
+/// Stops a debug/retained-scrape session by `sessionId` (from
+/// `list_debug_sessions`), releasing its login lock. Unlike `cancel_scrape`,
+/// this works for a session the current app process never registered a
+/// cancel channel for -- in particular a retained failed-scrape session that
+/// outlived the `run_scrape_for_login` call that reported its error.
+#[tauri::command]
+fn stop_debug_session_by_id(session_id: String) -> Result<(), String> {
+    let session_id = require_non_empty_input("session_id", session_id)?;
+    let descriptor = crate::debug_registry::list_sessions()
+        .into_iter()
+        .find(|descriptor| descriptor.session_id == session_id)
+        .ok_or_else(|| format!("no debug session found with id '{session_id}'"))?;
+    crate::scrape::debug::stop_debug_session(&descriptor.socket_path).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -3274,11 +3352,11 @@ fn get_pending_prompt(
 mod tests {
     use super::{
         cancel_prompt_for_login, delete_login_account, evidence_ref_matches_document,
-        inspect_login_extraction_support, register_scrape_cancel, require_existing_login,
-        require_label_input, require_login_name_input, require_non_empty_input,
-        resolve_artifact_dir, resolve_prompt_timeout_secs, retained_failure_message,
-        run_login_account_extraction_blocking, scrape_output_payload, send_prompt_answer,
-        summarize_scrape_log, trigger_scrape_cancel, unregister_scrape_cancel,
+        filter_debug_sessions_for_ledger, inspect_login_extraction_support, register_scrape_cancel,
+        require_existing_login, require_label_input, require_login_name_input,
+        require_non_empty_input, resolve_artifact_dir, resolve_prompt_timeout_secs,
+        retained_failure_message, run_login_account_extraction_blocking, scrape_output_payload,
+        send_prompt_answer, summarize_scrape_log, trigger_scrape_cancel, unregister_scrape_cancel,
         validate_artifact_filename, wait_for_prompt_answer, PendingPrompt, PromptAnswerInner,
         PromptAnswerState, PromptWaitOutcome, ScrapeCancelState,
     };
@@ -3311,6 +3389,26 @@ mod tests {
         assert!(message.starts_with("driver script failed: boom\n"));
         assert!(message.contains("not a hang"));
         assert!(message.contains("debug exec --socket /tmp/rm-1-x.sock"));
+    }
+
+    #[test]
+    fn filter_debug_sessions_for_ledger_excludes_other_ledgers() {
+        let make =
+            |login_name: &str, ledger_dir: &str| crate::debug_registry::DebugSessionDescriptor {
+                session_id: format!("debug-{login_name}"),
+                login_name: login_name.to_string(),
+                kind: "failed-scrape".to_string(),
+                pid: 1,
+                socket_path: PathBuf::from(format!("/tmp/rm-{login_name}.sock")),
+                ledger_dir: PathBuf::from(ledger_dir),
+                started_at: "2026-09-24T20:25:02Z".to_string(),
+            };
+        let sessions = vec![make("chase", "/ledger/a"), make("citi", "/ledger/b")];
+
+        let views = filter_debug_sessions_for_ledger(&sessions, std::path::Path::new("/ledger/a"));
+
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].login_name, "chase");
     }
 
     #[test]
