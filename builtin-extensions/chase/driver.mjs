@@ -3,6 +3,8 @@
  */
 
 const BASE_URL = 'https://www.chase.com';
+const DASHBOARD_URL =
+    'https://secure.chase.com/web/auth/dashboard#/dashboard/overview';
 
 /**
  * @typedef {object} AccountInfo
@@ -155,20 +157,9 @@ async function handleLogin(context) {
     const isUserVisibleMain = await page.locator(userSelector).isVisible();
 
     if (!isUserVisibleMain) {
-        const framesJson = await page.frames();
-        const frames = JSON.parse(framesJson);
-        // Be more selective about logon frames
-        const logonFrame = frames.find(
-            (f) =>
-                f.id === 'logonbox' ||
-                f.name === 'logonbox' ||
-                (f.url &&
-                    f.url.includes('logonbox') &&
-                    !f.url.includes('doubleclick') &&
-                    !f.url.includes('google')),
-        );
-        if (logonFrame) {
-            targetFrame = logonFrame.id || logonFrame.name || logonFrame.url;
+        const logonFrame = await findLogonFrame(page);
+        if (logonFrame !== null) {
+            targetFrame = logonFrame;
             refreshmint.log(`Switching to login iframe: ${targetFrame}`);
             try {
                 await page.switchToFrame(targetFrame);
@@ -316,6 +307,114 @@ async function handleLogin(context) {
 }
 
 /**
+ * Dismiss Chase's Qualtrics "We'd love to hear what you think of our new
+ * site" survey modal (seen 2026-09-25 on a download form), which intercepts
+ * every click. Only clicks "Cancel" inside that modal: the download form has
+ * its own Cancel button.
+ * @param {PageApi} page
+ * @returns {Promise<boolean>} whether a survey was dismissed
+ */
+async function dismissSurvey(page) {
+    return assertBoolean(
+        await page.evaluate(`(function() {
+        const modal = Array.from(document.querySelectorAll('mds-dialog-modal')).find(
+            (m) => m.getClientRects().length > 0 && /survey/i.test(m.innerText || ''),
+        );
+        if (!modal) return false;
+        const find = (root) => {
+            for (const b of Array.from(root.querySelectorAll('button'))) {
+                if ((b.innerText || '').trim().startsWith('Cancel')) return b;
+            }
+            for (const h of Array.from(root.querySelectorAll('*')).filter((e) => e.shadowRoot)) {
+                const found = find(h.shadowRoot);
+                if (found) return found;
+            }
+            return null;
+        };
+        const cancel = find(modal) || (modal.shadowRoot && find(modal.shadowRoot));
+        if (!cancel) return false;
+        cancel.click();
+        return true;
+    })()`),
+    );
+}
+
+/**
+ * Frame ref (for `page.switchToFrame`) of Chase's `logonbox` sign-in iframe,
+ * or null when the page has none.
+ * @param {PageApi} page
+ * @returns {Promise<string | null>}
+ */
+async function findLogonFrame(page) {
+    const parsedFrames = /** @type {unknown} */ (
+        JSON.parse(await page.frames())
+    );
+    const frames =
+        /** @type {Array<{id?: string, name?: string, url?: string}>} */ (
+            Array.isArray(parsedFrames) ? parsedFrames : []
+        );
+    // Be selective: ad/analytics frames can carry "logonbox" in their URL.
+    const logonFrame = frames.find(
+        (f) =>
+            f.id === 'logonbox' ||
+            f.name === 'logonbox' ||
+            (f.url !== undefined &&
+                f.url.includes('logonbox') &&
+                !f.url.includes('doubleclick') &&
+                !f.url.includes('google')),
+    );
+    if (logonFrame === undefined) return null;
+    for (const ref of [logonFrame.id, logonFrame.name, logonFrame.url]) {
+        if (ref !== undefined && ref !== '') return ref;
+    }
+    return null;
+}
+
+/**
+ * Whether the current frame shows a visible MFA "Confirm Your Identity"
+ * screen. The visibility check keeps a hidden, stale sign-in iframe from
+ * looking like an MFA prompt after login has moved on.
+ * @param {PageApi} page
+ * @returns {Promise<boolean>}
+ */
+async function currentFrameShowsMfa(page) {
+    return assertBoolean(
+        await page.evaluate(`(function() {
+        const h1 = document.querySelector('h1');
+        if (!h1 || h1.getClientRects().length === 0) return false;
+        const body = document.body ? document.body.innerText.toLowerCase() : '';
+        return h1.innerText.toLowerCase().includes('confirm') ||
+            body.includes('confirm your identity') ||
+            body.includes('one-time code');
+    })()`),
+    );
+}
+
+/**
+ * Since at least 2026-09-25 Chase renders the MFA screens inside the
+ * `logonbox` iframe on the dashboard URL, while the main frame is only a
+ * "loading" shell (verified against a retained failed-scrape session).
+ * Returns that frame's ref when it holds the MFA screen, else null (the MFA
+ * screen, if any, is in the main frame).
+ * @param {PageApi} page
+ * @returns {Promise<string | null>}
+ */
+async function findMfaFrame(page) {
+    await page.switchToMainFrame();
+    if (await currentFrameShowsMfa(page)) return null;
+    const logonFrame = await findLogonFrame(page);
+    if (logonFrame === null) return null;
+    await page.switchToFrame(logonFrame);
+    try {
+        return (await currentFrameShowsMfa(page)) ? logonFrame : null;
+    } finally {
+        await page.switchToMainFrame();
+    }
+}
+
+/**
+ * Handles the MFA screen in whichever frame is current; the main loop
+ * selects the sign-in iframe first when `findMfaFrame` finds it there.
  * @param {ScrapeContext} context
  * @returns {Promise<object>}
  */
@@ -328,7 +427,6 @@ async function handleMfa(context) {
     refreshmint.log(
         'Intent: Handle MFA identity confirmation. Fragment: ' + urlFragment,
     );
-    await page.switchToMainFrame();
 
     // 0. Verify page state and check for errors
     const pageInfoJson = /** @type {string} */ (
@@ -410,9 +508,16 @@ async function handleMfa(context) {
         await otpInput.fill(code);
         await humanPace(page, 1000, 2000);
 
-        const submitBtn = page
-            .getByRole('button', { name: /Submit|Next|Continue/i })
-            .first();
+        // `#next-content` is the OTP screen's "Next" (an mds-button host,
+        // verified 2026-09-25). The role/name fallback alone matched the code
+        // field's Show/Hide toggle first, so it toggled visibility forever
+        // instead of submitting.
+        const nextContent = page.locator('#next-content');
+        const submitBtn = (await nextContent.isVisible())
+            ? nextContent
+            : page
+                  .getByRole('button', { name: /Submit|Next|Continue/i })
+                  .first();
         if (await submitBtn.isVisible()) {
             const btnHtml =
                 (await submitBtn.getAttribute('id')) +
@@ -421,8 +526,9 @@ async function handleMfa(context) {
             refreshmint.log(
                 'OTP submit button is visible. Element info: ' + btnHtml,
             );
-            refreshmint.log('Clicking via getByRole...');
+            refreshmint.log('Clicking OTP submit...');
             await submitBtn.click();
+            context.otpSubmitted = true;
             await waitMs(page, 5000);
             return { progressName: 'mfa code submitted' };
         }
@@ -600,6 +706,27 @@ async function handleAccountDetails(context) {
     refreshmint.log('Intent: Find download button on account details page');
     await page.switchToMainFrame();
 
+    // Open the download form by URL: an account with no activity in the
+    // current view (e.g. a card with nothing since its last statement)
+    // disables the download button, but the form itself can still export
+    // all transactions. Verified 2026-09-25: #/dashboard/summary/<id>/<type>
+    // maps to #/dashboard/transactions/downloads/<id>/<type>, preselected.
+    const url = await page.url();
+    const summaryMarker = '#/dashboard/summary/';
+    const summaryIndex = url.indexOf(summaryMarker);
+    if (summaryIndex !== -1) {
+        const accountPath = url.slice(summaryIndex + summaryMarker.length);
+        refreshmint.log(`Opening download form for ${accountPath}...`);
+        await humanPace(page, 1000, 2000);
+        await page.goto(
+            url.slice(0, summaryIndex) +
+                '#/dashboard/transactions/downloads/' +
+                accountPath,
+        );
+        await waitMs(page, 5000);
+        return { progressName: `opened download form for ${accountPath}` };
+    }
+
     const downloadBtn = page.locator(
         '[data-testid="quick-action-download-activity-tooltip-button"]',
     );
@@ -634,10 +761,10 @@ async function handleDownload(context) {
     refreshmint.log('Intent: Interact with download dialog');
     await page.switchToMainFrame();
 
-    const nextAccount = context.accounts.find(
+    const pending = context.accounts.filter(
         (a) => !context.downloadedAccounts.has(a.name),
     );
-    if (!nextAccount) {
+    if (pending.length === 0) {
         refreshmint.log('All accounts downloaded. Returning to dashboard...');
         await page.evaluate(`(function() {
             const btn = Array.from(document.querySelectorAll('button')).find(el => el.textContent.includes('Go back to accounts'));
@@ -649,91 +776,106 @@ async function handleDownload(context) {
         return { progressName: 'downloading complete', done: true };
     }
 
-    refreshmint.log(`Preparing download for: ${nextAccount.name}`);
+    // The form's selects are mds-select web components (buttons in shadow
+    // DOM, verified 2026-09-25), which the old document.querySelectorAll
+    // ('button') search never saw -- so it silently downloaded the
+    // preselected account once per account. Opening the form from an
+    // account's own page preselects that account, so use it, and go back
+    // for the next account instead of driving the account dropdown.
+    const accountSelect = page.locator(
+        '#select-account_options_id-selector-no-label',
+    );
+    const selectedAccountText = (await accountSelect.isVisible())
+        ? await accountSelect.innerText()
+        : '';
+    const account = pending.find(
+        (a) => a.last4 !== '' && selectedAccountText.includes(a.last4),
+    );
+    if (account === undefined) {
+        refreshmint.log(
+            `Download form is for "${selectedAccountText}", not a pending account; returning to dashboard.`,
+        );
+        await page.goto(DASHBOARD_URL);
+        await waitMs(page, 5000);
+        return { progressName: `back to dashboard for ${pending[0].name}` };
+    }
+
+    refreshmint.log(`Preparing download for: ${account.name}`);
     await humanPace(page, 1000, 2000);
 
-    // 1. Select account in dropdown
-    const accountDropdown = page.evaluate(`(function(name) {
-        const btn = Array.from(document.querySelectorAll('button')).find(el => el.innerText.includes('Account,'));
-        if (btn) { btn.click(); return true; }
-        return false;
-    })()`);
-
-    if (await accountDropdown) {
+    const fileTypeSelect = page.locator(
+        '#select-showing-file-select-selector-no-label',
+    );
+    const fileType = await fileTypeSelect.innerText();
+    if (!fileType.includes('CSV')) {
+        // UNTESTED: CSV has been the default every time so far.
+        refreshmint.log(`File type is "${fileType}"; choosing CSV...`);
+        await fileTypeSelect.click();
         await waitMs(page, 1000);
-        const selected = await page.evaluate(`(function(name) {
-            const options = Array.from(document.querySelectorAll('[role="option"], li, button'));
-            const opt = options.find(o => o.innerText.includes(name));
-            if (opt) { opt.click(); return true; }
-            return false;
-        })("${nextAccount.name}")`);
-        if (selected) await waitMs(page, 1000);
-    }
-
-    // 2. Select File Type: Spreadsheet (Excel, CSV)
-    const fileTypeDropdown = await page.evaluate(`(function() {
-        const btn = Array.from(document.querySelectorAll('button')).find(el => el.innerText.includes('File type,'));
-        if (btn) { btn.click(); return true; }
-        return false;
-    })()`);
-    if (fileTypeDropdown) {
-        await waitMs(page, 1000);
-        await page.evaluate(`(function() {
-            const opt = Array.from(document.querySelectorAll('[role="option"], li, button')).find(o => o.innerText.includes('Spreadsheet (Excel, CSV)'));
-            if (opt) opt.click();
-        })()`);
+        await page
+            .getByRole('option', { name: /Spreadsheet \(Excel, CSV\)/ })
+            .first()
+            .click();
         await waitMs(page, 1000);
     }
 
-    // 3. Select Activity: All transactions
-    const activityDropdown = await page.evaluate(`(function() {
-        const btn = Array.from(document.querySelectorAll('button')).find(el => el.innerText.includes('Activity,'));
-        if (btn) { btn.click(); return true; }
-        return false;
-    })()`);
-    if (activityDropdown) {
+    const activitySelect = page.locator(
+        '#select-showing-activity-select-selector-no-label',
+    );
+    if (!(await activitySelect.innerText()).includes('All transactions')) {
+        await activitySelect.click();
         await waitMs(page, 1000);
-        await page.evaluate(`(function() {
-            const opt = Array.from(document.querySelectorAll('[role="option"], li, button')).find(o => o.innerText.includes('All transactions'));
-            if (opt) opt.click();
-        })()`);
+        // Option ids differ by account type (savings: ...-last24monthsoption;
+        // cards: a JSON date range), so pick the option by its `label`
+        // attribute (its rendered text is empty until the list is laid out).
+        const optionSelector =
+            '#showing-activity-select-selector-no-label mds-select-option';
+        const allIndex = /** @type {number} */ (
+            await page.evaluate(`Array.from(document.querySelectorAll(${JSON.stringify(optionSelector)}))
+                .findIndex((o) => o.getAttribute('label') === 'All transactions')`)
+        );
+        if (allIndex !== -1) {
+            await page.locator(optionSelector).nth(allIndex).click();
+        }
         await waitMs(page, 1000);
     }
+    const activity = await activitySelect.innerText();
+    const fileTypeNow = await fileTypeSelect.innerText();
+    if (
+        !activity.includes('All transactions') ||
+        !fileTypeNow.includes('CSV')
+    ) {
+        refreshmint.log(
+            `Download options did not stick (activity "${activity}", file type "${fileTypeNow}").`,
+        );
+        return {
+            progressName: `retrying download options for ${account.name}`,
+        };
+    }
 
-    // 4. Click Download
     refreshmint.log('Clicking Download button...');
     await humanPace(page, 1000, 2000);
     const downloadPromise = page.waitForDownload(30000);
-    const clickedDownload = await page.evaluate(`(function() {
-        const btn = Array.from(document.querySelectorAll('button')).find(el => el.textContent === 'Download');
-        if (btn) { btn.click(); return true; }
-        return false;
-    })()`);
-
-    if (clickedDownload) {
-        try {
-            const download = await downloadPromise;
-            refreshmint.log(`Download finished: ${download.suggestedFilename}`);
-            await refreshmint.saveDownloadedResource(
-                download.path,
-                download.suggestedFilename,
-                {
-                    label: nextAccount.label,
-                },
-            );
-            context.downloadedAccounts.add(nextAccount.name);
-            await page.evaluate(`(function() {
-                const btn = Array.from(document.querySelectorAll('button')).find(el => el.textContent.includes('Download other activity'));
-                if (btn) btn.click();
-            })()`);
-            await waitMs(page, 3000);
-            return { progressName: `downloaded ${nextAccount.name}` };
-        } catch (e) {
-            refreshmint.log(`Download failed for ${nextAccount.name}: ${e}`);
-        }
+    await page.locator('#downloadButton').click();
+    try {
+        const download = await downloadPromise;
+        // Chase names the file with a bare UUID; extraction only parses
+        // documents named *.csv (or with a CSV MIME type).
+        const filename = `Chase${account.last4}_Activity.csv`;
+        refreshmint.log(
+            `Download finished: ${download.suggestedFilename} -> ${filename}`,
+        );
+        await refreshmint.saveDownloadedResource(download.path, filename, {
+            label: account.label,
+        });
+        context.downloadedAccounts.add(account.name);
+    } catch (e) {
+        refreshmint.log(`Download failed for ${account.name}: ${String(e)}`);
+        return { progressName: `retrying download for ${account.name}` };
     }
-
-    return { progressName: `retrying download for ${nextAccount.name}` };
+    await page.goto(DASHBOARD_URL);
+    await waitMs(page, 5000);
+    return { progressName: `downloaded ${account.name}` };
 }
 
 async function main() {
@@ -773,6 +915,14 @@ async function main() {
         const [urlBeforeFragment, fragment] = url.split('#', 2);
         const urlFragment = fragment || '';
 
+        // Handlers may leave a sub-frame selected (handleLogin returns from
+        // inside the sign-in iframe while waiting), so reset before probing;
+        // otherwise routing depends on whichever frame the last step used.
+        await context.mainPage.switchToMainFrame();
+        if (await dismissSurvey(context.mainPage)) {
+            refreshmint.log('Dismissed Chase feedback survey popup.');
+            await waitMs(context.mainPage, 1500);
+        }
         // Get page context for better routing
         const pageStatusJson = /** @type {string} */ (
             await context.mainPage.evaluate(`(function() {
@@ -808,7 +958,9 @@ async function main() {
         let stepReturn;
         try {
             if (urlBeforeFragment.startsWith('https://secure.chase.com/')) {
+                const mfaFrame = await findMfaFrame(context.mainPage);
                 if (
+                    mfaFrame !== null ||
                     header.includes('confirm') ||
                     title.includes('identity') ||
                     // UNTESTED after the 2026-09-05 retained artifact. This
@@ -817,15 +969,33 @@ async function main() {
                     pageStatus.isMfa ||
                     urlFragment.includes('step=confirmIdentity')
                 ) {
+                    if (mfaFrame !== null) {
+                        // Verified 2026-09-25 end to end: method picker,
+                        // mobile-number confirmation, and OTP entry all
+                        // render inside this frame.
+                        refreshmint.log(
+                            `MFA screen is inside the sign-in iframe: ${mfaFrame}`,
+                        );
+                        await context.mainPage.switchToFrame(mfaFrame);
+                    }
+                    // No need to switch back afterwards: the loop resets
+                    // to the main frame before its next probe.
                     stepReturn = await handleMfa(context);
                 } else if (
                     header.includes('download') ||
-                    urlFragment.includes('downloadAccountTransactions')
+                    urlFragment.includes('downloadAccountTransactions') ||
+                    // Moved to #/dashboard/transactions/downloads/<id>/<type>
+                    // (seen 2026-09-25) with no h1; must win over '/dashboard'.
+                    urlFragment.includes('/transactions/downloads/')
                 ) {
                     stepReturn = await handleDownload(context);
                 } else if (
                     header.includes('account details') ||
-                    urlFragment.includes('accountDetails')
+                    urlFragment.includes('accountDetails') ||
+                    // Account pages moved to #/dashboard/summary/<id>/<type>
+                    // (seen 2026-09-25) with no h1; this must win over the
+                    // generic '/dashboard' branch below.
+                    urlFragment.includes('/dashboard/summary/')
                 ) {
                     stepReturn = await handleAccountDetails(context);
                 } else if (
