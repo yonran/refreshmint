@@ -499,7 +499,6 @@ pub async fn serve_existing_debug_session(
     refreshmint_inner: std::sync::Arc<tokio::sync::Mutex<super::js_api::RefreshmintInner>>,
 ) -> Result<(), Box<dyn Error>> {
     use std::time::{Duration, Instant};
-    use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::net::UnixListener;
 
     let socket_path = config.socket_path;
@@ -541,6 +540,11 @@ pub async fn serve_existing_debug_session(
         listener(&descriptor);
     }
 
+    let mut dispatcher = RealExecDispatcher {
+        page_inner,
+        refreshmint_inner,
+    };
+
     let started = Instant::now();
     let mut running = true;
     while running {
@@ -558,77 +562,7 @@ pub async fn serve_existing_debug_session(
 
         match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
             Ok(Ok((stream, _addr))) => {
-                let mut reader = BufReader::new(stream);
-                let mut body = String::new();
-                let read_result = reader.read_line(&mut body).await;
-                let mut stream = reader.into_inner();
-                match read_result {
-                    Ok(0) => {
-                        let response = Response {
-                            ok: false,
-                            error: Some("failed to read request: empty request".to_string()),
-                        };
-                        if let Err(err) = write_response_async(&mut stream, &response).await {
-                            eprintln!("failed to write debug response: {err}");
-                        }
-                    }
-                    Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
-                        Ok(Request::Exec {
-                            script,
-                            entry_root,
-                            entry_path,
-                            declared_secrets,
-                            prompt_overrides,
-                            prompt_requires_override,
-                            script_options,
-                        }) => {
-                            if let Err(err) = handle_exec_request_async(
-                                &mut stream,
-                                page_inner.clone(),
-                                refreshmint_inner.clone(),
-                                script,
-                                entry_root,
-                                entry_path,
-                                declared_secrets,
-                                prompt_overrides,
-                                prompt_requires_override,
-                                script_options,
-                            )
-                            .await
-                            {
-                                eprintln!("failed to write debug exec stream: {err}");
-                            }
-                        }
-                        Ok(Request::Stop) => {
-                            running = false;
-                            let response = Response {
-                                ok: true,
-                                error: None,
-                            };
-                            if let Err(err) = write_response_async(&mut stream, &response).await {
-                                eprintln!("failed to write debug response: {err}");
-                            }
-                        }
-                        Err(err) => {
-                            let response = Response {
-                                ok: false,
-                                error: Some(format!("invalid request: {err}")),
-                            };
-                            if let Err(err) = write_response_async(&mut stream, &response).await {
-                                eprintln!("failed to write debug response: {err}");
-                            }
-                        }
-                    },
-                    Err(err) => {
-                        let response = Response {
-                            ok: false,
-                            error: Some(format!("failed to read request: {err}")),
-                        };
-                        if let Err(err) = write_response_async(&mut stream, &response).await {
-                            eprintln!("failed to write debug response: {err}");
-                        }
-                    }
-                }
+                running = handle_connection(stream, &mut dispatcher).await;
             }
             Ok(Err(err)) => return Err(err.into()),
             Err(_) => continue,
@@ -644,6 +578,149 @@ pub async fn serve_existing_debug_session(
     drop(browser_instance);
     let _ = tokio::time::timeout(Duration::from_secs(5), handler_handle).await;
     Ok(())
+}
+
+/// Executes an `Exec` request against a stream. Boxed-future rather than
+/// `async fn` in a trait so `RealExecDispatcher` and test fakes can share a
+/// `&mut dyn` seam without pulling `chromiumoxide` types into the seam
+/// itself; that seam is what let us unit-test the connection-handling flow
+/// below (request parsing, dispatch, response writing) with a fake browser.
+#[cfg(unix)]
+trait ExecDispatcher {
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch<'a>(
+        &'a mut self,
+        stream: &'a mut tokio::net::UnixStream,
+        script: Option<String>,
+        entry_root: Option<PathBuf>,
+        entry_path: Option<PathBuf>,
+        declared_secrets: Option<super::js_api::SecretDeclarations>,
+        prompt_overrides: Option<super::js_api::PromptOverrides>,
+        prompt_requires_override: Option<bool>,
+        script_options: Option<super::js_api::ScriptOptions>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>>;
+}
+
+#[cfg(unix)]
+struct RealExecDispatcher {
+    page_inner: std::sync::Arc<tokio::sync::Mutex<super::js_api::PageInner>>,
+    refreshmint_inner: std::sync::Arc<tokio::sync::Mutex<super::js_api::RefreshmintInner>>,
+}
+
+#[cfg(unix)]
+impl ExecDispatcher for RealExecDispatcher {
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch<'a>(
+        &'a mut self,
+        stream: &'a mut tokio::net::UnixStream,
+        script: Option<String>,
+        entry_root: Option<PathBuf>,
+        entry_path: Option<PathBuf>,
+        declared_secrets: Option<super::js_api::SecretDeclarations>,
+        prompt_overrides: Option<super::js_api::PromptOverrides>,
+        prompt_requires_override: Option<bool>,
+        script_options: Option<super::js_api::ScriptOptions>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>> {
+        Box::pin(handle_exec_request_async(
+            stream,
+            self.page_inner.clone(),
+            self.refreshmint_inner.clone(),
+            script,
+            entry_root,
+            entry_path,
+            declared_secrets,
+            prompt_overrides,
+            prompt_requires_override,
+            script_options,
+        ))
+    }
+}
+
+/// Reads and handles one request off an accepted connection: parses it,
+/// dispatches `Exec` to `dispatcher` or handles `Stop` directly, and writes
+/// the response. Returns whether the server loop should keep running (i.e.
+/// `false` only after a `Stop` request).
+#[cfg(unix)]
+async fn handle_connection(
+    stream: tokio::net::UnixStream,
+    dispatcher: &mut dyn ExecDispatcher,
+) -> bool {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut reader = BufReader::new(stream);
+    let mut body = String::new();
+    let read_result = reader.read_line(&mut body).await;
+    let mut stream = reader.into_inner();
+    match read_result {
+        Ok(0) => {
+            let response = Response {
+                ok: false,
+                error: Some("failed to read request: empty request".to_string()),
+            };
+            if let Err(err) = write_response_async(&mut stream, &response).await {
+                eprintln!("failed to write debug response: {err}");
+            }
+            true
+        }
+        Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
+            Ok(Request::Exec {
+                script,
+                entry_root,
+                entry_path,
+                declared_secrets,
+                prompt_overrides,
+                prompt_requires_override,
+                script_options,
+            }) => {
+                if let Err(err) = dispatcher
+                    .dispatch(
+                        &mut stream,
+                        script,
+                        entry_root,
+                        entry_path,
+                        declared_secrets,
+                        prompt_overrides,
+                        prompt_requires_override,
+                        script_options,
+                    )
+                    .await
+                {
+                    eprintln!("failed to write debug exec stream: {err}");
+                }
+                true
+            }
+            Ok(Request::Stop) => {
+                let response = Response {
+                    ok: true,
+                    error: None,
+                };
+                if let Err(err) = write_response_async(&mut stream, &response).await {
+                    eprintln!("failed to write debug response: {err}");
+                }
+                false
+            }
+            Err(err) => {
+                let response = Response {
+                    ok: false,
+                    error: Some(format!("invalid request: {err}")),
+                };
+                if let Err(err) = write_response_async(&mut stream, &response).await {
+                    eprintln!("failed to write debug response: {err}");
+                }
+                true
+            }
+        },
+        Err(err) => {
+            let response = Response {
+                ok: false,
+                error: Some(format!("failed to read request: {err}")),
+            };
+            if let Err(err) = write_response_async(&mut stream, &response).await {
+                eprintln!("failed to write debug response: {err}");
+            }
+            true
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -967,6 +1044,8 @@ mod tests {
     use super::{
         finalize_debug_exec_resources, sanitize_segment, ExecOutputStream, ExecStreamFrame,
     };
+    #[cfg(unix)]
+    use super::{handle_connection, ExecDispatcher, Request, Response};
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
         PromptOverrides, RefreshmintInner, ScriptOptions, SensitiveData, SessionMetadata,
@@ -1080,5 +1159,166 @@ mod tests {
         assert!(sidecar_path.exists());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    struct FakeExecDispatcher {
+        dispatched_script: Option<String>,
+    }
+
+    #[cfg(unix)]
+    impl ExecDispatcher for FakeExecDispatcher {
+        fn dispatch<'a>(
+            &'a mut self,
+            stream: &'a mut tokio::net::UnixStream,
+            script: Option<String>,
+            _entry_root: Option<PathBuf>,
+            _entry_path: Option<PathBuf>,
+            _declared_secrets: Option<crate::scrape::js_api::SecretDeclarations>,
+            _prompt_overrides: Option<PromptOverrides>,
+            _prompt_requires_override: Option<bool>,
+            _script_options: Option<ScriptOptions>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>>
+        {
+            self.dispatched_script = script;
+            Box::pin(async move {
+                super::write_exec_stream_frame_async(
+                    stream,
+                    &ExecStreamFrame::Output {
+                        stream: ExecOutputStream::Stdout,
+                        line: "hello from fake browser".to_string(),
+                    },
+                )
+                .await?;
+                super::write_exec_stream_frame_async(
+                    stream,
+                    &ExecStreamFrame::Result {
+                        ok: true,
+                        error: None,
+                    },
+                )
+                .await
+            })
+        }
+    }
+
+    /// Exercises the normal `Exec` request/response flow through
+    /// `handle_connection` -- the actual code path every scraper debug
+    /// session's socket protocol runs through -- without a real browser.
+    /// `FakeExecDispatcher` stands in for `RealExecDispatcher`, which is the
+    /// only piece of `handle_connection`'s dependencies that would otherwise
+    /// require a live `chromiumoxide` browser and page.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handle_connection_serves_a_normal_exec_request() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (mut client, server) = tokio::net::UnixStream::pair()
+            .unwrap_or_else(|err| panic!("failed to create socket pair: {err}"));
+
+        let request = Request::Exec {
+            script: Some("console.log('hi')".to_string()),
+            entry_root: None,
+            entry_path: None,
+            declared_secrets: None,
+            prompt_overrides: None,
+            prompt_requires_override: None,
+            script_options: None,
+        };
+        let mut request_bytes =
+            serde_json::to_vec(&request).unwrap_or_else(|err| panic!("failed: {err}"));
+        request_bytes.push(b'\n');
+        client
+            .write_all(&request_bytes)
+            .await
+            .unwrap_or_else(|err| panic!("failed to write request: {err}"));
+
+        let mut dispatcher = FakeExecDispatcher {
+            dispatched_script: None,
+        };
+        let keep_running = handle_connection(server, &mut dispatcher).await;
+        assert!(
+            keep_running,
+            "an Exec request must not stop the debug session loop"
+        );
+        assert_eq!(
+            dispatcher.dispatched_script.as_deref(),
+            Some("console.log('hi')")
+        );
+
+        let mut reader = BufReader::new(&mut client);
+        let mut output_line = String::new();
+        reader
+            .read_line(&mut output_line)
+            .await
+            .unwrap_or_else(|err| panic!("failed to read output frame: {err}"));
+        let output_frame: ExecStreamFrame = serde_json::from_str(output_line.trim())
+            .unwrap_or_else(|err| panic!("failed to parse output frame: {err}"));
+        assert_eq!(
+            output_frame,
+            ExecStreamFrame::Output {
+                stream: ExecOutputStream::Stdout,
+                line: "hello from fake browser".to_string(),
+            }
+        );
+
+        let mut result_line = String::new();
+        reader
+            .read_line(&mut result_line)
+            .await
+            .unwrap_or_else(|err| panic!("failed to read result frame: {err}"));
+        let result_frame: ExecStreamFrame = serde_json::from_str(result_line.trim())
+            .unwrap_or_else(|err| panic!("failed to parse result frame: {err}"));
+        assert_eq!(
+            result_frame,
+            ExecStreamFrame::Result {
+                ok: true,
+                error: None,
+            }
+        );
+    }
+
+    /// Exercises the normal `Stop` request/response flow -- the fake
+    /// dispatcher is never invoked for `Stop`, so this covers the shutdown
+    /// signal path without any browser dependency at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handle_connection_serves_a_normal_stop_request() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (mut client, server) = tokio::net::UnixStream::pair()
+            .unwrap_or_else(|err| panic!("failed to create socket pair: {err}"));
+
+        let mut request_bytes =
+            serde_json::to_vec(&Request::Stop).unwrap_or_else(|err| panic!("failed: {err}"));
+        request_bytes.push(b'\n');
+        client
+            .write_all(&request_bytes)
+            .await
+            .unwrap_or_else(|err| panic!("failed to write request: {err}"));
+
+        let mut dispatcher = FakeExecDispatcher {
+            dispatched_script: None,
+        };
+        let keep_running = handle_connection(server, &mut dispatcher).await;
+        assert!(
+            !keep_running,
+            "a Stop request must stop the debug session loop"
+        );
+        assert_eq!(
+            dispatcher.dispatched_script, None,
+            "Stop must not be routed through the exec dispatcher"
+        );
+
+        let mut reader = BufReader::new(&mut client);
+        let mut response_line = String::new();
+        reader
+            .read_line(&mut response_line)
+            .await
+            .unwrap_or_else(|err| panic!("failed to read stop response: {err}"));
+        let response: Response = serde_json::from_str(response_line.trim())
+            .unwrap_or_else(|err| panic!("failed to parse stop response: {err}"));
+        assert!(response.ok);
+        assert_eq!(response.error, None);
     }
 }
