@@ -164,6 +164,8 @@ enum DebugCommand {
     Start(DebugStartArgs),
     Exec(DebugExecArgs),
     Stop(DebugStopArgs),
+    /// Print a running session's status as JSON (answered even mid-exec).
+    Status(DebugStatusArgs),
 }
 
 #[derive(Args)]
@@ -219,6 +221,12 @@ struct DebugExecArgs {
 
 #[derive(Args)]
 struct DebugStopArgs {
+    #[arg(long)]
+    socket: PathBuf,
+}
+
+#[derive(Args)]
+struct DebugStatusArgs {
     #[arg(long)]
     socket: PathBuf,
 }
@@ -515,6 +523,7 @@ fn run_debug(args: DebugArgs, context: tauri::Context<tauri::Wry>) -> Result<(),
         DebugCommand::Start(start_args) => run_debug_start(start_args, context),
         DebugCommand::Exec(exec_args) => run_debug_exec(exec_args),
         DebugCommand::Stop(stop_args) => run_debug_stop(stop_args),
+        DebugCommand::Status(status_args) => run_debug_status(status_args),
     }
 }
 
@@ -826,6 +835,12 @@ fn run_debug_exec(args: DebugExecArgs) -> Result<(), Box<dyn Error>> {
 fn run_debug_stop(args: DebugStopArgs) -> Result<(), Box<dyn Error>> {
     crate::scrape::debug::stop_debug_session(&args.socket)?;
     println!("Debug session stopped.");
+    Ok(())
+}
+
+fn run_debug_status(args: DebugStatusArgs) -> Result<(), Box<dyn Error>> {
+    let status = crate::scrape::debug::debug_session_status(&args.socket)?;
+    println!("{}", serde_json::to_string_pretty(&status)?);
     Ok(())
 }
 

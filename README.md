@@ -150,6 +150,18 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
 
 `debug start` also tears down the browser if the process exits (for example Ctrl+C or terminal close).
 
+The session serves each connection concurrently, so `debug stop` takes effect even while a `debug exec` is running (that exec is cut off), and a second `debug exec` waits for the first to finish.
+
+### Check a session's status
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin app -- \
+  debug status \
+  --socket /path/to/debug.sock
+```
+
+Prints the session descriptor plus `execRunning`, `uptimeSecs`, and `expiresInSecs` (`null` for sessions without a time limit) as JSON. It is answered even while an exec is running.
+
 ### GUI controls
 
 In the **Scraping** tab you can:

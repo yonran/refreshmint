@@ -154,7 +154,7 @@ pub fn exec_debug_entry_module_with_options(
 }
 
 pub fn stop_debug_session(socket_path: &Path) -> Result<(), Box<dyn Error>> {
-    let response = send_request(socket_path, Request::Stop)?;
+    let response: Response = send_request(socket_path, Request::Stop)?;
     if response.ok {
         return Ok(());
     }
@@ -162,6 +162,17 @@ pub fn stop_debug_session(socket_path: &Path) -> Result<(), Box<dyn Error>> {
         .error
         .unwrap_or_else(|| "stop failed".to_string())
         .into())
+}
+
+pub fn debug_session_status(socket_path: &Path) -> Result<DebugSessionStatus, Box<dyn Error>> {
+    let response: StatusResponse = send_request(socket_path, Request::Status)?;
+    match (response.ok, response.status) {
+        (true, Some(status)) => Ok(status),
+        (_, _) => Err(response
+            .error
+            .unwrap_or_else(|| "status failed".to_string())
+            .into()),
+    }
 }
 
 #[cfg(unix)]
@@ -288,12 +299,32 @@ enum Request {
         script_options: Option<super::js_api::ScriptOptions>,
     },
     Stop,
+    Status,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Response {
     ok: bool,
     error: Option<String>,
+}
+
+/// Snapshot of a running debug session, answered by a `status` request even
+/// while another client's `exec` is in progress.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugSessionStatus {
+    pub session: crate::debug_registry::DebugSessionDescriptor,
+    pub exec_running: bool,
+    pub uptime_secs: u64,
+    /// `None` for sessions without a lifetime limit (e.g. `debug start`).
+    pub expires_in_secs: Option<u64>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StatusResponse {
+    ok: bool,
+    error: Option<String>,
+    status: Option<DebugSessionStatus>,
 }
 
 #[cfg(any(unix, test))]
@@ -498,7 +529,7 @@ pub async fn serve_existing_debug_session(
     page_inner: std::sync::Arc<tokio::sync::Mutex<super::js_api::PageInner>>,
     refreshmint_inner: std::sync::Arc<tokio::sync::Mutex<super::js_api::RefreshmintInner>>,
 ) -> Result<(), Box<dyn Error>> {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use tokio::net::UnixListener;
 
     let socket_path = config.socket_path;
@@ -540,36 +571,16 @@ pub async fn serve_existing_debug_session(
         listener(&descriptor);
     }
 
-    let mut dispatcher = RealExecDispatcher {
-        page_inner,
-        refreshmint_inner,
-    };
+    let context = std::sync::Arc::new(ServerContext::new(
+        std::sync::Arc::new(RealExecDispatcher {
+            page_inner,
+            refreshmint_inner,
+        }),
+        descriptor,
+        config.max_duration,
+    ));
+    serve_connections(listener, context, &handler_handle).await?;
 
-    let started = Instant::now();
-    let mut running = true;
-    while running {
-        if handler_handle.is_finished() {
-            eprintln!("Browser event handler stopped; ending debug session.");
-            break;
-        }
-        if config
-            .max_duration
-            .is_some_and(|duration| started.elapsed() >= duration)
-        {
-            eprintln!("Debug session expired; closing browser.");
-            break;
-        }
-
-        match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
-            Ok(Ok((stream, _addr))) => {
-                running = handle_connection(stream, &mut dispatcher).await;
-            }
-            Ok(Err(err)) => return Err(err.into()),
-            Err(_) => continue,
-        }
-    }
-
-    drop(listener);
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
         let guard = browser_instance.lock().await;
         let _ = tokio::time::timeout(Duration::from_secs(5), guard.close()).await;
@@ -580,16 +591,123 @@ pub async fn serve_existing_debug_session(
     Ok(())
 }
 
+/// State shared by every connection task of one debug session.
+#[cfg(unix)]
+struct ServerContext {
+    dispatcher: std::sync::Arc<dyn ExecDispatcher>,
+    /// Held for the whole of an `Exec`. Scripts share one page and one
+    /// `RefreshmintInner` (whose `debug_output_sink` routes output to the
+    /// requesting client), so a second `Exec` queues here instead of running
+    /// alongside; `Status` and `Stop` never take it.
+    exec_lock: tokio::sync::Mutex<()>,
+    exec_running: std::sync::atomic::AtomicBool,
+    descriptor: crate::debug_registry::DebugSessionDescriptor,
+    started: std::time::Instant,
+    max_duration: Option<std::time::Duration>,
+    shutdown: tokio::sync::watch::Sender<bool>,
+}
+
+#[cfg(unix)]
+impl ServerContext {
+    fn new(
+        dispatcher: std::sync::Arc<dyn ExecDispatcher>,
+        descriptor: crate::debug_registry::DebugSessionDescriptor,
+        max_duration: Option<std::time::Duration>,
+    ) -> Self {
+        Self {
+            dispatcher,
+            exec_lock: tokio::sync::Mutex::new(()),
+            exec_running: std::sync::atomic::AtomicBool::new(false),
+            descriptor,
+            started: std::time::Instant::now(),
+            max_duration,
+            shutdown: tokio::sync::watch::channel(false).0,
+        }
+    }
+
+    fn status(&self) -> DebugSessionStatus {
+        let uptime = self.started.elapsed();
+        DebugSessionStatus {
+            session: self.descriptor.clone(),
+            exec_running: self.exec_running.load(std::sync::atomic::Ordering::SeqCst),
+            uptime_secs: uptime.as_secs(),
+            expires_in_secs: self
+                .max_duration
+                .map(|max| max.saturating_sub(uptime).as_secs()),
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.max_duration
+            .is_some_and(|max| self.started.elapsed() >= max)
+    }
+}
+
+/// Clears `exec_running` even when the connection task is aborted mid-exec.
+#[cfg(unix)]
+struct ExecRunningGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+#[cfg(unix)]
+impl Drop for ExecRunningGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Accepts connections until stopped, expired, or the browser event handler
+/// exits. Each connection runs in its own task so `Status` and `Stop` are
+/// answered while an `Exec` is still running; connections still open at
+/// shutdown (including a running `Exec`) are aborted.
+#[cfg(unix)]
+async fn serve_connections(
+    listener: tokio::net::UnixListener,
+    context: std::sync::Arc<ServerContext>,
+    handler_handle: &tokio::task::JoinHandle<()>,
+) -> std::io::Result<()> {
+    let mut shutdown = context.shutdown.subscribe();
+    let mut connections = tokio::task::JoinSet::new();
+    let result = loop {
+        if *shutdown.borrow_and_update() {
+            break Ok(());
+        }
+        if handler_handle.is_finished() {
+            eprintln!("Browser event handler stopped; ending debug session.");
+            break Ok(());
+        }
+        if context.expired() {
+            eprintln!("Debug session expired; closing browser.");
+            break Ok(());
+        }
+
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _addr)) => {
+                    let context = context.clone();
+                    connections.spawn(async move { handle_connection(stream, &context).await });
+                }
+                Err(err) => break Err(err),
+            },
+            _ = shutdown.changed() => {}
+            // Reap finished connections so the set does not grow unbounded.
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+            // Wake periodically to re-check expiry and the browser handler.
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+        }
+    };
+    connections.shutdown().await;
+    result
+}
+
 /// Executes an `Exec` request against a stream. Boxed-future rather than
 /// `async fn` in a trait so `RealExecDispatcher` and test fakes can share a
-/// `&mut dyn` seam without pulling `chromiumoxide` types into the seam
-/// itself; that seam is what let us unit-test the connection-handling flow
-/// below (request parsing, dispatch, response writing) with a fake browser.
+/// `dyn` seam without pulling `chromiumoxide` types into the seam itself;
+/// that seam is what lets the connection-handling flow below (request
+/// parsing, dispatch, response writing) be unit-tested with a fake browser.
 #[cfg(unix)]
-trait ExecDispatcher {
+trait ExecDispatcher: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     fn dispatch<'a>(
-        &'a mut self,
+        &'a self,
         stream: &'a mut tokio::net::UnixStream,
         script: Option<String>,
         entry_root: Option<PathBuf>,
@@ -611,7 +729,7 @@ struct RealExecDispatcher {
 impl ExecDispatcher for RealExecDispatcher {
     #[allow(clippy::too_many_arguments)]
     fn dispatch<'a>(
-        &'a mut self,
+        &'a self,
         stream: &'a mut tokio::net::UnixStream,
         script: Option<String>,
         entry_root: Option<PathBuf>,
@@ -636,15 +754,11 @@ impl ExecDispatcher for RealExecDispatcher {
     }
 }
 
-/// Reads and handles one request off an accepted connection: parses it,
-/// dispatches `Exec` to `dispatcher` or handles `Stop` directly, and writes
-/// the response. Returns whether the server loop should keep running (i.e.
-/// `false` only after a `Stop` request).
+/// Reads and handles one request off an accepted connection: `Exec` goes to
+/// the dispatcher (one at a time, via `exec_lock`), `Stop` signals the
+/// session to shut down after replying, and `Status` replies with a snapshot.
 #[cfg(unix)]
-async fn handle_connection(
-    stream: tokio::net::UnixStream,
-    dispatcher: &mut dyn ExecDispatcher,
-) -> bool {
+async fn handle_connection(stream: tokio::net::UnixStream, context: &ServerContext) {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let mut reader = BufReader::new(stream);
@@ -652,16 +766,10 @@ async fn handle_connection(
     let read_result = reader.read_line(&mut body).await;
     let mut stream = reader.into_inner();
     match read_result {
-        Ok(0) => {
-            let response = Response {
-                ok: false,
-                error: Some("failed to read request: empty request".to_string()),
-            };
-            if let Err(err) = write_response_async(&mut stream, &response).await {
-                eprintln!("failed to write debug response: {err}");
-            }
-            true
-        }
+        // A client that connects and closes without sending anything is a
+        // liveness probe (see `debug_registry::is_reachable`); there is no
+        // one left to reply to.
+        Ok(0) => {}
         Ok(_) => match serde_json::from_str::<Request>(body.trim()) {
             Ok(Request::Exec {
                 script,
@@ -672,7 +780,13 @@ async fn handle_connection(
                 prompt_requires_override,
                 script_options,
             }) => {
-                if let Err(err) = dispatcher
+                let _exec_lock = context.exec_lock.lock().await;
+                context
+                    .exec_running
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                let _running = ExecRunningGuard(&context.exec_running);
+                if let Err(err) = context
+                    .dispatcher
                     .dispatch(
                         &mut stream,
                         script,
@@ -687,17 +801,28 @@ async fn handle_connection(
                 {
                     eprintln!("failed to write debug exec stream: {err}");
                 }
-                true
             }
             Ok(Request::Stop) => {
                 let response = Response {
                     ok: true,
                     error: None,
                 };
+                // Reply before signaling: shutdown aborts every connection
+                // task, this one included.
                 if let Err(err) = write_response_async(&mut stream, &response).await {
                     eprintln!("failed to write debug response: {err}");
                 }
-                false
+                context.shutdown.send_replace(true);
+            }
+            Ok(Request::Status) => {
+                let response = StatusResponse {
+                    ok: true,
+                    error: None,
+                    status: Some(context.status()),
+                };
+                if let Err(err) = write_response_async(&mut stream, &response).await {
+                    eprintln!("failed to write debug response: {err}");
+                }
             }
             Err(err) => {
                 let response = Response {
@@ -707,7 +832,6 @@ async fn handle_connection(
                 if let Err(err) = write_response_async(&mut stream, &response).await {
                     eprintln!("failed to write debug response: {err}");
                 }
-                true
             }
         },
         Err(err) => {
@@ -718,7 +842,6 @@ async fn handle_connection(
             if let Err(err) = write_response_async(&mut stream, &response).await {
                 eprintln!("failed to write debug response: {err}");
             }
-            true
         }
     }
 }
@@ -805,6 +928,10 @@ async fn handle_exec_request_async(
 
         result
     });
+    // A `Stop` from another client aborts this connection's task; without
+    // this the detached script would keep driving the page while the
+    // browser is being closed.
+    let _abort_script_on_drop = AbortOnDrop(exec_task.abort_handle());
 
     let mut exec_result: Option<Result<(), String>> = None;
     loop {
@@ -923,6 +1050,16 @@ async fn handle_exec_request_async(
 }
 
 #[cfg(unix)]
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+#[cfg(unix)]
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[cfg(unix)]
 async fn cancel_exec_task(
     exec_task: &mut tokio::task::JoinHandle<Result<(), String>>,
     refreshmint_inner: &std::sync::Arc<tokio::sync::Mutex<super::js_api::RefreshmintInner>>,
@@ -934,7 +1071,10 @@ async fn cancel_exec_task(
 }
 
 #[cfg(unix)]
-fn send_request(socket_path: &Path, request: Request) -> Result<Response, Box<dyn Error>> {
+fn send_request<T: serde::de::DeserializeOwned>(
+    socket_path: &Path,
+    request: Request,
+) -> Result<T, Box<dyn Error>> {
     use std::io::{Read, Write};
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
@@ -947,19 +1087,21 @@ fn send_request(socket_path: &Path, request: Request) -> Result<Response, Box<dy
 
     let mut response_body = String::new();
     stream.read_to_string(&mut response_body)?;
-    let response: Response = serde_json::from_str(response_body.trim())?;
-    Ok(response)
+    Ok(serde_json::from_str(response_body.trim())?)
 }
 
 #[cfg(not(unix))]
-fn send_request(_socket_path: &Path, _request: Request) -> Result<Response, Box<dyn Error>> {
+fn send_request<T: serde::de::DeserializeOwned>(
+    _socket_path: &Path,
+    _request: Request,
+) -> Result<T, Box<dyn Error>> {
     Err("debug sockets are currently supported only on unix platforms".into())
 }
 
 #[cfg(unix)]
-async fn write_response_async(
+async fn write_response_async<T: serde::Serialize>(
     stream: &mut tokio::net::UnixStream,
-    response: &Response,
+    response: &T,
 ) -> std::io::Result<()> {
     let mut out = serde_json::to_vec(response)?;
     out.push(b'\n');
@@ -1041,11 +1183,14 @@ fn resolve_socket_bind_path(requested_path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::{
+        debug_session_status, handle_connection, serve_connections, stop_debug_session,
+        ExecDispatcher, Request, Response, ServerContext,
+    };
     use super::{
         finalize_debug_exec_resources, sanitize_segment, ExecOutputStream, ExecStreamFrame,
     };
-    #[cfg(unix)]
-    use super::{handle_connection, ExecDispatcher, Request, Response};
     use crate::login_config::login_account_documents_dir;
     use crate::scrape::js_api::{
         PromptOverrides, RefreshmintInner, ScriptOptions, SensitiveData, SessionMetadata,
@@ -1053,6 +1198,8 @@ mod tests {
     };
     use std::fs;
     use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn create_temp_dir(prefix: &str) -> PathBuf {
@@ -1162,14 +1309,43 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn test_descriptor(socket_path: PathBuf) -> crate::debug_registry::DebugSessionDescriptor {
+        crate::debug_registry::DebugSessionDescriptor {
+            session_id: "debug-test".to_string(),
+            login_name: "bank".to_string(),
+            kind: "failed-scrape".to_string(),
+            pid: std::process::id(),
+            socket_path,
+            ledger_dir: "/tmp/ledger.refreshmint".into(),
+            started_at: "now".to_string(),
+        }
+    }
+
+    /// Stands in for `RealExecDispatcher` so the socket protocol can be
+    /// tested without a browser: streams one output line, then (optionally)
+    /// holds the exec open until `release` is notified, like a long script.
+    #[cfg(unix)]
+    #[derive(Default)]
     struct FakeExecDispatcher {
-        dispatched_script: Option<String>,
+        dispatched_scripts: std::sync::Mutex<Vec<String>>,
+        hold_until_released: bool,
+        release: tokio::sync::Notify,
+    }
+
+    #[cfg(unix)]
+    impl FakeExecDispatcher {
+        fn dispatched_scripts(&self) -> Vec<String> {
+            self.dispatched_scripts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
     }
 
     #[cfg(unix)]
     impl ExecDispatcher for FakeExecDispatcher {
         fn dispatch<'a>(
-            &'a mut self,
+            &'a self,
             stream: &'a mut tokio::net::UnixStream,
             script: Option<String>,
             _entry_root: Option<PathBuf>,
@@ -1180,7 +1356,10 @@ mod tests {
             _script_options: Option<ScriptOptions>,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>>
         {
-            self.dispatched_script = script;
+            self.dispatched_scripts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(script.unwrap_or_default());
             Box::pin(async move {
                 super::write_exec_stream_frame_async(
                     stream,
@@ -1190,6 +1369,9 @@ mod tests {
                     },
                 )
                 .await?;
+                if self.hold_until_released {
+                    self.release.notified().await;
+                }
                 super::write_exec_stream_frame_async(
                     stream,
                     &ExecStreamFrame::Result {
@@ -1202,75 +1384,83 @@ mod tests {
         }
     }
 
-    /// Exercises the normal `Exec` request/response flow through
-    /// `handle_connection` -- the actual code path every scraper debug
-    /// session's socket protocol runs through -- without a real browser.
-    /// `FakeExecDispatcher` stands in for `RealExecDispatcher`, which is the
-    /// only piece of `handle_connection`'s dependencies that would otherwise
-    /// require a live `chromiumoxide` browser and page.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn handle_connection_serves_a_normal_exec_request() {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-        let (mut client, server) = tokio::net::UnixStream::pair()
-            .unwrap_or_else(|err| panic!("failed to create socket pair: {err}"));
-
-        let request = Request::Exec {
-            script: Some("console.log('hi')".to_string()),
+    fn exec_request(script: &str) -> Request {
+        Request::Exec {
+            script: Some(script.to_string()),
             entry_root: None,
             entry_path: None,
             declared_secrets: None,
             prompt_overrides: None,
             prompt_requires_override: None,
             script_options: None,
-        };
-        let mut request_bytes =
-            serde_json::to_vec(&request).unwrap_or_else(|err| panic!("failed: {err}"));
-        request_bytes.push(b'\n');
+        }
+    }
+
+    #[cfg(unix)]
+    async fn write_request(client: &mut tokio::net::UnixStream, request: &Request) {
+        use tokio::io::AsyncWriteExt;
+
+        let mut bytes =
+            serde_json::to_vec(request).unwrap_or_else(|err| panic!("serialize failed: {err}"));
+        bytes.push(b'\n');
         client
-            .write_all(&request_bytes)
+            .write_all(&bytes)
             .await
             .unwrap_or_else(|err| panic!("failed to write request: {err}"));
+    }
 
-        let mut dispatcher = FakeExecDispatcher {
-            dispatched_script: None,
-        };
-        let keep_running = handle_connection(server, &mut dispatcher).await;
+    #[cfg(unix)]
+    async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> String {
+        use tokio::io::AsyncBufReadExt;
+
+        let mut line = String::new();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            reader.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(Ok(_)) => line,
+            other => panic!("failed to read a line: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn parse_frame(line: &str) -> ExecStreamFrame {
+        serde_json::from_str(line.trim())
+            .unwrap_or_else(|err| panic!("failed to parse frame {line:?}: {err}"))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handle_connection_serves_a_normal_exec_request() {
+        let (mut client, server) = tokio::net::UnixStream::pair()
+            .unwrap_or_else(|err| panic!("failed to create socket pair: {err}"));
+        write_request(&mut client, &exec_request("console.log('hi')")).await;
+
+        let dispatcher = Arc::new(FakeExecDispatcher::default());
+        let context =
+            ServerContext::new(dispatcher.clone(), test_descriptor("/unused".into()), None);
+        handle_connection(server, &context).await;
+
+        assert_eq!(dispatcher.dispatched_scripts(), vec!["console.log('hi')"]);
         assert!(
-            keep_running,
-            "an Exec request must not stop the debug session loop"
+            !*context.shutdown.borrow(),
+            "Exec must not stop the session"
         );
-        assert_eq!(
-            dispatcher.dispatched_script.as_deref(),
-            Some("console.log('hi')")
-        );
+        assert!(!context.status().exec_running);
 
-        let mut reader = BufReader::new(&mut client);
-        let mut output_line = String::new();
-        reader
-            .read_line(&mut output_line)
-            .await
-            .unwrap_or_else(|err| panic!("failed to read output frame: {err}"));
-        let output_frame: ExecStreamFrame = serde_json::from_str(output_line.trim())
-            .unwrap_or_else(|err| panic!("failed to parse output frame: {err}"));
+        let mut reader = tokio::io::BufReader::new(&mut client);
         assert_eq!(
-            output_frame,
+            parse_frame(&read_line(&mut reader).await),
             ExecStreamFrame::Output {
                 stream: ExecOutputStream::Stdout,
                 line: "hello from fake browser".to_string(),
             }
         );
-
-        let mut result_line = String::new();
-        reader
-            .read_line(&mut result_line)
-            .await
-            .unwrap_or_else(|err| panic!("failed to read result frame: {err}"));
-        let result_frame: ExecStreamFrame = serde_json::from_str(result_line.trim())
-            .unwrap_or_else(|err| panic!("failed to parse result frame: {err}"));
         assert_eq!(
-            result_frame,
+            parse_frame(&read_line(&mut reader).await),
             ExecStreamFrame::Result {
                 ok: true,
                 error: None,
@@ -1278,47 +1468,131 @@ mod tests {
         );
     }
 
-    /// Exercises the normal `Stop` request/response flow -- the fake
-    /// dispatcher is never invoked for `Stop`, so this covers the shutdown
-    /// signal path without any browser dependency at all.
     #[cfg(unix)]
     #[tokio::test]
     async fn handle_connection_serves_a_normal_stop_request() {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
         let (mut client, server) = tokio::net::UnixStream::pair()
             .unwrap_or_else(|err| panic!("failed to create socket pair: {err}"));
+        write_request(&mut client, &Request::Stop).await;
 
-        let mut request_bytes =
-            serde_json::to_vec(&Request::Stop).unwrap_or_else(|err| panic!("failed: {err}"));
-        request_bytes.push(b'\n');
-        client
-            .write_all(&request_bytes)
-            .await
-            .unwrap_or_else(|err| panic!("failed to write request: {err}"));
+        let dispatcher = Arc::new(FakeExecDispatcher::default());
+        let context =
+            ServerContext::new(dispatcher.clone(), test_descriptor("/unused".into()), None);
+        handle_connection(server, &context).await;
 
-        let mut dispatcher = FakeExecDispatcher {
-            dispatched_script: None,
-        };
-        let keep_running = handle_connection(server, &mut dispatcher).await;
+        assert!(*context.shutdown.borrow(), "Stop must signal shutdown");
         assert!(
-            !keep_running,
-            "a Stop request must stop the debug session loop"
-        );
-        assert_eq!(
-            dispatcher.dispatched_script, None,
+            dispatcher.dispatched_scripts().is_empty(),
             "Stop must not be routed through the exec dispatcher"
         );
-
-        let mut reader = BufReader::new(&mut client);
-        let mut response_line = String::new();
-        reader
-            .read_line(&mut response_line)
-            .await
-            .unwrap_or_else(|err| panic!("failed to read stop response: {err}"));
-        let response: Response = serde_json::from_str(response_line.trim())
+        let mut reader = tokio::io::BufReader::new(&mut client);
+        let response: Response = serde_json::from_str(read_line(&mut reader).await.trim())
             .unwrap_or_else(|err| panic!("failed to parse stop response: {err}"));
         assert!(response.ok);
         assert_eq!(response.error, None);
+    }
+
+    /// Runs the real accept loop on a real socket: while one client's exec
+    /// is still running, a second client's `Status` is answered (the old
+    /// one-connection-at-a-time loop would hang here), a third client's
+    /// `Exec` queues rather than running alongside, and a `Stop` ends the
+    /// session and cuts off both in-flight exec connections.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serve_connections_answers_status_and_stop_while_an_exec_is_running() {
+        let socket_path =
+            std::env::temp_dir().join(format!("rm-mux-test-{}.sock", std::process::id()));
+        let _ = fs::remove_file(&socket_path);
+        let listener = tokio::net::UnixListener::bind(&socket_path)
+            .unwrap_or_else(|err| panic!("failed to bind test socket: {err}"));
+
+        let dispatcher = Arc::new(FakeExecDispatcher {
+            hold_until_released: true,
+            ..FakeExecDispatcher::default()
+        });
+        let context = Arc::new(ServerContext::new(
+            dispatcher.clone(),
+            test_descriptor(socket_path.clone()),
+            Some(std::time::Duration::from_secs(600)),
+        ));
+        let server = tokio::spawn({
+            let context = context.clone();
+            async move {
+                let browser_handler = tokio::spawn(std::future::pending::<()>());
+                let result = serve_connections(listener, context, &browser_handler).await;
+                browser_handler.abort();
+                result
+            }
+        });
+
+        let mut first_exec = tokio::net::UnixStream::connect(&socket_path)
+            .await
+            .unwrap_or_else(|err| panic!("failed to connect: {err}"));
+        write_request(&mut first_exec, &exec_request("first")).await;
+        let mut first_exec = tokio::io::BufReader::new(first_exec);
+        // Its first output frame proves the exec is running (and holding the
+        // exec lock) before the other clients connect.
+        assert!(matches!(
+            parse_frame(&read_line(&mut first_exec).await),
+            ExecStreamFrame::Output { .. }
+        ));
+
+        let status_path = socket_path.clone();
+        let status = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                debug_session_status(&status_path).map_err(|err| err.to_string())
+            }),
+        )
+        .await
+        {
+            Ok(Ok(Ok(status))) => status,
+            other => panic!("status request was not answered during an exec: {other:?}"),
+        };
+        assert!(status.exec_running);
+        assert_eq!(status.session.session_id, "debug-test");
+        assert!(status
+            .expires_in_secs
+            .is_some_and(|secs| (590..=600).contains(&secs)));
+
+        let mut second_exec = tokio::net::UnixStream::connect(&socket_path)
+            .await
+            .unwrap_or_else(|err| panic!("failed to connect: {err}"));
+        write_request(&mut second_exec, &exec_request("second")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            dispatcher.dispatched_scripts(),
+            vec!["first"],
+            "a second exec must wait for the first instead of running alongside it"
+        );
+
+        let stop_path = socket_path.clone();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                stop_debug_session(&stop_path).map_err(|err| err.to_string())
+            }),
+        )
+        .await
+        {
+            Ok(Ok(Ok(()))) => {}
+            other => panic!("stop request failed: {other:?}"),
+        }
+        match tokio::time::timeout(std::time::Duration::from_secs(5), server).await {
+            Ok(Ok(Ok(()))) => {}
+            other => panic!("server did not shut down after Stop: {other:?}"),
+        }
+
+        assert_eq!(
+            read_line(&mut first_exec).await,
+            "",
+            "the running exec's connection must be closed without a result"
+        );
+        let mut second_exec = tokio::io::BufReader::new(second_exec);
+        assert_eq!(read_line(&mut second_exec).await, "");
+        assert_eq!(dispatcher.dispatched_scripts(), vec!["first"]);
+        assert!(!context.status().exec_running);
+
+        let _ = fs::remove_file(&socket_path);
     }
 }
