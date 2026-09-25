@@ -318,8 +318,12 @@ async function extractOrderPageMetadata(page) {
 
         const findTotal = function() {
             const patterns = [
-                /(?:grand total|total|order total)\\s*[:\\n ]+(-?\\$?[\\d,]+\\.\\d{2})/i,
-                /(-?\\$?[\\d,]+\\.\\d{2})\\s*(?:grand total|total|order total)/i,
+                // Negative lookbehind excludes "Subtotal", which otherwise
+                // matches the bare "total" alternative and grabs whatever
+                // number happens to follow it in the flattened innerText
+                // (e.g. the Discounts-row amount, not the real total).
+                /(?<!sub)(?:grand total|total|order total)\\s*[:\\n ]+(-?\\$?[\\d,]+\\.\\d{2})/i,
+                /(-?\\$?[\\d,]+\\.\\d{2})\\s*(?<!sub)(?:grand total|total|order total)/i,
             ];
             for (const pattern of patterns) {
                 const match = bodyText.match(pattern);
