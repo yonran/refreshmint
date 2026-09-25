@@ -792,33 +792,45 @@ struct DebugSessionView {
     kind: String,
     pid: u32,
     started_at: String,
+    /// `None` when the session did not answer a status request in time --
+    /// e.g. a worker still running a binary from before `status` existed.
+    status: Option<DebugSessionStatusView>,
 }
 
-impl From<&crate::debug_registry::DebugSessionDescriptor> for DebugSessionView {
-    fn from(descriptor: &crate::debug_registry::DebugSessionDescriptor) -> Self {
-        DebugSessionView {
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DebugSessionStatusView {
+    exec_running: bool,
+    /// `None` for sessions without a lifetime limit (manual `debug start`).
+    expires_in_secs: Option<u64>,
+}
+
+/// Pure step behind `list_debug_sessions`, split out so it's testable
+/// without the real on-disk session registry or live sockets: a session
+/// belongs to this ledger only when its recorded `ledger_dir` matches
+/// exactly, so sessions started against a different ledger never leak into
+/// this one's Scrape tab. `status_of` is only asked about matching sessions.
+fn filter_debug_sessions_for_ledger(
+    sessions: &[crate::debug_registry::DebugSessionDescriptor],
+    ledger_dir: &std::path::Path,
+    status_of: impl Fn(
+        &crate::debug_registry::DebugSessionDescriptor,
+    ) -> Option<crate::scrape::debug::DebugSessionStatus>,
+) -> Vec<DebugSessionView> {
+    sessions
+        .iter()
+        .filter(|descriptor| descriptor.ledger_dir == ledger_dir)
+        .map(|descriptor| DebugSessionView {
             session_id: descriptor.session_id.clone(),
             login_name: descriptor.login_name.clone(),
             kind: descriptor.kind.clone(),
             pid: descriptor.pid,
             started_at: descriptor.started_at.clone(),
-        }
-    }
-}
-
-/// Pure filtering step behind `list_debug_sessions`, split out so it's
-/// testable without touching the real on-disk session registry: a session
-/// belongs to this ledger only when its recorded `ledger_dir` matches
-/// exactly, so sessions started against a different ledger never leak into
-/// this one's Scrape tab.
-fn filter_debug_sessions_for_ledger(
-    sessions: &[crate::debug_registry::DebugSessionDescriptor],
-    ledger_dir: &std::path::Path,
-) -> Vec<DebugSessionView> {
-    sessions
-        .iter()
-        .filter(|descriptor| descriptor.ledger_dir == ledger_dir)
-        .map(DebugSessionView::from)
+            status: status_of(descriptor).map(|status| DebugSessionStatusView {
+                exec_running: status.exec_running,
+                expires_in_secs: status.expires_in_secs,
+            }),
+        })
         .collect()
 }
 
@@ -829,15 +841,29 @@ fn filter_debug_sessions_for_ledger(
 /// latter hold their login's lock for up to 30 minutes with nothing in the
 /// frontend tracking them, so this is the only way the UI can discover one
 /// exists in order to offer a Stop button for it.
+///
+/// Async + `spawn_blocking` because each session is asked for its status over
+/// its socket; a sync command would do that I/O on the main thread.
 #[tauri::command]
-fn list_debug_sessions(ledger: String) -> Result<Vec<DebugSessionView>, String> {
+async fn list_debug_sessions(ledger: String) -> Result<Vec<DebugSessionView>, String> {
     let target_dir = std::path::PathBuf::from(ledger);
     crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
 
-    Ok(filter_debug_sessions_for_ledger(
-        &crate::debug_registry::list_sessions(),
-        &target_dir,
-    ))
+    tokio::task::spawn_blocking(move || {
+        filter_debug_sessions_for_ledger(
+            &crate::debug_registry::list_sessions(),
+            &target_dir,
+            |descriptor| {
+                crate::scrape::debug::debug_session_status(
+                    &descriptor.socket_path,
+                    Some(std::time::Duration::from_secs(1)),
+                )
+                .ok()
+            },
+        )
+    })
+    .await
+    .map_err(|err| err.to_string())
 }
 
 /// Stops a debug/retained-scrape session by `sessionId` (from
@@ -3405,10 +3431,48 @@ mod tests {
             };
         let sessions = vec![make("chase", "/ledger/a"), make("citi", "/ledger/b")];
 
-        let views = filter_debug_sessions_for_ledger(&sessions, std::path::Path::new("/ledger/a"));
+        let views =
+            filter_debug_sessions_for_ledger(&sessions, std::path::Path::new("/ledger/a"), |_| {
+                None
+            });
 
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].login_name, "chase");
+    }
+
+    #[test]
+    fn filter_debug_sessions_for_ledger_attaches_status_only_when_answered() {
+        let make = |login_name: &str| crate::debug_registry::DebugSessionDescriptor {
+            session_id: format!("debug-{login_name}"),
+            login_name: login_name.to_string(),
+            kind: "failed-scrape".to_string(),
+            pid: 1,
+            socket_path: PathBuf::from(format!("/tmp/rm-{login_name}.sock")),
+            ledger_dir: PathBuf::from("/ledger/a"),
+            started_at: "2026-09-24T20:25:02Z".to_string(),
+        };
+        let sessions = vec![make("chase"), make("citi")];
+
+        let views = filter_debug_sessions_for_ledger(
+            &sessions,
+            std::path::Path::new("/ledger/a"),
+            |descriptor| {
+                (descriptor.login_name == "chase").then(|| {
+                    crate::scrape::debug::DebugSessionStatus {
+                        session: descriptor.clone(),
+                        exec_running: true,
+                        uptime_secs: 60,
+                        expires_in_secs: Some(1740),
+                    }
+                })
+            },
+        );
+
+        let json = serde_json::to_value(&views)
+            .unwrap_or_else(|err| panic!("serialize views failed: {err}"));
+        assert_eq!(json[0]["status"]["execRunning"], true);
+        assert_eq!(json[0]["status"]["expiresInSecs"], 1740);
+        assert!(json[1]["status"].is_null());
     }
 
     #[test]

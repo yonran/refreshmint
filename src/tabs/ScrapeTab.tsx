@@ -28,6 +28,7 @@ import {
 import type { ScrapeTabSession } from '../types.ts';
 import { StatusBanner } from '../components/StatusBanner.tsx';
 import { classifyStatusMessage } from '../status-utils.ts';
+import { describeDebugSessionStatus } from '../debug-session-utils.ts';
 
 interface ScrapeTabProps {
     ledger: LedgerView | null;
@@ -144,6 +145,14 @@ export function ScrapeTab({
     // started before this app instance launched) -- the only handle the UI
     // has on those is Stop-by-session-id.
     const [debugSessions, setDebugSessions] = useState<DebugSessionView[]>([]);
+    // When `debugSessions` was fetched, so expiry countdowns keep moving
+    // between refreshes; `nowMs` ticks while any session is shown.
+    const [debugSessionsFetchedAt, setDebugSessionsFetchedAt] = useState(0);
+    const [nowMs, setNowMs] = useState(() => Date.now());
+    // The periodic refresh and the lock-change refresh can overlap; only the
+    // most recently issued request may update state, or a slow response from
+    // before a session stopped would resurrect it.
+    const debugSessionsRequestSeq = useRef(0);
     const [stoppingSessionId, setStoppingSessionId] = useState<string | null>(
         null,
     );
@@ -294,9 +303,13 @@ export function ScrapeTab({
             // A locked login may be held by a debug/retained-scrape session
             // this tab never started, so refresh alongside lock status
             // rather than only after the tab's own Run/Cancel actions.
+            const seq = ++debugSessionsRequestSeq.current;
             void listDebugSessions(ledgerPath)
                 .then((sessions) => {
-                    if (!cancelled) setDebugSessions(sessions);
+                    if (cancelled || seq !== debugSessionsRequestSeq.current)
+                        return;
+                    setDebugSessions(sessions);
+                    setDebugSessionsFetchedAt(Date.now());
                 })
                 .catch(() => {});
         };
@@ -318,6 +331,31 @@ export function ScrapeTab({
             void stopLockMetadataWatch();
         };
     }, [ledgerPath, loginNames]);
+
+    // While a session is shown, re-query it periodically: whether a script
+    // is running changes without touching any lock file, and a session whose
+    // process died must disappear even though nothing notifies us.
+    const hasDebugSessions = debugSessions.length > 0;
+    useEffect(() => {
+        if (ledgerPath === null || !hasDebugSessions) return;
+        let cancelled = false;
+        const interval = window.setInterval(() => {
+            setNowMs(Date.now());
+            const seq = ++debugSessionsRequestSeq.current;
+            void listDebugSessions(ledgerPath)
+                .then((sessions) => {
+                    if (cancelled || seq !== debugSessionsRequestSeq.current)
+                        return;
+                    setDebugSessions(sessions);
+                    setDebugSessionsFetchedAt(Date.now());
+                })
+                .catch(() => {});
+        }, 5000);
+        return () => {
+            cancelled = true;
+            window.clearInterval(interval);
+        };
+    }, [ledgerPath, hasDebugSessions]);
 
     // Refetch per-login scrape summaries for the console table. Runs on ledger /
     // login changes and after each completed scrape (scrapeLogVersion), without
@@ -622,6 +660,17 @@ export function ScrapeTab({
                                                 {lock?.locked === true
                                                     ? 'Locked'
                                                     : ''}
+                                                {orphanedSession !==
+                                                    undefined && (
+                                                    <span className="hint">
+                                                        {' '}
+                                                        {describeDebugSessionStatus(
+                                                            orphanedSession.status,
+                                                            debugSessionsFetchedAt,
+                                                            nowMs,
+                                                        )}{' '}
+                                                    </span>
+                                                )}
                                                 {orphanedSession !==
                                                     undefined && (
                                                     <button

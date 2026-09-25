@@ -597,12 +597,20 @@ export async function getScrapeDebugSessionSocket(): Promise<string | null> {
     return invoke('get_scrape_debug_session_socket');
 }
 
+export interface DebugSessionStatusView {
+    execRunning: boolean;
+    /** `null` for sessions without a lifetime limit (manual `debug start`). */
+    expiresInSecs: number | null;
+}
+
 export interface DebugSessionView {
     sessionId: string;
     loginName: string;
     kind: string;
     pid: number;
     startedAt: string;
+    /** `null` when the session did not answer a status request in time. */
+    status: DebugSessionStatusView | null;
 }
 
 export async function listDebugSessions(

@@ -839,7 +839,10 @@ fn run_debug_stop(args: DebugStopArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn run_debug_status(args: DebugStatusArgs) -> Result<(), Box<dyn Error>> {
-    let status = crate::scrape::debug::debug_session_status(&args.socket)?;
+    let status = crate::scrape::debug::debug_session_status(
+        &args.socket,
+        Some(std::time::Duration::from_secs(5)),
+    )?;
     println!("{}", serde_json::to_string_pretty(&status)?);
     Ok(())
 }

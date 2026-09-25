@@ -164,8 +164,15 @@ pub fn stop_debug_session(socket_path: &Path) -> Result<(), Box<dyn Error>> {
         .into())
 }
 
-pub fn debug_session_status(socket_path: &Path) -> Result<DebugSessionStatus, Box<dyn Error>> {
-    let response: StatusResponse = send_request(socket_path, Request::Status)?;
+/// `timeout` bounds the wait for a reply: a session still running a worker
+/// binary from before `status` existed serves one connection at a time, so
+/// mid-exec it would not answer until the script finished.
+pub fn debug_session_status(
+    socket_path: &Path,
+    timeout: Option<std::time::Duration>,
+) -> Result<DebugSessionStatus, Box<dyn Error>> {
+    let response: StatusResponse =
+        send_request_with_timeout(socket_path, Request::Status, timeout)?;
     match (response.ok, response.status) {
         (true, Some(status)) => Ok(status),
         (_, _) => Err(response
@@ -1070,10 +1077,18 @@ async fn cancel_exec_task(
     refreshmint.debug_output_sink = None;
 }
 
-#[cfg(unix)]
 fn send_request<T: serde::de::DeserializeOwned>(
     socket_path: &Path,
     request: Request,
+) -> Result<T, Box<dyn Error>> {
+    send_request_with_timeout(socket_path, request, None)
+}
+
+#[cfg(unix)]
+fn send_request_with_timeout<T: serde::de::DeserializeOwned>(
+    socket_path: &Path,
+    request: Request,
+    timeout: Option<std::time::Duration>,
 ) -> Result<T, Box<dyn Error>> {
     use std::io::{Read, Write};
     use std::net::Shutdown;
@@ -1081,6 +1096,8 @@ fn send_request<T: serde::de::DeserializeOwned>(
 
     let connect_path = resolve_socket_bind_path(socket_path);
     let mut stream = UnixStream::connect(&connect_path)?;
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
     serde_json::to_writer(&mut stream, &request)?;
     stream.write_all(b"\n")?;
     stream.shutdown(Shutdown::Write)?;
@@ -1091,9 +1108,10 @@ fn send_request<T: serde::de::DeserializeOwned>(
 }
 
 #[cfg(not(unix))]
-fn send_request<T: serde::de::DeserializeOwned>(
+fn send_request_with_timeout<T: serde::de::DeserializeOwned>(
     _socket_path: &Path,
     _request: Request,
+    _timeout: Option<std::time::Duration>,
 ) -> Result<T, Box<dyn Error>> {
     Err("debug sockets are currently supported only on unix platforms".into())
 }
@@ -1541,7 +1559,7 @@ mod tests {
         let status = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
             tokio::task::spawn_blocking(move || {
-                debug_session_status(&status_path).map_err(|err| err.to_string())
+                debug_session_status(&status_path, None).map_err(|err| err.to_string())
             }),
         )
         .await
