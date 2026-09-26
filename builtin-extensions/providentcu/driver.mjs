@@ -629,15 +629,53 @@ async function handleLogin(context) {
  */
 async function handleMfa(context) {
     const page = context.mainPage;
+
+    // Provident added an "Identity Verification" delivery-method chooser in
+    // front of the code-entry form (observed 2026-09-22 at
+    // AOP/Challenge.aspx: a modal offering "Send me a text message" /
+    // "Call my phone", with no code input yet). See handleMfaChoice in the
+    // bankofamerica driver for this codebase's established pattern of
+    // branching on DOM presence rather than URL, since both sub-states can
+    // share a URL.
+    const hasMethodChoice = assertBoolean(
+        await page.evaluate(
+            `!!document.querySelector('input[value="Send me a text message"], input[value="Call my phone"]')`,
+        ),
+    );
+    if (hasMethodChoice) {
+        refreshmint.log('State: MFA delivery-method choice');
+        await saveDebugPageState(page, 'mfa-method-choice');
+        // This is an ASP.NET WebForms postback button: the click submits the
+        // page and destroys the current JS execution context, so a
+        // navigation-oblivious waitMs() (a page.evaluate() timer) fails with
+        // "Inspected target navigated or closed" (observed 2026-09-26). Wait
+        // for the resulting load like handleLogin's Sign On click does.
+        await page.click('input[value="Send me a text message"]');
+        await page.waitForLoadState('domcontentloaded', 30000);
+        return { progressName: 'mfa method selected' };
+    }
+
     refreshmint.log('State: MFA required');
 
+    // The code field's id is txtSecurityCode, not txtCode -- confirmed via
+    // the live DOM snapshot on 2026-09-26
+    // (#..._grpSms_txtSecurityCode / #..._grpSms_btnSubmitSms, button
+    // value "Submit"). The old txtCode/"Continue" selectors never matched
+    // anything on this new post-2026-09-22 challenge page.
     const code = await refreshmint.prompt('Enter MFA code:');
-    await page.fill('input[name*="txtCode"], input[id*="txtCode"]', code);
-    await page.click(
-        'input[type="submit"][value="Continue"], #M_layout_content_PCDZ_MMCA7G7_ctl00_webInputForm_cmdContinue',
+    await page.fill(
+        'input[name*="txtSecurityCode"], input[id*="txtSecurityCode"]',
+        code,
     );
-
-    await waitMs(page, 3000);
+    // Same ASP.NET postback-navigation issue as the method-choice click
+    // above: this Submit destroys the current JS context, so waitMs()'s
+    // page.evaluate() timer fails with "Inspected target navigated or
+    // closed" (observed 2026-09-26, mid-run, after the click had already
+    // gone through).
+    await page.click(
+        'input[type="submit"][value="Submit"], input[type="submit"][value="Continue"]',
+    );
+    await page.waitForLoadState('domcontentloaded', 30000);
     return { progressName: 'mfa submitted' };
 }
 
@@ -2672,7 +2710,8 @@ async function main() {
             stepReturn = await handleLogin(context);
         } else if (
             urlWithoutFragment.includes('Mfa.aspx') ||
-            urlWithoutFragment.includes('SecurityChallenge')
+            urlWithoutFragment.includes('SecurityChallenge') ||
+            urlWithoutFragment.includes('AOP/Challenge.aspx')
         ) {
             stepReturn = await handleMfa(context);
         } else if (
