@@ -494,7 +494,7 @@ fn stop_debug_worker(
 
 #[tauri::command]
 async fn new_ledger(app: tauri::AppHandle, ledger: Option<String>) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = match ledger {
             Some(path) => crate::ledger::ensure_refreshmint_extension(path.into())
                 .map_err(|err| err.to_string())?,
@@ -511,7 +511,8 @@ async fn new_ledger(app: tauri::AppHandle, ledger: Option<String>) -> Result<(),
 
 #[tauri::command]
 async fn open_ledger(ledger: String) -> Result<ledger_open::LedgerView, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         ledger_open::open_ledger_dir(&target_dir).map_err(|err| err.to_string())
     })
@@ -523,7 +524,7 @@ async fn add_transaction(
     ledger: String,
     transaction: ledger_add::NewTransaction,
 ) -> Result<ledger_open::LedgerView, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         ledger_add::add_transaction_to_ledger(&target_dir, transaction)
             .map_err(|err| err.to_string())
@@ -536,7 +537,8 @@ async fn validate_transaction(
     ledger: String,
     transaction: ledger_add::NewTransaction,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         ledger_add::validate_transaction_only(&target_dir, transaction)
             .map_err(|err| err.to_string())
@@ -549,7 +551,7 @@ async fn add_transaction_text(
     ledger: String,
     transaction: String,
 ) -> Result<ledger_open::LedgerView, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         ledger_add::add_transaction_text(&target_dir, &transaction).map_err(|err| err.to_string())
     })
@@ -558,7 +560,8 @@ async fn add_transaction_text(
 
 #[tauri::command]
 async fn validate_transaction_text(ledger: String, transaction: String) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         ledger_add::validate_transaction_text(&target_dir, &transaction)
             .map_err(|err| err.to_string())
@@ -568,7 +571,8 @@ async fn validate_transaction_text(ledger: String, transaction: String) -> Resul
 
 #[tauri::command]
 async fn list_scrape_extensions(ledger: String) -> Result<Vec<String>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         scrape::list_runnable_extensions(&target_dir).map_err(|err| err.to_string())
@@ -582,7 +586,7 @@ async fn load_scrape_extension(
     source: String,
     replace: bool,
 ) -> Result<String, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
 
@@ -695,7 +699,8 @@ async fn get_login_extraction_support(
     ledger: String,
     login_name: String,
 ) -> Result<LoginExtractionSupport, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         require_existing_login(&target_dir, &login_name)?;
@@ -710,7 +715,7 @@ async fn start_scrape_debug_session_for_login(
     login_name: String,
     headless: bool,
 ) -> Result<String, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let login_name = require_login_name_input(login_name)?;
 
         let target_dir = std::path::PathBuf::from(ledger);
@@ -779,7 +784,7 @@ async fn start_scrape_debug_session(ledger: String, account: String) -> Result<S
 
 #[tauri::command]
 async fn stop_scrape_debug_session() -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let state = ui_debug_session_state();
         let session = {
             let mut guard = state
@@ -798,7 +803,7 @@ async fn stop_scrape_debug_session() -> Result<(), String> {
 
 #[tauri::command]
 async fn get_scrape_debug_session_socket() -> Result<Option<String>, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let state = ui_debug_session_state();
         let finished = {
             let mut guard = state
@@ -918,7 +923,7 @@ async fn list_debug_sessions(ledger: String) -> Result<Vec<DebugSessionView>, St
 /// outlived the `run_scrape_for_login` call that reported its error.
 #[tauri::command]
 async fn stop_debug_session_by_id(session_id: String) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let session_id = require_non_empty_input("session_id", session_id)?;
         let descriptor = crate::debug_registry::list_sessions()
             .into_iter()
@@ -932,7 +937,7 @@ async fn stop_debug_session_by_id(session_id: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn start_lock_metadata_watch(app: tauri::AppHandle, ledger: String) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         use notify::Watcher;
 
         let target_dir = std::path::PathBuf::from(ledger);
@@ -991,7 +996,7 @@ async fn start_lock_metadata_watch(app: tauri::AppHandle, ledger: String) -> Res
 
 #[tauri::command]
 async fn stop_lock_metadata_watch() -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let state = lock_metadata_watcher_state();
         let mut guard = state
             .lock()
@@ -1007,7 +1012,7 @@ async fn get_lock_status_snapshot(
     ledger: String,
     login_names: Vec<String>,
 ) -> Result<LockStatusSnapshot, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
 
@@ -1512,7 +1517,8 @@ async fn get_scrape_log(
     ledger: String,
     login_name: String,
 ) -> Result<Vec<operations::ScrapeLogEntry>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let ledger_dir = std::path::PathBuf::from(&ledger);
         crate::ledger::require_refreshmint_extension(&ledger_dir).map_err(|err| err.to_string())?;
         let login_name = require_login_name_input(login_name)?;
@@ -1556,7 +1562,8 @@ async fn get_last_scrape_summaries(
     ledger: String,
     login_names: Vec<String>,
 ) -> Result<std::collections::BTreeMap<String, LastScrapeSummary>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let ledger_dir = std::path::PathBuf::from(&ledger);
         crate::ledger::require_refreshmint_extension(&ledger_dir).map_err(|err| err.to_string())?;
         let mut summaries = std::collections::BTreeMap::new();
@@ -1616,7 +1623,8 @@ async fn list_scrape_failure_artifacts(
     ledger: String,
     artifacts_dir: String,
 ) -> Result<Vec<String>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let dir = resolve_artifact_dir(&ledger, &artifacts_dir)?;
         let mut names = Vec::new();
         if let Ok(read) = std::fs::read_dir(&dir) {
@@ -1640,7 +1648,8 @@ async fn read_scrape_failure_artifact(
     artifacts_dir: String,
     filename: String,
 ) -> Result<String, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         validate_artifact_filename(&filename)?;
         let dir = resolve_artifact_dir(&ledger, &artifacts_dir)?;
         let path = dir.join(&filename);
@@ -1661,7 +1670,8 @@ async fn list_documents(
     ledger: String,
     account_name: String,
 ) -> Result<Vec<extract::DocumentWithInfo>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let account_name = require_non_empty_input("account_name", account_name)?;
         extract::list_documents(&target_dir, &account_name).map_err(|err| err.to_string())
@@ -1675,7 +1685,8 @@ async fn list_login_account_documents(
     login_name: String,
     label: String,
 ) -> Result<Vec<extract::DocumentWithInfo>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let label = require_label_input(label)?;
@@ -1692,7 +1703,8 @@ async fn read_login_account_document_rows(
     label: String,
     document_name: String,
 ) -> Result<Vec<Vec<String>>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let label = require_label_input(label)?;
@@ -1714,7 +1726,8 @@ async fn read_login_account_document_text(
     label: String,
     document_name: String,
 ) -> Result<String, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let label = require_label_input(label)?;
@@ -1726,7 +1739,8 @@ async fn read_login_account_document_text(
 
 #[tauri::command]
 async fn read_attachment_data_url(ledger: String, filename: String) -> Result<String, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let ledger_dir = std::path::Path::new(&ledger);
         extract::read_attachment_data_url(ledger_dir, &filename).map_err(|e| e.to_string())
     })
@@ -2058,7 +2072,7 @@ async fn reset_document_extraction_failure(
     label: String,
     filename: String,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let label = require_label_input(label)?;
@@ -2088,7 +2102,8 @@ async fn get_account_config(
     ledger: String,
     account_name: String,
 ) -> Result<account_config::AccountConfig, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let account_name = require_non_empty_input("account_name", account_name)?;
         Ok(account_config::read_account_config(
@@ -2105,7 +2120,7 @@ async fn set_account_extension(
     account_name: String,
     extension: String,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let account_name = require_non_empty_input("account_name", account_name)?;
         let extension = extension.trim().to_string();
@@ -2177,7 +2192,8 @@ fn resolve_login_account_gl_account(
 
 #[tauri::command]
 async fn list_logins(ledger: String) -> Result<Vec<String>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         login_config::list_logins(&target_dir).map_err(|e| e.to_string())
@@ -2190,7 +2206,8 @@ async fn get_login_config(
     ledger: String,
     login_name: String,
 ) -> Result<login_config::LoginConfig, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         Ok(login_config::read_login_config(&target_dir, &login_name))
@@ -2200,7 +2217,7 @@ async fn get_login_config(
 
 #[tauri::command]
 async fn create_login(ledger: String, login_name: String, extension: String) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         let login_name = require_login_name_input(login_name)?;
@@ -2234,7 +2251,7 @@ async fn set_login_extension(
     login_name: String,
     extension: String,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         require_existing_login(&target_dir, &login_name)?;
@@ -2261,7 +2278,7 @@ async fn set_login_extension(
 
 #[tauri::command]
 async fn delete_login(ledger: String, login_name: String) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let _lock = login_config::acquire_login_lock_with_metadata(
@@ -2283,7 +2300,7 @@ async fn set_login_account(
     label: String,
     gl_account: Option<String>,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         require_existing_login(&target_dir, &login_name)?;
@@ -2321,7 +2338,7 @@ async fn remove_login_account(
     login_name: String,
     label: String,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         require_existing_login(&target_dir, &login_name)?;
@@ -2356,7 +2373,7 @@ async fn repair_login_account_labels(
     ledger: String,
     login_name: String,
 ) -> Result<migration::MigrationOutcome, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         require_existing_login(&target_dir, &login_name)?;
@@ -2395,7 +2412,7 @@ async fn repair_login_account_labels(
 
 #[tauri::command]
 async fn list_login_secrets(login_name: String) -> Result<Vec<DomainSecretEntry>, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let login_name = require_login_name_input(login_name)?;
         let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
         let mut entries = store
@@ -2420,7 +2437,7 @@ async fn sync_login_secrets_for_extension(
     login_name: String,
     extension: String,
 ) -> Result<SecretSyncResult, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         let login_name = require_login_name_input(login_name)?;
@@ -2481,7 +2498,7 @@ async fn set_login_credentials(
     username: String,
     password: String,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let login_name = require_login_name_input(login_name)?;
         let domain = require_non_empty_input("domain", domain)?;
         let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
@@ -2499,7 +2516,7 @@ async fn set_login_username(
     domain: String,
     username: String,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let login_name = require_login_name_input(login_name)?;
         let domain = require_non_empty_input("domain", domain)?;
         let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
@@ -2517,7 +2534,7 @@ async fn set_login_password(
     domain: String,
     password: String,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let login_name = require_login_name_input(login_name)?;
         let domain = require_non_empty_input("domain", domain)?;
         let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
@@ -2531,7 +2548,7 @@ async fn set_login_password(
 /// Delete all credentials for a domain.
 #[tauri::command]
 async fn remove_login_domain(login_name: String, domain: String) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let login_name = require_login_name_input(login_name)?;
         let domain = require_non_empty_input("domain", domain)?;
         let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
@@ -2543,7 +2560,7 @@ async fn remove_login_domain(login_name: String, domain: String) -> Result<(), S
 /// Read the username for a domain — no biometric prompt.
 #[tauri::command]
 async fn get_login_username(login_name: String, domain: String) -> Result<String, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let login_name = require_login_name_input(login_name)?;
         let domain = require_non_empty_input("domain", domain)?;
         let store = crate::secret::SecretStore::new(format!("login/{login_name}"));
@@ -2554,7 +2571,7 @@ async fn get_login_username(login_name: String, domain: String) -> Result<String
 
 #[tauri::command]
 async fn clear_login_profile(ledger: String, login_name: String) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         require_existing_login(&target_dir, &login_name)?;
@@ -2577,7 +2594,7 @@ async fn migrate_ledger(
     ledger: String,
     dry_run: bool,
 ) -> Result<migration::MigrationOutcome, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         migration::migrate_ledger(&target_dir, dry_run).map_err(|err| err.to_string())
@@ -2590,7 +2607,8 @@ async fn query_transactions(
     ledger: String,
     query: String,
 ) -> Result<Vec<ledger_open::TransactionRow>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let dir = std::path::PathBuf::from(&ledger);
         let journal_path = dir.join("general.journal");
         let tokens = ledger_open::tokenize_query(&query);
@@ -2608,7 +2626,8 @@ async fn run_hledger_report(
     args: Vec<String>,
     include_budget: Option<bool>,
 ) -> Result<report::ReportResult, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let ledger_path = std::path::PathBuf::from(&ledger);
         let journal_path = ledger_path.join("general.journal");
         // budget.journal is user-owned and lives NEXT TO general.journal (never an
@@ -2656,7 +2675,8 @@ async fn get_account_journal(
     ledger: String,
     account_name: String,
 ) -> Result<Vec<AccountJournalEntry>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let account_name = require_non_empty_input("account_name", account_name)?;
         let entries = account_journal::read_journal(&target_dir, &account_name)
@@ -2675,7 +2695,8 @@ async fn get_login_account_journal(
     login_name: String,
     label: String,
 ) -> Result<Vec<AccountJournalEntry>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let label = require_label_input(label)?;
@@ -2696,7 +2717,8 @@ async fn get_unposted(
     ledger: String,
     account_name: String,
 ) -> Result<Vec<AccountJournalEntry>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let account_name = require_non_empty_input("account_name", account_name)?;
         let entries =
@@ -2715,7 +2737,8 @@ async fn get_login_account_unposted(
     login_name: String,
     label: String,
 ) -> Result<Vec<AccountJournalEntry>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let label = require_label_input(label)?;
@@ -2733,7 +2756,8 @@ async fn get_login_account_unposted(
 async fn list_reconciliation_sessions(
     ledger: String,
 ) -> Result<Vec<bookkeeping::ReconciliationSession>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         bookkeeping::list_reconciliation_sessions(&target_dir).map_err(|err| err.to_string())
@@ -2748,7 +2772,8 @@ async fn query_reconciliation_candidates(
     statement_start_date: Option<String>,
     statement_end_date: String,
 ) -> Result<Vec<ledger_open::TransactionRow>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         let gl_account = require_non_empty_input("glAccount", gl_account)?;
@@ -2769,7 +2794,7 @@ async fn create_reconciliation_session(
     ledger: String,
     session: bookkeeping::NewReconciliationSessionInput,
 ) -> Result<bookkeeping::ReconciliationSession, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         bookkeeping::create_reconciliation_session(&target_dir, session)
@@ -2783,7 +2808,7 @@ async fn update_reconciliation_session(
     ledger: String,
     session: bookkeeping::UpdateReconciliationSessionInput,
 ) -> Result<bookkeeping::ReconciliationSession, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         bookkeeping::update_reconciliation_session(&target_dir, session)
@@ -2797,7 +2822,7 @@ async fn finalize_reconciliation_session(
     ledger: String,
     id: String,
 ) -> Result<bookkeeping::ReconciliationSession, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         let id = require_non_empty_input("id", id)?;
@@ -2812,7 +2837,7 @@ async fn reopen_reconciliation_session(
     ledger: String,
     id: String,
 ) -> Result<bookkeeping::ReconciliationSession, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         let id = require_non_empty_input("id", id)?;
@@ -2823,7 +2848,8 @@ async fn reopen_reconciliation_session(
 
 #[tauri::command]
 async fn list_bookkeeping_links(ledger: String) -> Result<Vec<bookkeeping::LinkRecord>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         bookkeeping::list_links(&target_dir).map_err(|err| err.to_string())
@@ -2836,7 +2862,7 @@ async fn create_bookkeeping_link(
     ledger: String,
     link: bookkeeping::NewLinkRecordInput,
 ) -> Result<bookkeeping::LinkRecord, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         bookkeeping::create_link(&target_dir, link).map_err(|err| err.to_string())
@@ -2846,7 +2872,7 @@ async fn create_bookkeeping_link(
 
 #[tauri::command]
 async fn delete_bookkeeping_link(ledger: String, id: String) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         let id = require_non_empty_input("id", id)?;
@@ -2857,7 +2883,8 @@ async fn delete_bookkeeping_link(ledger: String, id: String) -> Result<(), Strin
 
 #[tauri::command]
 async fn list_import_anomalies(ledger: String) -> Result<Vec<bookkeeping::ImportAnomaly>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         bookkeeping::list_import_anomalies(&target_dir).map_err(|err| err.to_string())
@@ -2870,7 +2897,7 @@ async fn review_import_anomaly(
     ledger: String,
     anomaly: bookkeeping::ReviewImportAnomalyInput,
 ) -> Result<bookkeeping::ImportAnomaly, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         bookkeeping::review_import_anomaly(&target_dir, anomaly).map_err(|err| err.to_string())
@@ -2883,7 +2910,7 @@ async fn link_import_anomaly_reversal(
     ledger: String,
     anomaly: bookkeeping::LinkImportAnomalyReversalInput,
 ) -> Result<bookkeeping::ImportAnomaly, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         bookkeeping::link_import_anomaly_reversal(&target_dir, anomaly)
@@ -2894,7 +2921,8 @@ async fn link_import_anomaly_reversal(
 
 #[tauri::command]
 async fn list_period_closes(ledger: String) -> Result<Vec<bookkeeping::PeriodClose>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         bookkeeping::list_period_closes(&target_dir).map_err(|err| err.to_string())
@@ -2907,7 +2935,7 @@ async fn upsert_period_close(
     ledger: String,
     period_close: bookkeeping::UpsertPeriodCloseInput,
 ) -> Result<bookkeeping::PeriodClose, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         bookkeeping::upsert_period_close(&target_dir, period_close).map_err(|err| err.to_string())
@@ -2920,7 +2948,7 @@ async fn reopen_period_close(
     ledger: String,
     period_id: String,
 ) -> Result<bookkeeping::PeriodClose, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         bookkeeping::reopen_period_close(&target_dir, &period_id).map_err(|err| err.to_string())
@@ -2930,7 +2958,8 @@ async fn reopen_period_close(
 
 #[tauri::command]
 async fn list_resolutions(ledger: String) -> Result<Vec<automation::Resolution>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         automation::list_resolutions(&target_dir).map_err(|err| err.to_string())
@@ -2943,7 +2972,7 @@ async fn create_resolution(
     ledger: String,
     resolution: automation::NewResolutionInput,
 ) -> Result<automation::Resolution, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         automation::create_resolution(&target_dir, resolution).map_err(|err| err.to_string())
@@ -2953,7 +2982,7 @@ async fn create_resolution(
 
 #[tauri::command]
 async fn disable_resolution(ledger: String, id: String) -> Result<automation::Resolution, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         let id = require_non_empty_input("id", id)?;
@@ -2964,7 +2993,7 @@ async fn disable_resolution(ledger: String, id: String) -> Result<automation::Re
 
 #[tauri::command]
 async fn enable_resolution(ledger: String, id: String) -> Result<automation::Resolution, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         let id = require_non_empty_input("id", id)?;
@@ -2978,7 +3007,8 @@ async fn list_automation_proposals(
     ledger: String,
     scope: automation::AutomationScope,
 ) -> Result<Vec<automation::AutomationProposal>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         automation::list_automation_proposals(&target_dir, scope).map_err(|err| err.to_string())
@@ -2988,7 +3018,7 @@ async fn list_automation_proposals(
 
 #[tauri::command]
 async fn apply_automation_proposal(ledger: String, proposal_id: String) -> Result<String, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         let proposal_id = require_non_empty_input("proposalId", proposal_id)?;
@@ -3003,7 +3033,7 @@ async fn apply_automation_policy(
     ledger: String,
     scope: automation::AutomationScope,
 ) -> Result<Vec<String>, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         automation::apply_automation_policy(&target_dir, scope).map_err(|err| err.to_string())
@@ -3020,7 +3050,7 @@ async fn post_login_account_entry(
     counterpart_account: String,
     posting_index: Option<usize>,
 ) -> Result<String, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let label = require_label_input(label)?;
@@ -3053,7 +3083,7 @@ async fn post_login_account_entry_split(
     entry_id: String,
     counterparts: Vec<post::SplitCounterpart>,
 ) -> Result<String, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let label = require_label_input(label)?;
@@ -3083,7 +3113,7 @@ async fn unpost_login_account_entry(
     entry_id: String,
     posting_index: Option<usize>,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let label = require_label_input(label)?;
@@ -3113,7 +3143,7 @@ async fn retire_login_account_entry(
     entry_id: String,
     reason: String,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         let login_name = require_non_empty_input("loginName", login_name)?;
@@ -3141,7 +3171,8 @@ async fn get_unposted_entries_for_transfer(
     exclude_label: String,
     source_entry_id: String,
 ) -> Result<Vec<UnpostedTransferResult>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let exclude_login = require_login_name_input(exclude_login)?;
         let exclude_label = require_label_input(exclude_label)?;
@@ -3183,7 +3214,7 @@ async fn post_login_account_transfer(
     entry_id2: String,
     fee_account: Option<String>,
 ) -> Result<String, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name1 = require_login_name_input(login_name1)?;
         let label1 = require_label_input(label1)?;
@@ -3215,7 +3246,7 @@ async fn sync_gl_transaction(
     label: String,
     entry_id: String,
 ) -> Result<String, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let label = require_label_input(label)?;
@@ -3233,7 +3264,8 @@ async fn suggest_categories(
     login_name: String,
     label: String,
 ) -> Result<std::collections::HashMap<String, categorize::CategoryResult>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let label = require_label_input(label)?;
@@ -3248,7 +3280,8 @@ async fn suggest_categories(
 async fn suggest_gl_categories(
     ledger: String,
 ) -> Result<std::collections::HashMap<String, categorize::GlCategoryResult>, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         categorize::suggest_gl_categories(&target_dir).map_err(|err| err.to_string())
     })
@@ -3260,8 +3293,8 @@ async fn suggest_gl_categories(
 /// the server-side matcher (automation::matching_rule_account).
 #[tauri::command]
 async fn normalize_payee(description: String) -> String {
-    command_lane::run_serialized(move || crate::payee_normalize::normalize_payee(&description))
-        .await
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || crate::payee_normalize::normalize_payee(&description)).await
 }
 
 #[tauri::command]
@@ -3271,7 +3304,7 @@ async fn recategorize_gl_transaction(
     posting_index: usize,
     new_account: String,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let txn_id = require_non_empty_input("txn_id", txn_id)?;
         let new_account = require_non_empty_input("new_account", new_account)?;
@@ -3294,7 +3327,7 @@ async fn recategorize_gl_transactions(
     ledger: String,
     edits: Vec<RecategorizeEdit>,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let mut prepared = Vec::with_capacity(edits.len());
         for edit in edits {
@@ -3315,7 +3348,7 @@ async fn merge_gl_transfer(
     txn_id_2: String,
     fee_account: Option<String>,
 ) -> Result<String, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let txn_id_1 = require_non_empty_input("txn_id_1", txn_id_1)?;
         let txn_id_2 = require_non_empty_input("txn_id_2", txn_id_2)?;
@@ -3342,7 +3375,7 @@ async fn unpost_gl_transaction(
     // remembered as not-a-transfer. See post::unpost_gl_transaction.
     record_memory: Option<bool>,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let gl_txn_id = require_non_empty_input("gl_txn_id", gl_txn_id)?;
         post::unpost_gl_transaction(
@@ -3365,7 +3398,7 @@ async fn create_not_transfer_link_for_gl_pair(
     txn_id_1: String,
     txn_id_2: String,
 ) -> Result<automation::Resolution, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let txn_id_1 = require_non_empty_input("txn_id_1", txn_id_1)?;
         let txn_id_2 = require_non_empty_input("txn_id_2", txn_id_2)?;
@@ -3381,7 +3414,8 @@ async fn create_not_transfer_link_for_gl_pair(
 async fn check_ledger_consistency(
     ledger: String,
 ) -> Result<consistency::ConsistencyReport, String> {
-    command_lane::run_serialized(move || {
+    // Read-only: see command_lane::run_shared.
+    command_lane::run_shared(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         consistency::check_ledger(&target_dir).map_err(|err| err.to_string())
@@ -3396,7 +3430,7 @@ async fn check_ledger_consistency(
 async fn recover_ledger_consistency(
     ledger: String,
 ) -> Result<consistency::ConsistencyReport, String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
         consistency::recover_ledger(&target_dir, "gui").map_err(|err| err.to_string())
@@ -3414,7 +3448,7 @@ async fn repair_dangling_ref(
     entry_id: String,
     posting_index: Option<usize>,
 ) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let login_name = require_login_name_input(login_name)?;
         let label = require_label_input(label)?;
@@ -3436,7 +3470,7 @@ async fn repair_dangling_ref(
 /// the source entry can be re-posted cleanly. See [consistency].
 #[tauri::command]
 async fn repair_orphaned_gl_txn(ledger: String, gl_txn_id: String) -> Result<(), String> {
-    command_lane::run_serialized(move || {
+    command_lane::run_exclusive(move || {
         let target_dir = std::path::PathBuf::from(ledger);
         let gl_txn_id = require_non_empty_input("gl_txn_id", gl_txn_id)?;
         post::repair_orphaned_gl_txn(&target_dir, &gl_txn_id, "gui").map_err(|err| err.to_string())
