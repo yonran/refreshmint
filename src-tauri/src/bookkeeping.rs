@@ -477,7 +477,7 @@ pub fn query_reconciliation_candidates(
     let transactions = crate::ledger_open::run_hledger_print(&journal_path)?;
     ensure_all_transactions_have_gl_ids(&transactions)?;
     let filtered: Vec<_> = transactions
-        .into_iter()
+        .iter()
         .filter(|txn| {
             txn.tpostings
                 .iter()
@@ -491,6 +491,7 @@ pub fn query_reconciliation_candidates(
             }
             txn.tdate.as_str() <= statement_end_date.as_str()
         })
+        .cloned()
         .collect();
     crate::ledger_open::build_transaction_rows(ledger_dir, &filtered)
 }
@@ -965,8 +966,8 @@ impl GlTxnIndex {
         let transactions = crate::ledger_open::run_hledger_print(&journal_path)?;
         ensure_all_transactions_have_gl_ids(&transactions)?;
         let mut records = BTreeMap::new();
-        for txn in transactions {
-            let id = gl_transaction_id(&txn).ok_or_else(|| {
+        for txn in transactions.iter() {
+            let id = gl_transaction_id(txn).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     "general.journal contains a transaction without an id: tag; run migrate_ledger first",

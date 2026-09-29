@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::account_journal;
 use crate::hledger;
@@ -157,10 +158,10 @@ pub fn suggest_categories(
 
     // Parse general.journal once (may not exist for new ledgers).
     let gl_journal_path = ledger_dir.join("general.journal");
-    let gl_txns: Vec<hledger::Transaction> = if gl_journal_path.exists() {
+    let gl_txns: Arc<Vec<hledger::Transaction>> = if gl_journal_path.exists() {
         run_hledger_print(&gl_journal_path).unwrap_or_default()
     } else {
-        vec![]
+        Arc::default()
     };
 
     // Build id → Transaction index for O(1) lookup.

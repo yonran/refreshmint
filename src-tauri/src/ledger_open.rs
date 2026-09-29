@@ -2,8 +2,9 @@ use crate::hledger::{Amount, Posting, Side, Transaction};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -120,8 +121,40 @@ pub fn open_ledger_dir(path: &Path) -> Result<LedgerView, Box<dyn std::error::Er
     })
 }
 
-pub(crate) fn run_hledger_print(journal_path: &Path) -> io::Result<Vec<Transaction>> {
-    run_hledger_print_with_query(journal_path, &[])
+/// Parsed journals keyed by path, each with the exact bytes it was parsed from.
+type PrintCache = HashMap<PathBuf, (Vec<u8>, Arc<Vec<Transaction>>)>;
+static PRINT_CACHE: OnceLock<Mutex<PrintCache>> = OnceLock::new();
+
+/// `hledger print` of the whole journal, reusing the previous parse while the
+/// file's contents are byte-for-byte unchanged.
+///
+/// Comparing contents (about 1 ms for a 1.5 MB journal) rather than size/mtime
+/// means writes from anywhere -- this app, the CLI, scrape workers, git, an
+/// editor -- are picked up without any explicit invalidation.
+pub(crate) fn run_hledger_print(journal_path: &Path) -> io::Result<Arc<Vec<Transaction>>> {
+    let key = journal_path
+        .canonicalize()
+        .unwrap_or_else(|_| journal_path.to_path_buf());
+    // Held across the hledger run so concurrent misses parse only once.
+    let mut cache = PRINT_CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let before = std::fs::read(journal_path)?;
+    if let Some((contents, txns)) = cache.get(&key) {
+        if *contents == before {
+            return Ok(Arc::clone(txns));
+        }
+    }
+    let txns = Arc::new(run_hledger_print_with_query(journal_path, &[])?);
+    // hledger reads the file itself, so only cache the result if the file did
+    // not change while it ran; otherwise we can't tell which version it parsed.
+    if std::fs::read(journal_path)? == before {
+        cache.insert(key, (before, Arc::clone(&txns)));
+    } else {
+        cache.remove(&key);
+    }
+    Ok(txns)
 }
 
 pub(crate) fn run_hledger_print_with_query(
@@ -823,6 +856,39 @@ mod tests {
         assert_eq!(
             rows[0].bookkeeping.soft_closed_period_id.as_deref(),
             Some("2024-01")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_hledger_print_reuses_parse_until_contents_change() {
+        let root = temp_ledger_dir("print-cache");
+        let journal = root.join("general.journal");
+        fs::write(
+            &journal,
+            "2024-01-01 Coffee  ; id: a\n    Expenses:Food  10.00 USD\n    Assets:Cash\n",
+        )
+        .unwrap();
+
+        let first = run_hledger_print(&journal).unwrap();
+        let second = run_hledger_print(&journal).unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "unchanged file should reuse the parse"
+        );
+
+        // Same length, so a size/mtime check within one timestamp tick could
+        // miss it; comparing contents must not.
+        fs::write(
+            &journal,
+            "2024-01-01 Coffee  ; id: a\n    Expenses:Food  20.00 USD\n    Assets:Cash\n",
+        )
+        .unwrap();
+        let third = run_hledger_print(&journal).unwrap();
+        assert!(!Arc::ptr_eq(&first, &third));
+        assert_eq!(
+            third[0].tpostings[0].pamount[0].aquantity.floating_point,
+            20.0
         );
         let _ = fs::remove_dir_all(root);
     }
