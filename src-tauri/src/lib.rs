@@ -935,76 +935,74 @@ async fn stop_debug_session_by_id(session_id: String) -> Result<(), String> {
     .await
 }
 
+// Deliberately a sync command (main thread), outside command_lane: it only
+// manages the watcher behind its own mutex, and the frontend fires stop then
+// start back to back, which the main thread keeps in call order.
 #[tauri::command]
-async fn start_lock_metadata_watch(app: tauri::AppHandle, ledger: String) -> Result<(), String> {
-    command_lane::run_exclusive(move || {
-        use notify::Watcher;
+fn start_lock_metadata_watch(app: tauri::AppHandle, ledger: String) -> Result<(), String> {
+    use notify::Watcher;
 
-        let target_dir = std::path::PathBuf::from(ledger);
-        crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
+    let target_dir = std::path::PathBuf::from(ledger);
+    crate::ledger::require_refreshmint_extension(&target_dir).map_err(|err| err.to_string())?;
 
-        let state = lock_metadata_watcher_state();
-        let mut guard = state
-            .lock()
-            .map_err(|_| "failed to acquire lock metadata watcher state".to_string())?;
+    let state = lock_metadata_watcher_state();
+    let mut guard = state
+        .lock()
+        .map_err(|_| "failed to acquire lock metadata watcher state".to_string())?;
 
-        if let Some(existing) = guard.as_ref() {
-            if existing.ledger_path == target_dir {
-                return Ok(());
-            }
+    if let Some(existing) = guard.as_ref() {
+        if existing.ledger_path == target_dir {
+            return Ok(());
         }
+    }
 
-        guard.take();
+    guard.take();
 
-        let app_handle = app.clone();
-        let ledger_path = target_dir.clone();
-        let watcher =
-            notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
-                let Ok(event) = result else {
-                    return;
-                };
-                let should_emit = event.paths.iter().any(|path| {
-                    matches!(
-                        path.file_name().and_then(|name| name.to_str()),
-                        Some(".lock.meta.json" | ".gl.lock.meta.json")
-                    )
-                });
-                if should_emit {
-                    let _ = app_handle.emit(
-                        "refreshmint://lock-status-changed",
-                        LockStatusChangedEvent {
-                            ledger_path: ledger_path.to_string_lossy().to_string(),
-                        },
-                    );
-                }
-            })
-            .map_err(|err| err.to_string())?;
+    let app_handle = app.clone();
+    let ledger_path = target_dir.clone();
+    let watcher =
+        notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
+            let Ok(event) = result else {
+                return;
+            };
+            let should_emit = event.paths.iter().any(|path| {
+                matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some(".lock.meta.json" | ".gl.lock.meta.json")
+                )
+            });
+            if should_emit {
+                let _ = app_handle.emit(
+                    "refreshmint://lock-status-changed",
+                    LockStatusChangedEvent {
+                        ledger_path: ledger_path.to_string_lossy().to_string(),
+                    },
+                );
+            }
+        })
+        .map_err(|err| err.to_string())?;
 
-        let mut watcher = watcher;
-        watcher
-            .watch(&target_dir, notify::RecursiveMode::Recursive)
-            .map_err(|err| err.to_string())?;
+    let mut watcher = watcher;
+    watcher
+        .watch(&target_dir, notify::RecursiveMode::Recursive)
+        .map_err(|err| err.to_string())?;
 
-        *guard = Some(LockMetadataWatcher {
-            ledger_path: target_dir,
-            _watcher: watcher,
-        });
-        Ok(())
-    })
-    .await
+    *guard = Some(LockMetadataWatcher {
+        ledger_path: target_dir,
+        _watcher: watcher,
+    });
+    Ok(())
 }
 
+// Sync for the same reason as start_lock_metadata_watch.
 #[tauri::command]
-async fn stop_lock_metadata_watch() -> Result<(), String> {
-    command_lane::run_exclusive(move || {
-        let state = lock_metadata_watcher_state();
-        let mut guard = state
-            .lock()
-            .map_err(|_| "failed to acquire lock metadata watcher state".to_string())?;
-        guard.take();
-        Ok(())
-    })
-    .await
+fn stop_lock_metadata_watch() -> Result<(), String> {
+    let state = lock_metadata_watcher_state();
+    let mut guard = state
+        .lock()
+        .map_err(|_| "failed to acquire lock metadata watcher state".to_string())?;
+    guard.take();
+    Ok(())
 }
 
 #[tauri::command]
