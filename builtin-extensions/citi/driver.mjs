@@ -1489,7 +1489,25 @@ async function main() {
                 state = await evalCitiStateFlags();
             }
 
-            if (state.hasSignOff || state.hasAccountsMenu) {
+            // The generic bucket's `url` was captured before the poll above,
+            // and Citi's SPA can be mid-route-transition at that instant
+            // (e.g. a transient /US/ag/ hop on the way to /US/nga/
+            // accstatement). By the time the poll settles, the URL may have
+            // moved on to one of the specific prefixes checked above this
+            // bucket. Re-check against the *current* URL before falling
+            // back to the generic handlers, so a just-arrived, more
+            // specific page isn't misrouted into handleLoggedIn's fallback
+            // logic -- that caused an infinite statements<->dashboard
+            // bounce (observed live 2026-09-29: handleLoggedIn kept
+            // re-clicking the statements link because it never saw itself
+            // land on ACCOUNT_STATEMENTS_URL_PREFIX).
+            const settledUrl = await context.mainPage.url();
+            if (
+                settledUrl !== url &&
+                settledUrl.startsWith(ACCOUNT_STATEMENTS_URL_PREFIX)
+            ) {
+                stepReturn = await handleAccountStatementsPage(context);
+            } else if (state.hasSignOff || state.hasAccountsMenu) {
                 stepReturn = await handleLoggedIn(context);
             } else if (
                 state.hasMfaModal ||
