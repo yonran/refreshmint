@@ -83,3 +83,5 @@ Both commands run in the pre-commit hook and in CI.
 ## Scraping
 
 Read [scraper.md](./docs/scraper.md) before you edit any extension driver which scrapes an account.
+
+**A credential submission is a real login attempt the instant it fires**, whether or not MFA is ever completed afterward -- it counts toward bank-side lockout/fraud thresholds. When live-testing a login/MFA fix via `debug exec`, watch the log stream as it runs (don't redirect to a file and wait for a timeout unattended) and kill the process the moment you see an unexpected second submission. See "Login submissions are real attempts against production" in [scraper.md](./docs/scraper.md) for the full incident writeup and the per-run submission-cap pattern to add to any driver's login handler.

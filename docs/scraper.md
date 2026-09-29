@@ -177,6 +177,42 @@ continue;` skipped every Target statement because the links have no id.
   already staged (twelve copies of one Citi CSV in a day). `hasDocument` now
   sees staged resources; keep per-run state in the scrape context regardless.
 
+**Login submissions are real attempts against production**
+
+- Filling credentials and clicking the sign-on button is a real login
+  attempt the instant it fires, whether or not anything afterward (an MFA
+  code, a "remember device" click) is ever completed. It counts toward
+  bank-side lockout/fraud thresholds the same as a wrong password would.
+  Don't treat "I haven't entered a wrong MFA code yet" as "I haven't done
+  anything risky yet."
+- A driver whose main loop keeps landing back on the login page after a
+  submit (stale/ambiguous selectors, a state check that can't tell
+  submitted-but-still-rendering apart from never-submitted, a real
+  rejection, ...) will silently resubmit credentials every iteration --
+  the exact same failure mode as any other "no progress" loop, except each
+  iteration here is a live attempt against the bank instead of a wasted
+  step. Cap real submissions per run (see `MAX_LOGIN_SUBMIT_COUNT` and the
+  guard in citi's `handleLogin`) and fail loudly with a clear message the
+  first time the cap would be exceeded, instead of retrying.
+- When iterating on a login/MFA fix live via `debug exec`, don't redirect
+  output to a file and wait for a timeout unattended -- run it so the log
+  streams as it happens (or poll it every couple seconds) and kill the
+  process the moment you see a second "submitting"/"signing on" log line
+  you didn't expect. A background run you don't watch can submit many times
+  before you notice.
+- Case study (citi, 2026-09-26/28): fixing the login field selectors for a
+  site redesign surfaced two more bugs on the way to a working fix -- an
+  ambiguous `getByRole('button', {name: 'Sign On'})` match (a second
+  same-text element existed in some page states) and an `<mfa-modal>`
+  presence check that was true on every page load, including the very
+  first, because the element is a present-but-empty placeholder. Both bugs
+  independently caused the same symptom: the driver treated a
+  just-submitted page as an unsubmitted login page and resubmitted. Across
+  several debug-session iterations while chasing this, credentials were
+  submitted well over 10 times before a submission cap was added. Assume a
+  redesign changed more than the one selector you're looking at, and add
+  the cap _before_ the first live retry, not after a resubmission incident.
+
 **Selectors written from assumptions**
 
 - `#2026` -- ids that start with a digit are not valid CSS. Use `[id="2026"]`.
