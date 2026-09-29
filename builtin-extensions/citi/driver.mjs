@@ -511,7 +511,18 @@ function activityFileInfoForOption(optionText) {
  * @property {string[]} progressNames
  * @property {Set<string>} progressNamesSet
  * @property {number} lastProgressStep
+ * @property {number} loginSubmitCount
  */
+
+// Hard cap on real credential submissions per scrape run. Each submission is
+// a real login attempt against the live site, not a free retry -- see
+// "Login submissions are real attempts" in docs/scraper.md. A driver bug
+// that keeps landing back on the login page after a submit (wrong button,
+// stale state check, silent rejection, ...) must fail loudly instead of
+// resubmitting, which is exactly what looping on this would otherwise do
+// (observed 2026-09-26/28: 10+ real submissions across debug sessions
+// before this guard existed).
+const MAX_LOGIN_SUBMIT_COUNT = 1;
 
 async function waitMs(page, ms) {
     try {
@@ -574,9 +585,16 @@ async function handleLogin(context) {
     const loginStateJson = /** @type {string} */ (
         await page.evaluate(`(function() {
             const bodyText = document.body ? document.body.innerText.toLowerCase() : '';
-            const username = document.querySelector('#username');
-            const password = document.querySelector('#citi-input2-0');
-            const signInButton = document.querySelector('#signInBtn');
+            // Citi redesigned the login form (observed 2026-09-26): the old
+            // #username/#citi-input2-0/#signInBtn ids are gone. The new
+            // fields are #CdsSignon3_0_username / #CdsSignon3_0_password;
+            // the Sign On button has no id at all, so it's matched by text
+            // below (see the click site).
+            const username = document.querySelector('#CdsSignon3_0_username');
+            const password = document.querySelector('#CdsSignon3_0_password');
+            const signInButton = Array.from(document.querySelectorAll('button[type="submit"]')).find(
+                (el) => (el.innerText || '').trim() === 'Sign On',
+            );
             const errorText = Array.from(
                 document.querySelectorAll('[role="alert"], .alert, .error, .error-message'),
             )
@@ -612,14 +630,48 @@ async function handleLogin(context) {
         );
     }
 
-    // The top-level www.citi.com page hosts the real login form.
-    await page.fill('#username', 'citi_username');
+    // Never resubmit real credentials silently. If we're back here after
+    // already submitting once, something is wrong (wrong button, a state
+    // check that can't tell login-submitted-but-still-rendered apart from
+    // login-not-yet-submitted, a real rejection, ...) and needs a human to
+    // look at it -- not another live attempt. See MAX_LOGIN_SUBMIT_COUNT.
+    if (context.loginSubmitCount >= MAX_LOGIN_SUBMIT_COUNT) {
+        await logSnapshot(page, 'login-resubmit-blocked');
+        throw new Error(
+            `Refusing to resubmit Citi login: already submitted ` +
+                `${context.loginSubmitCount} time(s) this run and the page ` +
+                `still looks like an unsubmitted login form. This needs a ` +
+                `human to check what actually happened (wrong button, a ` +
+                `real rejection, a state-detection bug, ...) instead of ` +
+                `retrying against production.`,
+        );
+    }
+
+    // The top-level www.citi.com page hosts the real login form. It's an
+    // Angular reactive form (ancestor classes include ng-untouched
+    // ng-pristine ng-invalid, confirmed live 2026-09-28); fill() sets the
+    // DOM value without firing the input events Angular's change detection
+    // listens for, so the form can stay client-side invalid and silently
+    // swallow the submit click. Use type() like chase/target/target-circle-
+    // card already do for framework-controlled inputs -- see "fill() does
+    // not always drive framework-controlled inputs" in docs/scraper.md.
+    await page.type('#CdsSignon3_0_username', 'citi_username');
     await humanPace(page, 200, 400);
-    await page.fill('#citi-input2-0', 'citi_password');
+    await page.type('#CdsSignon3_0_password', 'citi_password');
     await humanPace(page, 600, 1000);
 
-    refreshmint.log('Submitting Citi sign-on form.');
-    await page.click('#signInBtn');
+    context.loginSubmitCount++;
+    refreshmint.log(
+        `Submitting Citi sign-on form (attempt ${context.loginSubmitCount}/${MAX_LOGIN_SUBMIT_COUNT}).`,
+    );
+    // The button has no id/aria-label (confirmed live 2026-09-26). Text-only
+    // matching (getByRole('button', {name: 'Sign On'})) is ambiguous: a
+    // second "Sign On" button can exist elsewhere in the DOM in some page
+    // states (observed 2026-09-26: a strict-mode "2 elements found" error).
+    // The real control is the type="submit" button inside the sign-on
+    // <form> itself (class cds-signon3-button) -- scope to that instead of
+    // relying on text alone.
+    await page.click('form button[type="submit"].cds-signon3-button');
     await waitMs(page, 4000);
 
     return { progressName: 'submitted citi login' };
@@ -1304,6 +1356,7 @@ async function main() {
         progressNames: [],
         progressNamesSet: new Set(),
         lastProgressStep: 0,
+        loginSubmitCount: 0,
     };
 
     while (true) {
@@ -1363,6 +1416,7 @@ async function main() {
              *   hasPassword: boolean,
              *   hasSignOff: boolean,
              *   hasAccountsMenu: boolean,
+             *   hasMfaModal: boolean,
              *   hasOtpField: boolean,
              *   hasMfaText: boolean,
              *   bodyHasInactivityHome: boolean,
@@ -1378,10 +1432,19 @@ async function main() {
                     await context.mainPage.evaluate(`(function() {
                     const bodyText = document.body ? document.body.innerText.toLowerCase() : '';
                     return JSON.stringify([
-                        !!document.querySelector('#username'),
-                        !!document.querySelector('#citi-input2-0'),
+                        !!document.querySelector('#CdsSignon3_0_username'),
+                        !!document.querySelector('#CdsSignon3_0_password'),
                         !!document.querySelector('#signOffmainAnchor'),
                         !!document.querySelector('#accountsmainAnchor0, #accountsMainLI'),
+                        // <mfa-modal> is present-but-empty in the DOM on
+                        // every page load, even the fresh login page
+                        // (confirmed live 2026-09-26); presence alone is a
+                        // false positive. Require it to actually have
+                        // rendered content.
+                        (function() {
+                            const modal = document.querySelector('mfa-modal');
+                            return !!(modal && modal.innerText && modal.innerText.trim());
+                        })(),
                         !!document.querySelector(
                             'input[name="otp"], input[name="code"], input[inputmode="numeric"]',
                         ),
@@ -1402,9 +1465,10 @@ async function main() {
                     hasPassword: Boolean(flags[1]),
                     hasSignOff: Boolean(flags[2]),
                     hasAccountsMenu: Boolean(flags[3]),
-                    hasOtpField: Boolean(flags[4]),
-                    hasMfaText: Boolean(flags[5]),
-                    bodyHasInactivityHome: Boolean(flags[6]),
+                    hasMfaModal: Boolean(flags[4]),
+                    hasOtpField: Boolean(flags[5]),
+                    hasMfaText: Boolean(flags[6]),
+                    bodyHasInactivityHome: Boolean(flags[7]),
                 });
             };
             let state = await evalCitiStateFlags();
@@ -1415,6 +1479,7 @@ async function main() {
                 !state.hasPassword &&
                 !state.hasSignOff &&
                 !state.hasAccountsMenu &&
+                !state.hasMfaModal &&
                 !state.hasOtpField &&
                 !state.hasMfaText &&
                 !state.bodyHasInactivityHome;
@@ -1426,10 +1491,22 @@ async function main() {
 
             if (state.hasSignOff || state.hasAccountsMenu) {
                 stepReturn = await handleLoggedIn(context);
+            } else if (
+                state.hasMfaModal ||
+                state.hasOtpField ||
+                state.hasMfaText
+            ) {
+                // The <mfa-modal> overlays the login page without removing
+                // the username/password fields from the DOM underneath it
+                // (confirmed live 2026-09-26: after one real submission, the
+                // modal appeared but #CdsSignon3_0_username/_password were
+                // still present). Checked before hasUsername/hasPassword so
+                // a live MFA challenge is never mistaken for a fresh login
+                // page and resubmitted -- that mistake burned 8 real login
+                // submissions in one run before this fix.
+                stepReturn = await handleMfa(context);
             } else if (state.hasUsername || state.hasPassword) {
                 stepReturn = await handleLogin(context);
-            } else if (state.hasOtpField || state.hasMfaText) {
-                stepReturn = await handleMfa(context);
             } else if (
                 url.startsWith('https://www.citi.com/') ||
                 state.bodyHasInactivityHome
