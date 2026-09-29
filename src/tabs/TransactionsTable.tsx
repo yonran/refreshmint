@@ -1,4 +1,5 @@
 import {
+    memo,
     useCallback,
     useEffect,
     useLayoutEffect,
@@ -265,7 +266,6 @@ export function TransactionsTable({
         return map;
     }, [transactions]);
 
-    type ContextMenuItem = { label: string; action: () => void };
     const [contextMenu, setContextMenu] = useState<{
         x: number;
         y: number;
@@ -448,6 +448,119 @@ export function TransactionsTable({
         });
     }
 
+    // Rows are memoized (TransactionTableRow), so they get stable wrappers
+    // that call the latest handlers instead of the handlers themselves, which
+    // callers typically recreate on every render. Whether each optional
+    // handler is present stays visible, since rows render differently without it.
+    const latestHandlersRef = useRef({
+        onRecategorize,
+        onMergeTransfer,
+        onOpenLinkTransfer,
+        onUnmergeTransfer,
+        onNotATransfer,
+        onOpenSimilarRecategorize,
+        onAddSearchTerm,
+        onOpenEvidence,
+        openContextMenu,
+        openSimilarConfirmForTxn,
+        updateSelectedIds,
+    });
+    useLayoutEffect(() => {
+        latestHandlersRef.current = {
+            onRecategorize,
+            onMergeTransfer,
+            onOpenLinkTransfer,
+            onUnmergeTransfer,
+            onNotATransfer,
+            onOpenSimilarRecategorize,
+            onAddSearchTerm,
+            onOpenEvidence,
+            openContextMenu,
+            openSimilarConfirmForTxn,
+            updateSelectedIds,
+        };
+    });
+    const hasRecategorize = onRecategorize !== undefined;
+    const hasMergeTransfer = onMergeTransfer !== undefined;
+    const hasOpenLinkTransfer = onOpenLinkTransfer !== undefined;
+    const hasUnmergeTransfer = onUnmergeTransfer !== undefined;
+    const hasNotATransfer = onNotATransfer !== undefined;
+    const hasOpenSimilarRecategorize = onOpenSimilarRecategorize !== undefined;
+    const hasAddSearchTerm = onAddSearchTerm !== undefined;
+    const hasOpenEvidence = onOpenEvidence !== undefined;
+    const openImage = lightbox.openImage;
+    const rowActions = useMemo(
+        (): TransactionTableRowActions => ({
+            onRecategorize: hasRecategorize
+                ? (...args) => {
+                      latestHandlersRef.current.onRecategorize?.(...args);
+                  }
+                : undefined,
+            onMergeTransfer: hasMergeTransfer
+                ? (...args) => {
+                      latestHandlersRef.current.onMergeTransfer?.(...args);
+                  }
+                : undefined,
+            onOpenLinkTransfer: hasOpenLinkTransfer
+                ? (...args) => {
+                      latestHandlersRef.current.onOpenLinkTransfer?.(...args);
+                  }
+                : undefined,
+            onUnmergeTransfer: hasUnmergeTransfer
+                ? (...args) => {
+                      latestHandlersRef.current.onUnmergeTransfer?.(...args);
+                  }
+                : undefined,
+            onNotATransfer: hasNotATransfer
+                ? (...args) => {
+                      latestHandlersRef.current.onNotATransfer?.(...args);
+                  }
+                : undefined,
+            onOpenSimilarRecategorize: hasOpenSimilarRecategorize
+                ? (...args) => {
+                      latestHandlersRef.current.onOpenSimilarRecategorize?.(
+                          ...args,
+                      );
+                  }
+                : undefined,
+            onAddSearchTerm: hasAddSearchTerm
+                ? (...args) => {
+                      latestHandlersRef.current.onAddSearchTerm?.(...args);
+                  }
+                : undefined,
+            onOpenEvidence: hasOpenEvidence
+                ? (...args) => {
+                      latestHandlersRef.current.onOpenEvidence?.(...args);
+                  }
+                : undefined,
+            openContextMenu: (...args) => {
+                latestHandlersRef.current.openContextMenu(...args);
+            },
+            openSimilarConfirmForTxn: (...args) => {
+                latestHandlersRef.current.openSimilarConfirmForTxn(...args);
+            },
+            updateSelectedIds: (...args) => {
+                latestHandlersRef.current.updateSelectedIds(...args);
+            },
+            openImage,
+            setCategoryDraft,
+            setEditingKey,
+            setRowCreateRule,
+            setExpandedEvidenceIds,
+        }),
+        [
+            hasRecategorize,
+            hasMergeTransfer,
+            hasOpenLinkTransfer,
+            hasUnmergeTransfer,
+            hasNotATransfer,
+            hasOpenSimilarRecategorize,
+            hasAddSearchTerm,
+            hasOpenEvidence,
+            openImage,
+        ],
+    );
+
     return (
         <>
             {selectedIds.size === 0 && acceptAllEdits.length > 0 && (
@@ -584,837 +697,45 @@ export function TransactionsTable({
                             </tr>
                         ) : (
                             transactions.map((txn) => {
-                                const isUncategorized = txn.postings.some(
-                                    (p) =>
-                                        p.account === UNCATEGORIZED_GL_ACCOUNT,
-                                );
-                                const glSuggestion =
-                                    glCategorySuggestions[txn.id];
-                                const transferMatch =
-                                    glSuggestion?.transferMatch ?? null;
-                                // Near-miss transfer candidates (2+ ambiguous
-                                // matches; see GlCategoryResult.transferCandidates).
-                                const transferCandidateCount =
-                                    glSuggestion?.transferCandidates.length ??
-                                    0;
-                                const suggested =
-                                    glSuggestion?.suggested ?? null;
-                                const eligible =
-                                    singleNonBalancingPosting(txn) !== null;
+                                // Only the row being edited sees the edit
+                                // state, so typing re-renders just that row.
+                                const isEditingRow =
+                                    editingKey !== null &&
+                                    editingKey.startsWith(`${txn.id}:`);
                                 return (
-                                    <tr
+                                    <TransactionTableRow
                                         key={txn.id}
-                                        className={
-                                            isUncategorized
-                                                ? 'row-uncategorized'
-                                                : undefined
+                                        txn={txn}
+                                        glSuggestion={
+                                            glCategorySuggestions[txn.id]
                                         }
-                                    >
-                                        {hasCheckbox && (
-                                            <td>
-                                                {eligible && (
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={selectedIds.has(
-                                                            txn.id,
-                                                        )}
-                                                        onChange={() => {
-                                                            updateSelectedIds(
-                                                                (prev) => {
-                                                                    const next =
-                                                                        new Set(
-                                                                            prev,
-                                                                        );
-                                                                    if (
-                                                                        next.has(
-                                                                            txn.id,
-                                                                        )
-                                                                    )
-                                                                        next.delete(
-                                                                            txn.id,
-                                                                        );
-                                                                    else
-                                                                        next.add(
-                                                                            txn.id,
-                                                                        );
-                                                                    return next;
-                                                                },
-                                                            );
-                                                        }}
-                                                    />
-                                                )}
-                                            </td>
+                                        similarGroupIds={similarGroupIds}
+                                        isSelected={selectedIds.has(txn.id)}
+                                        isEvidenceExpanded={expandedEvidenceIds.has(
+                                            txn.id,
                                         )}
-                                        <td
-                                            className="mono"
-                                            onContextMenu={(e) => {
-                                                openContextMenu(e, [
-                                                    {
-                                                        label: `Filter: date:${txn.date}`,
-                                                        action: () =>
-                                                            onAddSearchTerm?.(
-                                                                `date:${txn.date}`,
-                                                            ),
-                                                    },
-                                                    {
-                                                        label: `Filter: date:${txn.date}..`,
-                                                        action: () =>
-                                                            onAddSearchTerm?.(
-                                                                `date:${txn.date}..`,
-                                                            ),
-                                                    },
-                                                    {
-                                                        label: `Filter: date:..${txn.date}`,
-                                                        action: () =>
-                                                            onAddSearchTerm?.(
-                                                                `date:..${txn.date}`,
-                                                            ),
-                                                    },
-                                                ]);
-                                            }}
-                                        >
-                                            {txn.date}
-                                        </td>
-                                        <td
-                                            onContextMenu={(e) => {
-                                                const key = similarKey(txn);
-                                                const similarIds =
-                                                    key !== null
-                                                        ? (similarGroupIds.get(
-                                                              key,
-                                                          ) ?? [])
-                                                        : [];
-                                                const balancingAccount =
-                                                    txn.postings.find(
-                                                        (p) =>
-                                                            p.account.startsWith(
-                                                                'Assets:',
-                                                            ) ||
-                                                            p.account.startsWith(
-                                                                'Liabilities:',
-                                                            ),
-                                                    )?.account ?? '';
-                                                const items: ContextMenuItem[] =
-                                                    [
-                                                        {
-                                                            label: `Filter: desc:${quoteHledgerRegex(txn.description)}`,
-                                                            action: () =>
-                                                                onAddSearchTerm?.(
-                                                                    `desc:${quoteHledgerRegex(txn.description)}`,
-                                                                ),
-                                                        },
-                                                    ];
-                                                if (
-                                                    hasCheckbox &&
-                                                    similarIds.length > 1
-                                                ) {
-                                                    items.push({
-                                                        label: `Check ${similarIds.length} uncategorized ${txn.description} transactions from ${balancingAccount}`,
-                                                        action: () => {
-                                                            updateSelectedIds(
-                                                                () =>
-                                                                    new Set(
-                                                                        similarIds,
-                                                                    ),
-                                                            );
-                                                        },
-                                                    });
-                                                }
-                                                openContextMenu(e, [...items]);
-                                            }}
-                                        >
-                                            <div>{txn.description}</div>
-                                            {onOpenEvidence !== undefined &&
-                                                parseGlSourceRefs(
-                                                    txn.comment,
-                                                ).map((ref) => (
-                                                    <button
-                                                        key={`${txn.id}:src:${ref.locator}:${ref.entryId}`}
-                                                        type="button"
-                                                        className="link-button source-chip"
-                                                        title={`Open source evidence (${ref.locator})`}
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            onOpenEvidence(ref);
-                                                        }}
-                                                    >
-                                                        source
-                                                    </button>
-                                                ))}
-                                            {(() => {
-                                                const badges =
-                                                    bookkeepingBadges(txn);
-                                                return badges.length ===
-                                                    0 ? null : (
-                                                    <div className="transaction-bookkeeping-badges">
-                                                        {badges.map((badge) => (
-                                                            <span
-                                                                key={`${txn.id}:${badge}`}
-                                                                className="chip"
-                                                            >
-                                                                {badge}
-                                                            </span>
-                                                        ))}
-                                                    </div>
-                                                );
-                                            })()}
-                                        </td>
-                                        <td>
-                                            {hasActions ? (
-                                                <div className="postings-list">
-                                                    {txn.postings.map(
-                                                        (p, postingIndex) => {
-                                                            const key = `${txn.id}:${postingIndex}`;
-                                                            const isEditing =
-                                                                editingKey ===
-                                                                key;
-                                                            const isUnknown =
-                                                                p.account ===
-                                                                UNCATEGORIZED_GL_ACCOUNT;
-                                                            // Only counterpart legs are recategorizable;
-                                                            // the backend enforces the same rule in
-                                                            // apply_recategorizations (src-tauri/src/post.rs).
-                                                            const isNonBalanceSheet =
-                                                                !p.account.startsWith(
-                                                                    'Assets:',
-                                                                ) &&
-                                                                !p.account.startsWith(
-                                                                    'Liabilities:',
-                                                                );
-                                                            const postingMenuItems: ContextMenuItem[] =
-                                                                [
-                                                                    {
-                                                                        label: `Filter: acct:${quoteHledgerRegex(p.account)}`,
-                                                                        action: () =>
-                                                                            onAddSearchTerm?.(
-                                                                                `acct:${quoteHledgerRegex(p.account)}`,
-                                                                            ),
-                                                                    },
-                                                                ];
-                                                            if (
-                                                                isNonBalanceSheet
-                                                            ) {
-                                                                postingMenuItems.push(
-                                                                    {
-                                                                        label: 'Set Category',
-                                                                        action: () => {
-                                                                            setCategoryDraft(
-                                                                                isUnknown &&
-                                                                                    suggested !==
-                                                                                        null
-                                                                                    ? suggested
-                                                                                    : '',
-                                                                            );
-                                                                            setRowCreateRule(
-                                                                                false,
-                                                                            );
-                                                                            setEditingKey(
-                                                                                key,
-                                                                            );
-                                                                        },
-                                                                    },
-                                                                );
-                                                                const keyForSimilarMenu =
-                                                                    similarityGroupKey(
-                                                                        txn,
-                                                                    );
-                                                                const similarIdsForMenu =
-                                                                    keyForSimilarMenu !==
-                                                                    null
-                                                                        ? (similarGroupIds.get(
-                                                                              keyForSimilarMenu,
-                                                                          ) ??
-                                                                          [])
-                                                                        : [];
-                                                                if (
-                                                                    !isUnknown &&
-                                                                    onOpenSimilarRecategorize !==
-                                                                        undefined &&
-                                                                    similarIdsForMenu.length >
-                                                                        1
-                                                                ) {
-                                                                    postingMenuItems.push(
-                                                                        {
-                                                                            label: `Categorize ${similarIdsForMenu.length} similar transactions to ${p.account}`,
-                                                                            action: () => {
-                                                                                openSimilarConfirmForTxn(
-                                                                                    txn,
-                                                                                    p.account,
-                                                                                );
-                                                                            },
-                                                                        },
-                                                                    );
-                                                                }
-                                                            }
-                                                            if (
-                                                                isNonBalanceSheet &&
-                                                                onOpenLinkTransfer !==
-                                                                    undefined
-                                                            ) {
-                                                                postingMenuItems.push(
-                                                                    {
-                                                                        label: 'Link Transfer',
-                                                                        action: () => {
-                                                                            onOpenLinkTransfer(
-                                                                                txn.id,
-                                                                            );
-                                                                        },
-                                                                    },
-                                                                );
-                                                            }
-                                                            // A generated txn with 2+ source tags is a merged
-                                                            // transfer; offer server-side unmerge (see
-                                                            // post::unpost_gl_transaction).
-                                                            if (
-                                                                onUnmergeTransfer !==
-                                                                    undefined &&
-                                                                txn.bookkeeping
-                                                                    .generated &&
-                                                                (
-                                                                    txn.comment.match(
-                                                                        /; source:/g,
-                                                                    ) ?? []
-                                                                ).length >= 2
-                                                            ) {
-                                                                postingMenuItems.push(
-                                                                    {
-                                                                        label: 'Unmerge transfer',
-                                                                        action: () => {
-                                                                            onUnmergeTransfer(
-                                                                                txn.id,
-                                                                            );
-                                                                        },
-                                                                    },
-                                                                );
-                                                            }
-                                                            // Negative memory for a suggested (not yet merged)
-                                                            // transfer pair; drops the ↔ chip.
-                                                            if (
-                                                                onNotATransfer !==
-                                                                    undefined &&
-                                                                transferMatch !==
-                                                                    null
-                                                            ) {
-                                                                postingMenuItems.push(
-                                                                    {
-                                                                        label: 'Not a transfer',
-                                                                        action: () => {
-                                                                            onNotATransfer(
-                                                                                txn.id,
-                                                                                transferMatch.txnId,
-                                                                            );
-                                                                        },
-                                                                    },
-                                                                );
-                                                            }
-                                                            const hideAmounts =
-                                                                hideObviousAmounts &&
-                                                                hasObviousAmounts(
-                                                                    txn,
-                                                                );
-                                                            const keyForSimilar =
-                                                                similarKey(txn);
-                                                            const filteredSimilarIds =
-                                                                keyForSimilar !==
-                                                                null
-                                                                    ? (similarGroupIds.get(
-                                                                          keyForSimilar,
-                                                                      ) ?? [])
-                                                                    : [];
-                                                            const canShowSimilarPill =
-                                                                onOpenSimilarRecategorize !==
-                                                                    undefined &&
-                                                                filteredSimilarIds.length >
-                                                                    1;
-                                                            return (
-                                                                <div
-                                                                    key={`${txn.id}:${postingIndex}`}
-                                                                    className="postings-item"
-                                                                >
-                                                                    {isEditing ? (
-                                                                        <>
-                                                                            <AccountInput
-                                                                                value={
-                                                                                    categoryDraft
-                                                                                }
-                                                                                onChange={(
-                                                                                    v,
-                                                                                ) => {
-                                                                                    setCategoryDraft(
-                                                                                        v,
-                                                                                    );
-                                                                                }}
-                                                                                onKeyDown={(
-                                                                                    e,
-                                                                                ) => {
-                                                                                    if (
-                                                                                        e.key ===
-                                                                                            'Enter' &&
-                                                                                        categoryDraft.trim()
-                                                                                    ) {
-                                                                                        onRecategorize?.(
-                                                                                            txn.id,
-                                                                                            postingIndex,
-                                                                                            categoryDraft.trim(),
-                                                                                            p.account,
-                                                                                            txn.descriptionRaw ||
-                                                                                                txn.description,
-                                                                                            rowCreateRule,
-                                                                                        );
-                                                                                        setEditingKey(
-                                                                                            null,
-                                                                                        );
-                                                                                        setRowCreateRule(
-                                                                                            false,
-                                                                                        );
-                                                                                    } else if (
-                                                                                        e.key ===
-                                                                                        'Escape'
-                                                                                    ) {
-                                                                                        setEditingKey(
-                                                                                            null,
-                                                                                        );
-                                                                                    }
-                                                                                }}
-                                                                                accounts={
-                                                                                    accountNames
-                                                                                }
-                                                                                oldAccount={
-                                                                                    p.account
-                                                                                }
-                                                                                autoFocus
-                                                                            />
-                                                                            <button
-                                                                                type="button"
-                                                                                className="ghost-button"
-                                                                                disabled={
-                                                                                    !categoryDraft.trim()
-                                                                                }
-                                                                                onClick={() => {
-                                                                                    if (
-                                                                                        categoryDraft.trim()
-                                                                                    ) {
-                                                                                        onRecategorize?.(
-                                                                                            txn.id,
-                                                                                            postingIndex,
-                                                                                            categoryDraft.trim(),
-                                                                                            p.account,
-                                                                                            txn.descriptionRaw ||
-                                                                                                txn.description,
-                                                                                            rowCreateRule,
-                                                                                        );
-                                                                                        setEditingKey(
-                                                                                            null,
-                                                                                        );
-                                                                                        setRowCreateRule(
-                                                                                            false,
-                                                                                        );
-                                                                                    }
-                                                                                }}
-                                                                            >
-                                                                                Set
-                                                                            </button>
-                                                                            <button
-                                                                                type="button"
-                                                                                className="ghost-button"
-                                                                                onClick={() => {
-                                                                                    setEditingKey(
-                                                                                        null,
-                                                                                    );
-                                                                                    setRowCreateRule(
-                                                                                        false,
-                                                                                    );
-                                                                                }}
-                                                                            >
-                                                                                Cancel
-                                                                            </button>
-                                                                            <label
-                                                                                className="count-label"
-                                                                                title="Also create a standing rule for this payee, so future matches post here automatically."
-                                                                            >
-                                                                                <input
-                                                                                    type="checkbox"
-                                                                                    checked={
-                                                                                        rowCreateRule
-                                                                                    }
-                                                                                    onChange={(
-                                                                                        e,
-                                                                                    ) => {
-                                                                                        setRowCreateRule(
-                                                                                            e
-                                                                                                .target
-                                                                                                .checked,
-                                                                                        );
-                                                                                    }}
-                                                                                />{' '}
-                                                                                Create
-                                                                                rule
-                                                                            </label>
-                                                                            {canShowSimilarPill && (
-                                                                                <button
-                                                                                    type="button"
-                                                                                    className="chip chip-interactive similar-count-pill"
-                                                                                    disabled={
-                                                                                        !categoryDraft.trim()
-                                                                                    }
-                                                                                    onClick={() => {
-                                                                                        if (
-                                                                                            categoryDraft.trim()
-                                                                                        ) {
-                                                                                            openSimilarConfirmForTxn(
-                                                                                                txn,
-                                                                                                categoryDraft.trim(),
-                                                                                            );
-                                                                                        }
-                                                                                    }}
-                                                                                >
-                                                                                    ×
-                                                                                    {
-                                                                                        filteredSimilarIds.length
-                                                                                    }{' '}
-                                                                                    similar
-                                                                                </button>
-                                                                            )}
-                                                                        </>
-                                                                    ) : isUnknown ? (
-                                                                        <button
-                                                                            type="button"
-                                                                            className="posting-account posting-account-unknown"
-                                                                            title="Click to set category"
-                                                                            onClick={() => {
-                                                                                setCategoryDraft(
-                                                                                    suggested !==
-                                                                                        null
-                                                                                        ? suggested
-                                                                                        : '',
-                                                                                );
-                                                                                setRowCreateRule(
-                                                                                    false,
-                                                                                );
-                                                                                setEditingKey(
-                                                                                    key,
-                                                                                );
-                                                                            }}
-                                                                            onContextMenu={(
-                                                                                e,
-                                                                            ) => {
-                                                                                openContextMenu(
-                                                                                    e,
-                                                                                    postingMenuItems,
-                                                                                );
-                                                                            }}
-                                                                        >
-                                                                            {
-                                                                                p.account
-                                                                            }
-                                                                        </button>
-                                                                    ) : (
-                                                                        <span
-                                                                            onContextMenu={(
-                                                                                e,
-                                                                            ) => {
-                                                                                openContextMenu(
-                                                                                    e,
-                                                                                    postingMenuItems,
-                                                                                );
-                                                                            }}
-                                                                        >
-                                                                            {
-                                                                                p.account
-                                                                            }
-                                                                        </span>
-                                                                    )}
-                                                                    {isNonBalanceSheet &&
-                                                                        !isEditing &&
-                                                                        transferMatch !==
-                                                                            null &&
-                                                                        onMergeTransfer !==
-                                                                            undefined && (
-                                                                            <button
-                                                                                type="button"
-                                                                                className="ghost-button"
-                                                                                disabled={
-                                                                                    transferActionBusy
-                                                                                }
-                                                                                onClick={() => {
-                                                                                    onMergeTransfer(
-                                                                                        txn.id,
-                                                                                        transferMatch.txnId,
-                                                                                    );
-                                                                                }}
-                                                                            >
-                                                                                {mergeTransferChipLabel(
-                                                                                    {
-                                                                                        date: transferMatch.date,
-                                                                                        description:
-                                                                                            transferMatch.description,
-                                                                                    },
-                                                                                )}
-                                                                            </button>
-                                                                        )}
-                                                                    {isNonBalanceSheet &&
-                                                                        !isEditing &&
-                                                                        transferMatch ===
-                                                                            null &&
-                                                                        transferCandidateCount >=
-                                                                            2 &&
-                                                                        onOpenLinkTransfer !==
-                                                                            undefined && (
-                                                                            // Ambiguous
-                                                                            // near-miss:
-                                                                            // open the
-                                                                            // Link
-                                                                            // Transfer
-                                                                            // modal, no
-                                                                            // one-click
-                                                                            // merge.
-                                                                            <button
-                                                                                type="button"
-                                                                                className="ghost-button"
-                                                                                title="Multiple possible transfer counterparts; open Link Transfer to pick one"
-                                                                                onClick={() => {
-                                                                                    onOpenLinkTransfer(
-                                                                                        txn.id,
-                                                                                    );
-                                                                                }}
-                                                                            >
-                                                                                ↔{' '}
-                                                                                {
-                                                                                    transferCandidateCount
-                                                                                }{' '}
-                                                                                possible
-                                                                            </button>
-                                                                        )}
-                                                                    {isUnknown &&
-                                                                        !isEditing &&
-                                                                        suggested !==
-                                                                            null &&
-                                                                        transferMatch ===
-                                                                            null &&
-                                                                        onRecategorize !==
-                                                                            undefined && (
-                                                                            <div className="categorize-chip">
-                                                                                <button
-                                                                                    type="button"
-                                                                                    className="ghost-button"
-                                                                                    disabled={
-                                                                                        recategorizeBusy
-                                                                                    }
-                                                                                    onClick={() => {
-                                                                                        onRecategorize(
-                                                                                            txn.id,
-                                                                                            postingIndex,
-                                                                                            suggested,
-                                                                                            p.account,
-                                                                                            txn.descriptionRaw ||
-                                                                                                txn.description,
-                                                                                            false,
-                                                                                        );
-                                                                                    }}
-                                                                                >
-                                                                                    {categorizeChipLabel(
-                                                                                        suggested,
-                                                                                    )}
-                                                                                </button>
-                                                                                {canShowSimilarPill && (
-                                                                                    <button
-                                                                                        type="button"
-                                                                                        className="chip chip-interactive similar-count-pill"
-                                                                                        onClick={() => {
-                                                                                            openSimilarConfirmForTxn(
-                                                                                                txn,
-                                                                                                suggested,
-                                                                                            );
-                                                                                        }}
-                                                                                    >
-                                                                                        ×
-                                                                                        {
-                                                                                            filteredSimilarIds.length
-                                                                                        }{' '}
-                                                                                        similar
-                                                                                    </button>
-                                                                                )}
-                                                                            </div>
-                                                                        )}
-                                                                    {!hideAmounts && (
-                                                                        <span className="amount">
-                                                                            {formatTotals(
-                                                                                p.totals,
-                                                                            )}
-                                                                        </span>
-                                                                    )}
-                                                                </div>
-                                                            );
-                                                        },
-                                                    )}
-                                                </div>
-                                            ) : (
-                                                <PostingsList
-                                                    postings={txn.postings}
-                                                    hideAmounts={
-                                                        hideObviousAmounts &&
-                                                        hasObviousAmounts(txn)
-                                                    }
-                                                />
-                                            )}
-                                        </td>
-                                        <td
-                                            className="amount"
-                                            onContextMenu={(e) => {
-                                                const totals = txn.totals;
-                                                if (
-                                                    totals == null ||
-                                                    totals.length === 0
-                                                )
-                                                    return;
-                                                const t = totals[0];
-                                                if (t == null) return;
-                                                const total = formatScaled(
-                                                    t.mantissa,
-                                                    t.scale,
-                                                );
-                                                openContextMenu(e, [
-                                                    {
-                                                        label: `Filter: amt:${total}`,
-                                                        action: () =>
-                                                            onAddSearchTerm?.(
-                                                                `amt:${total}`,
-                                                            ),
-                                                    },
-                                                    {
-                                                        label: `Filter: amt:>=${total}`,
-                                                        action: () =>
-                                                            onAddSearchTerm?.(
-                                                                `amt:>=${total}`,
-                                                            ),
-                                                    },
-                                                    {
-                                                        label: `Filter: amt:<=${total}`,
-                                                        action: () =>
-                                                            onAddSearchTerm?.(
-                                                                `amt:<=${total}`,
-                                                            ),
-                                                    },
-                                                ]);
-                                            }}
-                                        >
-                                            {formatTotals(txn.totals)}
-                                        </td>
-                                        <td>
-                                            {txn.evidence.length === 0 ? (
-                                                <span className="text-muted">
-                                                    -
-                                                </span>
-                                            ) : (
-                                                (() => {
-                                                    const imageRefs =
-                                                        txn.evidence.filter(
-                                                            isImageAttachmentRef,
-                                                        );
-                                                    const otherRefs =
-                                                        txn.evidence.filter(
-                                                            (r) =>
-                                                                !isImageAttachmentRef(
-                                                                    r,
-                                                                ),
-                                                        );
-                                                    const evidenceExpanded =
-                                                        expandedEvidenceIds.has(
-                                                            txn.id,
-                                                        );
-                                                    return (
-                                                        <div className="evidence-list">
-                                                            {imageRefs.map(
-                                                                (
-                                                                    evidenceRef,
-                                                                ) => (
-                                                                    <button
-                                                                        key={`${txn.id}-${evidenceRef}`}
-                                                                        className="chip chip-mono chip-interactive evidence-chip evidence-chip-image"
-                                                                        type="button"
-                                                                        onClick={() => {
-                                                                            void lightbox.openImage(
-                                                                                attachmentFilename(
-                                                                                    evidenceRef,
-                                                                                ),
-                                                                            );
-                                                                        }}
-                                                                    >
-                                                                        {attachmentFilename(
-                                                                            evidenceRef,
-                                                                        )}
-                                                                    </button>
-                                                                ),
-                                                            )}
-                                                            {otherRefs.length >
-                                                                0 && (
-                                                                <>
-                                                                    <button
-                                                                        className="chip chip-mono chip-interactive evidence-chip evidence-chip-toggle"
-                                                                        type="button"
-                                                                        onClick={() => {
-                                                                            setExpandedEvidenceIds(
-                                                                                (
-                                                                                    prev,
-                                                                                ) => {
-                                                                                    const next =
-                                                                                        new Set(
-                                                                                            prev,
-                                                                                        );
-                                                                                    if (
-                                                                                        evidenceExpanded
-                                                                                    ) {
-                                                                                        next.delete(
-                                                                                            txn.id,
-                                                                                        );
-                                                                                    } else {
-                                                                                        next.add(
-                                                                                            txn.id,
-                                                                                        );
-                                                                                    }
-                                                                                    return next;
-                                                                                },
-                                                                            );
-                                                                        }}
-                                                                    >
-                                                                        {evidenceExpanded
-                                                                            ? '▾'
-                                                                            : '▸'}{' '}
-                                                                        {
-                                                                            otherRefs.length
-                                                                        }{' '}
-                                                                        source
-                                                                        {otherRefs.length !==
-                                                                        1
-                                                                            ? 's'
-                                                                            : ''}
-                                                                    </button>
-                                                                    {evidenceExpanded &&
-                                                                        otherRefs.map(
-                                                                            (
-                                                                                evidenceRef,
-                                                                            ) => (
-                                                                                <span
-                                                                                    key={`${txn.id}-${evidenceRef}`}
-                                                                                    className="chip chip-mono evidence-chip"
-                                                                                    title={
-                                                                                        evidenceRef
-                                                                                    }
-                                                                                >
-                                                                                    {
-                                                                                        evidenceRef
-                                                                                    }
-                                                                                </span>
-                                                                            ),
-                                                                        )}
-                                                                </>
-                                                            )}
-                                                        </div>
-                                                    );
-                                                })()
-                                            )}
-                                        </td>
-                                    </tr>
+                                        editingKey={
+                                            isEditingRow ? editingKey : null
+                                        }
+                                        categoryDraft={
+                                            isEditingRow ? categoryDraft : ''
+                                        }
+                                        rowCreateRule={
+                                            isEditingRow ? rowCreateRule : false
+                                        }
+                                        // Only the category editor uses these.
+                                        accountNames={
+                                            isEditingRow
+                                                ? accountNames
+                                                : NO_ACCOUNT_NAMES
+                                        }
+                                        hasActions={hasActions}
+                                        hasCheckbox={hasCheckbox}
+                                        hideObviousAmounts={hideObviousAmounts}
+                                        recategorizeBusy={recategorizeBusy}
+                                        transferActionBusy={transferActionBusy}
+                                        actions={rowActions}
+                                    />
                                 );
                             })
                         )}
@@ -1551,3 +872,674 @@ export function TransactionsTable({
         </>
     );
 }
+
+type ContextMenuItem = { label: string; action: () => void };
+
+const NO_ACCOUNT_NAMES: string[] = [];
+
+type TransactionsTableProps = Parameters<typeof TransactionsTable>[0];
+
+type TransactionTableRowActions = {
+    onRecategorize: TransactionsTableProps['onRecategorize'];
+    onMergeTransfer: TransactionsTableProps['onMergeTransfer'];
+    onOpenLinkTransfer: TransactionsTableProps['onOpenLinkTransfer'];
+    onUnmergeTransfer: TransactionsTableProps['onUnmergeTransfer'];
+    onNotATransfer: TransactionsTableProps['onNotATransfer'];
+    onOpenSimilarRecategorize: TransactionsTableProps['onOpenSimilarRecategorize'];
+    onAddSearchTerm: TransactionsTableProps['onAddSearchTerm'];
+    onOpenEvidence: TransactionsTableProps['onOpenEvidence'];
+    openContextMenu: (e: React.MouseEvent, items: ContextMenuItem[]) => void;
+    openSimilarConfirmForTxn: (
+        txn: TransactionRow,
+        targetAccount: string,
+    ) => void;
+    updateSelectedIds: (
+        updater: (prev: ReadonlySet<string>) => ReadonlySet<string>,
+    ) => void;
+    openImage: (name: string) => Promise<void>;
+    setCategoryDraft: React.Dispatch<React.SetStateAction<string>>;
+    setEditingKey: React.Dispatch<React.SetStateAction<string | null>>;
+    setRowCreateRule: React.Dispatch<React.SetStateAction<boolean>>;
+    setExpandedEvidenceIds: React.Dispatch<
+        React.SetStateAction<ReadonlySet<string>>
+    >;
+};
+
+// One table row. Memoized so a change that affects one row (a checkbox, a
+// keystroke in a category box) doesn't re-render all of them: each row only
+// gets its own slice of the table's state, and `actions` is stable.
+const TransactionTableRow = memo(function TransactionTableRow({
+    txn,
+    glSuggestion,
+    similarGroupIds,
+    isSelected,
+    isEvidenceExpanded,
+    editingKey,
+    categoryDraft,
+    rowCreateRule,
+    accountNames,
+    hasActions,
+    hasCheckbox,
+    hideObviousAmounts,
+    recategorizeBusy,
+    transferActionBusy,
+    actions,
+}: {
+    txn: TransactionRow;
+    glSuggestion: GlCategoryResult | undefined;
+    similarGroupIds: Map<string, string[]>;
+    isSelected: boolean;
+    isEvidenceExpanded: boolean;
+    // Non-null only on the row being edited.
+    editingKey: string | null;
+    categoryDraft: string;
+    rowCreateRule: boolean;
+    accountNames: string[];
+    hasActions: boolean;
+    hasCheckbox: boolean;
+    hideObviousAmounts: boolean;
+    recategorizeBusy: boolean;
+    transferActionBusy: boolean;
+    actions: TransactionTableRowActions;
+}) {
+    const {
+        onRecategorize,
+        onMergeTransfer,
+        onOpenLinkTransfer,
+        onUnmergeTransfer,
+        onNotATransfer,
+        onOpenSimilarRecategorize,
+        onAddSearchTerm,
+        onOpenEvidence,
+        openContextMenu,
+        openSimilarConfirmForTxn,
+        updateSelectedIds,
+        openImage,
+        setCategoryDraft,
+        setEditingKey,
+        setRowCreateRule,
+        setExpandedEvidenceIds,
+    } = actions;
+    const isUncategorized = txn.postings.some(
+        (p) => p.account === UNCATEGORIZED_GL_ACCOUNT,
+    );
+    const transferMatch = glSuggestion?.transferMatch ?? null;
+    // Near-miss transfer candidates (2+ ambiguous
+    // matches; see GlCategoryResult.transferCandidates).
+    const transferCandidateCount = glSuggestion?.transferCandidates.length ?? 0;
+    const suggested = glSuggestion?.suggested ?? null;
+    const eligible = singleNonBalancingPosting(txn) !== null;
+    return (
+        <tr
+            key={txn.id}
+            className={isUncategorized ? 'row-uncategorized' : undefined}
+        >
+            {hasCheckbox && (
+                <td>
+                    {eligible && (
+                        <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {
+                                updateSelectedIds((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(txn.id)) next.delete(txn.id);
+                                    else next.add(txn.id);
+                                    return next;
+                                });
+                            }}
+                        />
+                    )}
+                </td>
+            )}
+            <td
+                className="mono"
+                onContextMenu={(e) => {
+                    openContextMenu(e, [
+                        {
+                            label: `Filter: date:${txn.date}`,
+                            action: () => onAddSearchTerm?.(`date:${txn.date}`),
+                        },
+                        {
+                            label: `Filter: date:${txn.date}..`,
+                            action: () =>
+                                onAddSearchTerm?.(`date:${txn.date}..`),
+                        },
+                        {
+                            label: `Filter: date:..${txn.date}`,
+                            action: () =>
+                                onAddSearchTerm?.(`date:..${txn.date}`),
+                        },
+                    ]);
+                }}
+            >
+                {txn.date}
+            </td>
+            <td
+                onContextMenu={(e) => {
+                    const key = similarKey(txn);
+                    const similarIds =
+                        key !== null ? (similarGroupIds.get(key) ?? []) : [];
+                    const balancingAccount =
+                        txn.postings.find(
+                            (p) =>
+                                p.account.startsWith('Assets:') ||
+                                p.account.startsWith('Liabilities:'),
+                        )?.account ?? '';
+                    const items: ContextMenuItem[] = [
+                        {
+                            label: `Filter: desc:${quoteHledgerRegex(txn.description)}`,
+                            action: () =>
+                                onAddSearchTerm?.(
+                                    `desc:${quoteHledgerRegex(txn.description)}`,
+                                ),
+                        },
+                    ];
+                    if (hasCheckbox && similarIds.length > 1) {
+                        items.push({
+                            label: `Check ${similarIds.length} uncategorized ${txn.description} transactions from ${balancingAccount}`,
+                            action: () => {
+                                updateSelectedIds(() => new Set(similarIds));
+                            },
+                        });
+                    }
+                    openContextMenu(e, [...items]);
+                }}
+            >
+                <div>{txn.description}</div>
+                {onOpenEvidence !== undefined &&
+                    parseGlSourceRefs(txn.comment).map((ref) => (
+                        <button
+                            key={`${txn.id}:src:${ref.locator}:${ref.entryId}`}
+                            type="button"
+                            className="link-button source-chip"
+                            title={`Open source evidence (${ref.locator})`}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onOpenEvidence(ref);
+                            }}
+                        >
+                            source
+                        </button>
+                    ))}
+                {(() => {
+                    const badges = bookkeepingBadges(txn);
+                    return badges.length === 0 ? null : (
+                        <div className="transaction-bookkeeping-badges">
+                            {badges.map((badge) => (
+                                <span
+                                    key={`${txn.id}:${badge}`}
+                                    className="chip"
+                                >
+                                    {badge}
+                                </span>
+                            ))}
+                        </div>
+                    );
+                })()}
+            </td>
+            <td>
+                {hasActions ? (
+                    <div className="postings-list">
+                        {txn.postings.map((p, postingIndex) => {
+                            const key = `${txn.id}:${postingIndex}`;
+                            const isEditing = editingKey === key;
+                            const isUnknown =
+                                p.account === UNCATEGORIZED_GL_ACCOUNT;
+                            // Only counterpart legs are recategorizable;
+                            // the backend enforces the same rule in
+                            // apply_recategorizations (src-tauri/src/post.rs).
+                            const isNonBalanceSheet =
+                                !p.account.startsWith('Assets:') &&
+                                !p.account.startsWith('Liabilities:');
+                            const postingMenuItems: ContextMenuItem[] = [
+                                {
+                                    label: `Filter: acct:${quoteHledgerRegex(p.account)}`,
+                                    action: () =>
+                                        onAddSearchTerm?.(
+                                            `acct:${quoteHledgerRegex(p.account)}`,
+                                        ),
+                                },
+                            ];
+                            if (isNonBalanceSheet) {
+                                postingMenuItems.push({
+                                    label: 'Set Category',
+                                    action: () => {
+                                        setCategoryDraft(
+                                            isUnknown && suggested !== null
+                                                ? suggested
+                                                : '',
+                                        );
+                                        setRowCreateRule(false);
+                                        setEditingKey(key);
+                                    },
+                                });
+                                const keyForSimilarMenu =
+                                    similarityGroupKey(txn);
+                                const similarIdsForMenu =
+                                    keyForSimilarMenu !== null
+                                        ? (similarGroupIds.get(
+                                              keyForSimilarMenu,
+                                          ) ?? [])
+                                        : [];
+                                if (
+                                    !isUnknown &&
+                                    onOpenSimilarRecategorize !== undefined &&
+                                    similarIdsForMenu.length > 1
+                                ) {
+                                    postingMenuItems.push({
+                                        label: `Categorize ${similarIdsForMenu.length} similar transactions to ${p.account}`,
+                                        action: () => {
+                                            openSimilarConfirmForTxn(
+                                                txn,
+                                                p.account,
+                                            );
+                                        },
+                                    });
+                                }
+                            }
+                            if (
+                                isNonBalanceSheet &&
+                                onOpenLinkTransfer !== undefined
+                            ) {
+                                postingMenuItems.push({
+                                    label: 'Link Transfer',
+                                    action: () => {
+                                        onOpenLinkTransfer(txn.id);
+                                    },
+                                });
+                            }
+                            // A generated txn with 2+ source tags is a merged
+                            // transfer; offer server-side unmerge (see
+                            // post::unpost_gl_transaction).
+                            if (
+                                onUnmergeTransfer !== undefined &&
+                                txn.bookkeeping.generated &&
+                                (txn.comment.match(/; source:/g) ?? [])
+                                    .length >= 2
+                            ) {
+                                postingMenuItems.push({
+                                    label: 'Unmerge transfer',
+                                    action: () => {
+                                        onUnmergeTransfer(txn.id);
+                                    },
+                                });
+                            }
+                            // Negative memory for a suggested (not yet merged)
+                            // transfer pair; drops the ↔ chip.
+                            if (
+                                onNotATransfer !== undefined &&
+                                transferMatch !== null
+                            ) {
+                                postingMenuItems.push({
+                                    label: 'Not a transfer',
+                                    action: () => {
+                                        onNotATransfer(
+                                            txn.id,
+                                            transferMatch.txnId,
+                                        );
+                                    },
+                                });
+                            }
+                            const hideAmounts =
+                                hideObviousAmounts && hasObviousAmounts(txn);
+                            const keyForSimilar = similarKey(txn);
+                            const filteredSimilarIds =
+                                keyForSimilar !== null
+                                    ? (similarGroupIds.get(keyForSimilar) ?? [])
+                                    : [];
+                            const canShowSimilarPill =
+                                onOpenSimilarRecategorize !== undefined &&
+                                filteredSimilarIds.length > 1;
+                            return (
+                                <div
+                                    key={`${txn.id}:${postingIndex}`}
+                                    className="postings-item"
+                                >
+                                    {isEditing ? (
+                                        <>
+                                            <AccountInput
+                                                value={categoryDraft}
+                                                onChange={(v) => {
+                                                    setCategoryDraft(v);
+                                                }}
+                                                onKeyDown={(e) => {
+                                                    if (
+                                                        e.key === 'Enter' &&
+                                                        categoryDraft.trim()
+                                                    ) {
+                                                        onRecategorize?.(
+                                                            txn.id,
+                                                            postingIndex,
+                                                            categoryDraft.trim(),
+                                                            p.account,
+                                                            txn.descriptionRaw ||
+                                                                txn.description,
+                                                            rowCreateRule,
+                                                        );
+                                                        setEditingKey(null);
+                                                        setRowCreateRule(false);
+                                                    } else if (
+                                                        e.key === 'Escape'
+                                                    ) {
+                                                        setEditingKey(null);
+                                                    }
+                                                }}
+                                                accounts={accountNames}
+                                                oldAccount={p.account}
+                                                autoFocus
+                                            />
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                disabled={!categoryDraft.trim()}
+                                                onClick={() => {
+                                                    if (categoryDraft.trim()) {
+                                                        onRecategorize?.(
+                                                            txn.id,
+                                                            postingIndex,
+                                                            categoryDraft.trim(),
+                                                            p.account,
+                                                            txn.descriptionRaw ||
+                                                                txn.description,
+                                                            rowCreateRule,
+                                                        );
+                                                        setEditingKey(null);
+                                                        setRowCreateRule(false);
+                                                    }
+                                                }}
+                                            >
+                                                Set
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                onClick={() => {
+                                                    setEditingKey(null);
+                                                    setRowCreateRule(false);
+                                                }}
+                                            >
+                                                Cancel
+                                            </button>
+                                            <label
+                                                className="count-label"
+                                                title="Also create a standing rule for this payee, so future matches post here automatically."
+                                            >
+                                                <input
+                                                    type="checkbox"
+                                                    checked={rowCreateRule}
+                                                    onChange={(e) => {
+                                                        setRowCreateRule(
+                                                            e.target.checked,
+                                                        );
+                                                    }}
+                                                />{' '}
+                                                Create rule
+                                            </label>
+                                            {canShowSimilarPill && (
+                                                <button
+                                                    type="button"
+                                                    className="chip chip-interactive similar-count-pill"
+                                                    disabled={
+                                                        !categoryDraft.trim()
+                                                    }
+                                                    onClick={() => {
+                                                        if (
+                                                            categoryDraft.trim()
+                                                        ) {
+                                                            openSimilarConfirmForTxn(
+                                                                txn,
+                                                                categoryDraft.trim(),
+                                                            );
+                                                        }
+                                                    }}
+                                                >
+                                                    ×{filteredSimilarIds.length}{' '}
+                                                    similar
+                                                </button>
+                                            )}
+                                        </>
+                                    ) : isUnknown ? (
+                                        <button
+                                            type="button"
+                                            className="posting-account posting-account-unknown"
+                                            title="Click to set category"
+                                            onClick={() => {
+                                                setCategoryDraft(
+                                                    suggested !== null
+                                                        ? suggested
+                                                        : '',
+                                                );
+                                                setRowCreateRule(false);
+                                                setEditingKey(key);
+                                            }}
+                                            onContextMenu={(e) => {
+                                                openContextMenu(
+                                                    e,
+                                                    postingMenuItems,
+                                                );
+                                            }}
+                                        >
+                                            {p.account}
+                                        </button>
+                                    ) : (
+                                        <span
+                                            onContextMenu={(e) => {
+                                                openContextMenu(
+                                                    e,
+                                                    postingMenuItems,
+                                                );
+                                            }}
+                                        >
+                                            {p.account}
+                                        </span>
+                                    )}
+                                    {isNonBalanceSheet &&
+                                        !isEditing &&
+                                        transferMatch !== null &&
+                                        onMergeTransfer !== undefined && (
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                disabled={transferActionBusy}
+                                                onClick={() => {
+                                                    onMergeTransfer(
+                                                        txn.id,
+                                                        transferMatch.txnId,
+                                                    );
+                                                }}
+                                            >
+                                                {mergeTransferChipLabel({
+                                                    date: transferMatch.date,
+                                                    description:
+                                                        transferMatch.description,
+                                                })}
+                                            </button>
+                                        )}
+                                    {isNonBalanceSheet &&
+                                        !isEditing &&
+                                        transferMatch === null &&
+                                        transferCandidateCount >= 2 &&
+                                        onOpenLinkTransfer !== undefined && (
+                                            // Ambiguous
+                                            // near-miss:
+                                            // open the
+                                            // Link
+                                            // Transfer
+                                            // modal, no
+                                            // one-click
+                                            // merge.
+                                            <button
+                                                type="button"
+                                                className="ghost-button"
+                                                title="Multiple possible transfer counterparts; open Link Transfer to pick one"
+                                                onClick={() => {
+                                                    onOpenLinkTransfer(txn.id);
+                                                }}
+                                            >
+                                                ↔ {transferCandidateCount}{' '}
+                                                possible
+                                            </button>
+                                        )}
+                                    {isUnknown &&
+                                        !isEditing &&
+                                        suggested !== null &&
+                                        transferMatch === null &&
+                                        onRecategorize !== undefined && (
+                                            <div className="categorize-chip">
+                                                <button
+                                                    type="button"
+                                                    className="ghost-button"
+                                                    disabled={recategorizeBusy}
+                                                    onClick={() => {
+                                                        onRecategorize(
+                                                            txn.id,
+                                                            postingIndex,
+                                                            suggested,
+                                                            p.account,
+                                                            txn.descriptionRaw ||
+                                                                txn.description,
+                                                            false,
+                                                        );
+                                                    }}
+                                                >
+                                                    {categorizeChipLabel(
+                                                        suggested,
+                                                    )}
+                                                </button>
+                                                {canShowSimilarPill && (
+                                                    <button
+                                                        type="button"
+                                                        className="chip chip-interactive similar-count-pill"
+                                                        onClick={() => {
+                                                            openSimilarConfirmForTxn(
+                                                                txn,
+                                                                suggested,
+                                                            );
+                                                        }}
+                                                    >
+                                                        ×
+                                                        {
+                                                            filteredSimilarIds.length
+                                                        }{' '}
+                                                        similar
+                                                    </button>
+                                                )}
+                                            </div>
+                                        )}
+                                    {!hideAmounts && (
+                                        <span className="amount">
+                                            {formatTotals(p.totals)}
+                                        </span>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                ) : (
+                    <PostingsList
+                        postings={txn.postings}
+                        hideAmounts={
+                            hideObviousAmounts && hasObviousAmounts(txn)
+                        }
+                    />
+                )}
+            </td>
+            <td
+                className="amount"
+                onContextMenu={(e) => {
+                    const totals = txn.totals;
+                    if (totals == null || totals.length === 0) return;
+                    const t = totals[0];
+                    if (t == null) return;
+                    const total = formatScaled(t.mantissa, t.scale);
+                    openContextMenu(e, [
+                        {
+                            label: `Filter: amt:${total}`,
+                            action: () => onAddSearchTerm?.(`amt:${total}`),
+                        },
+                        {
+                            label: `Filter: amt:>=${total}`,
+                            action: () => onAddSearchTerm?.(`amt:>=${total}`),
+                        },
+                        {
+                            label: `Filter: amt:<=${total}`,
+                            action: () => onAddSearchTerm?.(`amt:<=${total}`),
+                        },
+                    ]);
+                }}
+            >
+                {formatTotals(txn.totals)}
+            </td>
+            <td>
+                {txn.evidence.length === 0 ? (
+                    <span className="text-muted">-</span>
+                ) : (
+                    (() => {
+                        const imageRefs =
+                            txn.evidence.filter(isImageAttachmentRef);
+                        const otherRefs = txn.evidence.filter(
+                            (r) => !isImageAttachmentRef(r),
+                        );
+                        const evidenceExpanded = isEvidenceExpanded;
+                        return (
+                            <div className="evidence-list">
+                                {imageRefs.map((evidenceRef) => (
+                                    <button
+                                        key={`${txn.id}-${evidenceRef}`}
+                                        className="chip chip-mono chip-interactive evidence-chip evidence-chip-image"
+                                        type="button"
+                                        onClick={() => {
+                                            void openImage(
+                                                attachmentFilename(evidenceRef),
+                                            );
+                                        }}
+                                    >
+                                        {attachmentFilename(evidenceRef)}
+                                    </button>
+                                ))}
+                                {otherRefs.length > 0 && (
+                                    <>
+                                        <button
+                                            className="chip chip-mono chip-interactive evidence-chip evidence-chip-toggle"
+                                            type="button"
+                                            onClick={() => {
+                                                setExpandedEvidenceIds(
+                                                    (prev) => {
+                                                        const next = new Set(
+                                                            prev,
+                                                        );
+                                                        if (evidenceExpanded) {
+                                                            next.delete(txn.id);
+                                                        } else {
+                                                            next.add(txn.id);
+                                                        }
+                                                        return next;
+                                                    },
+                                                );
+                                            }}
+                                        >
+                                            {evidenceExpanded ? '▾' : '▸'}{' '}
+                                            {otherRefs.length} source
+                                            {otherRefs.length !== 1 ? 's' : ''}
+                                        </button>
+                                        {evidenceExpanded &&
+                                            otherRefs.map((evidenceRef) => (
+                                                <span
+                                                    key={`${txn.id}-${evidenceRef}`}
+                                                    className="chip chip-mono evidence-chip"
+                                                    title={evidenceRef}
+                                                >
+                                                    {evidenceRef}
+                                                </span>
+                                            ))}
+                                    </>
+                                )}
+                            </div>
+                        );
+                    })()
+                )}
+            </td>
+        </tr>
+    );
+});

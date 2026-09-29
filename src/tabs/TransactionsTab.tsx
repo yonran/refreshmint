@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import {
     addTransaction,
@@ -671,7 +671,9 @@ export function TransactionsTab({
         };
     }, [ledgerPath, rawDraft, entryMode]);
 
-    const filteredTransactions = (() => {
+    // Memoized so TransactionsTable's per-row memoization isn't defeated by a
+    // new array (and new similar-transaction groups) on every render.
+    const filteredTransactions = useMemo(() => {
         const base = queryResults ?? ledger.transactions;
         const unpostedFiltered = base.filter((txn) => {
             if (unpostedOnly) {
@@ -685,7 +687,11 @@ export function TransactionsTab({
             unpostedFiltered,
             bookkeepingFilter,
         );
-    })();
+    }, [queryResults, ledger.transactions, unpostedOnly, bookkeepingFilter]);
+    const accountNames = useMemo(
+        () => ledger.accounts.map((a) => a.name),
+        [ledger.accounts],
+    );
 
     const isNewTxnExpanded =
         isNewTxnExpandedOverride ?? ledger.transactions.length === 0;
@@ -2330,7 +2336,7 @@ export function TransactionsTab({
             <TransactionsTable
                 transactions={filteredTransactions}
                 ledgerPath={ledgerPath}
-                accountNames={ledger.accounts.map((a) => a.name)}
+                accountNames={accountNames}
                 onOpenEvidence={onOpenEvidence}
                 glCategorySuggestions={glCategorySuggestions}
                 selectedTransactionIds={selectedTransactionIds}
